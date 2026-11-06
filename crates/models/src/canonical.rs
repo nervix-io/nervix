@@ -21,38 +21,39 @@ use meticulous::OptionExt as _;
 use thiserror::Error;
 
 use crate::{
-    AckWindow, AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
-    AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
-    AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
-    AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
-    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, Assignment, AssignmentTarget,
-    AssignmentTargetScope, AvroType, Backup, BackupCapture, BackupResources, BackupScope,
-    BinaryOperator, BranchEviction, BranchSelection, CborType, ClickHouseValueMapping,
-    ClientConfigEntry, ClientIngestMode, ClientResourceMount, CodecEncodingRule,
-    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
-    DomainStartPoint, EmitterBatchPolicy, EmitterBody, EmitterEntity, EmitterEnvelope,
-    EmitterPublishing, EnvelopeClause, ExistingUserPolicy, Expression, FieldScope, Float64Literal,
-    FlushPolicy, GeneralErrorPolicy, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorMapping, IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy,
-    InspectionFormat, Invocation, JsonType, Literal, MaterializedStateDependency,
-    MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
-    MongoDbConflictAction, MySqlConflictAction, NamePosition, OutputBranch, ParseAsType,
-    PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, RangeOperator, RelayBranching, RelayName, Restore, RestoreLifecycle,
-    RestoreMode, RestoreScope, RestoreState, RetryPolicy, RouteConstruction, SchemaField,
-    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, Statement,
-    SubscriptionLiteral, TransactionInspectionTarget, UnaryOperator, WindowBound, WindowStateLimit,
-    WireSchemaField,
+    AckWindow, AlterBranch, AlterBranchOperation, AlterDeduplicator, AlterDeduplicatorOperation,
+    AlterEmitter, AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
+    AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
+    AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
+    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+    AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope, AvroType,
+    Backup, BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction,
+    BranchPartitions, BranchSelection, CborType, ClickHouseValueMapping, ClientConfigEntry,
+    ClientIngestMode, ClientResourceMount, CodecEncodingRule, CodecJaqTransformations, CodecName,
+    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer,
+    CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DescribeBackup,
+    DescribeTransaction, DomainPace, DomainStartPoint, EmitterBatchPolicy, EmitterBody,
+    EmitterEntity, EmitterEnvelope, EmitterPublishing, EnvelopeClause, ExistingUserPolicy,
+    Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
+    InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorMapping, InferencerTensorSchema,
+    IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
+    Invocation, JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy,
+    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
+    MySqlConflictAction, NamePosition, OutputBranch, ParseAsType, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RangeOperator,
+    RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, Statement, SubscriptionLiteral,
+    TransactionInspectionTarget, UnaryOperator, WindowBound, WindowStateLimit, WireSchemaField,
 };
 
 /// The Plexus release canonical rendering writes.
@@ -865,6 +866,7 @@ impl Statement {
             Self::AlterReingestor(alter) => alter.to_canonical_plexus(),
             Self::AlterGenerator(alter) => alter.to_canonical_plexus(),
             Self::AlterPlacement(alter) => alter.to_canonical_plexus(),
+            Self::AlterBranch(alter) => alter.to_canonical_plexus(),
             Self::Drop(drop) => Ok(format!(
                 "DROP {} {};",
                 drop.kind.keyword_phrase(),
@@ -1281,6 +1283,25 @@ impl AlterSchema {
         Ok(format!(
             "ALTER SCHEMA {} {operations};",
             self.schema.as_str()
+        ))
+    }
+}
+
+impl AlterBranch {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                AlterBranchOperation::SetPartitions { partitions } => {
+                    format!("SET PARTITIONS {}", partitions.count())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "ALTER BRANCH {} {operations};",
+            self.branch.as_str()
         ))
     }
 }
@@ -1808,6 +1829,11 @@ impl CreateBranch {
             self.schema.as_str(),
             self.ttl
         );
+        // One partition is the default every declaration without a count has, so its canonical
+        // rendering omits it.
+        if self.partitions != BranchPartitions::ONE {
+            rendered.push_str(&format!(" PARTITIONS {}", self.partitions.count()));
+        }
         if let Some(eviction) = &self.eviction {
             match eviction {
                 BranchEviction::Lru { max_instances } => {
@@ -2287,6 +2313,9 @@ impl<Version: Display> CreateInferencer<Version> {
             "INPUTS",
             inference_mapping_items(&self.inputs)?,
         ));
+        if !self.state.is_empty() {
+            clauses.push(Clause::braced("STATE", inference_state_items(&self.state)?));
+        }
         clauses.push(Clause::braced(
             "OUTPUT SCHEMA",
             inference_output_schema_items(&self.output_schema)?,
@@ -2350,6 +2379,24 @@ impl<Version: Display> CreateWasmProcessor<Version> {
     }
 }
 
+fn inference_tensor_schema(schema: &InferencerTensorSchema) -> String {
+    let dimensions = schema
+        .dimensions
+        .iter()
+        .map(|dimension| match dimension {
+            InferencerTensorDimension::Fixed(size) => size.to_string(),
+            InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
+            InferencerTensorDimension::Batch => "BATCH".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} TENSOR<{}>[{dimensions}]",
+        schema.representation.as_ref(),
+        schema.element_type.as_ref()
+    )
+}
+
 fn inference_mapping_items(
     mappings: &[InferencerTensorMapping],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
@@ -2357,22 +2404,10 @@ fn inference_mapping_items(
         .iter()
         .map(|mapping| {
             Ok(format!(
-                "{} {} TENSOR<{}>[{}] = {}",
+                "{} {} = {}",
                 string_literal(&mapping.tensor),
-                mapping.schema.representation.as_ref(),
-                mapping.schema.element_type.as_ref(),
-                mapping
-                    .schema
-                    .dimensions
-                    .iter()
-                    .map(|dimension| match dimension {
-                        InferencerTensorDimension::Fixed(size) => size.to_string(),
-                        InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
-                        InferencerTensorDimension::Batch => "BATCH".to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                expression_to_plexus(&mapping.expression)?
+                inference_tensor_schema(&mapping.schema),
+                expression_to_plexus(&mapping.expression)?,
             ))
         })
         .collect()
@@ -2381,25 +2416,35 @@ fn inference_mapping_items(
 fn inference_output_schema_items(
     declarations: &[InferencerTensorDeclaration],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
-    declarations
+    Ok(declarations
         .iter()
         .map(|declaration| {
-            Ok(format!(
-                "{} {} TENSOR<{}>[{}]",
+            format!(
+                "{} {}",
                 string_literal(&declaration.tensor),
-                declaration.schema.representation.as_ref(),
-                declaration.schema.element_type.as_ref(),
-                declaration
-                    .schema
-                    .dimensions
-                    .iter()
-                    .map(|dimension| match dimension {
-                        InferencerTensorDimension::Fixed(size) => size.to_string(),
-                        InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
-                        InferencerTensorDimension::Batch => "BATCH".to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                inference_tensor_schema(&declaration.schema),
+            )
+        })
+        .collect())
+}
+
+fn inference_state_items(
+    bindings: &[InferencerStateBinding],
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
+    bindings
+        .iter()
+        .map(|binding| {
+            let initial = match &binding.initial {
+                InferencerStateInitial::Zeros => "ZEROS".to_string(),
+                InferencerStateInitial::Constant(expression) => {
+                    format!("({})", expression_to_plexus(expression)?)
+                }
+            };
+            Ok(format!(
+                "{} FROM {} {} INITIAL {initial}",
+                string_literal(&binding.input),
+                string_literal(&binding.output),
+                inference_tensor_schema(&binding.schema),
             ))
         })
         .collect()
@@ -3004,7 +3049,7 @@ pub fn ingest_quiesce_to_plexus(quiesce: &crate::IngestQuiesceMode) -> String {
 }
 
 impl ClientIngestMode {
-    /// The mode clause of a client source, after its `MODE` keyword.
+    /// The mode clause of a client ingestor, after its `MODE` keyword.
     pub fn to_canonical_plexus(&self) -> String {
         let Self {
             window,
@@ -3061,11 +3106,6 @@ impl EmitterPublishing<'_> {
                 ack_timeout,
                 retry_policy,
             } => confirmed("ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::NatsJetStream {
-                window,
-                ack_timeout,
-                retry_policy,
-            } => confirmed("JETSTREAM ACK", window, ack_timeout, retry_policy),
             EmitterPublishing::RequestAck { retry_policy } => {
                 format!("ACK {}", retry(retry_policy))
             }
@@ -3415,16 +3455,28 @@ pub fn string_literal(value: &str) -> String {
     }
 }
 
+/// A wire schema field type as canonical Plexus writes it: its keywords in uppercase.
 trait NativeTypeToPlexus {
     fn to_plexus_keyword(&self) -> String;
 }
 
-impl<T> NativeTypeToPlexus for T
-where
-    T: AsRef<str>,
-{
+impl NativeTypeToPlexus for JsonType {
     fn to_plexus_keyword(&self) -> String {
         self.as_ref().to_ascii_uppercase()
+    }
+}
+
+impl NativeTypeToPlexus for CborType {
+    fn to_plexus_keyword(&self) -> String {
+        self.as_ref().to_ascii_uppercase()
+    }
+}
+
+/// An AVRO type's keywords are the names of its Avro schema, so an array writes its item type at
+/// every depth, `ARRAY<ARRAY<DOUBLE>>`.
+impl NativeTypeToPlexus for AvroType {
+    fn to_plexus_keyword(&self) -> String {
+        self.to_string().to_ascii_uppercase()
     }
 }
 
@@ -3596,6 +3648,43 @@ mod tests {
         assert_eq!(
             plexus,
             "CREATE WIRE AVRO SCHEMA latency MODE STRICT (\n  p99 DOUBLE,\n  created_at STRING\n);"
+        );
+    }
+
+    #[test]
+    fn renders_avro_array_items_at_every_depth() {
+        let schema: Model = Model::WireAvroSchema(CreateWireSchema {
+            name: named("lists"),
+            strictness: Default::default(),
+            fields: vec![
+                WireSchemaField {
+                    name: named("totals"),
+                    ty: AvroType::array_of(AvroType::Long),
+                    optional: true,
+                },
+                WireSchemaField {
+                    name: named("matrix"),
+                    ty: AvroType::array_of(AvroType::array_of(AvroType::Double)),
+                    optional: false,
+                },
+            ],
+        });
+        assert_eq!(
+            schema.to_canonical_plexus().expect("must render"),
+            "CREATE WIRE AVRO SCHEMA lists MODE STRICT (\n  totals ARRAY<LONG> OPTIONAL,\n  \
+             matrix ARRAY<ARRAY<DOUBLE>>\n);"
+        );
+
+        let alter = crate::AlterWireSchema {
+            schema: named("lists"),
+            operations: vec![crate::AlterWireSchemaOperation::SetFieldType {
+                field: named("totals"),
+                ty: AvroType::array_of(AvroType::Int),
+            }],
+        };
+        assert_eq!(
+            super::alter_avro_wire_schema_to_canonical_plexus(&alter).expect("must render"),
+            "ALTER WIRE AVRO SCHEMA lists ALTER FIELD totals SET TYPE ARRAY<INT>;"
         );
     }
 
@@ -4959,7 +5048,7 @@ mod tests {
                             group: named("Orders Group"),
                             start_at: crate::IngestStartPosition::Earliest,
                         },
-                        instances: nonzero!(3u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(3u64)),
                         mode: KafkaIngestMode::AckParallel {
                             max: nonzero!(8u64),
                             batch_timeout: "100ms".to_string(),
@@ -4985,7 +5074,7 @@ mod tests {
                             ownership: PulsarSubscriptionOwnership::Provisioned,
                             kind: PulsarSubscriptionType::KeyShared,
                         },
-                        instances: nonzero!(1u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(1u64)),
                         mode: PulsarIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
@@ -5000,7 +5089,7 @@ mod tests {
                     decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/+/Orders"),
-                        instances: nonzero!(2u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(2u64)),
                         session: MqttSession::Clean,
                         qos: MqttQos::Qos0,
                         mode: MqttIngestMode::NoAck,
@@ -5016,7 +5105,7 @@ mod tests {
                     decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/#"),
-                        instances: nonzero!(1u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(1u64)),
                         session: MqttSession::Persistent,
                         qos: MqttQos::Qos2,
                         mode: MqttIngestMode::NoAck,
@@ -5033,7 +5122,7 @@ mod tests {
                         client: named("nats_main"),
                         subject: named("orders.*.created"),
                         queue_group: named("Orders-Workers"),
-                        instances: nonzero!(2u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(2u64)),
                         mode: NatsIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
@@ -5048,7 +5137,7 @@ mod tests {
                     decoded(RabbitMqQueueIngestor {
                         client: named("rmq_main"),
                         queue: named("Orders Queue"),
-                        instances: nonzero!(1u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(1u64)),
                         mode: RabbitMqIngestMode::AckSequential {
                             timeout: "20s".to_string(),
                             retry_policy: retry.clone(),
@@ -5125,7 +5214,7 @@ mod tests {
                     decoded(SqsQueueIngestor {
                         client: named("sqs_main"),
                         queue: named("Orders.fifo"),
-                        instances: nonzero!(4u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(4u64)),
                         mode: SqsIngestMode::AckSequential {
                             timeout: "45s".to_string(),
                             retry_policy: retry.clone(),

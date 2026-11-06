@@ -51,14 +51,16 @@ stream for each of the four.
 | Generated column pool: the Arrow IPC stream a WASM guest writes beside its routed outputs | `wasm-generated-pools` | The decoded pool is the written one, unnamed fields with their types, nullability and metadata and every row, value and null, whether the stream ends with the end-of-stream marker or is closed after its record batch |
 | Damaged generated pools | `wasm-generated-pools-malformed` | A typed defect of the guest's generated Arrow IPC or of its record batch count; or one record batch of unnamed columns that writes and decodes back to itself; only the empty byte string is no pool |
 | `WIRE JSON`, `WIRE CBOR` and `WIRE AVRO` rows | `codec-schemaful-rows` | Every row of a batch, encoded one payload per row by a codec of a shape the registry accepts and decoded into one group builder, is the original row |
+| Connector metadata retained and projected into Arrow columns | `ingest-metadata-projection` | Every declared type, including full-width U64 sequence and delivery counts, preserves all values, typed failures and validity through retention, quiesce replay and lazy column projection; deferred producers run only for requested fields, with ordered headers and transport identity |
+| NATS STREAM delivery metadata and headers | `nats-delivery-metadata` | All seven metadata fields, the complete positive U64 coordinate range, signed nanosecond timestamps, payload, acknowledgement subject and every header pair survive borrowed projection and retention |
 | MongoDB mapped columns encoded as BSON documents | `mongodb-bson-mapping` | Exact document bytes against a typed reference, including integer widths, float bits, native millisecond dates, binary subtype, arrays and nulls; stored size equals the BSON reference with the generated identifier when one is needed |
 | Groups of payloads with damaged members | `codec-schemaful-payload-groups` | Each payload is accepted or refused in a group exactly as alone, with a typed failure of its own bytes, and the group holds exactly the rows its accepted payloads decode to alone |
-| `WIRE JSON` and `WIRE CBOR` rows holding non-finite floats | `codec-json-non-finite-floats` | The projection, not a round trip: a non-finite float of an optional top-level field reads back as a null with every other value intact, and one in a required field or a list element refuses the payload with a typed failure |
+| `WIRE JSON` rows holding non-finite floats | `codec-json-non-finite-floats` | A non-finite float of an optional top-level field reads back as a null with every other value intact, and one in a required field or a list element refuses the payload with a typed failure |
 | Numbers through the JAQ-native `JSON`, `YAML`, `TOML` and `CBOR` codecs and a protobuf codec, with unchanged programs | `codec-transforming-numbers` | Every row of a batch of numbers, encoded one payload per row and decoded, is the original row: an `F64` and an `F32` to their bits, alone and in a list, and an `I64` to its value; a protobuf singular zero of either sign reads back as positive zero |
 | Numbers through a JAQ program and through each numeric native format's writer and reader | `jaq-native-numbers` | The identity program answers with the numbers it was given, and `JSON`, `YAML`, `TOML` and `CBOR` read back the numbers they wrote, directly and handed to the identity program: floats to their bits, integers to their value and signedness |
-| Routed relay payload from the sending runtime to the receiving runtime's rows | `remote-relay-rows` | The rows, the concrete branch or its absence with key values to the bit, every row's watermarks and one registration per row |
+| Routed relay payload from the sending runtime to the receiving runtime's rows | `remote-relay-rows` | The rows, the concrete branch or its absence with key values to the bit and its partition seed, every row's watermarks and one registration per row, under the payload's unit, which owns the decoded key |
 | Routed payloads whose parts disagree | `remote-relay-rows-malformed` | The first defect in the receiver's order: the body, the watermark count, the registration count, then the branch key, before any row forms a batch |
-| Relay grant request, its relay metadata and the payload the receiver rebuilds, grant replies, admission exchanges, acknowledgement resolutions and connection bindings | `relay-wire-messages` | Every field through the bounded rkyv codec under the class and limit the transport uses, branch key floats by their bits, and no charge outlives a message |
+| Relay grant request, its relay metadata and the payload the receiver rebuilds, grant replies, admission exchanges, acknowledgement resolutions and connection bindings | `relay-wire-messages` | Every field through the bounded rkyv codec under the class and limit the transport uses, the relay unit a payload names, branch key floats by their bits, and no charge outlives a message |
 | Damaged relay and acknowledgement messages | `relay-wire-messages-malformed` | The codec's typed decode failure within the depth bound, or a message that encodes and decodes back to itself; either way the decoder frees every allocation it made, counted on the decoding thread, and no charge outlives the bytes |
 | Client emitter delivery: the canonical Arrow IPC stream a client emitter writes for the rows of one delivery and the client library decodes | `client-emitter-deliveries` | The decoded batch holds the Arrow schema of exactly the fields the emitter declares, which are its output schema field for field, and every delivered row, value and null in the order the emitter selected them; the same bytes are refused under one row more or fewer and under fields of another optionality, order or number |
 | Client producer link: the message that opens a link, the `Open`, `Submit`, `Clear`, `Close`, `Detach` and heartbeat frames of its serving node, and the `Opened`, `Refused`, `Admitting`, `Outcome`, `Admission`, `Ended`, `Closed` and heartbeat answers of its owning node | `client-producer-link-frames` | Every field through the bounded duplex codec of the link's stream, under the relay class and payload limit the transport encodes a frame with, and no charge outlives a frame |
@@ -97,39 +99,40 @@ branch fingerprint.
 
 ## Codec Domains
 
-JSON fields use their five representation types, and AVRO fields their eight. Generated JSON
-`string` byte fields declare `BASE64`; generated AVRO byte fields use either `bytes` directly or
-`string` with `BASE64`. The row, payload-group and bounded-encoding properties preserve the bytes
-through both declared representations. CBOR keeps its own current wire vocabulary.
+JSON fields use five representation types, CBOR fields six, and AVRO fields seven scalar types and
+`array<item>` of any of them, arrays included. Generated JSON `string` byte fields and JSON lists of
+bytes declare `BASE64`; generated CBOR `bytes` fields and CBOR lists of bytes hold native byte
+strings; generated AVRO byte fields and innermost byte items use either `bytes` directly or `string`
+with `BASE64`. A generated list of datetimes declares `RFC3339` in every format. The row,
+payload-group and bounded-encoding properties preserve the bytes through these representations.
 
-- `WIRE JSON` and `WIRE CBOR` preserve every value of every field type except a non-finite float:
-  JSON has no number for one, and the CBOR decoder reads values through the JSON model. The JSON
-  encoder writes a non-finite float as `null`, which reads back as a null of an optional field and
-  refuses a required field or a list element; the CBOR encoder writes the float, and the decoder
-  reads it as a null. Their domain therefore holds finite floats of every bit pattern. A JSON or
-  CBOR number beyond the range of an `F32` field rounds to an infinity, as the nearest float.
-- The JSON and CBOR readers read a number as a 64-bit float before narrowing it to an `F32` field.
+- `WIRE JSON` preserves every finite value. JSON has no number for a non-finite float, so the JSON
+  encoder writes it as `null`, which reads back as a null of an optional field and refuses a
+  required field or a list element. `WIRE CBOR` reads and writes native CBOR floats, including
+  non-finite values, through its own value model directly into Arrow. A JSON number or CBOR float
+  beyond the range of an `F32` field rounds to an infinity, as the nearest float.
+- The JSON reader reads a number as a 64-bit float before narrowing it to an `F32` field.
   Where that float lies exactly halfway between two `F32` values, the decoder names the one whose
   shortest decimal reads as the same float, so every `F32` the encoder writes reads back to its
   bits. An exhaustive check of all 2^32 bit patterns found two that rounding half to even would
   otherwise change, `±7.038531e-26`; `a_number_reads_as_the_f32_whose_shortest_decimal_it_is` and
-  the scenario outline **A `<wire_format>` number reads as the F32 whose shortest decimal it is**
-  retain that case.
-- An exact `U8` through `I64`, `F32`, `F64` or `DATETIME` JSON or CBOR wire type binds only the
-  internal type of its name; the generic `integer`, `number`, `string` with `ENCODE ... AS
-  RFC3339`, `boolean`, `bytes` and `array` types bind the types the registry lists for them. The
-  generator draws both, and `generated_schemaful_codecs_are_accepted` holds every generated codec
-  to the registry's own validation.
+  the JSON scenario outline **A `<wire_format>` number reads as the F32 whose shortest decimal it is**
+  retain that case. CBOR narrows its binary float directly to the internal width.
+- CBOR binds `integer`, `float`, `boolean`, `text`, `bytes` and `array` to the corresponding
+  internal types. `DATETIME` binds `text` with `ENCODE ... AS RFC3339`. JSON uses `integer`,
+  `number`, `string`, `boolean` and `array`; AVRO keeps its own scalar types and declares the item
+  type of every array level. The generator draws them, and `generated_schemaful_codecs_are_accepted`
+  holds every generated codec to the registry's own validation.
 - A payload refused while a nested list value is being appended closes that list value inside the
   abandoned row, so its elements never become the first elements of the next row's list. The
   payload-group property and the scenario outline **Kafka NO ACK keeps the nested lists of a
   collected ingest group exact when a `<wire_format>` message is refused inside one** retain that
   case.
-- `WIRE AVRO` preserves every float bit pattern. A top-level field holds a type an Avro wire type
-  binds, and an unsigned element of a list is written as an Avro `long`, so the generated domain
-  holds unsigned values up to `i64::MAX`; a larger one is refused when it is encoded.
+- `WIRE AVRO` preserves every float bit pattern. A field and every list element hold a type an
+  Avro type binds exactly, and each element travels as the item type the wire schema declares for
+  its depth.
 - Every format writes a datetime as RFC 3339 text in UTC, which reads back to the same nanosecond
-  from 1677 through 2262, and bytes as padded base64 text in JSON and CBOR and as octets in Avro.
+  from 1677 through 2262, and bytes as padded base64 text in JSON and native octets in CBOR and Avro.
 - A wire schema lists its fields in any order. Avro writes them in that order, and every format
   decodes into the internal schema's column order.
 - The JAQ-native and protobuf codecs are transformations: a JAQ program decides the shape both

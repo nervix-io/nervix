@@ -52,8 +52,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0xa5, 0xa8, 0x72, 0xa6, 0x14, 0x8c, 0xe8, 0x29, 0x90, 0xdd, 0x9a, 0x77, 0x7f, 0xea, 0xb5, 0xfe,
-    0xa3, 0x26, 0x8b, 0x35, 0xf6, 0x3e, 0xe1, 0x1a, 0x0f, 0x13, 0x3c, 0x29, 0xa9, 0x15, 0xb7, 0xf2,
+    0x3a, 0xdc, 0x2e, 0xef, 0x74, 0x94, 0xae, 0xad, 0x9a, 0x9c, 0x6c, 0x2d, 0x90, 0x92, 0xb3, 0xdb,
+    0xb7, 0xde, 0x33, 0xac, 0x97, 0xdf, 0xc7, 0x29, 0x34, 0x1d, 0x93, 0x9b, 0x53, 0xcf, 0xa5, 0x1c,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -189,6 +189,7 @@ pub(crate) struct RelayMetadata {
     pub(crate) kind: RelayPayloadKind,
     pub(crate) domain: nervix_models::DomainName,
     pub(crate) relay: nervix_models::RelayName,
+    pub(crate) unit: nervix_models::Unit,
     pub(crate) key: Option<Vec<nervix_models::RemoteRuntimeField>>,
     pub(crate) metadata: Vec<nervix_models::RemoteRuntimeRecordMetadata>,
     pub(crate) acks: Vec<Option<nervix_models::RemoteAckRegistration>>,
@@ -201,6 +202,7 @@ impl RelayMetadata {
             kind: payload.kind,
             domain: payload.domain.clone(),
             relay: payload.relay.clone(),
+            unit: payload.unit,
             key: payload.key.clone(),
             metadata: payload.metadata.clone(),
             acks: payload.acks.clone(),
@@ -218,6 +220,7 @@ impl RelayMetadata {
             kind: self.kind,
             domain: self.domain,
             relay: self.relay,
+            unit: self.unit,
             key: self.key,
             batch_ipc,
             metadata: self.metadata,

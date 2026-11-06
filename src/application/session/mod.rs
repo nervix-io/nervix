@@ -64,23 +64,21 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
-    CloseEmitterRequest, CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
-    DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
-    DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
-    MAX_IN_FLIGHT_REQUESTS, OpenEmitterRequest, OpenIngestorRequest, ReadEmitterBatchRequest,
-    Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId, RequestRejected,
-    RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding,
-    SessionLimits, SettleEmitterBatchRequest, SubscribeDisposition, SubscribeOutcome,
-    SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
-    UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
+    CloseEmitterRequest, CommandDisposition, CommandRequest, DetachDomainClockRequest,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainList, DomainSelection, EncodedFrame, InspectTransactionRequest,
+    InspectionOutcome, MAX_IN_FLIGHT_REQUESTS, OpenEmitterRequest, OpenIngestorRequest,
+    ReadEmitterBatchRequest, Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId,
+    RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason,
+    SessionEnding, SessionLimits, SettleEmitterBatchRequest, SubscribeDisposition,
+    SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
+    UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,
 };
-use nervix_plexus::client_statement::{
-    ClientStatement, ParsedClientStatement, parse_client_statement_sources,
-};
+use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -104,6 +102,7 @@ use super::{
     command_result::CommandResult,
     model_mutation::command_error,
     session_service::{SessionServiceImpl, rejected_source_response},
+    statement_grammar::with_statement_grammar,
     subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
     transaction::TransactionInspectionOutcome,
 };
@@ -958,11 +957,29 @@ async fn run_ordered_lane(
         }
         let request_id = item.request_id;
         let request: &'static str = (&item.request).into();
+        let execution_reference = if tracing::enabled!(tracing::Level::DEBUG) {
+            match &item.request {
+                OrderedRequest::Command(command) => Some(command.execution_reference.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut answered_disposition = None;
         let started = nervix_primitives::time::Instant::now();
-        serve_ordered(&shared, item, &mut subscriptions, &mut clock_attachments).await;
+        serve_ordered(
+            &shared,
+            item,
+            &mut subscriptions,
+            &mut clock_attachments,
+            &mut answered_disposition,
+        )
+        .await;
         debug!(
             %request_id,
             request,
+            execution_reference = ?execution_reference,
+            disposition = ?answered_disposition,
             elapsed = ?started.elapsed(),
             "served an ordered session request"
         );
@@ -977,6 +994,7 @@ async fn serve_ordered(
     item: OrderedWork,
     subscriptions: &mut SessionSubscriptions,
     clock_attachments: &mut ClockAttachments,
+    answered_disposition: &mut Option<CommandDisposition>,
 ) {
     let OrderedWork {
         request_id,
@@ -985,7 +1003,8 @@ async fn serve_ordered(
     } = item;
     match request {
         OrderedRequest::Command(command) => {
-            serve_command(shared, request_id, &admission, command, subscriptions).await;
+            *answered_disposition =
+                serve_command(shared, request_id, &admission, command, subscriptions).await;
         }
         OrderedRequest::Attach(attach) => {
             if admission.admit().is_err() {
@@ -1101,7 +1120,7 @@ async fn serve_command(
     admission: &RequestAdmission,
     command: CommandRequest,
     subscriptions: &mut SessionSubscriptions,
-) {
+) -> Option<CommandDisposition> {
     let execution_reference = command.execution_reference.clone();
     #[cfg(feature = "testing")]
     let reply_script_request = command.clone();
@@ -1114,23 +1133,33 @@ async fn serve_command(
         _ = admission.cancelled_before_admission() => Err(CancelledBeforeAdmission),
     };
     let Ok(response) = processed else {
-        return;
+        return None;
     };
     let outcome = command_outcome(execution_reference, response);
+    #[cfg(not(feature = "testing"))]
+    let body = ReplyBody::Command(Box::new(outcome));
     #[cfg(feature = "testing")]
-    let outcome = {
-        let mut outcome = outcome;
-        shared
-            .service
-            .inner
-            .runtime
-            .fault_injection()
-            .substitute_uncertain_command_reply(&reply_script_request, &mut outcome);
-        outcome
+    let body = shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .script_command_reply(&reply_script_request, outcome);
+    // Only a testing script answers a command with a reply of another kind, which has no
+    // command disposition.
+    let disposition = if tracing::enabled!(tracing::Level::DEBUG)
+        && let ReplyBody::Command(outcome) = &body
+    {
+        Some(outcome.disposition.clone())
+    } else {
+        None
     };
-    shared
-        .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
-        .await;
+    let queued = shared.finish_with(request_id, body).await;
+    if queued == QueuedReply::Reply {
+        disposition
+    } else {
+        None
+    }
 }
 
 async fn serve_subscribe(
@@ -1163,6 +1192,16 @@ async fn serve_subscribe(
         message,
         diagnostics: Vec::new(),
     };
+    #[cfg(feature = "testing")]
+    shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .pause_subscription_response_delivery_if_armed(
+            shared.service.inner.consensus.local_node_id(),
+        )
+        .await;
     // The rows follow the reply that announces their schema. A subscription whose reply was not
     // queued, because the request was cancelled, the session ended or the reply could not be
     // encoded, was never announced, so it is abandoned before it delivers anything.
@@ -1192,7 +1231,8 @@ async fn open_subscription(
     if subscriptions.transaction_active() {
         return Err(Box::new(subscription_in_transaction()));
     }
-    let statements = match parse_client_statement_sources(&statement) {
+    let parsed = with_statement_grammar(|grammar| grammar.parse_sources(&statement));
+    let statements = match parsed {
         Ok(statements) => statements,
         Err(report) => {
             return Err(Box::new(rejected_source_response(report.current_context())));

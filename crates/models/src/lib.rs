@@ -38,6 +38,7 @@ mod duration_text;
 mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
+mod execution_unit;
 mod expression;
 mod http_request;
 mod ingestor_input;
@@ -141,10 +142,11 @@ pub use connector::{
     IngestAcknowledgement, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceMode,
     IngestQuiesceOverflow, IngestStartPosition, IngestorAlteration, IngestorDeclaration,
     IngestorEntity, IngestorEntityBody, IngestorEntityCapabilities, IngestorEntityChange,
-    IngestorEntityKind, IngestorEntityMetadata, IngestorEntityModel, IngestorMetadataDeclaration,
-    IngestorMetadataField, IngestorMetadataType, IngestorReference, IngestorReferenceKind,
-    KafkaConfigEntry, KafkaConsumerGroupName, KafkaEmitter, KafkaEmitterChange, KafkaEmitterEntity,
-    KafkaIngestMode, KafkaIngestor, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter,
+    IngestorEntityKind, IngestorEntityMetadata, IngestorEntityModel, IngestorInstances,
+    IngestorInstancingCapability, IngestorMetadataDeclaration, IngestorMetadataField,
+    IngestorMetadataType, IngestorReference, IngestorReferenceKind, KafkaConfigEntry,
+    KafkaConsumerGroupName, KafkaEmitter, KafkaEmitterChange, KafkaEmitterEntity, KafkaIngestMode,
+    KafkaIngestor, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter,
     KafkaTopicEmitterChange, KafkaTopicEmitterMode, KafkaTopicIngestor,
     KafkaTopicIngestorAlteration, KafkaTopicIngestorChange, KafkaTopicName,
     KafkaTopicPublishingMode, LiteralHeaderWrite, LocatorDeclaration, LocatorName,
@@ -162,9 +164,11 @@ pub use connector::{
     MqttTopicName, MqttTopicPublishingMode, MqttTransport, MySqlConfigEntry, MySqlConflictAction,
     MySqlEmitter, MySqlEmitterChange, MySqlEmitterEntity, MySqlTableEmitter,
     MySqlTableEmitterChange, MySqlTableEmitterMode, MySqlTableName, MySqlTablePublishingMode,
-    MySqlValueEncoding, MySqlValueMapping, NatsConfigEntry, NatsEmitter, NatsEmitterChange,
-    NatsEmitterEntity, NatsIngestMode, NatsIngestor, NatsIngestorEntity, NatsPublishSubjectName,
-    NatsQueueGroupName, NatsSubjectEmitter, NatsSubjectEmitterChange, NatsSubjectEmitterMode,
+    MySqlValueEncoding, MySqlValueMapping, NatsConfigEntry, NatsConsumerName, NatsEmitter,
+    NatsEmitterChange, NatsEmitterEntity, NatsEmitterMode, NatsIngestMode, NatsIngestor,
+    NatsIngestorEntity, NatsPublishSubjectName, NatsQueueGroupName, NatsStreamEmitter,
+    NatsStreamEmitterChange, NatsStreamIngestMode, NatsStreamIngestor, NatsStreamIngestorChange,
+    NatsStreamName, NatsStreamPublishingMode, NatsSubjectEmitter, NatsSubjectEmitterChange,
     NatsSubjectIngestor, NatsSubjectIngestorAlteration, NatsSubjectIngestorChange, NatsSubjectName,
     NatsSubjectPublishingMode, OTEL_ATTRIBUTES_ENCODING, OTEL_HEADERS_FORMAT,
     OTEL_HISTOGRAM_VALUE_FIELDS, OTEL_HISTOGRAM_VALUE_TYPES, OTEL_LOG_VALUE_FIELDS,
@@ -247,6 +251,7 @@ pub use emitter_envelope::{
     EmitterEnvelope, EmitterEnvelopeAlteration, EnvelopeClause, EnvelopeClauseValue,
     EnvelopeDeclarationError, EnvelopeProperty,
 };
+pub use execution_unit::{Unit, UnitIndexError, UnitKind};
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
     ExternalValue, FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField,
@@ -289,11 +294,11 @@ pub use processor::{
     CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateCorrelator,
     CreateDeduplicator, CreateInferencer, CreateJunction, CreateReingestor, CreateReorderer,
     CreateWasmProcessor, CreateWindowProcessor, FlushPolicy, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
-    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-    InferencerTensorSchemaError, InputCollectPolicy, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound,
-    WindowStateLimit,
+    InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+    InferencerTensorRepresentation, InferencerTensorSchema, InferencerTensorSchemaError,
+    InputCollectPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound, WindowStateLimit,
 };
 pub use quiesce::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
@@ -341,10 +346,10 @@ pub use restore::{
     RestoreStepReport, RestoredDomain, RestoredUsers,
 };
 pub use schedule::{
-    ClusterSchedule, DomainNodeUnitRef, DomainSchedule, KafkaPartitionSchedule, NodeUnitRef,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    ClusterSchedule, DomainNodeUnitRef, DomainSchedule, EntityGateTargets, KafkaPartitionSchedule,
+    NodeUnitRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule, ScheduledModel,
-    ScheduledNode, ScheduledNodes, ScheduledUnit, Unit,
+    ScheduledNode, ScheduledNodes, ScheduledUnit,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,
@@ -357,23 +362,24 @@ pub use settings::{
     ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
 };
 pub use statement::{
-    AckWindow, AlterDomain, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation,
-    AlterIngestor, AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,
-    AlterPlacementOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
-    AlterTransportIngestorOperation, BranchEviction, BranchPartitions, BranchSelection,
-    CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-    CodecProtobufConfig, CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain,
-    CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreatePlacement, CreateRelay,
-    CreateResource, CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser,
-    CreateVhost, DeleteSubscription, DescribeClient, DescribeCluster, DescribeCorrelator,
-    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
-    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    AckWindow, AlterBranch, AlterBranchError, AlterBranchOperation, AlterDomain, AlterGenerator,
+    AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
+    AlterIngestorOperation, AlterPlacement, AlterPlacementError, AlterPlacementOperation,
+    AlterRelay, AlterRelayError, AlterRelayOperation, AlterTransportIngestorOperation,
+    BranchEviction, BranchPartitions, BranchSelection, CodecBatchContainer, CodecEncoding,
+    CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+    CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain, CreateEndpoint,
+    CreateGenerator, CreateIngestor, CreateLookup, CreatePlacement, CreateRelay, CreateResource,
+    CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
+    DeleteSubscription, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
+    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
     DomainTick, DrainNode, DropModel, DropNode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
     IngestTimestampSource, InspectionFormat, LookupQuery, MaterializedRelayState,
-    MessageErrorPolicy, Model, ModelKind, PlacementPolicy, RelayBranching, Relocation,
-    RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    MessageErrorPolicy, Model, ModelKind, PartitionSeed, PlacementPolicy, RelayBranching,
+    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat, RetryPolicy,
     ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
     ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,

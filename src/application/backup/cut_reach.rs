@@ -253,9 +253,9 @@ mod tests {
         );
         let first = node.single_unit().clone();
         node.units.clear();
-        node.units.insert(Unit::Partition(0), first.clone());
+        node.units.insert(Unit::partition(0), first.clone());
         node.units.insert(
-            Unit::Partition(1),
+            Unit::partition(1),
             nervix_models::ScheduledUnit {
                 primary_node: Some(node_named("node-2")),
                 assigned_nodes: vec![node_named("node-2"), node_named("node-3")],

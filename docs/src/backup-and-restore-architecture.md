@@ -97,6 +97,20 @@ then the version for exact equality, copies the payload into an aligned buffer a
 bytecheck before it reads a value, and then validates each vocabulary value in the record's
 conversion. A changed shape therefore fails at its header instead of validating as garbage.
 
+Kafka unit checkpoints include the explicit-start generation and both committed positions and
+any canonical start positions still awaiting adoption. Those pending positions remain on
+instance zero until their recipient has persisted its slice. Backup publication fences cover
+selection, adoption and seed release. Restore retains the pending cut, so a delayed unit can
+resume it after the lifecycle advances. Count redistribution prepares the newest canonical
+generation and each actual owner's progress on every target primary and replica.
+
+The current archive uses format major `5`. Each unit-bearing record owns an eight-byte primitive
+rank with four-byte alignment. Rank zero is `Single`, ranks one through `2^32` select the full
+32-bit partition range, and subsequent ranks select instance indices from zero. Every rank is a
+valid unit, and the instance range includes every source index an allocation can materialize.
+The record version fences this shape before decoding; restore then validates that the unit belongs
+to the restored schedule.
+
 ### Layout And Verification
 
 The writer lays an archive out completely before it writes a byte: every section's length and
@@ -110,7 +124,7 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `2`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `5`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,
@@ -1202,3 +1216,12 @@ leader crash, a partitioned coordinator, an owner restart and concurrent staging
 volume](https://app.clickup.com/t/86bckvq84): three concurrent restores of 40 MiB guest saves staged
 at most about 0.3 GB on a state owner, finished in under 20 seconds each on a GitHub-hosted worker,
 and left no unpublished staging five seconds after they ended.
+
+## Capturing Instance-Owned Intake
+
+A cut enumerates each locally owned `NodeUnitRef` of an ingestor, checks its readiness/drain
+summary, and captures its exact offset and branch-lifecycle placements. A logical ingestor can
+therefore contribute checkpoints from several owners. Restore retains the global instance index
+when staging and publishing those generations; final placement does not renumber it. The current
+archive major also identifies this interpretation of canonical fixed-count and per-partition
+Models. Manifest and individual state-record versions retain their own current contracts.

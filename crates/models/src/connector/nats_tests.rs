@@ -1,8 +1,8 @@
-//! Tests of the NATS vocabulary's executable Core subject contract.
+//! Tests of the NATS vocabulary's executable Core subject and JetStream stream contracts.
 //!
 //! Layer: test harness.
-//! - **Owns.** NATS declaration, subject, queue-group and client-configuration contract checks
-//!   through the public vocabulary.
+//! - **Owns.** NATS declaration, subject, queue-group, stream, consumer and client-configuration
+//!   contract checks through the public vocabulary.
 //! - **Depends on.** NATS Models, entity kinds and shared declaration types.
 //! - **Must not know.** The NATS driver, parsing, planning or runtime subscriptions.
 
@@ -86,20 +86,14 @@ fn subject_ingestion_requires_its_queue_group_and_instance_count() {
 }
 
 #[test]
-fn subject_emission_declares_core_and_jetstream_publication() {
+fn subject_and_stream_emission_declare_their_publication_contracts() {
     let emit = EmitterEntityKind::Nats(NatsEmitterEntity::Subject).capabilities();
 
     assert_eq!(
         emit.reference,
         EmitterReferenceKind::Client(ConnectorKind::Nats)
     );
-    assert_eq!(
-        emit.publishing_kinds(),
-        &[
-            EmitterPublishingModeKind::NoAck,
-            EmitterPublishingModeKind::NatsJetStream,
-        ]
-    );
+    assert_eq!(emit.publishing_kinds(), &[EmitterPublishingModeKind::NoAck]);
     assert_eq!(emit.body, EmitterBodyForm::Codec);
     assert_eq!(emit.batch, EmitterBatchLegality::Optional { maximum: None });
     assert!(!emit.requires_batch_transformation);
@@ -111,20 +105,76 @@ fn subject_emission_declares_core_and_jetstream_publication() {
         })
     );
     assert!(emit.options.is_empty());
-    assert!(emit.envelope.is_empty());
+    assert_eq!(emit.envelope, &[EnvelopeClauseKind::ReplyTo]);
     assert!(emit.properties.is_empty());
+
+    let stream = EmitterEntityKind::Nats(NatsEmitterEntity::Stream).capabilities();
+    assert_eq!(
+        stream.publishing_kinds(),
+        &[EmitterPublishingModeKind::BrokerAck]
+    );
+    assert_eq!(
+        stream.reference,
+        EmitterReferenceKind::Client(ConnectorKind::Nats)
+    );
+    assert_eq!(stream.body, EmitterBodyForm::Codec);
+    assert_eq!(
+        stream.batch,
+        EmitterBatchLegality::Optional { maximum: None }
+    );
+    assert_eq!(
+        stream.locator,
+        Some(LocatorDeclaration {
+            keywords: "STREAM",
+            name: LocatorName::External(NatsStreamName::DECLARATION),
+        })
+    );
+    assert_eq!(stream.options[0].keywords, "SUBJECT");
+    assert_eq!(stream.envelope, &[EnvelopeClauseKind::MessageId]);
 }
 
 #[test]
-fn both_subject_directions_carry_headers_by_name_and_no_typed_metadata() {
-    let ingest = IngestorEntityKind::Nats(NatsIngestorEntity::Subject).capabilities();
-    let emit = EmitterEntityKind::Nats(NatsEmitterEntity::Subject).capabilities();
-    let headers = Some(HeaderModel::exact(HeaderLayout::RepeatsByName));
-
-    assert_eq!(ingest.headers, headers);
-    assert_eq!(emit.headers, headers);
-    assert!(ingest.reads_headers());
-    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
+fn both_entities_declare_ordered_headers_and_their_complete_metadata() {
+    let headers = Some(HeaderModel::exact(HeaderLayout::OrderedRepeats));
+    for entity in [NatsIngestorEntity::Subject, NatsIngestorEntity::Stream] {
+        let ingest = IngestorEntityKind::Nats(entity).capabilities();
+        assert_eq!(ingest.headers, headers);
+        assert!(ingest.reads_headers());
+    }
+    for entity in [NatsEmitterEntity::Subject, NatsEmitterEntity::Stream] {
+        assert_eq!(
+            EmitterEntityKind::Nats(entity).capabilities().headers,
+            headers
+        );
+    }
+    let fields = |entity| {
+        IngestorEntityKind::Nats(entity)
+            .capabilities()
+            .metadata
+            .fields()
+            .iter()
+            .map(|field| (field.name(), field.ty()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        fields(NatsIngestorEntity::Subject),
+        vec![
+            ("subject", IngestorMetadataType::String),
+            ("reply", IngestorMetadataType::String),
+        ]
+    );
+    assert_eq!(
+        fields(NatsIngestorEntity::Stream),
+        vec![
+            ("subject", IngestorMetadataType::String),
+            ("reply", IngestorMetadataType::String),
+            ("stream", IngestorMetadataType::String),
+            ("consumer", IngestorMetadataType::String),
+            ("sequence", IngestorMetadataType::U64),
+            ("timestamp", IngestorMetadataType::Datetime),
+            ("delivered", IngestorMetadataType::U64),
+        ]
+    );
 }
 
 #[test]
@@ -175,7 +225,6 @@ fn subject_emission_bounds_a_core_write_by_its_client_timeout() {
                 key: DeadlineKey::Timeout,
                 omitted: OmittedDeadline::Unbounded,
             },
-            WaitBound::Clause("ACK TIMEOUT"),
         ]
     );
     assert_eq!(emit.bounds.deadline_keys(), vec![DeadlineKey::Timeout]);
@@ -183,6 +232,21 @@ fn subject_emission_bounds_a_core_write_by_its_client_timeout() {
         emit.bounds.driver_limits,
         &["Messages above the server's max_payload are rejected."]
     );
+}
+
+#[test]
+fn stream_emission_bounds_pub_ack_answers_by_its_window() {
+    let emit = EmitterEntityKind::Nats(NatsEmitterEntity::Stream).capabilities();
+    assert_eq!(emit.bounds.buffers.len(), 2);
+    assert_eq!(
+        emit.bounds.buffers[1].bound,
+        BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("ACK PARALLEL MAX, 1 under ACK SEQUENTIAL"),
+            overflow: BufferOverflow::Backpressure,
+        }
+    );
+    assert_eq!(emit.bounds.waits[2].bound, WaitBound::Clause("ACK TIMEOUT"));
+    assert_eq!(emit.bounds.waits[3].bound, WaitBound::Clause("ACK TIMEOUT"));
 }
 
 fn config_entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -382,6 +446,10 @@ fn client_schema_requires_both_halves_of_a_tls_identity() {
 #[case::every_token(">")]
 #[case::system_prefix("$JS.API.STREAM.INFO.Orders")]
 #[case::utf8("telemetry.Événements.東京")]
+// Examples from https://docs.nats.io/concepts/subjects (Core subject hierarchy and wildcards).
+#[case::nats_docs_literal("orders.retail.placed")]
+#[case::nats_docs_one_token("orders.*.placed")]
+#[case::nats_docs_tail("sensor.>")]
 fn subscription_subjects_keep_their_spelling_and_whole_token_wildcards(#[case] raw: &str) {
     let subject = NatsSubjectName::try_from(raw)
         .assured("each fixture has nonempty tokens and wildcards only as whole tokens");
@@ -400,11 +468,75 @@ fn subscription_subjects_keep_their_spelling_and_whole_token_wildcards(#[case] r
 #[case::space("orders created", ExternalNameError::InvalidChar { ch: ' ' })]
 #[case::tab("orders\tcreated", ExternalNameError::InvalidChar { ch: '\t' })]
 #[case::control("orders.\u{7}", ExternalNameError::InvalidChar { ch: '\u{7}' })]
+#[case::partial_wildcard("time.New*.east", ExternalNameError::WildcardInsideLevel { wildcard: '*' })]
+#[case::leading_tail(">.created", ExternalNameError::WildcardBeforeLastLevel { wildcard: '>' })]
 fn subscription_subjects_refuse_what_the_subject_rule_excludes(
     #[case] raw: &str,
     #[case] expected: ExternalNameError,
 ) {
     assert_eq!(NatsSubjectName::try_from(raw), Err(expected));
+}
+
+#[test]
+fn publication_subjects_report_malformed_patterns_before_a_wildcard() {
+    assert_eq!(
+        NatsPublishSubjectName::try_from("orders.*..created"),
+        Err(ExternalNameError::EmptyLevel { separator: '.' })
+    );
+    assert_eq!(
+        NatsPublishSubjectName::try_from("orders.>.created"),
+        Err(ExternalNameError::WildcardBeforeLastLevel { wildcard: '>' })
+    );
+    assert_eq!(
+        NatsPublishSubjectName::try_from("orders.*.created"),
+        Err(ExternalNameError::InvalidChar { ch: '*' })
+    );
+}
+
+#[test]
+fn bolero_nats_subjects_preserve_subscription_and_publication_bounds() {
+    // Corpus bytes '0' through ';' map in order to these grammar and refusal characters.
+    const SYMBOLS: [char; 12] = [
+        'a', 'Z', '.', '*', '>', '$', '_', '-', ' ', '\t', '\u{7}', 'é',
+    ];
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(1152)
+        .for_each(|bytes: &[u8]| {
+            let raw: String = bytes
+                .iter()
+                .map(|byte| SYMBOLS[usize::from(*byte) % SYMBOLS.len()])
+                .collect();
+            let subscribed = NatsSubjectName::try_from(raw.as_str());
+            let published = NatsPublishSubjectName::try_from(raw.as_str());
+
+            if let Ok(subject) = &subscribed {
+                assert_eq!(subject.as_str(), raw);
+                assert!((1..=1024).contains(&raw.len()));
+                assert!(!raw.chars().any(char::is_whitespace));
+                assert!(!raw.chars().any(char::is_control));
+                let tokens: Vec<_> = raw.split('.').collect();
+                assert!(tokens.iter().all(|token| !token.is_empty()));
+                for (position, token) in tokens.iter().enumerate() {
+                    assert!(
+                        !token.chars().any(|ch| matches!(ch, '*' | '>'))
+                            || matches!(*token, "*" | ">"),
+                        "wildcards must occupy a whole token: {raw:?}"
+                    );
+                    if *token == ">" {
+                        assert_eq!(position + 1, tokens.len(), "tail wildcard: {raw:?}");
+                    }
+                }
+            }
+            if let Ok(subject) = &published {
+                assert_eq!(subject.as_str(), raw);
+                assert!(
+                    subscribed.is_ok(),
+                    "a literal subject is also a subscription"
+                );
+                assert!(!raw.chars().any(|ch| matches!(ch, '*' | '>')));
+            }
+        });
 }
 
 #[test]
@@ -497,5 +629,192 @@ fn queue_groups_are_bounded_and_refuse_whitespace() {
     assert_eq!(
         NatsQueueGroupName::try_from("workers\n"),
         Err(ExternalNameError::InvalidChar { ch: '\n' })
+    );
+}
+
+#[test]
+fn stream_ingestion_declares_acknowledged_pulls_answered_by_the_server() {
+    let ingest = IngestorEntityKind::Nats(NatsIngestorEntity::Stream).capabilities();
+
+    assert_eq!(
+        ingest.reference,
+        IngestorReferenceKind::Client(ConnectorKind::Nats)
+    );
+    assert!(!ingest.executes_on_every_cluster_node);
+    assert_eq!(
+        ingest.delivery,
+        &[
+            DeclaredDelivery::ACK_SEQUENTIAL,
+            DeclaredDelivery::ACK_PARALLEL
+        ]
+    );
+    assert_eq!(ingest.declared_delivery(IngestDeliveryKind::NoAck), None);
+    assert_eq!(ingest.position_class, PositionClass::BrokerRedelivered);
+    assert_eq!(
+        ingest.acknowledgement_confirmation,
+        AcknowledgementConfirmation::Answered
+    );
+    assert_eq!(
+        ingest.quiesce,
+        &[
+            DeclaredQuiesce::SUSPEND,
+            DeclaredQuiesce::BUFFER,
+            DeclaredQuiesce::DROP,
+        ]
+    );
+    assert_eq!(
+        ingest.headers,
+        Some(HeaderModel::exact(HeaderLayout::OrderedRepeats))
+    );
+}
+
+#[test]
+fn stream_ingestion_requires_its_consumer_and_names_no_instance_count() {
+    let ingest = IngestorEntityKind::Nats(NatsIngestorEntity::Stream).capabilities();
+
+    assert_eq!(
+        ingest.locator,
+        Some(LocatorDeclaration {
+            keywords: "STREAM",
+            name: LocatorName::External(NatsStreamName::DECLARATION),
+        })
+    );
+    let keywords: Vec<&str> = ingest
+        .options
+        .iter()
+        .map(|option| option.keywords)
+        .collect();
+    assert_eq!(keywords, vec!["CONSUMER"]);
+    let consumer = ingest
+        .option("CONSUMER")
+        .assured("the stream ingestor declares its consumer option");
+    assert!(consumer.is_required());
+    assert_eq!(
+        consumer.form,
+        OptionForm::Value {
+            value: OptionValue::Name(NatsConsumerName::DECLARATION),
+            example: "CONSUMER 'nervix'",
+        }
+    );
+    assert_eq!(ingest.option("INSTANCES"), None);
+}
+
+#[test]
+fn stream_ingestion_bounds_what_a_pull_holds_by_its_acknowledgement_window() {
+    let ingest = IngestorEntityKind::Nats(NatsIngestorEntity::Stream).capabilities();
+
+    assert_eq!(ingest.bounds.buffers.len(), 1);
+    assert_eq!(
+        ingest.bounds.buffers[0].bound,
+        BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("ACK PARALLEL MAX, 1 under ACK SEQUENTIAL"),
+            overflow: BufferOverflow::Backpressure,
+        }
+    );
+    let waits: Vec<WaitBound> = ingest.bounds.waits.iter().map(|wait| wait.bound).collect();
+    assert_eq!(
+        waits,
+        vec![
+            WaitBound::Unbounded,
+            WaitBound::Driver("5 s per address"),
+            WaitBound::Driver("5 s request timeout"),
+            WaitBound::Driver("10 s request timeout"),
+            WaitBound::Driver("a ping every 60 s; the connection ends after 2 go unanswered"),
+        ]
+    );
+    assert!(ingest.bounds.deadline_keys().is_empty());
+    assert_eq!(ingest.bounds.driver_limits.len(), 1);
+}
+
+#[test]
+fn stream_modes_take_their_acknowledgement_windows_from_the_statement() {
+    let retry_policy = RetryPolicy {
+        backoff: "100ms".to_string(),
+        max_backoff: "1s".to_string(),
+    };
+    let sequential = NatsStreamIngestMode::AckSequential {
+        timeout: "10s".to_string(),
+        retry_policy: retry_policy.clone(),
+    };
+    assert_eq!(
+        sequential.acknowledgement(),
+        IngestAcknowledgement::Sequential {
+            timeout: "10s",
+            retry: &retry_policy,
+        }
+    );
+    let max = NonZeroU64::new(4).assured("a fixed window of four is positive");
+    let parallel = NatsStreamIngestMode::AckParallel {
+        max,
+        batch_timeout: "50ms".to_string(),
+        timeout: "10s".to_string(),
+        retry_policy: retry_policy.clone(),
+    };
+    assert_eq!(
+        parallel.acknowledgement(),
+        IngestAcknowledgement::Parallel {
+            max,
+            batch_timeout: "50ms",
+            timeout: "10s",
+            retry: &retry_policy,
+        }
+    );
+}
+
+#[rstest]
+#[case::lower("orders")]
+#[case::mixed_case("Orders-EU")]
+#[case::underscores("orders_2026")]
+#[case::utf8("Événements-東京")]
+#[case::punctuation("orders:v2$")]
+fn stream_and_consumer_names_are_kept_exactly_as_written(#[case] raw: &str) {
+    let stream = NatsStreamName::try_from(raw)
+        .assured("each fixture holds no separator, wildcard, whitespace or control character");
+    assert_eq!(stream.as_str(), raw);
+    let consumer =
+        NatsConsumerName::try_from(raw).assured("a consumer name follows the stream name rule");
+    assert_eq!(consumer.as_str(), raw);
+}
+
+#[rstest]
+#[case::empty("", ExternalNameError::Empty)]
+#[case::subject_separator("orders.eu", ExternalNameError::InvalidChar { ch: '.' })]
+#[case::token_wildcard("orders*", ExternalNameError::InvalidChar { ch: '*' })]
+#[case::tail_wildcard("orders>", ExternalNameError::InvalidChar { ch: '>' })]
+#[case::path_separator("orders/eu", ExternalNameError::InvalidChar { ch: '/' })]
+#[case::windows_path_separator("orders\\eu", ExternalNameError::InvalidChar { ch: '\\' })]
+#[case::space("orders eu", ExternalNameError::InvalidChar { ch: ' ' })]
+#[case::control("orders\u{7}", ExternalNameError::InvalidChar { ch: '\u{7}' })]
+fn stream_and_consumer_names_refuse_what_jetstream_refuses(
+    #[case] raw: &str,
+    #[case] expected: ExternalNameError,
+) {
+    assert_eq!(NatsStreamName::try_from(raw), Err(expected.clone()));
+    assert_eq!(NatsConsumerName::try_from(raw), Err(expected));
+}
+
+#[test]
+fn stream_and_consumer_names_are_bounded_at_the_servers_name_length() {
+    let at_bound = format!("{}{}", "é".repeat(127), "x");
+    assert_eq!(at_bound.len(), 255);
+    let stream = NatsStreamName::try_from(at_bound.as_str())
+        .assured("255 bytes fit the JetStream name bound");
+    assert_eq!(stream.as_str(), at_bound);
+    let consumer = NatsConsumerName::try_from(at_bound.as_str())
+        .assured("255 bytes fit the JetStream name bound");
+    assert_eq!(consumer.as_str(), at_bound);
+
+    let above_bound = format!("{at_bound}x");
+    let too_long = ExternalNameError::TooLong {
+        max: 255,
+        actual: 256,
+    };
+    assert_eq!(
+        NatsStreamName::try_from(above_bound.as_str()),
+        Err(too_long.clone())
+    );
+    assert_eq!(
+        NatsConsumerName::try_from(above_bound.as_str()),
+        Err(too_long)
     );
 }

@@ -55,11 +55,15 @@ fn assert_rejected(fixture: &UnfoldingDomain, report: &str, rejections: u64) {
     assert!(report.starts_with(REJECTION), "{report}");
     assert!(
         report.contains(": codec 'event_json' refused the payload: "),
-        "the rejection names the codec and no transport position for a header source: {report}"
+        "the rejection names the codec and no transport position for a header ingestor: {report}"
     );
     let described = fixture
         .runtime
-        .describe_local_ingestor(&fixture.domain, &fixture.ingestor)
+        .describe_local_ingestor(
+            &fixture.domain,
+            &fixture.ingestor,
+            nervix_models::Unit::SINGLE,
+        )
         .expect("the fixture's ingestor describes itself");
     assert_eq!(described.decode_rejections_total, rejections);
     let last = described
@@ -166,7 +170,7 @@ async fn an_unacknowledged_batch_drops_a_payload_its_codec_refuses_and_delivers_
     );
     assert_rejected(&fixture, &report, 1);
     assert_eq!(
-        host.unfolding_refused.get(),
+        host.interactions.unfolding_refused.get(),
         0,
         "a codec refusal is not a refusal for room"
     );

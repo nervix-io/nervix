@@ -11,7 +11,7 @@
 )]
 
 use std::{
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::Range,
     str::FromStr,
 };
@@ -501,6 +501,45 @@ pub fn nonzero_u32_value<'src>(
     u32_value(label)
         .try_map(move |value, span| {
             NonZeroU32::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
+        })
+        .boxed()
+}
+
+/// An integer written where the count is bounded by the 16-bit range its Model uses.
+///
+/// The bound belongs to the value, so a count outside it is rejected where it is written rather
+/// than narrowed later: the message names the range instead of leaving a truncated number behind.
+pub fn u16_value<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], u16, extra::Err<ParseError<'src>>> + Clone {
+    // Each alternative carries the label for the same reason `u64_value` does: chumsky only
+    // rewrites an alternative error whose position matches the start of the labelled parser.
+    choice((
+        select! { Token::NumberLiteral(v) => v }.labelled(label),
+        word_raw().labelled(label),
+    ))
+    .try_map(|raw, span| {
+        integer_literal::<u16>(&raw).map_err(|_| {
+            Rich::custom(
+                span,
+                format!("invalid integer '{raw}'; expected 0 through {}", u16::MAX),
+            )
+        })
+    })
+    .boxed()
+}
+
+/// A 16-bit count written where zero has no meaning, parsed straight into `NonZeroU16`.
+///
+/// The label goes on the integer itself, not on the checked parser: labelling the check would
+/// rewrite `zero_reason` into a bare expectation and lose the explanation.
+pub fn nonzero_u16_value<'src>(
+    label: &'static str,
+    zero_reason: &'static str,
+) -> impl Parser<'src, &'src [Token], NonZeroU16, extra::Err<ParseError<'src>>> + Clone {
+    u16_value(label)
+        .try_map(move |value, span| {
+            NonZeroU16::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
         })
         .boxed()
 }
@@ -1060,20 +1099,25 @@ pub fn duration_lit<'src>()
     // setting consumes it validates it; checking it here would take over validation the runtime has
     // to do anyway, since models also arrive from persisted state. Only keywords are ruled out,
     // because a keyword is never a value.
+    let span = select! { Token::NumberLiteral(value) => value }.then(word_raw());
+    let spans = span
+        .clone()
+        .map(|(number, unit)| format!("{number}{unit}"))
+        .foldl(span.repeated(), |mut raw, (number, unit)| {
+            raw.push(' ');
+            raw.push_str(&number);
+            raw.push_str(&unit);
+            raw
+        });
+
     choice((
-        select! { Token::NumberLiteral(value) => value }
-            .then(word_raw())
-            .map(|(number, unit)| format!("{number}{unit}"))
-            .try_map(|raw, span| {
-                let mapping_input = nervix_models::parse_duration_text(&raw).map(|_| raw.clone());
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(report) => Err(Rich::custom(
-                        span,
-                        format!("invalid duration '{raw}': {}", report.current_context()),
-                    )),
-                }
-            }),
+        spans.try_map(|raw, span| match nervix_models::parse_duration_text(&raw) {
+            Ok(_) => Ok(raw),
+            Err(report) => Err(Rich::custom(
+                span,
+                format!("invalid duration '{raw}': {report:#}"),
+            )),
+        }),
         unknown_word(),
     ))
     .labelled("duration_literal")
@@ -2386,16 +2430,36 @@ mod tests {
         error::{RichPattern, RichReason},
         prelude::*,
     };
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::NamePosition;
     use strum::IntoEnumIterator as _;
 
     use super::{
-        ALTER_OPERATION_HEADS, LexedInput, ParseError, current_word_prefix, filter_where_clause,
-        format_parse_error, into_parse_error, kw, lex_input, schema_ref, suggestions_from_errors,
-        token_span_to_source_span,
+        ALTER_OPERATION_HEADS, LexedInput, ParseError, current_word_prefix, duration_lit,
+        filter_where_clause, format_parse_error, into_parse_error, kw, lex_input, schema_ref,
+        suggestions_from_errors, token_span_to_source_span,
     };
     use crate::lexer::{Identifier, Token, Word};
+
+    #[test]
+    fn multi_span_duration_keeps_the_following_keyword() {
+        let LexedInput { tokens, .. } =
+            lex_input("1 min 30s MAX").assured("the input is lexical Plexus");
+        let parsed = duration_lit()
+            .then_ignore(kw(Identifier::Max))
+            .then_ignore(end())
+            .parse(tokens.as_slice())
+            .into_result()
+            .assured("MAX belongs to the following clause");
+        assert_eq!(parsed, "1min 30s");
+    }
+
+    #[test]
+    fn duration_does_not_consume_a_count_and_its_messages_keyword() {
+        let LexedInput { tokens, .. } =
+            lex_input("100 MESSAGES").assured("the input is lexical Plexus");
+        assert!(duration_lit().parse(tokens.as_slice()).has_errors());
+    }
 
     #[test]
     fn canonical_plexus_quotes_a_keyword_exactly_where_the_grammar_reads_it_as_one() {

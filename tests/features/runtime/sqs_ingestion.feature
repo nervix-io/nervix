@@ -107,7 +107,7 @@ Feature: SQS ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "sqs_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "sqs_notifications" leaves fault mode
     And SQS message is published to queue "notifications_reconnect_{{test_id}}"

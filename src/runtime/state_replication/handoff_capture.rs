@@ -23,18 +23,19 @@
 use super::*;
 
 impl Runtime {
-    pub(crate) async fn capture_ownership_handoff_state(
+    pub(crate) async fn capture_selected_ownership_handoff_state(
         &self,
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         entity: &NodeRef,
         unit: nervix_models::Unit,
         base_schedule_fingerprint: [u8; 32],
+        selection: nervix_interconnect::OwnershipHandoffSelection,
     ) -> OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>> {
-        if !self.entity_gate_operation_owns_entity(
+        if !self.entity_gate_operation_owns_unit(
             coordination,
             domain,
-            entity,
+            &NodeUnitRef::new(entity.clone(), unit),
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(
@@ -44,8 +45,26 @@ impl Runtime {
                 entity.identifier.as_str()
             )));
         }
-        self.capture_frozen_ownership_handoff_state(domain, entity, unit, base_schedule_fingerprint)
-            .await
+        self.verify_local_handoff_schedule(domain, base_schedule_fingerprint)?;
+        match selection {
+            nervix_interconnect::OwnershipHandoffSelection::Unit => {
+                self.capture_frozen_ownership_handoff_state(domain, entity, unit)
+                    .await
+            }
+            nervix_interconnect::OwnershipHandoffSelection::IngestorUnits {
+                selection,
+                checkpoints,
+            } => {
+                self.project_captured_ingestor_unit_state(
+                    domain,
+                    entity,
+                    unit,
+                    selection,
+                    checkpoints,
+                )
+                .await
+            }
+        }
     }
 
     async fn capture_frozen_ownership_handoff_state(
@@ -53,10 +72,8 @@ impl Runtime {
         domain: &DomainName,
         entity: &NodeRef,
         unit: nervix_models::Unit,
-        base_schedule_fingerprint: [u8; 32],
     ) -> OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>> {
         let scheduled = self.ownership_handoff_scheduled_node(domain, entity)?;
-        self.verify_local_handoff_schedule(domain, base_schedule_fingerprint)?;
         let source_is_passive = self
             .inner
             .executions
@@ -102,7 +119,7 @@ impl Runtime {
                 None => None,
             }
         } else {
-            self.checkpoint_entrypoint_branch_lifecycle(domain, entity)
+            self.checkpoint_entrypoint_branch_lifecycle(domain, entity, unit)
                 .await?
         };
         let mut checkpoints = Vec::new();
@@ -121,15 +138,27 @@ impl Runtime {
                 .change_context(OwnershipHandoffError::Persistence)?;
             checkpoints.push((placement, snapshot));
         }
-        for state in self.inner.replicated_kafka_offset_states.iter() {
-            if matches_entity(state.key()) {
-                checkpoints.push((
+        let kafka_offsets = self
+            .inner
+            .replicated_kafka_offset_states
+            .iter()
+            .filter(|state| matches_entity(state.key()))
+            .map(|state| {
+                (
                     state.key().clone(),
-                    ReplicatedKafkaOffsetState::read(state.value())
-                        .latest_snapshot()
-                        .change_context(OwnershipHandoffError::Persistence)?,
-                ));
-            }
+                    ReplicatedKafkaOffsetState::read(state.value()),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (placement, state) in kafka_offsets {
+            nervix_primitives::task::consume_budget().await;
+            let _capture = state.start_coordination().capture_guard().await;
+            checkpoints.push((
+                placement,
+                state
+                    .latest_snapshot()
+                    .change_context(OwnershipHandoffError::Persistence)?,
+            ));
         }
         let materialized = self
             .inner

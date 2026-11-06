@@ -617,29 +617,40 @@ impl Client {
                 })),
             };
         }
+        let mut last_unresolved_answer = None;
         let result = nervix_primitives::time::timeout_at(
             deadline,
-            self.execute_prepared_within_budget(execution, deadline, cancellation),
+            self.execute_prepared_within_budget(
+                execution,
+                deadline,
+                cancellation,
+                &mut last_unresolved_answer,
+            ),
         )
         .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => Err(Report::new(ClientError::RetryDeadline)),
+        };
         let outcome = match result {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(report))
+            Ok(outcome) => outcome,
+            Err(report)
                 if execution.can_have_admitted_command()
                     && report.current_context().can_hide_admitted_work() =>
             {
+                let report = match last_unresolved_answer {
+                    Some(answer)
+                        if matches!(report.current_context(), ClientError::RetryDeadline) =>
+                    {
+                        report.change_context(answer)
+                    }
+                    _ => report,
+                };
                 return Err(report.change_context(ClientError::UncertainCommand {
                     reference: execution.reference.clone(),
                 }));
             }
-            Ok(Err(report)) => return Err(report),
-            Err(_) if execution.can_have_admitted_command() => {
-                let expired = Report::new(ClientError::RetryDeadline);
-                return Err(expired.change_context(ClientError::UncertainCommand {
-                    reference: execution.reference.clone(),
-                }));
-            }
-            Err(_) => return Err(Report::new(ClientError::RetryDeadline)),
+            Err(report) => return Err(report),
         };
         match self.download_backup_of(execution, outcome).await {
             Ok(outcome) => Ok(outcome),
@@ -681,10 +692,12 @@ impl Client {
         execution: &ExecutionHandle,
         deadline: Instant,
         cancellation: CallCancellation<'_>,
+        last_unresolved_answer: &mut Option<ClientError>,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
         let outcome = self
-            .execute_with_redirects(execution, deadline, cancellation)
+            .execute_with_redirects(execution, deadline, cancellation, last_unresolved_answer)
             .await?;
+        *last_unresolved_answer = None;
         self.record_commit_basis(&outcome).await;
         if let Some(transaction) = outcome.transaction.clone() {
             self.adopt_transaction_status(transaction).await;
@@ -856,6 +869,7 @@ impl Client {
         execution: &ExecutionHandle,
         deadline: Instant,
         cancellation: CallCancellation<'_>,
+        last_unresolved_answer: &mut Option<ClientError>,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
         let recovery = execution.route.recovery_deadline(deadline);
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
@@ -877,6 +891,12 @@ impl Client {
                 }
                 Err(report) => return Err(report),
             };
+            if !matches!(outcome.routing(), Routing::Complete) {
+                *last_unresolved_answer = Some(ClientError::LastUnresolvedAnswer {
+                    disposition: outcome.disposition.clone(),
+                    message: outcome.message.clone(),
+                });
+            }
             match outcome.routing() {
                 Routing::Complete => return Ok(outcome),
                 Routing::Detached if self.active_transaction_status().await.is_some() => {
@@ -1084,15 +1104,7 @@ impl Client {
                     .request_until(request, None, wait, cancellation)
                     .await?
                 {
-                    ReplyBody::Command(outcome) => {
-                        if outcome.execution_reference != execution.reference {
-                            return Err(Report::new(ClientError::ExecutionReferenceMismatch {
-                                expected: execution.reference.clone(),
-                                received: outcome.execution_reference,
-                            }));
-                        }
-                        Ok(CommandOutcome::from(*outcome))
-                    }
+                    ReplyBody::Command(outcome) => Ok(CommandOutcome::from(*outcome)),
                     other => Err(Report::new(ClientError::unexpected_reply(
                         RequestKind::Command,
                         other,
@@ -1335,7 +1347,7 @@ impl Client {
                 timeout.unwrap_or(self.inner.connector.request_timeout()),
                 async {
                     // Register before sending so a prompt reply always finds its waiter.
-                    let Some(mut registered) = exchange.register() else {
+                    let Some(mut registered) = exchange.register_for(&request) else {
                         return Err(Report::new(exchange.pending.lock().failure()));
                     };
                     let message = ClientMessage {
@@ -1368,6 +1380,9 @@ impl Client {
                                     request: kind,
                                 }))
                             }
+                            failure @ (ClientError::ExecutionReferenceMismatch { .. }
+                            | ClientError::ReplyKindMismatch { .. }) => Err(Report::new(failure)
+                                .change_context(ClientError::RequestInterrupted { request: kind })),
                             failure => Err(Report::new(failure)),
                         },
                     }
@@ -1446,8 +1461,10 @@ impl Client {
     /// The stream outlives the session. When the session ends, it reports
     /// [`SubscriptionEvent::Interrupted`] for every subscription the session held that the server
     /// had not ended, opens a new session, and opens each of them again as a new generation. An
-    /// opening that session refuses or leaves unanswered is reported as
-    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. A subscription
+    /// opening that fails while the session stays open is reported as
+    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. An opening
+    /// left unanswered past the request timeout ends
+    /// that session and wakes the reader to open another. A subscription
     /// the server ended is never opened again, and its [`SubscriptionEvent::Ended`] is reported
     /// once, after the events before it, even when its session ended before it was read. With
     /// nothing to restore it waits for the next session the client opens, and delivers the events

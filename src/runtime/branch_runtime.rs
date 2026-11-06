@@ -60,8 +60,7 @@ pub(super) struct BranchRuntime {
     pub(super) routing: Option<DomainRoutingCache>,
     pub(super) routing_snapshot: Option<StdArc<DomainRoutingSnapshot>>,
     pub(super) domain_clock: DomainClock,
-    pub(super) entity_kind: ModelKind,
-    pub(super) source: RelayName,
+    pub(super) owner: NodeUnitRef,
     pub(super) root_relay: RelayName,
     pub(super) error_policies: ErrorPolicies,
     pub(super) relays: HashMap<RelayName, ConcreteRelayRuntime>,
@@ -365,7 +364,7 @@ impl BranchRuntime {
             "a domain whose routing is not resolved has no materialized relays to reconcile, \
              which reading the routing below reports",
         );
-        let (desired_relays, relay_schema) = match self.domain_routing() {
+        let (desired_relays, relay_schema, relay_unit) = match self.domain_routing() {
             Ok(routing) => {
                 let desired_relays = routing
                     .materialized_stream_specs
@@ -374,7 +373,7 @@ impl BranchRuntime {
                         !routing
                             .materialized_stream_owner_nodes
                             .get(*relay)
-                            .is_some_and(Option::is_some)
+                            .is_some_and(RelayOwnerRoutes::is_placed)
                     })
                     .cloned()
                     .collect::<HashSet<_>>();
@@ -382,9 +381,10 @@ impl BranchRuntime {
                     .materialized_stream_specs
                     .get(relay)
                     .map(|spec| spec.schema.clone());
-                (desired_relays, relay_schema)
+                let relay_unit = routing.relay_partitioning(relay).unit_of(&self.key);
+                (desired_relays, relay_schema, Some(relay_unit))
             }
-            Err(_) => (HashSet::default(), None),
+            Err(_) => (HashSet::default(), None, None),
         };
         self.materialized_states
             .retain(|identifier, _| desired_relays.contains(identifier));
@@ -397,11 +397,26 @@ impl BranchRuntime {
                 );
                 return;
             };
-            let placement = match self.runtime.state_placement(
+            // The state of this branch belongs to the unit of the relay that owns its key.
+            let unit = match relay_unit {
+                Some(Ok(unit)) => unit,
+                Some(Err(error)) => {
+                    warn!(
+                        domain = self.domain.as_str(),
+                        relay = relay.as_str(),
+                        error = %format_args!("{error:#}"),
+                        "failed to place the branch-local materialized relay state"
+                    );
+                    return;
+                }
+                None => return,
+            };
+            let placement = match self.runtime.state_placement_for_unit(
                 &self.domain,
                 RuntimeStateKind::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
+                unit,
                 self.key.clone(),
             ) {
                 Ok(placement) => placement,
@@ -466,7 +481,7 @@ impl BranchRuntime {
             .domain_routing()
             .ok()
             .and_then(|routing| routing.materialized_stream_owner_nodes.get(relay))
-            .is_some_and(Option::is_some)
+            .is_some_and(RelayOwnerRoutes::is_placed)
         {
             return;
         }
@@ -600,11 +615,11 @@ impl BranchRuntime {
         self.metrics.source_dirty.mark();
         if self.dispatch_stream(&root_relay, &batch).await.is_err() {
             let error = Report::new(RouteOutputError::Forward { relay: root_relay });
-            if self.entity_kind == ModelKind::Ingestor {
+            if self.owner.node.kind == ModelKind::Ingestor {
                 self.runtime.handle_general_error_for_acks(
                     &self.domain,
-                    self.entity_kind,
-                    &self.source,
+                    self.owner.node.kind,
+                    &self.owner.node.identifier,
                     &self.error_policies,
                     batch.acks.iter(),
                     &error,
@@ -612,8 +627,8 @@ impl BranchRuntime {
             } else {
                 self.runtime.handle_internal_processor_error_for_acks(
                     &self.domain,
-                    self.entity_kind,
-                    &self.source,
+                    self.owner.node.kind,
+                    &self.owner.node.identifier,
                     &self.error_policies,
                     batch.acks.iter(),
                     &error,
@@ -806,10 +821,10 @@ impl IngestorRouteTask {
         acks: &[AckSet],
         error: &Report<C>,
     ) {
-        if self.template.branch.entity_kind == ModelKind::Ingestor {
+        if self.template.branch.owner.node.kind == ModelKind::Ingestor {
             self.runtime_handle.handle_general_error_for_acks(
                 &self.domain,
-                self.template.branch.entity_kind,
+                self.template.branch.owner.node.kind,
                 &self.ingestor,
                 &self.template.branch.error_policies,
                 acks.iter(),
@@ -819,7 +834,7 @@ impl IngestorRouteTask {
             self.runtime_handle
                 .handle_internal_processor_error_for_acks(
                     &self.domain,
-                    self.template.branch.entity_kind,
+                    self.template.branch.owner.node.kind,
                     &self.ingestor,
                     &self.template.branch.error_policies,
                     acks.iter(),
@@ -1056,7 +1071,7 @@ impl IngestorRouteTask {
             Err(error) => {
                 self.runtime_handle.events().report_error(format!(
                     "{} '{}' in domain '{}' could not bind its route flush clock: {error:#}",
-                    self.template.branch.entity_kind.as_str(),
+                    self.template.branch.owner.node.kind.as_str(),
                     self.ingestor.as_str(),
                     self.domain.as_str(),
                 ));
@@ -1065,11 +1080,13 @@ impl IngestorRouteTask {
         };
         let ownership_entity = DomainNodeRef::node_in(
             self.domain.clone(),
-            self.template.branch.entity_kind,
-            ModelName::from(&self.template.branch.source),
+            self.template.branch.owner.node.kind,
+            ModelName::from(&self.template.branch.owner.node.identifier),
         );
-        let ownership_freeze =
-            OwnershipHandoffFreezeWatch::new(&self.runtime_handle, ownership_entity);
+        let ownership_freeze = OwnershipHandoffFreezeWatch::for_unit(
+            &self.runtime_handle,
+            DomainNodeUnitRef::new(ownership_entity, self.template.branch.owner.unit),
+        );
         loop {
             nervix_primitives::task::consume_budget().await;
             self.runtime_handle
@@ -1077,8 +1094,8 @@ impl IngestorRouteTask {
                 .fault_injection
                 .pause_ingestor_route_poll_if_armed(
                     &self.domain,
-                    self.template.branch.entity_kind,
-                    &self.template.branch.source,
+                    self.template.branch.owner.node.kind,
+                    &RelayName::from(&self.template.branch.owner.node.identifier),
                 )
                 .await;
             let freeze = ownership_freeze.observe();
@@ -1168,13 +1185,9 @@ impl IngestorRouteRuntime {
         });
         // The obligation is registered before the task starts, so a generation requested between
         // the spawn and the first poll is still owed by this route rather than missed.
-        let quiesce = OutputBufferQuiesceGauge::new(runtime_handle.node_quiesce_counters(
-            &domain,
-            NodeRef::new(
-                template.branch.entity_kind,
-                ModelName::from(&template.branch.source),
-            ),
-        ));
+        let quiesce = OutputBufferQuiesceGauge::new(
+            runtime_handle.unit_quiesce_counters(&domain, template.branch.owner.clone()),
+        );
         let force_flush = runtime_handle.force_flush_participant(&domain, quiesce.counters());
         let task = nervix_primitives::task::spawn(
             IngestorRouteTask {
@@ -1409,10 +1422,10 @@ impl BranchExecutionRuntime {
         acks: impl IntoIterator<Item = &'a AckSet>,
         error: &Report<C>,
     ) {
-        if template.entity_kind == ModelKind::Ingestor {
+        if template.owner.node.kind == ModelKind::Ingestor {
             runtime_handle.handle_general_error_for_acks(
                 domain,
-                template.entity_kind,
+                template.owner.node.kind,
                 ingestor,
                 &template.error_policies,
                 acks,
@@ -1421,7 +1434,7 @@ impl BranchExecutionRuntime {
         } else {
             runtime_handle.handle_internal_processor_error_for_acks(
                 domain,
-                template.entity_kind,
+                template.owner.node.kind,
                 ingestor,
                 &template.error_policies,
                 acks,
@@ -1445,7 +1458,7 @@ impl BranchExecutionRuntime {
             Err(error) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
                     domain,
-                    template.entity_kind,
+                    template.owner.node.kind,
                     ingestor,
                     &template.error_policies,
                     completion.acks.iter(),
@@ -1614,8 +1627,8 @@ impl BranchExecutionRuntime {
                 tick_due_branch_instance_branches(&restored_snapshot, &instances).await;
             let ownership_entity = DomainNodeRef::node_in(
                 domain.clone(),
-                template.entity_kind,
-                ModelName::from(&template.source),
+                template.owner.node.kind,
+                ModelName::from(&template.owner.node.identifier),
             );
             let mut checkpoint_requests_open = true;
             let mut lanes = BranchDispatchLanes::default();
@@ -1624,7 +1637,10 @@ impl BranchExecutionRuntime {
                 nervix::lifecycle_call,
                 "this task binds its exact ownership freeze publication before entering its \
                  recurring loop",
-                OwnershipHandoffFreezeWatch::new(&runtime_handle, ownership_entity)
+                OwnershipHandoffFreezeWatch::for_unit(
+                    &runtime_handle,
+                    DomainNodeUnitRef::new(ownership_entity, template.owner.unit)
+                )
             );
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -2088,11 +2104,12 @@ pub(super) fn branch_lru_placement(
     domain: &DomainName,
     template: &BranchInstanceTemplate,
 ) -> error_stack::Result<RuntimeStatePlacement, StateIdentityError> {
-    runtime.state_placement(
+    runtime.state_placement_for_unit(
         domain,
         RuntimeStateKind::BranchLru,
-        template.entity_kind,
-        &template.source,
+        template.owner.node.kind,
+        &template.owner.node.identifier,
+        template.owner.unit,
         None,
     )
 }
@@ -2171,8 +2188,8 @@ fn checkpoint_branch_instance_lru_snapshot<V>(
 ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
     let placement = branch_lru_placement(runtime, domain, template).change_context_lazy(|| {
         OwnershipHandoffError::StatePlacement {
-            kind: template.entity_kind,
-            identifier: ModelName::from(&template.source),
+            kind: template.owner.node.kind,
+            identifier: ModelName::from(&template.owner.node.identifier),
         }
     })?;
     let _publication = runtime.backup_publication(domain);
@@ -2480,10 +2497,10 @@ mod tests {
         let status = runtime.entity_drain_status(
             &domain,
             &[],
-            &[NodeRef {
+            &nervix_models::EntityGateTargets::Entities(vec![NodeRef {
                 kind: ModelKind::Junction,
                 identifier: processor.clone(),
-            }],
+            }]),
             EntityGatePurpose::ModelAlteration,
         );
         assert_eq!(status.node_work_items, 1);
@@ -2492,10 +2509,10 @@ mod tests {
         let handoff_status = runtime.entity_drain_status(
             &domain,
             &[],
-            &[NodeRef {
+            &nervix_models::EntityGateTargets::Entities(vec![NodeRef {
                 kind: ModelKind::Junction,
                 identifier: processor,
-            }],
+            }]),
             EntityGatePurpose::OwnershipHandoff,
         );
         assert_eq!(handoff_status.node_work_items, 0);
@@ -2668,7 +2685,10 @@ mod tests {
         let ingestor = named::<IngestorName>("orders_source");
         let tracker = Arc::new(AckRootTracker::default());
         runtime.inner.in_flight_by_ingestor.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+                Unit::SINGLE,
+            ),
             tracker.clone(),
         );
         let (acks, _completion) = AckSet::tracked_root(tracker);
@@ -2681,7 +2701,7 @@ mod tests {
         let alteration = runtime.entity_drain_status(
             &domain,
             &[],
-            &affected,
+            &nervix_models::EntityGateTargets::Entities(affected.to_vec()),
             EntityGatePurpose::ModelAlteration,
         );
         assert_eq!(alteration.outstanding_acks, 1);
@@ -2690,7 +2710,7 @@ mod tests {
         let handoff = runtime.entity_drain_status(
             &domain,
             &[],
-            &affected,
+            &nervix_models::EntityGateTargets::Entities(affected.to_vec()),
             EntityGatePurpose::OwnershipHandoff,
         );
         assert_eq!(handoff.outstanding_acks, 0);
@@ -2719,8 +2739,10 @@ mod tests {
             template: IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    entity_kind: ModelKind::Ingestor,
-                    source: named("orders_source"),
+                    owner: NodeUnitRef::new(
+                        NodeRef::new(ModelKind::Ingestor, named::<ModelName>("orders_source")),
+                        Unit::SINGLE,
+                    ),
                     root_relay: relay.clone(),
                     branch: None,
                     branch_ttl: None,
@@ -2769,7 +2791,7 @@ mod tests {
                         &coordination,
                         &domain,
                         &[],
-                        &[entity],
+                        &nervix_models::EntityGateTargets::Entities(vec![entity]),
                         EntityGatePurpose::OwnershipHandoff,
                         EntityGateLease {
                             deadline: nervix_primitives::time::Instant::now()
@@ -2809,7 +2831,9 @@ mod tests {
                     &coordination,
                     &domain,
                     &[],
-                    std::slice::from_ref(&entity),
+                    &nervix_models::EntityGateTargets::Entities(
+                        (std::slice::from_ref(&entity)).to_vec(),
+                    ),
                     EntityGatePurpose::OwnershipHandoff,
                 )
                 .expect("the exact handoff scope reports its drain")
@@ -2824,7 +2848,12 @@ mod tests {
         assert!(freeze.observe().is_frozen());
         assert!(
             runtime
-                .entity_drain_status(&domain, &[], &[entity], EntityGatePurpose::OwnershipHandoff)
+                .entity_drain_status(
+                    &domain,
+                    &[],
+                    &nervix_models::EntityGateTargets::Entities(vec![entity]),
+                    EntityGatePurpose::OwnershipHandoff
+                )
                 .is_drained()
         );
         runtime
@@ -2861,8 +2890,10 @@ mod tests {
             template: IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    entity_kind: ModelKind::Ingestor,
-                    source: named("orders_source"),
+                    owner: NodeUnitRef::new(
+                        NodeRef::new(ModelKind::Ingestor, named::<ModelName>("orders_source")),
+                        Unit::SINGLE,
+                    ),
                     root_relay: relay.clone(),
                     branch: None,
                     branch_ttl: None,

@@ -191,7 +191,7 @@ Feature: RabbitMQ ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "rabbit_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "rabbit_notifications" leaves fault mode
     And RabbitMQ message is published to queue "notifications_reconnect_{{test_id}}"
@@ -645,19 +645,19 @@ Feature: RabbitMQ ingestion
     When emitter "mqtt_forward" enters fault mode
     Then within "30s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      ingestor ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
       """
     And within "30s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      ingestor ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
       """
     And within "30s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      ingestor ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
       """
     And within "30s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      ingestor ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
       """
     When emitter "mqtt_forward" leaves fault mode
     And the stallable endpoint "rabbitmq" is resumed
@@ -847,8 +847,7 @@ Feature: RabbitMQ ingestion
         };
         CREATE MQTT CLIENT mqtt_out
         CONFIG {
-          'addr' = '{{mqtt_addr}}',
-          'client_id' = 'nervix-cucumber-rabbit-lost-reject-out-{{test_id}}'
+          'addr' = '{{mqtt_addr}}'
         };
         CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
         FROM rabbit_main QUEUE 'notifications_individual_{{test_id}}' MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 1h ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 200ms

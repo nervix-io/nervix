@@ -27,7 +27,7 @@ use super::{
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaGroupCommit, KafkaOffsetPosition,
     KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
     KafkaTopicIngestorPlan, TopicPartitionInspector,
-    commit_tests::{cluster, plan as group_plan, publish, read_positions, subscribed_source},
+    commit_tests::{cluster, plan as group_plan, publish, read_positions, subscribed_ingestor},
 };
 
 struct UnreachedOffsets;
@@ -77,20 +77,20 @@ async fn rejecting_a_delivered_record_admits_its_seek_and_reads_that_offset_agai
     let executor = Executor::default();
     let mut plan = group_plan(&broker, KafkaGroupCommit::EachAcknowledgedBatch);
     plan.executor = executor.clone();
-    let mut source = KafkaTopicIngestor::open(&plan, 0)
+    let mut ingestor = KafkaTopicIngestor::open(&plan, 0)
         .await
-        .assured("the source accepts its group and broker configuration");
+        .assured("the ingestor accepts its group and broker configuration");
     assert!(matches!(
-        source
+        ingestor
             .resume()
             .await
-            .assured("the source subscribes to its topic"),
+            .assured("the ingestor subscribes to its topic"),
         nervix_connector::IngestorResume::Ready
     ));
-    let positions = read_positions(&mut source).await;
+    let positions = read_positions(&mut ingestor).await;
     let admitted = executor.snapshot().connector_storage.admitted;
 
-    source
+    ingestor
         .reject(&positions)
         .await
         .assured("the rejected partition is still assigned");
@@ -100,7 +100,7 @@ async fn rejecting_a_delivered_record_admits_its_seek_and_reads_that_offset_agai
         admitted + 1,
         "all rejected partitions seek through one admitted control job"
     );
-    assert_eq!(read_positions(&mut source).await, positions);
+    assert_eq!(read_positions(&mut ingestor).await, positions);
 }
 
 #[async_trait]
@@ -133,23 +133,23 @@ impl KafkaDomainOffsetServices for UnreachedOffsets {
 async fn cancelling_a_commit_keeps_its_request_in_flight() {
     let broker = cluster();
     publish(&broker).await;
-    let mut source = subscribed_source(&broker, KafkaGroupCommit::EachAcknowledgedBatch).await;
-    let positions = read_positions(&mut source).await;
+    let mut ingestor = subscribed_ingestor(&broker, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    let positions = read_positions(&mut ingestor).await;
     broker
         .broker_round_trip_time(1, Duration::from_secs(3600))
         .assured("the test broker can hold its replies");
     let request = GroupCommitRequest::acknowledged(&positions)
         .assured("the delivered record has a valid next offset");
-    let mut commit = Box::pin(source.commits.commit(
-        &source.control,
-        &source.consumer,
+    let mut commit = Box::pin(ingestor.commits.commit(
+        &ingestor.control,
+        &ingestor.consumer,
         "orders-ingestor",
         request,
     ));
     let first_poll = poll_fn(|context| Poll::Ready(commit.as_mut().poll(context))).await;
     assert!(first_poll.is_pending(), "the held broker has not answered");
     drop(commit);
-    let retained = source.commits.unanswered.is_some();
+    let retained = ingestor.commits.unanswered.is_some();
     broker
         .broker_round_trip_time(1, Duration::ZERO)
         .assured("the test releases its broker before checking cancellation");
@@ -166,12 +166,12 @@ async fn a_domain_resume_yields_while_the_broker_holds_its_metadata() {
     broker
         .broker_round_trip_time(1, Duration::from_secs(3600))
         .assured("the test broker can hold its replies");
-    let mut source = domain_source(&broker, Executor::default()).await;
-    let mut resume = Box::pin(source.resume());
+    let mut ingestor = domain_ingestor(&broker, Executor::default()).await;
+    let mut resume = Box::pin(ingestor.resume());
     let first_poll = poll_fn(|context| Poll::Ready(resume.as_mut().poll(context))).await;
     broker
         .broker_round_trip_time(1, Duration::ZERO)
-        .assured("the broker releases its replies before the test drops its source");
+        .assured("the broker releases its replies before the test drops its ingestor");
 
     assert!(
         first_poll.is_pending(),
@@ -179,7 +179,7 @@ async fn a_domain_resume_yields_while_the_broker_holds_its_metadata() {
     );
 }
 
-async fn domain_source(
+async fn domain_ingestor(
     broker: &MockCluster<'static, DefaultProducerContext>,
     executor: Executor,
 ) -> KafkaTopicIngestor {
@@ -205,14 +205,14 @@ async fn domain_source(
     };
     KafkaTopicIngestor::open(&plan, 0)
         .await
-        .assured("the source accepts the test broker's configuration")
+        .assured("the ingestor accepts the test broker's configuration")
 }
 
 #[nervix_primitives::test]
 async fn a_control_memory_refusal_preserves_its_typed_admission_cause() {
     let broker = cluster();
     let executor = Executor::default();
-    let mut source = domain_source(&broker, executor.clone()).await;
+    let mut ingestor = domain_ingestor(&broker, executor.clone()).await;
     // The open ingestor already holds the charge of its consumer's retirement.
     let commands = executor.snapshot().commands_memory;
     let _held = executor
@@ -221,7 +221,7 @@ async fn a_control_memory_refusal_preserves_its_typed_admission_cause() {
             commands.capacity_bytes - commands.reserved_bytes,
         )
         .assured("the test occupies the rest of the command budget before resuming");
-    let report = source
+    let report = ingestor
         .resume()
         .await
         .expect_err("a full command budget refuses the metadata job");
@@ -254,7 +254,7 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
         ..ExecutionConfig::default()
     })
     .assured("the test changes only worker counts");
-    let source = domain_source(&broker, executor.clone()).await;
+    let ingestor = domain_ingestor(&broker, executor.clone()).await;
     // The charge of its consumer's retirement, which the open ingestor holds throughout.
     let opened = executor.snapshot().commands_memory.reserved_bytes;
     let (started, has_started) = oneshot::channel();
@@ -282,13 +282,16 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
     let mut queued = Box::pin(executor.run_storage(StorageClass::Connector, charge, |_, _| ()));
     let first_poll = poll_fn(|context| Poll::Ready(queued.as_mut().poll(context))).await;
     assert!(first_poll.is_pending());
-    let result = source.control.run(&source.consumer, |_, _| Ok(())).await;
+    let result = ingestor
+        .control
+        .run(&ingestor.consumer, |_, _| Ok(()))
+        .await;
     drop(queued);
     // The queue has room again, but the only worker remains held. This wait must spend the
     // effective client deadline on admission without starting the native operation afterwards.
-    let expired: Result<(), _> = source
+    let expired: Result<(), _> = ingestor
         .control
-        .run(&source.consumer, |_, _| {
+        .run(&ingestor.consumer, |_, _| {
             panic!("a control job whose admission deadline expired cannot start")
         })
         .await;
@@ -322,10 +325,10 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
 async fn a_cancelled_control_call_finishes_before_the_next_can_mutate_its_consumer() {
     let broker = cluster();
     let executor = Executor::default();
-    let source = domain_source(&broker, executor.clone()).await;
+    let ingestor = domain_ingestor(&broker, executor.clone()).await;
     let (started, has_started) = oneshot::channel();
     let (release, released) = oneshot::channel();
-    let mut first = Box::pin(source.control.run(&source.consumer, move |_, _| {
+    let mut first = Box::pin(ingestor.control.run(&ingestor.consumer, move |_, _| {
         started
             .send(())
             .assured("the test awaits the native operation");
@@ -341,7 +344,7 @@ async fn a_cancelled_control_call_finishes_before_the_next_can_mutate_its_consum
         .assured("the first native operation is in flight");
     drop(first);
 
-    let mut second = Box::pin(source.control.run(&source.consumer, |_, _| Ok(())));
+    let mut second = Box::pin(ingestor.control.run(&ingestor.consumer, |_, _| Ok(())));
     let poll = poll_fn(|context| Poll::Ready(second.as_mut().poll(context))).await;
     let admitted_before_release = executor.snapshot().connector_storage.admitted;
     release

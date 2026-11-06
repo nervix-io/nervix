@@ -144,7 +144,7 @@ Feature: CLI public session dispatch
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "leader"
@@ -170,7 +170,7 @@ Feature: CLI public session dispatch
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "cli_node"
@@ -189,7 +189,7 @@ Feature: CLI public session dispatch
       """
       {"value":1,"extra":true}
       """
-    Then the CLI REPL eventually displays "[events] server ERROR: ingestor 'raw_metrics_source' general error in domain '{{domain}}': decode rejection"
+    Then the CLI REPL eventually displays "[events] runtime ERROR: ingestor 'raw_metrics_ingestor' general error in domain '{{domain}}': decode rejection"
     When http payload is posted repeatedly to node "{{cli_node}}" with host "http-{{test_id}}.example.com" path "/metrics" until the CLI REPL displays '[events] subscription [watch] from [raw_metrics]: {"value":7}'
       """
       {"value":7}
@@ -202,6 +202,22 @@ Feature: CLI public session dispatch
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario: The CLI labels each notice by its kind and prints one membership event per node change
+    Given a 3 node nervix cluster is started
+    Then the current leader node is saved as placeholder "observer"
+    And a node other than placeholder "observer" is saved as placeholder "successor"
+    And a node other than placeholders "observer" and "successor" is saved as placeholder "departing"
+    When the CLI REPL is started on node "{{observer}}"
+    And leadership is transferred from node "{{observer}}" to node "{{successor}}"
+    Then the CLI REPL eventually displays "[events] leadership INFO: raft transition: state=Follower leader={{successor}}"
+    When node "{{departing}}" is stopped
+    Then the CLI REPL eventually displays "[events] membership INFO: node '{{departing}}' left"
+    When node "{{departing}}" is started
+    Then the CLI REPL eventually displays "[events] membership INFO: node '{{departing}}' joined (incarnation "
+    And the CLI REPL displays "node '{{departing}}' left" exactly 1 times
+    When the CLI REPL runs "exit"
+    Then the CLI REPL ends successfully
 
   Scenario Outline: CLI attaches its session to the active domain's clock
     Given a <cluster_size> node nervix cluster is started
@@ -492,6 +508,45 @@ Feature: CLI public session dispatch
     When the restore step pause on node "{{leader}}" is released
     And the CLI executes "RESTORE DOMAIN {{domain}} AS {{domain}}_copy FROM '{{archive}}';" under execution reference "{{restore_reference}}" on node "{{leader}}"
     Then the CLI exited with status 0 and printed "{{domain}}_copy"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: The CLI recovers its own execution after a foreign command reply on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the next successful reply to native command "CREATE SCHEMA cli_identity (value STRING);" names another execution
+    When the CLI executes "CREATE SCHEMA cli_identity (value STRING);" on node "{{leader}}"
+    Then the CLI exited with status 0 and printed "quiesce level:"
+    And the CLI output does not contain "another execution's failure"
+    And the native command recovered only its own execution reference
+    When the CLI executes "SHOW CREATE SCHEMA cli_identity;" on node "{{leader}}"
+    Then the CLI output contains "cli_identity"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: The CLI recovers its own execution after a reply of another kind on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the next successful reply to native command "CREATE SCHEMA cli_reply_kind (value STRING);" is a reply of another kind
+    When the CLI executes "CREATE SCHEMA cli_reply_kind (value STRING);" on node "{{leader}}"
+    Then the CLI exited with status 0 and printed "quiesce level:"
+    And the native command recovered its own execution reference after a reply of another kind
+    When the CLI executes "SHOW CREATE SCHEMA cli_reply_kind;" on node "{{leader}}"
+    Then the CLI output contains "cli_reply_kind"
 
     Examples:
       | cluster_size |

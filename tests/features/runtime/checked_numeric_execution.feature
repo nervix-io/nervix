@@ -34,7 +34,7 @@ Feature: Checked numeric execution
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-integers-{{test_id}}.example.com;
       CREATE ENDPOINT operand_ingress ON edge PATH '/operands' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR operand_source
+      CREATE HTTP ENDPOINT INGESTOR operand_ingestor
         FROM operand_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING operand_batch_codec
         TO operands
@@ -138,7 +138,7 @@ Feature: Checked numeric execution
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-narrow-{{test_id}}.example.com;
       CREATE ENDPOINT narrow_operand_ingress ON edge PATH '/operands' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR narrow_operand_source
+      CREATE HTTP ENDPOINT INGESTOR narrow_operand_ingestor
         FROM narrow_operand_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING narrow_operand_batch_codec
         TO narrow_operands
@@ -239,7 +239,7 @@ Feature: Checked numeric execution
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-floats-{{test_id}}.example.com;
       CREATE ENDPOINT measurement_ingress ON edge PATH '/measurements' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR measurement_source
+      CREATE HTTP ENDPOINT INGESTOR measurement_ingestor
         FROM measurement_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_batch_codec
         TO measurements
@@ -322,7 +322,7 @@ Feature: Checked numeric execution
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-routes-{{test_id}}.example.com;
       CREATE ENDPOINT operand_ingress ON edge PATH '/operands' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR operand_source
+      CREATE HTTP ENDPOINT INGESTOR operand_ingestor
         FROM operand_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING operand_batch_codec
         TO operands
@@ -347,7 +347,7 @@ Feature: Checked numeric execution
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-      CREATE ZEROMQ PUSH EMITTER operand_sink
+      CREATE ZEROMQ PUSH EMITTER operand_emitter
         FROM operands
         TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING operand_codec
         INHERIT ALL
@@ -369,7 +369,7 @@ Feature: Checked numeric execution
       """
       "id":"ordinary" | "left":3
       "input_id":"zero-divisor" | reingestor 'partition_operands' FILTER-MAP side error division_by_zero: integer division by zero
-      "input_id":"zero-divisor" | emitter 'operand_sink' FILTER-MAP side error division_by_zero: integer remainder by zero
+      "input_id":"zero-divisor" | emitter 'operand_emitter' FILTER-MAP side error division_by_zero: integer remainder by zero
       """
 
     Examples:

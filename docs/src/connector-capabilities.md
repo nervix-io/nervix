@@ -20,6 +20,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | Not offered: Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | Not offered: Application batches carry their declared schema; there is no separate transport metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
@@ -40,6 +41,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
@@ -60,6 +62,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL |  |
 | Every live node | yes |  |
@@ -78,8 +81,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | KAFKA client |  |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
+| Instancing | per_partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
@@ -87,19 +91,20 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Acknowledgement confirmation | answered |  |
 | Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |  |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |  |
-| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |  |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### PULSAR TOPIC ingest
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, ingest metadata. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, ingest metadata. SUBSCRIPTION, TYPE and INSTANCES configure ingestion only: subscription ownership and an owned subscription's EARLIEST or LATEST position govern creation, while existing cursors prevail. TIMESTAMP and DELIVER AFTER are emitter envelope clauses; an ingestor selects a received time with TIMESTAMP AT. Ingestion reads ordered, repeated properties, while publication keeps the last value written for each property name and uses a producer receipt. Both directions use the same quoted, case-preserving local or fully qualified Pulsar topic names and the same client configuration. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
+| Instancing | per_partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
@@ -114,12 +119,13 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, ingest metadata. Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, ingest metadata. Both directions declare QOS 0, 1 or 2 independently of MODE. Consumption alone declares SESSION: NO ACK accepts every session/QoS pairing, while ACK SEQUENTIAL, ACK PARALLEL and SUSPEND require SESSION PERSISTENT with QOS 1 or 2. Every ingestor joins a Nervix-managed shared subscription, so its broker must support shared subscriptions. Publication pairs QOS 0 with NO ACK and QOS 1 or 2 with an ACK mode; its clean or persistent session follows QoS without a SESSION clause. Consumption reads the delivered packet's metadata and ordered, repeated user properties; publication writes RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |  |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |  |
+| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
+| Instancing | per_partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
@@ -134,14 +140,15 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | NATS SUBJECT | Compare `NATS SUBJECT`: locator, options, modes. Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
+| Entity | NATS SUBJECT | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes, ingest metadata. Core NATS on both sides. A subject ingestor joins a queue group, so the server hands each message to one of its members, and reads in NO ACK with no position to resume from; QUEUE GROUP and INSTANCES are ingest-only. A subject emitter publishes in NO ACK and completes once its client has flushed the write, without a server answer; REPLY TO is emit-only. JetStream is the NATS STREAM entity on each side: a stream also stores a Core publication to one of its subjects, and a subscription also receives a JetStream publication to its subject. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
 | Reference | NATS client |  |
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
-| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |  |
-| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); required |  |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
+| Instancing | per_partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | Not offered: The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace. |  |
+| Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
@@ -150,16 +157,38 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Driver limits | None declared. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
+### NATS STREAM ingest
+
+| Capability | Declaration | Mirror and transport reason |
+| --- | --- | --- |
+| Entity | NATS STREAM | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes, ingest metadata. JetStream on both sides. A stream ingestor reads an operator-provisioned stream through a durable pull consumer, which keeps the position, and settles each delivery with an acknowledgement or negative acknowledgement the server answers; CONSUMER is ingest-only. A stream emitter publishes to one literal subject its operator-provisioned stream captures, names that stream in each message's expected-stream header and waits for the PubAck that says the stream stored it; SUBJECT and MESSAGE ID are emit-only. Core NATS is the NATS SUBJECT entity on each side: a stream ingestor also reads what a subject emitter published to one of the stream's subjects, and a subject ingestor also receives what a stream emitter publishes to its subject. |
+| Reference | NATS client |  |
+| Locator and validation rule | STREAM 'orders' (nats_stream) |  |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Options in statement order | `CONSUMER 'nervix'` (string literal checked by nats_consumer); required |  |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
+| Instancing | single |  |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |  |
+| Every live node | no; scheduled owner |  |
+| Position class | broker_redelivered |  |
+| Acknowledgement confirmation | answered |  |
+| Buffers | deliveries a pull request brought ahead of the host: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it |  |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the consumer lookup: driver default, 5 s request timeout<br>the answer to an acknowledgement or a negative acknowledgement: driver default, 10 s request timeout<br>a pull request, and a silent connection: driver default, a ping every 60 s; the connection ends after 2 go unanswered |  |
+| Driver limits | A pull request asks for at most the consumer's MaxRequestBatch and waits at most its MaxRequestExpires, where its operator set them. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
+
 ### RABBITMQ QUEUE ingest
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`: locator, options, modes, ingest metadata. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
+| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`: locator, options, modes, ingest metadata. Consumption chooses automatic NO ACK or per-delivery acknowledgement with prefetch one under ACK SEQUENTIAL and MAX under ACK PARALLEL; prefetch is ingest-only and scoped to each instance. Queue publication uses the default exchange with the queue name as its routing key, and waits for a channel round trip under NO ACK or publisher confirms under ACK. PERSISTENT, MANDATORY, TIMESTAMP and PROPERTIES are emit-only; consumption reads the delivered envelope and properties through metadata. Both directions preserve quoted queue names and use sorted_by_name headers with exact names. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
+| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
+| Instancing | per_partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
@@ -180,6 +209,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
@@ -200,6 +230,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |  |
 | Headers | Not offered: An HTTP response's headers describe a whole answer rather than one of its samples, and each sample's labels travel in its payload under metric, so a query source reads no transport headers. |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
 | Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
@@ -220,6 +251,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | Not offered: The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
@@ -238,8 +270,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
+| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Instancing | per_partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
@@ -260,12 +293,13 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | `HEADERS { 'authorization' = 'Bearer token' }` (composed clause); optional; omitted when unset |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.frame_type: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |  |
+| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |  |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |  |
 | Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
@@ -280,6 +314,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL |  |
 | Every live node | yes |  |
@@ -300,6 +335,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL |  |
 | Every live node | yes |  |
@@ -379,7 +415,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, emit envelope/properties. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, emit envelope/properties. SUBSCRIPTION, TYPE and INSTANCES configure ingestion only: subscription ownership and an owned subscription's EARLIEST or LATEST position govern creation, while existing cursors prevail. TIMESTAMP and DELIVER AFTER are emitter envelope clauses; an ingestor selects a received time with TIMESTAMP AT. Ingestion reads ordered, repeated properties, while publication keeps the last value written for each property name and uses a producer receipt. Both directions use the same quoted, case-preserving local or fully qualified Pulsar topic names and the same client configuration. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -400,7 +436,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes, emit envelope/properties. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
+| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes, emit envelope/properties. Consumption chooses automatic NO ACK or per-delivery acknowledgement with prefetch one under ACK SEQUENTIAL and MAX under ACK PARALLEL; prefetch is ingest-only and scoped to each instance. Queue publication uses the default exchange with the queue name as its routing key, and waits for a channel round trip under NO ACK or publisher confirms under ACK. PERSISTENT, MANDATORY, TIMESTAMP and PROPERTIES are emit-only; consumption reads the delivered envelope and properties through metadata. Both directions preserve quoted queue names and use sorted_by_name headers with exact names. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -421,7 +457,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ EXCHANGE | Compare `RABBITMQ QUEUE`: locator, options, modes, emit envelope/properties. No ingestor consumes an exchange: the exchange routes each message by the key its record computes to the queues bound to it, and a RABBITMQ QUEUE ingestor consumes one of those queues. Publishing waits for a channel answer or publisher confirmation, as it does for a queue. |
+| Entity | RABBITMQ EXCHANGE | Compare `RABBITMQ QUEUE`: locator, options, modes, emit envelope/properties. No ingestor consumes an exchange: provision its bindings and consume a bound queue with RABBITMQ QUEUE. ROUTING KEY and MANDATORY are emit-only: each record computes its routing key, and MANDATORY rejects an unroutable message instead of letting the broker drop it. Publication shares the queue emitter's modes, persistence, timestamp, properties and sorted_by_name headers with exact names; consumer prefetch belongs only to the queue ingestor. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | EXCHANGE 'events' (rabbitmq_exchange) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -463,7 +499,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, emit envelope/properties. Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, emit envelope/properties. Both directions declare QOS 0, 1 or 2 independently of MODE. Consumption alone declares SESSION: NO ACK accepts every session/QoS pairing, while ACK SEQUENTIAL, ACK PARALLEL and SUSPEND require SESSION PERSISTENT with QOS 1 or 2. Every ingestor joins a Nervix-managed shared subscription, so its broker must support shared subscriptions. Publication pairs QOS 0 with NO ACK and QOS 1 or 2 with an ACK mode; its clean or persistent session follows QoS without a SESSION clause. Consumption reads the delivered packet's metadata and ordered, repeated user properties; publication writes RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |  |
@@ -484,22 +520,43 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | NATS SUBJECT | Compare `NATS SUBJECT`: locator, options, modes. Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
+| Entity | NATS SUBJECT | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes, emit envelope/properties. Core NATS on both sides. A subject ingestor joins a queue group, so the server hands each message to one of its members, and reads in NO ACK with no position to resume from; QUEUE GROUP and INSTANCES are ingest-only. A subject emitter publishes in NO ACK and completes once its client has flushed the write, without a server answer; REPLY TO is emit-only. JetStream is the NATS STREAM entity on each side: a stream also stores a Core publication to one of its subjects, and a subscription also receives a JetStream publication to its subject. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
 | Reference | NATS client |  |
 | Locator and validation rule | SUBJECT 'orders.Created' (nats_publish_subject) |  |
-| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
 | Batch transformation required | no |  |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
+| Envelope | REPLY TO reply_queue |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |  |
-| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted<br>a JetStream acknowledgement: `ACK TIMEOUT` |  |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | Messages above the server's max_payload are rejected. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
+
+### NATS STREAM emit
+
+| Capability | Declaration | Mirror and transport reason |
+| --- | --- | --- |
+| Entity | NATS STREAM | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes, emit envelope/properties. JetStream on both sides. A stream ingestor reads an operator-provisioned stream through a durable pull consumer, which keeps the position, and settles each delivery with an acknowledgement or negative acknowledgement the server answers; CONSUMER is ingest-only. A stream emitter publishes to one literal subject its operator-provisioned stream captures, names that stream in each message's expected-stream header and waits for the PubAck that says the stream stored it; SUBJECT and MESSAGE ID are emit-only. Core NATS is the NATS SUBJECT entity on each side: a stream ingestor also reads what a subject emitter published to one of the stream's subjects, and a subject ingestor also receives what a stream emitter publishes to its subject. |
+| Reference | NATS client |  |
+| Locator and validation rule | STREAM 'orders' (nats_stream) |  |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Options in statement order | `SUBJECT 'orders.created'` (string literal checked by nats_publish_subject); required |  |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
+| Body | ENCODE USING &lt;codec&gt; |  |
+| BATCH | optional |  |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
+| Batch transformation required | no |  |
+| Envelope | MESSAGE ID id |  |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; its MESSAGE ID envelope and written headers travel with the payload. |  |
+| Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it<br>PubAck answers awaiting settlement: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it |  |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the stream lookup: `ACK TIMEOUT`<br>a JetStream acknowledgement: `ACK TIMEOUT` |  |
+| Driver limits | Messages above the server's max_payload are rejected. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### ZEROMQ PUSH emit
 

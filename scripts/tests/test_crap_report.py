@@ -11,12 +11,19 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from scripts import cargo_crap, crap_report
+from scripts import crap_report
 from scripts.tests.test_native_coverage import job_section, step_section
-from scripts.tests.test_ratchet import branching
 
 ROOT = Path(__file__).resolve().parents[2]
 RECORD = Path("target/coverage-merge/record.json")
+
+
+def branching(name: str, complexity: int) -> str:
+    decisions = "".join(
+        f"    if value == {index} {{\n        return {index};\n    }}\n"
+        for index in range(complexity - 1)
+    )
+    return f"fn {name}(value: u32) -> u32 {{\n{decisions}    0\n}}\n"
 
 
 def git(root: Path, *arguments: str) -> str:
@@ -293,13 +300,13 @@ class VacuousAnalysisTests(unittest.TestCase):
         self.assertEqual(report["mismatch"], {"kind": "unreadable-files", "files": ["src/linked.rs"]})
 
     def test_a_measured_file_whose_record_the_analyzer_did_not_bind_is_vacuous(self) -> None:
-        unbound = cargo_crap.Function("src/lib.rs", "complex", 1, 31.0)
+        unbound = crap_report.Function("src/lib.rs", "complex", 1, 31.0)
         with TemporaryDirectory() as directory:
             root = Path(directory)
             write_repository(root, {"src/lib.rs": COMPLEX})
             write_report(root, {"src/lib.rs": covering(COMPLEX, 1)})
-            scores = cargo_crap.Scores(scored=(), unmeasured=(unbound,))
-            with mock.patch("scripts.crap_report.cargo_crap.score", return_value=scores):
+            scores = crap_report.Scores(scored=(), unmeasured=(unbound,))
+            with mock.patch("scripts.crap_report.score", return_value=scores):
                 report, error = self.vacuous(root)
 
         self.assertEqual(report["mismatch"], {"kind": "unbound-files", "files": ["src/lib.rs"]})
@@ -323,7 +330,7 @@ class FailedAnalysisTests(unittest.TestCase):
             root = Path(directory)
             write_repository(root, {"src/lib.rs": COMPLEX})
             write_report(root, {"src/lib.rs": covering(COMPLEX, 1)})
-            with mock.patch("scripts.cargo_crap.executable", return_value=root / "missing/cargo-crap"):
+            with mock.patch("scripts.crap_report.analyzer", side_effect=crap_report.AnalyzerError("cargo-crap 0.6.1 is not installed")):
                 status, _, error = check(root)
             report = written(root)
 

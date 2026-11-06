@@ -70,7 +70,7 @@ pub(super) fn queue_body<'src>()
     client_ref()
         .then_ignore(kw(Identifier::Queue))
         .then(external_name::<RabbitMqQueueName>())
-        .then(optional_instances())
+        .then(optional_instances::<RabbitMqQueueIngestor>())
         .then_ignore(kw(Identifier::Mode))
         .then(mode())
         .then(suspend_only_quiesce_clause())
@@ -247,7 +247,9 @@ mod tests {
         };
         assert_eq!(source.queue.as_str(), queue);
         assert_eq!(source.client.as_str(), "broker");
-        assert_eq!(source.instances.get(), expected_instances);
+        assert!(
+            matches!(source.instances, nervix_models::IngestorInstances::Count(count) if count.get() == expected_instances)
+        );
         assert_eq!(source.quiesce(), &IngestQuiesceMode::Suspend);
         let IngestAcknowledgement::Sequential { timeout, retry } = source.acknowledgement() else {
             panic!("the ingestor carries its sequential acknowledgement policy");

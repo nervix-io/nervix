@@ -19,14 +19,15 @@ use nervix_models::{
     IcebergStorageBackend, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
     IngestorReferenceKind, KafkaConsumerGroupName, KafkaEmitterEntity, KafkaIngestorEntity,
     KafkaTopicName, LocatorDeclaration, LocatorName, MongoDbEmitterEntity, MqttEmitterEntity,
-    MqttIngestorEntity, MqttTopicFilter, MySqlEmitterEntity, NatsEmitterEntity, NatsIngestorEntity,
-    NatsQueueGroupName, NatsSubjectName, OptionDeclaration, OptionForm, OptionPresence,
-    OtelEmitterEntity, PostgresEmitterEntity, PrometheusIngestorEntity, PropertyType,
-    PulsarEmitterEntity, PulsarIngestorEntity, PulsarSubscriptionName, PulsarTopicName,
-    RabbitMqEmitterEntity, RabbitMqExchangeName, RabbitMqIngestorEntity, RabbitMqQueueName,
-    RedisChannelName, RedisEmitterEntity, RedisIngestorEntity, RuntimeCapability,
-    SentryEmitterEntity, SqsEmitterEntity, SqsIngestorEntity, SqsQueueName, SyslogEmitterEntity,
-    SyslogIngestorEntity, WebsocketsIngestorEntity, ZeroMqEmitterEntity, ZeroMqIngestorEntity,
+    MqttIngestorEntity, MqttTopicFilter, MySqlEmitterEntity, NatsConsumerName, NatsEmitterEntity,
+    NatsIngestorEntity, NatsQueueGroupName, NatsStreamName, NatsSubjectName, OptionDeclaration,
+    OptionForm, OptionPresence, OtelEmitterEntity, PostgresEmitterEntity, PrometheusIngestorEntity,
+    PropertyType, PulsarEmitterEntity, PulsarIngestorEntity, PulsarSubscriptionName,
+    PulsarTopicName, RabbitMqEmitterEntity, RabbitMqExchangeName, RabbitMqIngestorEntity,
+    RabbitMqQueueName, RedisChannelName, RedisEmitterEntity, RedisIngestorEntity,
+    RuntimeCapability, SentryEmitterEntity, SqsEmitterEntity, SqsIngestorEntity, SqsQueueName,
+    SyslogEmitterEntity, SyslogIngestorEntity, WebsocketsIngestorEntity, ZeroMqEmitterEntity,
+    ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -132,6 +133,15 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
             quiesce: PUSH,
             locator: Some(("SUBJECT", "nats_subject")),
             options: &[("QUEUE GROUP", true), ("INSTANCES", true)],
+        },
+        IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => IngestorSurface {
+            delivery: &[
+                (IngestDeliveryKind::AckSequential, false),
+                (IngestDeliveryKind::AckParallel, false),
+            ],
+            quiesce: FLEXIBLE,
+            locator: Some(("STREAM", "nats_stream")),
+            options: &[("CONSUMER", true)],
         },
         IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => IngestorSurface {
             delivery: &[
@@ -244,6 +254,7 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         EnvelopeClauseKind::Mandatory,
         EnvelopeClauseKind::Timestamp,
     ];
+    let message_id = &[EnvelopeClauseKind::MessageId];
     match kind {
         EmitterEntityKind::Client(ClientEmitterEntity::Consumer) => EmitterSurface {
             reference: EmitterReferenceKind::Schema,
@@ -285,9 +296,19 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         EmitterEntityKind::Redis(RedisEmitterEntity::PubSub) => {
             located(ConnectorKind::Redis, "CHANNEL", "redis_channel", &[])
         }
-        EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => {
-            located(ConnectorKind::Nats, "SUBJECT", "nats_publish_subject", &[])
-        }
+        EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => EmitterSurface {
+            envelope: &[EnvelopeClauseKind::ReplyTo],
+            ..located(ConnectorKind::Nats, "SUBJECT", "nats_publish_subject", &[])
+        },
+        EmitterEntityKind::Nats(NatsEmitterEntity::Stream) => EmitterSurface {
+            envelope: message_id,
+            ..located(
+                ConnectorKind::Nats,
+                "STREAM",
+                "nats_stream",
+                &[("SUBJECT", true)],
+            )
+        },
         EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterSurface {
             envelope: &[
                 EnvelopeClauseKind::Delay,
@@ -457,6 +478,8 @@ fn every_external_name_declares_its_label_and_an_example_its_rule_admits() {
     );
     assert_declares_an_admitted_example::<NatsSubjectName>("nats_subject");
     assert_declares_an_admitted_example::<NatsQueueGroupName>("nats_queue_group");
+    assert_declares_an_admitted_example::<NatsStreamName>("nats_stream");
+    assert_declares_an_admitted_example::<NatsConsumerName>("nats_consumer");
     assert_declares_an_admitted_example::<MqttTopicFilter>("mqtt_topic_filter");
 }
 
@@ -485,7 +508,7 @@ fn every_option() -> Vec<(String, OptionDeclaration)> {
 }
 
 #[test]
-fn every_option_example_writes_its_keywords_and_every_default_is_a_declared_choice() {
+fn every_option_example_writes_its_keywords_and_defaults_are_declared_values_or_choices() {
     for (entity, option) in every_option() {
         let examples = option.examples();
         assert!(!examples.is_empty(), "{entity} {}", option.keywords);
@@ -503,8 +526,11 @@ fn every_option_example_writes_its_keywords_and_every_default_is_a_declared_choi
             continue;
         };
         match option.form {
-            OptionForm::Choice(_) => assert!(
-                option.choice(default).is_some(),
+            OptionForm::Choice(choices) => assert!(
+                option.choice(default).is_some()
+                    || choices.iter().any(|choice| choice.value
+                        == Some(nervix_models::OptionValue::Count)
+                        && default.parse::<std::num::NonZeroU64>().is_ok()),
                 "{entity}: {} defaults to {default}, which it does not offer",
                 option.keywords
             ),
@@ -687,7 +713,8 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
             "OFFSET BY DOMAIN",
             "OFFSET BY CONSUMER GROUP START AT EARLIEST",
             "OFFSET BY CONSUMER GROUP START AT LATEST",
-            "INSTANCES",
+            "INSTANCES <count>",
+            "INSTANCES PER PARTITION",
             "metadata.topic",
             "metadata.partition",
             "metadata.offset",
@@ -771,7 +798,10 @@ fn an_mqtt_source_answers_the_session_and_quality_of_service_it_subscribes_with(
             .assured("MQTT answers its quality of service");
         assert!(matches!(session, "CLEAN" | "PERSISTENT"), "{session}");
         assert!(matches!(qos, "0" | "1" | "2"), "{qos}");
-        assert_eq!(source.chosen("INSTANCES"), None);
+        assert_eq!(
+            source.chosen("INSTANCES"),
+            source.instances().map(|instances| instances.choice())
+        );
     }
     let kafka = IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic);
     let bytes = seeded_bytes(1);

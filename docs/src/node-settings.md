@@ -22,6 +22,10 @@ cadence owned by `RuntimeAdmission`. This remains an internal policy constant pe
 adoption; installation does not introduce another numeric policy or an operator option. Committed
 schedule and domain updates can wake an installation retry sooner, and success ends that cadence.
 
+Canonical Kafka start admission derives its deadline from the interconnect checkpoint-transfer
+contract. Selecting and durably adopting a start cut waits for that transfer, so it shares the
+existing transfer budget rather than defining another numeric policy or operator option.
+
 Changes to the server's command line, startup settings and initialization contract keep the shipped
 Kubernetes operator's generated startup command, chart and example current in the same delivery.
 The server-image [deployment checks](installation-kubernetes.md#deployment-qualification) qualify
@@ -76,6 +80,11 @@ slowest heartbeat a compatible leader sends stays within a third of the follower
 election timeout. Gossip derives its failure detector the same way: it assumes ten gossip
 intervals between a peer's heartbeats until it has observed some, and takes no gap longer than
 twenty gossip intervals as a sample, 5 and 10 seconds by default.
+
+The maximum Raft election timeout also bounds the leader lease and a heartbeat's response wait.
+The interval still schedules heartbeats; an answer later than one interval but inside the lease
+can renew it using that request's sending time. This adds no node setting or separate timing
+prerequisite.
 
 A proposed new prerequisite first has to establish why a committed cluster parameter applied by
 rebuilding its owner cannot express it.
@@ -366,6 +375,13 @@ Plexus, the Nervix graph definition language:
 ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
 ```
 
+Duration assignments accept [multi-span duration literals](domains-and-time.md#duration-literals),
+including the text canonical Plexus renders:
+
+```plexus
+ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s;
+```
+
 The statement runs outside domain transactions and needs no selected domain. Its assignments
 form one transition: either every assignment is committed or none is. A duplicate parameter,
 an invalid value, or a cap that an existing model exceeds refuses the transition with the
@@ -420,7 +436,7 @@ transition, even when a later command has changed another parameter.
 
 `DESCRIBE CLUSTER` reports committed values and each node's running revision and values. A node
 that has not applied the current record remains visibly behind. Sessions receive an informational
-notice after their node successfully installs a parameter revision. The installation supervisor
+`ClusterParameters` notice after their node successfully installs a parameter revision. The installation supervisor
 retries a failed graph installation; a retry of the same revision sends no additional parameter
 notice. A joining or returning node obtains the
 live cluster's published record before activating services that consume it and verifies that
@@ -458,6 +474,11 @@ The compiler accepts this contract on a constant, including an associated consta
 `fixed` kind and one nonempty reason. Duplicate, malformed and misplaced contracts fail. The
 source scanner validates the gate before excluding a constant, including inactive code. The
 reason remains reviewed evidence; neither parser nor compiler proves its prose true.
+
+The one-minute and fifteen-minute metric EMA windows, their decay conversion and the published
+connector-interaction duration buckets are fixed observation contracts. Their declarations carry
+the fixed reasons in the metric owners; they are not node settings. The current resolution is
+documented in [Metrics And Observability](metrics-and-observability.md#connector-interactions).
 
 `just ratchet --show hidden_tunables` lists the temporary count's sites. It counts numeric
 `const` items of types `Duration`, `usize`, `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`,

@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The core NATS connection and queue subscription each ingestor instance reads
 //!   through, the end of that subscription when the connection is lost, and
-//!   message headers as ingest headers.
+//!   each message's borrowed headers, subject and reply metadata.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   the node executor, the boundary's channels and `async-nats`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -26,9 +26,9 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use futures_util::StreamExt as _;
 use nervix_connector::{
-    BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
-    IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume,
+    BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
+    IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
+    IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
 };
 use nervix_execution::Executor;
 use nervix_models::{ClientConfigEntry, NatsQueueGroupName, NatsSubjectName};
@@ -38,6 +38,18 @@ use thiserror::Error;
 use crate::client::{NatsClientOptions, NatsClientOptionsError};
 
 const NATS: &str = "nats";
+
+/// The lost connections a client holds for its instance until the instance hears of them: one,
+/// because an instance ends its subscription or its pull on the first.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an instance ends its subscription or pull on the first lost-connection signal, \
+                  so a second pending signal would carry nothing"
+    )
+)]
+pub(crate) const PENDING_LOSS_SIGNALS: usize = 1;
 
 /// Why a NATS ingestor could not connect or subscribe.
 #[derive(Debug, Error)]
@@ -124,8 +136,7 @@ impl NatsSubjectIngestorPlan {
     }
 
     async fn subscribe(&self) -> NatsSubjectIngestorResult<NatsSubscription> {
-        // One pending signal is enough: the instance ends its subscription on the first.
-        let (lost, connection_lost) = mpsc::channel(1);
+        let (lost, connection_lost) = mpsc::channel(PENDING_LOSS_SIGNALS);
         let client = Self::client_from_config(&self.executor, &self.config, lost).await?;
         let subscriber = client
             .queue_subscribe(
@@ -153,8 +164,9 @@ impl NatsSubjectIngestorPlan {
     /// The host reopens a lost connection on its own reconnect cadence, so the client reports the
     /// loss instead of reconnecting in the background. The client cannot be told to make no
     /// attempt of its own, so it makes one before its connection task ends; the instance has
-    /// ended its subscription by then, and that attempt only lets the task end.
-    async fn client_from_config(
+    /// ended its subscription by then, and that attempt only lets the task end. Every NATS
+    /// ingestor entity connects through it.
+    pub(crate) async fn client_from_config(
         executor: &Executor,
         config: &[ClientConfigEntry],
         lost: mpsc::Sender<()>,
@@ -206,15 +218,35 @@ pub struct NatsMessageHeaders {
     message: NatsMessage,
 }
 
+impl NatsMessageHeaders {
+    /// The headers of `message`, which every NATS ingestor entity reads as its ingest headers.
+    pub(crate) fn new(message: NatsMessage) -> Self {
+        Self { message }
+    }
+
+    /// The payload of the message these headers belong to.
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.message.payload
+    }
+}
+
 impl IngestMessageHeaders for NatsMessageHeaders {
     fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
         let Some(headers) = self.message.headers.as_ref() else {
             return;
         };
-        for (name, values) in headers.iter() {
-            for value in values {
-                visit(name.as_ref(), value.as_str());
-            }
+        for (name, value) in headers.iter_ordered() {
+            visit(name, value);
+        }
+    }
+}
+
+impl IngestMessageMetadata for NatsMessageHeaders {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        values.string(self.message.subject.as_str());
+        match self.message.reply.as_ref() {
+            Some(reply) => values.string(reply.as_str()),
+            None => values.absent(),
         }
     }
 }
@@ -240,7 +272,11 @@ impl IngestorMessage for NatsSubjectIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(&self.headers)
+        IngestMetadataRow {
+            fields: &self.headers,
+            headers: IngestRowHeaders::Borrowed(&self.headers),
+            position: None,
+        }
     }
 }
 
@@ -359,6 +395,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_subject_message_projects_its_concrete_subject_and_reply() {
+        use nervix_connector::{RetainedIngestMetadata, RetainedIngestMetadataValue as Value};
+
+        for reply in [None, Some("response.inbox")] {
+            let reply_bytes = match reply {
+                Some(reply) => reply.len(),
+                None => 0,
+            };
+            let message = NatsSubjectIngestorMessage {
+                headers: NatsMessageHeaders::new(NatsMessage {
+                    subject: "orders.created".into(),
+                    reply: reply.map(|reply| reply.to_string().into()),
+                    payload: b"{}".as_slice().into(),
+                    headers: None,
+                    status: None,
+                    description: None,
+                    length: "orders.created".len() + 2 + reply_bytes,
+                }),
+                position: (),
+            };
+            let expected_reply = match reply {
+                Some(reply) => Value::String(reply.to_string()),
+                None => Value::Absent,
+            };
+            let retained = RetainedIngestMetadata::capture(message.metadata().fields);
+            assert_eq!(
+                retained.values(),
+                &[Value::String("orders.created".to_string()), expected_reply]
+            );
+        }
+    }
+
     #[nervix_primitives::test]
     async fn a_cancelled_read_takes_nothing_and_leaves_the_next_message_to_the_next_read() {
         let server = ScriptedServer::start().await;
@@ -387,20 +456,23 @@ mod tests {
             max_messages: NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let mut source = NatsSubjectIngestor::open(&plan, 0)
+        let mut ingestor = NatsSubjectIngestor::open(&plan, 0)
             .await
             .expect("opening a NATS ingestor does not connect");
-        source
+        ingestor
             .resume()
             .await
             .expect("the ingestor subscribes through the stand-in server");
 
         let cancellation = IngestorReadCancellation::new();
         cancellation.cancel();
-        let interrupted = timeout(OBSERVATION_BOUND, source.next_batch(request, &cancellation))
-            .await
-            .expect("a cancelled read ends at once")
-            .expect("a cancelled read is not a failure");
+        let interrupted = timeout(
+            OBSERVATION_BOUND,
+            ingestor.next_batch(request, &cancellation),
+        )
+        .await
+        .expect("a cancelled read ends at once")
+        .expect("a cancelled read is not a failure");
         let IngestorBatch::Interrupted { gathered } = interrupted else {
             panic!("a read the host cancelled ends as interrupted");
         };
@@ -411,7 +483,7 @@ mod tests {
             .expect("the scripted server waits for the delivery to be allowed");
         let batch = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the delivered message reaches the ingestor")
@@ -457,14 +529,14 @@ mod tests {
             max_messages: NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let mut source = NatsSubjectIngestor::open(&plan, 0)
+        let mut ingestor = NatsSubjectIngestor::open(&plan, 0)
             .await
             .expect("opening a NATS ingestor does not connect");
         assert!(
-            source.needs_resume(),
+            ingestor.needs_resume(),
             "an opened ingestor has not subscribed yet"
         );
-        let resumed = source
+        let resumed = ingestor
             .resume()
             .await
             .expect("the ingestor subscribes through the stand-in server");
@@ -472,7 +544,7 @@ mod tests {
 
         let batch = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the delivered message reaches the ingestor")
@@ -489,7 +561,7 @@ mod tests {
 
         let ended = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the lost connection ends the wait for the next message");
@@ -505,11 +577,11 @@ mod tests {
             Some(NatsSubjectIngestorError::ConnectionLost)
         ));
         assert!(
-            source.needs_resume(),
+            ingestor.needs_resume(),
             "the host reconnects an ingestor whose subscription ended through its resume"
         );
 
-        let error = source
+        let error = ingestor
             .resume()
             .await
             .expect_err("the server is down, so the next resume cannot connect");
@@ -524,7 +596,7 @@ mod tests {
     /// pending, or after the instance stopped listening, is dropped.
     #[test]
     fn a_lost_connection_is_signalled_once_and_not_after_the_instance_stopped_listening() {
-        let (lost, mut connection_lost) = mpsc::channel(1);
+        let (lost, mut connection_lost) = mpsc::channel(PENDING_LOSS_SIGNALS);
         NatsSubjectIngestorPlan::signal_connection_lost(&lost);
         NatsSubjectIngestorPlan::signal_connection_lost(&lost);
         assert!(
@@ -588,7 +660,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn client_configuration_failures_keep_typed_context() {
-        let (lost, _connection_lost) = mpsc::channel(1);
+        let (lost, _connection_lost) = mpsc::channel(PENDING_LOSS_SIGNALS);
         let error = NatsSubjectIngestorPlan::client_from_config(
             &nervix_execution::Executor::default(),
             &[],
@@ -624,6 +696,156 @@ mod tests {
         ));
     }
 
+    /// The production SDK encoder and ordered receive parser preserve every generated pair and
+    /// payload through a loopback server, including Unicode, wire folding and retained headers.
+    #[test]
+    fn bolero_ordered_headers_survive_the_transport_and_retention() {
+        use nervix_arbitrary::Entropy;
+        use nervix_connector::RetainedIngestHeaders;
+        use nervix_primitives::runtime::Builder;
+
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the property owns a current-thread runtime");
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(64)
+            .for_each(|bytes: &[u8]| {
+                let mut entropy = Entropy::new(bytes);
+                let folded = entropy.flag();
+                let count = entropy.byte() % 9;
+                let mut written = Vec::new();
+                for _ in 0..count {
+                    let name =
+                        ["first", "second", "First", "third"][usize::from(entropy.byte() % 4)];
+                    let name = if entropy.flag() {
+                        format!("{name}-{}", "n".repeat(64))
+                    } else {
+                        name.to_string()
+                    };
+                    let base = ["alpha", "βeta", "雪", ""][usize::from(entropy.byte() % 4)];
+                    let value = if entropy.flag() {
+                        format!("\u{2003}{base} ")
+                    } else {
+                        base.to_string()
+                    };
+                    written.push((name, value));
+                }
+                let payload = vec![entropy.byte(), entropy.byte(), entropy.byte()];
+                let expected = written
+                    .iter()
+                    .map(|(name, value)| {
+                        let value = if folded {
+                            format!("{}  tail-λ", value.trim_start())
+                        } else {
+                            value.trim().to_string()
+                        };
+                        (name.clone(), value)
+                    })
+                    .collect::<Vec<_>>();
+                runtime.block_on(async move {
+                    timeout(Duration::from_secs(5), async move {
+                        let server = ScriptedServer::start().await;
+                        let addr = server.addr();
+                        let expected_payload = payload.clone();
+                        let input = written.clone();
+                        let (finish, finished) = oneshot::channel();
+                        let script = nervix_primitives::task::spawn(async move {
+                            let mut connection = server.accept(1024 * 1024).await;
+                            let subscription = connection.expect_subscription().await;
+                            let publish = connection.expect_publish().await;
+                            let mut encoded = Vec::new();
+                            let mut returned = String::new();
+                            if !input.is_empty() {
+                                encoded.extend_from_slice(b"NATS/1.0\r\n");
+                                returned.push_str("NATS/1.0\r\n");
+                                for (name, value) in &input {
+                                    encoded.extend_from_slice(
+                                        format!("{name}: {value}\r\n").as_bytes(),
+                                    );
+                                    returned.push_str(&format!("{name}: {value}\r\n"));
+                                    if folded {
+                                        returned.push_str("  tail-λ\r\n");
+                                    }
+                                }
+                                encoded.extend_from_slice(b"\r\n");
+                                returned.push_str("\r\n");
+                            }
+                            encoded.extend_from_slice(&expected_payload);
+                            assert_eq!(publish.message, encoded);
+                            if input.is_empty() {
+                                connection.deliver(&subscription, &expected_payload).await;
+                            } else {
+                                connection
+                                    .deliver_headers(
+                                        &subscription,
+                                        returned.as_bytes(),
+                                        &expected_payload,
+                                    )
+                                    .await;
+                            }
+                            finished
+                                .await
+                                .expect("the property consumed the echoed frame");
+                            connection
+                        });
+                        let (lost, _losses) = mpsc::channel(PENDING_LOSS_SIGNALS);
+                        let client = NatsSubjectIngestorPlan::client_from_config(
+                            &nervix_execution::Executor::default(),
+                            &[entry("addr", &addr)],
+                            lost,
+                        )
+                        .await
+                        .expect("the ingestor selects ordered transport headers");
+                        let mut subscription = client
+                            .subscribe("events")
+                            .await
+                            .expect("the property subscribes");
+                        client.flush().await.expect("the subscription is written");
+                        client
+                            .publish_with_headers(
+                                "events",
+                                crate::subject::NatsSubjectEmitter::header_map(written),
+                                payload.clone().into(),
+                            )
+                            .await
+                            .expect("the bounded publication fits the server");
+                        let message = match subscription.next().await {
+                            Some(message) => message,
+                            None => {
+                                let _ = finish.send(());
+                                script
+                                    .await
+                                    .expect("the server's original failure is reported");
+                                panic!("the echoed message arrives");
+                            }
+                        };
+                        assert_eq!(message.payload.as_ref(), payload);
+                        let headers = NatsMessageHeaders::new(message);
+                        let retained = RetainedIngestHeaders::capture(&headers);
+                        drop(headers);
+                        let mut actual = Vec::new();
+                        retained.visit(&mut |name, value| {
+                            actual.push((name.to_string(), value.to_string()))
+                        });
+                        assert_eq!(actual, expected);
+                        subscription
+                            .unsubscribe()
+                            .await
+                            .expect("the property ends its subscription");
+                        client.flush().await.expect("the unsubscription is written");
+                        finish
+                            .send(())
+                            .expect("the server waits for the property to finish");
+                        let _connection = script.await.expect("the server completes its script");
+                    })
+                    .await
+                    .expect("one bounded transport case completes");
+                });
+            });
+    }
+
     #[test]
     fn every_header_value_is_visited_under_its_name() {
         let mut header_map = async_nats::HeaderMap::new();
@@ -645,12 +867,9 @@ mod tests {
         assert_eq!(visited, vec!["trace=a", "trace=b"]);
     }
 
-    /// Both NATS entities declare repeats by name with exact names: the header map an emitter writes
-    /// keeps every value of a name together under it in write order, so a reader of the published
-    /// message finds each name's values together and in that order, while names that differ in
-    /// letter case stay two names.
+    /// Both NATS entities retain every pair in its written position and match names exactly.
     #[test]
-    fn written_headers_read_back_with_every_value_of_a_name_together_in_write_order() {
+    fn written_headers_read_back_in_their_complete_order() {
         let mut written = Vec::new();
         for (name, value) in [
             ("trace", "a"),
@@ -666,7 +885,9 @@ mod tests {
                 subject: "events".into(),
                 reply: None,
                 payload: bytes::Bytes::new(),
-                headers: Some(crate::subject::NatsSubjectEmitter::header_map(&written)),
+                headers: Some(crate::subject::NatsSubjectEmitter::header_map(
+                    written.clone(),
+                )),
                 status: None,
                 description: None,
                 length: 0,
@@ -675,31 +896,6 @@ mod tests {
         let mut visited: Vec<(String, String)> = Vec::new();
         headers.visit(&mut |name, value| visited.push((name.to_string(), value.to_string())));
 
-        let mut finished = std::collections::BTreeSet::new();
-        let mut current: Option<&str> = None;
-        let mut values: std::collections::BTreeMap<&str, Vec<&str>> =
-            std::collections::BTreeMap::new();
-        for (name, value) in &visited {
-            if current != Some(name.as_str()) {
-                if let Some(previous) = current {
-                    finished.insert(previous);
-                }
-                assert!(
-                    !finished.contains(name.as_str()),
-                    "every value of {name} is visited together: {visited:?}"
-                );
-                current = Some(name);
-            }
-            values
-                .entry(name.as_str())
-                .or_default()
-                .push(value.as_str());
-        }
-        let expected = std::collections::BTreeMap::from([
-            ("Tenant", vec!["x"]),
-            ("tenant", vec!["y"]),
-            ("trace", vec!["a", "b", "c"]),
-        ]);
-        assert_eq!(values, expected);
+        assert_eq!(visited, written);
     }
 }

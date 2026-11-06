@@ -53,7 +53,7 @@ use super::redis_client;
 
 const REDIS: &str = "redis";
 
-/// Why a Redis Pub/Sub source could not open its subscription.
+/// Why a Redis Pub/Sub ingestor could not open its subscription.
 #[derive(Debug, Error)]
 pub enum RedisPubSubIngestorError {
     #[error("invalid Redis client configuration")]
@@ -102,7 +102,7 @@ pub enum RedisPubSubIngestorError {
 
 type RedisPubSubIngestorResult<T> = Result<T, Report<RedisPubSubIngestorError>>;
 
-/// What one Redis Pub/Sub source subscribes to: its configured client, node resolver, channel or
+/// What one Redis Pub/Sub ingestor subscribes to: its configured client, node resolver, channel or
 /// pattern, and the deadline its subscription is established within.
 #[derive(Debug, Clone)]
 pub struct RedisPubSubIngestorPlan {
@@ -374,7 +374,7 @@ impl IngestMessageMetadata for RedisPubSubIngestorMessage {
     }
 }
 
-/// One Redis Pub/Sub source instance: its subscription stream, absent while reconnecting.
+/// One Redis Pub/Sub ingestor instance: its subscription stream, absent while reconnecting.
 pub struct RedisPubSubIngestor {
     plan: RedisPubSubIngestorPlan,
     stream: Option<RedisSubscription>,
@@ -620,7 +620,7 @@ mod tests {
             }
         }
 
-        /// The source hands over exactly the delivered bytes, and the channel and pattern as the
+        /// The ingestor hands over exactly the delivered bytes, and the channel and pattern as the
         /// declaration orders them.
         fn check(&self) {
             let message = RedisPubSubIngestorMessage {
@@ -819,20 +819,20 @@ mod tests {
             let (mut stream, _) = listener
                 .accept()
                 .await
-                .assured("the source connects to its Redis server");
+                .assured("the ingestor connects to its Redis server");
             let command = b"*2\r\n$10\r\nPSUBSCRIBE\r\n$8\r\norders.*\r\n";
             let mut received = vec![0; command.len()];
             stream
                 .read_exact(&mut received)
                 .await
-                .assured("the source asks for its pattern subscription");
+                .assured("the ingestor asks for its pattern subscription");
             assert_eq!(received, command);
             stream
                 .write_all(
                     b"-NOPERM this user has no permissions to access one of the channels\r\n",
                 )
                 .await
-                .assured("the refusal reaches the source");
+                .assured("the refusal reaches the ingestor");
         });
         let subscription = RedisSubscriptionTarget::Pattern(
             nervix_models::RedisChannelPattern::parse("orders.*")
@@ -931,7 +931,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn cancelling_a_lookup_leaves_the_source_ready_for_a_new_answer() {
+    async fn cancelling_a_lookup_leaves_the_ingestor_ready_for_a_new_answer() {
         let fixture = Fixture::start().await;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await

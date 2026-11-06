@@ -83,15 +83,52 @@ Feature: Web console visual schema and branch creation
       | wire-json-schema | JSON   | integer | INTEGER        | 5          |
       | wire-json-schema | JSON   | boolean | BOOLEAN        | 5          |
       | wire-json-schema | JSON   | array   | ARRAY          | 5          |
-      | wire-cbor-schema | CBOR   | string  | STRING         | 19         |
-      | wire-avro-schema | AVRO   | boolean | BOOLEAN        | 8          |
-      | wire-avro-schema | AVRO   | int     | INT            | 8          |
-      | wire-avro-schema | AVRO   | long    | LONG           | 8          |
-      | wire-avro-schema | AVRO   | float   | FLOAT          | 8          |
-      | wire-avro-schema | AVRO   | double  | DOUBLE         | 8          |
-      | wire-avro-schema | AVRO   | string  | STRING         | 8          |
-      | wire-avro-schema | AVRO   | bytes   | BYTES          | 8          |
-      | wire-avro-schema | AVRO   | array   | ARRAY          | 8          |
+      | wire-cbor-schema | CBOR   | integer | INTEGER        | 6          |
+      | wire-cbor-schema | CBOR   | float   | FLOAT          | 6          |
+      | wire-cbor-schema | CBOR   | boolean | BOOLEAN        | 6          |
+      | wire-cbor-schema | CBOR   | text    | TEXT           | 6          |
+      | wire-cbor-schema | CBOR   | bytes   | BYTES          | 6          |
+      | wire-cbor-schema | CBOR   | array   | ARRAY          | 6          |
+      | wire-avro-schema | AVRO   | boolean | BOOLEAN        | 7          |
+      | wire-avro-schema | AVRO   | int     | INT            | 7          |
+      | wire-avro-schema | AVRO   | long    | LONG           | 7          |
+      | wire-avro-schema | AVRO   | float   | FLOAT          | 7          |
+      | wire-avro-schema | AVRO   | double  | DOUBLE         | 7          |
+      | wire-avro-schema | AVRO   | string  | STRING         | 7          |
+      | wire-avro-schema | AVRO   | bytes   | BYTES          | 7          |
+
+  @visual_wire_schema_create
+  Scenario: The AVRO form builds an array from the item type it wraps
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='wire-avro-schema']" is clicked
+    And selector ".create-name" is filled with "visual_avro_arrays"
+    And selector ".create-mode-options [data-value='STRICT']" is clicked
+    And selector ".create-add-field" is clicked
+    And selector ".create-field-name" is filled with "matrix"
+    Then selector ".create-field-type [data-type='array']" does not exist
+    When selector ".create-field-type [data-type='double']" is clicked
+    And selector ".create-add-wire-array" is clicked
+    Then selector ".create-preview" contains "matrix ARRAY<DOUBLE>"
+    When selector ".create-add-wire-array" is clicked
+    Then selector ".create-preview" contains "matrix ARRAY<ARRAY<DOUBLE>>"
+    When selector ".create-wire-array-layers [aria-label='Remove array layer 2']" is clicked
+    Then selector ".create-preview" contains "matrix ARRAY<DOUBLE>"
+    And selector ".create-preview" does not contain "ARRAY<ARRAY<DOUBLE>>"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
+    And selector ".prompt-row input" is filled with "SHOW CREATE WIRE AVRO SCHEMA visual_avro_arrays;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "matrix ARRAY<DOUBLE>" exactly 2 times
 
   Scenario: Wire formats retain separate identities when their names coincide
     Given a 1 node nervix cluster is started
@@ -100,7 +137,7 @@ Feature: Web console visual schema and branch creation
       """
       CREATE DOMAIN {{domain}};
       CREATE WIRE JSON SCHEMA same_name MODE STRICT (payload string);
-      CREATE WIRE CBOR SCHEMA same_name MODE LOOSE (payload string);
+      CREATE WIRE CBOR SCHEMA same_name MODE LOOSE (payload text);
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -241,15 +278,18 @@ Feature: Web console visual schema and branch creation
     Then selector ".create-schema-ref [data-value='tenant_key']" exists
     When selector ".create-schema-ref [data-value='tenant_key']" is clicked
     And selector ".create-ttl" is filled with "5m"
+    Then selector ".create-partitions" has value "1"
+    And selector ".create-preview" contains "CREATE BRANCH bounded_tenants SCHEMA tenant_key TTL 5m;"
+    When selector ".create-partitions" is filled with "4"
     And selector ".create-limit-instances" is clicked
     And selector ".create-max-instances" is filled with "3"
-    Then selector ".create-preview" contains "MAX INSTANCES 3 EVICT LRU"
+    Then selector ".create-preview" contains "TTL 5m PARTITIONS 4 MAX INSTANCES 3 EVICT LRU"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE BRANCH bounded_tenants;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE BRANCH bounded_tenants SCHEMA tenant_key TTL 5m MAX INSTANCES 3 EVICT LRU;" exactly 2 times
+    Then selector ".terminal" contains "CREATE BRANCH bounded_tenants SCHEMA tenant_key TTL 5m PARTITIONS 4 MAX INSTANCES 3 EVICT LRU;" exactly 2 times
 
   Scenario: Changing a branch draft's domain retains and invalidates its selected schema
     Given a 1 node nervix cluster is started

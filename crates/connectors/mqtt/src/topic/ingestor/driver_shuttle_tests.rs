@@ -248,7 +248,7 @@ fn an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_it_reque
         assert_eq!(
             ids,
             [1, 2, 3, 4, 5],
-            "every publish the broker delivered reaches the source exactly once, in order"
+            "every publish the broker delivered reaches the ingestor exactly once, in order"
         );
         drop(broker.await.assured(CHECK_TASK_JOINS));
     });
@@ -377,7 +377,7 @@ fn admitted_publishes_keep_order_while_the_first_acknowledgement_is_written() {
         }
 
         connection.acknowledge(&read).await.assured(
-            "a driver whose held publish the source made room for polls again and writes the \
+            "a driver whose held publish the ingestor made room for polls again and writes the \
              acknowledgement",
         );
 
@@ -403,7 +403,7 @@ fn admitted_publishes_keep_order_while_the_first_acknowledgement_is_written() {
         assert_eq!(
             ids,
             [1, 2, 3],
-            "every publish the broker delivered reaches the source exactly once, in order"
+            "every publish the broker delivered reaches the ingestor exactly once, in order"
         );
         drop(broker.await.assured(CHECK_TASK_JOINS));
     });

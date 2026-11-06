@@ -45,7 +45,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use super::{
-    command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
+    command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::{current_timestamp, subtract_timestamp_duration},
     domain_lifecycle::DomainAlterError,
     model_mutation::{
@@ -842,13 +842,26 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.detach_transaction() else {
             return;
         };
-        if self
-            .inner
+        self.inner
             .transaction_bindings
-            .get(&id)
-            .is_some_and(|binding| binding.value() == &subscriptions.session_id)
+            .remove_if(&id, |_, binding| binding == &subscriptions.session_id);
+    }
+
+    /// A definitive failure without a transaction status may mean its finished record has already
+    /// been reclaimed. A session that still names that transaction can then release its binding;
+    /// uncertain outcomes and failures of transactions that still exist keep their binding.
+    pub(in crate::application) async fn release_missing_transaction_binding_on_failure(
+        &self,
+        id: &str,
+        result: &CommandResult,
+        subscriptions: &mut SessionSubscriptions,
+    ) {
+        if subscriptions.transaction_id() == Some(id)
+            && matches!(&result.disposition, CommandDisposition::Failed)
+            && result.transaction.is_none()
+            && self.inner.consensus.current_transaction(id).await.is_none()
         {
-            self.inner.transaction_bindings.remove(&id);
+            self.release_session_transaction_binding(subscriptions);
         }
     }
 
@@ -906,6 +919,9 @@ impl SessionServiceImpl {
             .current_transaction(&transaction_id)
             .await
         else {
+            if subscriptions.transaction_id() == Some(transaction_id.as_str()) {
+                self.release_session_transaction_binding(subscriptions);
+            }
             return TransactionAttachment::Refused(Box::new(command_error(format!(
                 "transaction '{transaction_id}' is unknown"
             ))));
@@ -1130,6 +1146,7 @@ impl SessionServiceImpl {
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {
                         node: ImpactNodeCoverage::all_executions(moved.entity),
+                        unit: moved.unit,
                         source: moved.former_owner,
                         destination: moved.destination,
                         attribution: attribution.clone(),
@@ -1537,7 +1554,7 @@ impl SessionServiceImpl {
         };
         let result = self
             .revert_identified_transaction(
-                id,
+                id.clone(),
                 subscriptions.user.clone(),
                 self.transaction_activity(),
             )
@@ -1549,6 +1566,8 @@ impl SessionServiceImpl {
         {
             self.release_session_transaction_binding(subscriptions);
         }
+        self.release_missing_transaction_binding_on_failure(&id, &result, subscriptions)
+            .await;
         result
     }
 
@@ -1572,7 +1591,7 @@ impl SessionServiceImpl {
         };
         let result = self
             .commit_identified_transaction(
-                id,
+                id.clone(),
                 subscriptions.user.clone(),
                 self.transaction_activity(),
                 expected_preview,
@@ -1585,6 +1604,8 @@ impl SessionServiceImpl {
         {
             self.release_session_transaction_binding(subscriptions);
         }
+        self.release_missing_transaction_binding_on_failure(&id, &result, subscriptions)
+            .await;
         result
     }
 
@@ -1677,6 +1698,13 @@ impl SessionServiceImpl {
                 }
             }
         };
+        #[cfg(feature = "testing")]
+        if finished.is_err() {
+            self.inner
+                .runtime
+                .pause_explicit_commit_failure_if_armed(self.inner.consensus.local_node_id(), &id)
+                .await;
+        }
         match finished {
             Ok(transaction) => transaction_commit_result(&transaction),
             Err(error) => {
@@ -1692,6 +1720,18 @@ impl SessionServiceImpl {
                         ))
                     };
                 if let Some(transaction) = self.inner.consensus.current_transaction(&id).await {
+                    if matches!(transaction.state, TransactionState::Finished(_)) {
+                        // Another coordinator's recorded outcome owns the reply after this
+                        // attempt has released its execution lock, including a recorded failure.
+                        drop(result);
+                        return transaction_commit_result(&transaction);
+                    }
+                    if matches!(transaction.state, TransactionState::Committing(_))
+                        && !matches!(proposal_error, Some(ConsensusError::LeadershipLost { .. }))
+                    {
+                        result.disposition =
+                            CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying);
+                    }
                     result.transaction = Some(transaction_status(&transaction));
                 }
                 result

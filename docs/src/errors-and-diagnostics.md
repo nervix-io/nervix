@@ -2,6 +2,14 @@
 
 *Plexus, the Nervix graph definition language.*
 
+The allowance engine returns `Admission` decisions separately from input and conversion errors.
+`WaitUntil`, `NeverAdmissible` and `KeyBudgetExhausted` are ordinary outcomes, not decode failures
+or dropped payloads. `QuotaError` identifies invalid rates, bursts, costs, TTLs and horizon ranges;
+`AdmissionError` identifies charge shape, monotonic regression, clock range, exhausted visit
+sequences and malformed generations. Both retain typed `error_stack::Report` contexts. Key
+fingerprints have a value-free `Debug` implementation, and the engine never receives original
+key values. Host policy and public message-error mapping belong to the caller.
+
 Native session TLS provisioning fails before a node opens its stores or listeners. Missing
 certificate/key paths and TLS files supplied in HTTP mode are distinct application errors. File
 reads retain their `io::Error` beneath `TlsMaterialError::ReadFile`, including the certificate or
@@ -32,6 +40,17 @@ RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The 
 `ClientConfigSchemaError::RequiresScheme` refuses TLS files with `amqp` before file inspection
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
 certificate/key pairing refusal remains independent of the scheme check.
+
+NATS stream metadata is decoded where a program requests it. A malformed acknowledgement
+subject retains the driver's parsing cause; a nonpositive sequence or delivery count and an
+out-of-range publication timestamp have distinct typed field causes. `IngestMetadataFailure`
+shares the immutable typed cause through capture and replay. The host projects it into a validation
+row outcome only for a read field, after `FILTER WHERE` and before event-time selection. A delivery
+retains its opaque transport acknowledgement independently; a missing acknowledgement remains a
+source-attempt failure. A computed Core reply subject
+that violates the publication-subject rule instead becomes a per-record rejection before hand-over.
+An invalid literal reply subject is refused by registry preflight with `NatsReplySubject` and the
+external-name validation cause, before the emitter starts.
 
 An OTEL literal outside its declared field domain is a typed registry mapping issue that names
 the signal, key and required constraint. It carries no literal value. A TLS file key with a
@@ -107,6 +126,15 @@ failure signatures, discarded outcomes, canonical panic operations and Option/Re
 flow. Expanding an error projection into an explicit Result branch preserves its complete report,
 context and recovery disposition. The source parser reports malformed authored Rust through a
 typed path/location context over the original parse cause; rendering includes that cause once.
+
+Emitter branch TTL/LRU retirement is a normal lifetime outcome. It NoACKs only unresolved
+host-owned rows, releases their prepared content and parked materialized-state wait, and
+preserves acknowledgements transferred to a connector. `EmitterBranchRetentionError` retains
+typed domain-clock and physical-deadline causes; a branched input without its concrete key has
+a distinct failure. An unavailable clock postpones a maintenance scan and records a transient
+failure; it never turns held rows into decode rejections or blocks a physical retry or stop
+deadline. New input whose retention activity cannot be established follows the emitter's
+general error policy.
 
 Nervix gives a failure its meaning at the boundary that can decide what went wrong. That meaning
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
@@ -292,6 +320,12 @@ the existing management response. A conflict, higher vote or incomplete acceptan
 before data-stream admission. A management request failure uses the same unreachable-peer error
 as a heartbeat; subsequent data-stream setup failures remain transport failures. Neither path
 retries inside the adapter or changes the caller's retry gate.
+
+A heartbeat worker accepts a follower answer arriving inside the leader lease, even after one
+heartbeat interval, and credits its original sending time. Its management request and worker share
+that lease deadline. A timeout or transport failure still becomes an unreachable-peer outcome;
+the lease check uses the acknowledged request's sending time. Empty replication
+probes retain their shorter soft deadline and existing failure projection.
 
 An ended consensus append input completes normally without a peer operation or a peer error. With
 a first request available, stream setup may return the existing typed admission, membership or
@@ -586,12 +620,24 @@ revision restores the save under the active clock at `START`.
 
 ### Codecs And Ingress
 
+Before a schemaful codec is accepted, the registry refuses a wire field that cannot carry its
+internal field with `RegistryError::IncompatibleSchema`, naming the codec and the field: a type
+mismatch, an AVRO array nested to another depth than the internal `ARRAY` and `VEC` levels, a
+`DATETIME` or `BYTES` value or list element that travels as text without its `ENCODE` rule, or a
+`BASE64` rule on bytes the format carries natively. A rule whose field's innermost elements are not
+of the rule's type is the registry's `InvalidModel` refusal of the codec.
+
 Codec compilation, decoding and encoding return `CodecError` reports. The codec context names the
 codec, and the field when one is at fault, and the typed reason stays beneath it: a
 `CodecContractError` for a declaration or use the wire format does not support, such as a missing
 wire field or `ON INGESTION` program; a `FieldDecodeError` or `FieldEncodeError` for a value that
 does not fit its field; a `SyslogDecodeError` or `SyslogEncodeError` for a syslog frame; the Arrow
 builder's `RuntimeSchemaError`; or the CBOR, Avro, simd-json, protobuf or UTF-8 error that failed.
+Schemaful CBOR rejects a tagged item, a non-text map key, and a duplicate map key with a typed
+`FieldDecodeError` beneath the codec and field context. A CBOR value that cannot fit an internal
+Arrow field carries `RuntimeSchemaError::CborValueTypeMismatch` with its CBOR kind and expected
+internal type. CBOR header inspection retains a typed read, syntax or depth cause if it cannot
+finish on a payload the value decoder otherwise accepts.
 An unfolding payload keeps the report of the message that failed and names its zero-based input and
 output position after it. The ingest group returns that report unchanged. A source host and an HTTP
 or WebSocket endpoint render the whole chain once as the message of the decode rejection that
@@ -653,6 +699,28 @@ or the optional applied-start generation. A mismatched signature retains the typ
 `KafkaOffsetCheckpointError::FormatSignature` cause beneath `RuntimePersistenceError::DecodeState`.
 Loading, replica conversion and backup capture all use that owning decoder; no missing marker is
 filled from domain metadata.
+
+Kafka's canonical-start coordination retains its typed offer, encoding, allocation and transfer
+causes beneath `StateReplicationError::KafkaStart`. A capture freeze reports `KafkaStartFrozen`;
+the shared checkpoint-transfer deadline reports `KafkaStartDeadline`. Changed lifecycle or
+assignment authority reports `Superseded`. The interconnect handler rejects a source node that
+does not match its authenticated peer before reading or changing state. Runtime admission also
+checks the current membership incarnation. These failures end that initialization attempt; the
+host retries through its existing source lifecycle without polling from substitute positions.
+
+An ingestor layout preparation retains invalid selections, source or checkpoint inventories,
+component kinds and allocation bounds beneath `OwnershipHandoffError::IngestorUnitLayout`.
+Offset and metric decoding keep their owning typed causes. Preparation fails before publishing
+the replacement layout; it never installs only the source cuts that happened to succeed.
+Membership-incarnation refusals name the affected node and its source or destination role.
+Replicas receiving prepared state are destinations of that transfer, so a layout's additional
+participants retain the same diagnostic precision as a single-unit handoff.
+
+Fixed ingestor counts are checked for native conversion and execution-unit layout before
+placement allocates their units. A conversion or layout failure remains beneath
+`IngestorInstancingError::UnaddressableCount` and `RegistryError::IngestorInstancing`; the report
+names the complete declared count, ingestor and domain. It is refused at model admission rather
+than ending the session's ordered task while materializing an impossible unit map.
 
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
@@ -1160,10 +1228,10 @@ starts where the group's committed offset or the ingestor's `START AT` places it
 
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It
-fails the source's open or the partition inspector's start, as transiently as a refused control
+fails the ingestor's open or the partition inspector's start, as transiently as a refused control
 call. A Kafka producer takes the same charge, and a refused one keeps `AdmissionError` beneath
-`KafkaProducerStartError::RetirementAdmission` beneath `SinkStartError::Initialize`, whose
-description names the refused charge; the emitter starts its sink again after its retry delay. See
+`KafkaProducerStartError::RetirementAdmission` beneath `EmitterOpenError::Initialize`, whose
+description names the refused charge; the emitter starts again after its retry delay. See
 [Kafka client retirement](./connector-contract.md#kafka-client-retirement). A retirement has no
 caller to fail, so its supervisor reports a destruction job that panicked at `debug`.
 
@@ -1285,8 +1353,24 @@ A NATS source whose client loses its connection to the server reports
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
 `IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error.
 The driver's `ConnectError` remains beneath `Connect`, so a peer that closes before its initial
-INFO message is reported as `expected INFO, got nothing`. A
-NATS JetStream publish keeps the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
+INFO message is reported as `expected INFO, got nothing`. The driver's ordered header decoder
+keeps invalid UTF-8, header-name, header-value and checked-offset conversion failures as typed
+causes under `io::Error`; these remain transport failures, separate from projected delivery-field
+failures. A NATS STREAM source reports the
+server's answer that its stream or consumer does not exist as
+`NatsStreamIngestorError::MissingStream` or `MissingConsumer` beneath `IngestorError::Resume`,
+naming the stream and the consumer, and a consumer it cannot read as declared as `PushConsumer` or
+`AcknowledgementPolicy`; a lookup that learned nothing keeps the driver's `ConsumerInfoError`
+beneath `VerifyConsumer`. A pull request the server refuses is `PullRefused` with a `NatsPullRefusal`
+holding the server's status and the description it gave, if any, beneath `IngestorError::Read`, and a lost connection is `ConnectionLost`.
+An acknowledgement or a negative acknowledgement the server does not answer keeps the client's
+`RequestError` beneath `Acknowledge` or `NegativelyAcknowledge`, and one without a connection to
+send it on is `Disconnected`. A
+NATS STREAM opening reports `EmitterOpenError::MissingExternalEntity` with the stream name if its
+lookup finds no stream; its public emitter status uses that typed error's value-free display text
+to name the missing stream. Other lookup failures keep the driver's typed cause beneath `Initialize`.
+A stream publish whose subject the named stream does not capture is a per-record external rejection.
+Other NATS JetStream publish failures keep the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
 client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
 connector's description of the failure for the emitter's transient error. A message above the
 server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
@@ -1419,7 +1503,7 @@ key and the expected type with the VM's compile failure beneath it. An `SQS QUEU
 writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, or a
 `DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
 `SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command
-refusals before publication, including during `ALTER`, rather than retried source or sink
+refusals before publication, including during `ALTER`, rather than retried ingestor or emitter
 initialization failures. They never include a record's values. An ingestor whose delivery mode lacks
 the option choices its entity declares for it, such as an MQTT `ACK` mode outside a persistent
 session at QoS 1 or 2, is `ConnectorDeclarationIssue::Delivery`, carrying the vocabulary's typed
@@ -1533,8 +1617,17 @@ a member that does not exist names the domain and the member, a server-listener 
 ingestor, a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides
 request different strategies lists every member of that group, and an override outside the unit
 names its member. The failed command renders the chain, such as `relocation plan failed: junction
-'chain_distant' is not part of the relocation`. See [Control Plane](./control-plane.md) for
-activation and [Typed States And Validation Boundaries](./typed-states.md) for required state.
+'chain_distant' is not part of the relocation`. A relay divided into partitions has no one owner to
+move, so a relocation that selects it is refused with `RelocationError::MemberPartitioned`, naming
+the domain and the relay. See [Control Plane](./control-plane.md) for activation and
+[Typed States And Validation Boundaries](./typed-states.md) for required state.
+
+`ALTER BRANCH <branch> SET PARTITIONS <n>` on a domain that is running or paused is refused before
+anything is committed with `TransactionPlanningError::BranchPartitionsRequireStoppedDomain`, which
+names the operation, the domain and the branch and states the stopped-domain path, such as `branch
+'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments',
+run ALTER BRANCH, then START it`. A domain build whose committed schedule lacks a unit its relay
+needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
 
 Visual schema, branch, relay, and subscription editors report incomplete names, fields, types,
 modes, references, branching, capacities, instance limits, filters and sample rates before
@@ -1584,6 +1677,25 @@ memory capacity and reserved bytes beside configured workers, running jobs and p
 operator can distinguish memory waiting, worker waiting and dependency work. These are
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
+
+The shared ONNX environment reports native diagnostics with a static message, the native severity
+and code site. It preserves the `ort::logging` tracing target and the `ort` span's identity and
+location. Native diagnostic text may contain tensor values, so it never enters the log, including
+under trace logging; this projection applies to model inspection and both inference modes.
+
+Stateful inferencer validation names the inferencer and offending port when a declaration repeats
+a port, uses a non-fixed state axis, mixes `BATCH` with `STATE`, or supplies an `INITIAL` expression
+that reads fields, is nondeterministic, or has the wrong type, shape or nullability. Model binding
+validation checks both ports of each state pair and requires complete input and output coverage.
+These are configuration refusals before activation.
+
+At stateful admission, an `INPUTS` row error or model refusal goes through that route's
+`ON MESSAGE ERROR` policy with the original input and captured materialized-state snapshot. It
+does not advance the branch's tensors or discard other rows of the input batch. A worker admission
+refusal that evaluated nothing remains an execution failure, with its typed cause; it is not a
+model rejection. A route construction error occurs after the model's successful invocation and
+does not undo that invocation. A later flush dispatches its buffered outputs without running the
+model again.
 
 ### Client Inspection Admission
 
@@ -2044,6 +2156,14 @@ failure beneath the reason can quote the payload it evaluated, and is not render
 
 ### Whole-Batch And Node Failures
 
+Emitter interaction metrics project the host's existing typed result into a bounded observation:
+success, retryable failure (also an interrupted attempt), invalid connector configuration, or
+terminal preparation/contract violation. An unknown or repeated record answer belongs to the
+last class. The projection does not replace a report, render its cause into a label or change
+retry and acknowledgement policy. A settled record rejection can therefore accompany a
+successful host attempt. The exact label spellings and families belong to
+[Connector Interactions](metrics-and-observability.md#connector-interactions).
+
 A planned batch that fails as a whole, rather than one message at a time, returns a
 `PlannedGeneralError` report together with the acknowledgements of every message the batch held.
 The error names the step that failed: preparing lookup inputs or the input batch, executing the
@@ -2232,6 +2352,13 @@ replica diagnostic prints that cause chain. Cancellation or failed conversion pu
 partial table, and an assignment-token refusal keeps a delayed transfer from overwriting a
 promoted owner. A commit that lacks its required replica acknowledgement still reports the
 existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
+Kafka start coordination preserves typed admission, native conversion, memory and bulk-transfer
+causes through its reporting boundary. A frozen unit reports its exact placement, and a
+coordination deadline names the domain, source and unit. The current node incarnation, ownership
+fingerprint and originating assignment fence stale work. A count transition refuses incomplete
+source inventories, foreign partition ownership and repeated metric identities before preparing
+target state; a failed preparation cannot publish a partial layout.
+
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
 the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
@@ -2285,8 +2412,11 @@ from a failed request. A relay payload that does not decode is `RuntimeError::De
 naming the domain and relay, with the `RemoteRelayDecodeError` that says what the payload got wrong
 beneath it: no admission registration, a body that is not one Arrow section of the relay's schema,
 metadata or acknowledgement sidecars whose row count differs from the body's, acknowledgement
-registrations on a subscription fan-out, a branch key that does not decode, or rows that do not
-assemble into a relay batch. The Arrow body, `BranchKeyError` or relay batch failure stays beneath
+registrations on a subscription fan-out, a branch key that does not decode, a key that lands in
+another partition than the one the payload names (`RemoteRelayDecodeError::Unit`, naming the
+addressed unit), or rows that do not assemble into a relay batch. A batch of a partitioned relay that
+names no concrete key has no partition: the producer refuses it with
+`RelayPartitionError::UnbranchedBatchOfPartitionedRelay` and fails its record acknowledgements. The Arrow body, `BranchKeyError` or relay batch failure stays beneath
 that. An Arrow body that is not one canonical IPC stream framed within its own bytes is
 `ArrowBodyError::Framing`, naming the `IpcFramingDefect`: a message without its continuation
 marker, a stream cut inside a message, a negative length, metadata that is not an Arrow message, a
@@ -2366,6 +2496,17 @@ in a later term; otherwise no leader is known. An unconfirmed lease is never rep
 and a move never as an unconfirmed lease: the context's text says which, so an operator reading a
 rendered report or log line tells lease trouble from an election without a separate counter. The
 Raft or I/O error stays beneath the context as the report's cause.
+
+Membership timeout success is decided from both the effective configuration and its committed
+publication. A matching voter union does not convert that timeout into success while the expected
+uniform target remains joint or uncommitted. A refusal of a uniform continuation keeps the same
+typed Raft write classification; it does not mean the preceding joint entry was rolled back.
+A fatal failure reading Core or submitting its conditional completion passes through the same
+Raft write classifier with its original cause. The completion responder retains the original
+membership write error, including uncertainty, rather than interpreting it as a definite refusal.
+Finding that Core is already uniform is an ordinary completion outcome carrying its separate
+effective and committed records; it proposes no additional membership entry, even when a preceding
+joint observation became stale before Core handled the request.
 
 Trace-level vote and pre-vote transport completion events record the existing nested result before
 its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
@@ -2460,7 +2601,10 @@ describes impact inspection.
 The session service's own edges report the same way. A gRPC call whose credentials do not
 authenticate it fails as a `GrpcAuthenticationError` report, `Required`, `Failed` or `Busy`, and the
 call ends with `UNAUTHENTICATED`, or with `UNAVAILABLE` when the node could not verify the
-credentials now; the status names only the refusal. A command on a transaction its session is no
+credentials now; the status names only the refusal. Known, unknown and invalid names use the same
+per-name pacing and generic rejection; the delay never carries a separate user-existence outcome.
+An unavailable verification establishes no failure bucket and preserves any existing pacing.
+A command on a transaction its session is no
 longer bound to fails as a `SessionTransactionBindingError` report, whose current context selects
 the `TransactionTakenOver` or `TransactionDetached` disposition and whose chain is the command's
 message. A domain snapshot that cannot be encoded for a session is `SnapshotEncodingError::Graph`
@@ -2486,10 +2630,22 @@ An ordinary command whose internal transaction is still committing when its comm
 any other report, such as `TransactionCommitError::RecoverQuiescence` above a drain timeout or a
 consensus write refused by a saturated log, answers `OutcomeUnknown` with the `StillApplying` cause
 rather than `Failed`. That report describes one attempt, and the committing transaction keeps the
-command's domain mutation lease until recovery under the same reference records the outcome. A
-model step that adopts its transaction's own pause validates its frozen planning inputs against
-the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another owner
-changed.
+command's domain mutation lease until recovery under the same reference records the outcome. If
+another coordinator has already finished that transaction, the ordinary command recovers its
+recorded outcome instead: an obsolete commit-attempt report cannot replace a committed success or
+the transaction's recorded terminal failure. Typed leadership loss still selects the leader
+response. A model step that adopts its transaction's own pause validates its frozen planning inputs
+against the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another
+owner changed.
+
+An explicit `COMMIT` applies the same distinction at its own result boundary. If an execution
+attempt returns a report, the coordinator reads the authoritative transaction again before
+answering from that report. A recorded terminal outcome supplies the reply, including its step
+diagnostics and recorded failure; a still-committing transaction answers
+`OutcomeUnknown(StillApplying)` and retains the command's execution reference for recovery. A
+leadership-loss report follows the leader route while no terminal outcome is known. Neither an
+attempt error nor the aggregate transaction status alone is a terminal result for the commit's
+reference.
 
 An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
 its coordinator's observation of the command's internal transaction. Before the session maps such a
@@ -2533,7 +2689,7 @@ On the serving node, a state, tick or end frame that does not fit the session's 
 sent and is logged as a warning: delivery waits for the next state or tick, and an end it could not
 send still ends the attachment. Accepting clock progress fails only for a domain the node does not
 hold, and a report that does not match the committed fence, or is not newer than the accepted tick,
-is ignored without an error. That failure reaches the node's sessions as the error notice
+is ignored without an error. That failure reaches the node's sessions as the `ControlPlane` error notice
 `failed to apply domain clock progress for '<domain>'` with its whole chain, and its log as a
 warning.
 
@@ -2557,6 +2713,12 @@ cases emits an early tick or silently clamps the interval.
 
 ### Rust Client, CLI And C Binding
 
+A native request deadline ends the exchange's request registry and wakes its frame reader. An
+unanswered subscription reopening therefore ends that session, with its normal interruption and
+recovery behavior; it does not report `RestorationFailed` on that ended session. A waiting event
+reader that knows no server for recovery returns `ClientError::SessionClosed`. Clock readers follow
+the same exchange ending even when another restoration's retry delay is still pending.
+
 Every call of the Rust client returns an `error_stack::Report<ClientError>`. Its current context is
 the failure a caller acts on, and the frames beneath keep the cause: a call's transport status, the
 wire codec's report beneath `EncodeRequest`, `InvalidUploadReply` or `InvalidRestoreReply`, the
@@ -2565,11 +2727,27 @@ name's report beneath `InvalidResourceName`, a local archive's I/O error beneath
 `InvalidCursor` or `InvalidCompletionPageSize`, the event queue's overflow beneath `EventOverflow`,
 and the `BackupDownloadError` beneath `BackupDownload`. A failure that may hide an admitted command
 or an installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
-outcome unknown. A call its caller cancels through `execute_prepared_with_cancellation` ends with
+outcome unknown. If the server answered a command with a disposition that required another attempt,
+`LastUnresolvedAnswer` holds the last such typed disposition and its public message between
+`UncertainCommand` and the retry deadline that ended retrying. It does not replace the outer
+uncertainty or turn the intermediate answer into a terminal outcome. A call its caller cancels
+through `execute_prepared_with_cancellation` ends with
 the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
 `UncertainCommand` above `RequestCancelled` at `AfterAdmission` for one that keeps running, or
 `CallCancelled` when no request of the call waited for a reply, beneath `UncertainCommand` or
-`UncertainUpload` where the call may already have taken effect. The client decides retries, session
+`UncertainUpload` where the call may already have taken effect. A command reply whose execution reference differs from its request's is reported as a protocol
+violation at the exchange reader, which ends that session before reading another frame. The call
+recovers under its own reference through the ordinary session-loss path, or reports
+`UncertainCommand` if recovery cannot finish. A restore's reference mismatch ends the session
+used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. A reply whose
+kind cannot answer its request, such as a domain listing under a command's request identity, is
+reported the same way at the exchange reader, as `ReplyKindMismatch` naming the request and the
+reply's kind, before anything the reply carries is applied. Every request still waiting on that
+session is interrupted. A call that cannot recover reports `RequestInterrupted` above that cause,
+and a command `UncertainCommand` above both. Hosts read
+`FailureKind::Uncertain` and the original execution reference from that outer context; the CLI
+reports an unknown outcome with exit status `3` when recovery did not complete.
+The client decides retries, session
 recovery and uncertainty from those typed contexts and never from text, and a context names its own
 operation without repeating its transport status, which the next frame shows. The CLI adds the
 operation it ran above the client's report, `failed to connect to the server` or `the request to
@@ -2805,8 +2983,27 @@ completed backup's archive was not downloaded, never as a failure of the backup.
 failure names an archive file the browser could not read or that is empty, a transport failure, a
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
-execution reference. A refusal of the stream is shown as `restore refused (<failure>): <message>`,
-and the restore's own outcome as the dispatcher renders any command's. The console WebSocket
+execution reference. A reply that cannot be read or answers another request or execution stops
+the restore call with its typed failure and `the outcome of restore '<own>' is unknown`. It never
+establishes a refusal or applies another execution's result. Once an attempt has sent the whole
+archive without learning the outcome, or the leader has answered that the outcome is unknown, the
+restore may have been admitted. If a later archive read, missing console address, stream refusal or
+expired execution reference ends it, that failure sits beneath `the console stopped before learning
+the outcome of a restore the leader may have admitted`; the dialog reports the outcome as unknown
+naming the execution reference. An already uncertain reply failure keeps its own typed context.
+The dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
+could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
+restore's own outcome as the dispatcher renders any command's. A session reply whose
+command outcome names another execution reference than its command's is a protocol violation: the
+dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
+'<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
+connection, and recovers the command under its own reference on the next one. The console WebSocket
+session also stops on a reply that cannot be decoded or reassembled, and on a reply whose kind does
+not answer its request, which it reports as `protocol violation: the server answered with a reply
+of another kind`. It checks that kind before it applies anything the reply carries, so such a reply
+is never shown as a command's failure. Each report gives `protocol violation:` with the cause and
+says that pending command outcomes are unknown. The console recovers every waiting command whole,
+under its original reference and issue order, after the new connection restores the session. The console WebSocket
 transport closes a call whose client broke its framing with the codec's close code, a second
 download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
 the node stops with `1001`.
@@ -2936,12 +3133,36 @@ warnings in text and JSON reports.
 
 The client reports an archive it cannot read as `ClientError::ReadRestoreArchive` with the path and
 the I/O error kind, above the I/O error when the client read the file itself, an empty file as
-`ClientError::EmptyRestoreArchive`, a failed call as `ClientError::Restore` with its status, and a
-reply that does not decode as `ClientError::InvalidRestoreReply` above the codec's report; an error
-that may hide an admitted restore is `ClientError::UncertainCommand` with its execution reference,
-above the failure that left the outcome unknown. The C binding classifies an unreadable or empty
-archive as `NX_ERROR_INVALID_ARGUMENT`, a failed call as `NX_ERROR_TRANSPORT`, and an undecodable
-reply as `NX_ERROR_PROTOCOL`.
+`ClientError::EmptyRestoreArchive`, and a failed call as `ClientError::Restore` with its status.
+A verified restore reply that fails semantic decoding retains `ClientError::InvalidRestoreReply`
+above the wire decoder's typed report; a reply naming another transport request retains
+`ClientError::UnexpectedReply { request: Restore }`. Both are beneath
+`ClientError::UncertainCommand` with the restore's own execution reference, because the invalid
+reply cannot establish whether the node applied the restore. The client ends that attempt's exact
+session and interrupts its pending requests; a replacement session remains usable. The shared host
+reports `FailureKind::Uncertain`, the C binding reports `NX_ERROR_UNCERTAIN`, and the CLI exits with
+status `3` and the original execution reference. Other errors that may hide an admitted restore
+likewise retain their cause beneath `UncertainCommand`. A pre-admission unreadable or empty archive
+is `NX_ERROR_INVALID_ARGUMENT`; a valid stream refusal is a definitive failed outcome if no earlier
+attempt could have been admitted.
+
+A structurally rejected native restore reply retains the complete frame-verification report
+through tonic's standard-error source, where its typed rejection can be inspected. Tonic's own
+receive-size failure happens before frame verification and retains its status instead. The
+restore receive phase distinguishes either from a server refusal received before the response;
+no classification reads a status message. After ending only the session selected for that stream,
+the client reports `UncertainCommand` under the original execution reference above
+`InvalidRestoreReply` and the receive failure. The shared binding exposes `NX_ERROR_UNCERTAIN`
+with that reference, and the CLI reports status 3. A replacement session and definitive local,
+authentication and declared stream refusals retain their meanings before an earlier attempt left
+the execution uncertain.
+
+The Rust client carries restore uncertainty across attempts. A later archive-open/read failure
+retains `ReadRestoreArchive` beneath `UncertainCommand`, rather than reporting the restore as
+refused locally. `RestoreStreamRefused` retains the later declared stream refusal, and
+`LastUnresolvedAnswer` the typed expired reference or unrecorded refusal, beneath that uncertainty.
+These outcomes preserve the original execution reference,
+`NX_ERROR_UNCERTAIN`, and CLI status 3 after an earlier complete upload or `OutcomeUnknown`.
 
 ## Sensitive Data And Observability
 
@@ -3249,6 +3470,17 @@ gate; compiler findings feed no debt count. These are repository validation erro
 runtime failure variants.
 [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
 
+`nervix-ratchet` keeps orchestration refusals in typed `error-stack` reports through its command
+boundary. Evidence failures retain the configuration, file and target or package identity;
+measurement refusals retain the peak and declared bound. The command renders the complete report,
+including diagnostic attachments. Cargo progress text is ignored; malformed JSON records stop
+analysis with their log path and typed parser cause. Authored-token provenance retains its typed
+parser cause beneath the source-file context. Driver compilation records preserve exit status or
+signal, resident peak, cgroup OOM observations and admission outcome, so a failed compiler, failed
+driver and interrupted compiler keep distinct diagnoses.
+[Architecture enforcement](architecture-enforcement.md) owns the matrix, shared admission protocol
+and cache evidence that produce these tooling reports.
+
 The isolated architecture compiler emits sixteen ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
 `nervix::invalid_contract`; the four failure diagnostics above; the six architecture diagnostics
@@ -3387,6 +3619,7 @@ refuse, and unit tests beside each owner.
 | A cause appears once in a rendered chain | `inferencer.feature`: the cause of an unreadable ONNX model appears exactly once in the failed command's message |
 | A branch is named by its fingerprint | `wasm_processor.feature`: the server error of a branch with a sensitive key carries the fingerprint and not the key value. The runtime's unit tests hold every branch-local context to the same rendering |
 | A consensus failure keeps its class at a client mutation | `consensus_failure_reports.feature`: creating a domain or a user, cordoning and draining a node, and queueing a transaction statement each report the failure that rejected the proposal |
+| An explicit commit recovers a terminal outcome recorded after an attempt failed | `explicit_commit_recovery.feature` runs the public one- and three-node session cases; `explicit_commit_recovers_the_result_recorded_after_its_attempt_failed` holds a real failed attempt at the transaction owner while another coordinator finishes it |
 | A session ends with the status of its failure | `session_protocol.feature`, `authentication.feature` and `cli_session.feature` |
 | The formatter reports rejected source with its stage and exit status | `plexus_format.feature` |
 | Input a decoder must refuse fails with the owner's typed error and never panics | The registered Bolero targets `plexus-statement-text`, `models-duration-text`, `wasm-protocol-malformed`, `runtime-arrow-bodies-malformed`, `client-producer-batches-malformed`, `relay-wire-messages-malformed`, `client-discriminators`, `backup-malformed-records` and `consensus-state-corruption` |
@@ -3504,3 +3737,20 @@ renders the property value. The publisher projects these reports into the record
 outcome before transport and continues with representable neighbours. A wrong property name or
 type at this connector boundary remains a typed contract refusal; normal statements are already
 checked against the entity's declaration and exact types at `CREATE` and `ALTER`.
+
+## Ingestor Instancing Boundaries
+
+The registry owns typed `IngestorInstancingError` causes for unsupported instancing, missing or
+different construction partition structures and Kafka's required domain-offset mode. The
+surrounding report identifies the domain and ingestor. Correct the declaration before activation.
+A count change uses the ownership-handoff preparation boundary to preserve the offset lifetime.
+Start planning separately validates the complete resolved unit declaration.
+`AlreadyRunning` and `IngestorNotRunning` name the exact source unit, allowing a sibling instance
+to start or stop independently.
+Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.
+`UnitIndexError` is the vocabulary's pure refusal for an instance ordinal outside its compact
+identity range. Semantic JSON validates that bound during deserialization. The client wire decoder
+preserves the cause under `WireDecodeError::InvalidValue`, and a stored tagged key preserves it
+under `StoredStateIssue::KeyUnitInvalid` and `RuntimePersistenceError::DecodeState`.
+Allocation-layout validation rejects unaddressable count declarations before materializing units;
+every addressable index fits the identity range.

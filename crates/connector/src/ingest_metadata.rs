@@ -19,10 +19,10 @@
     )
 )]
 
-use std::{fmt, net::SocketAddr};
+use std::{error::Error, fmt, net::SocketAddr};
 
 use nervix_models::{IngestorMetadataType, Timestamp};
-use nervix_primitives::sync::Arc;
+use nervix_primitives::sync::{Arc, StdArc};
 
 /// Transport headers of one ingestor message, visited in the order its entity's declared header model
 /// keeps them: as the message carries them for `ordered_repeats`, each name's values together for
@@ -47,7 +47,7 @@ pub trait IngestMessageHeaders: Send + Sync {
     fn visit(&self, visit: &mut dyn FnMut(&str, &str));
 }
 
-/// A ingestor message that carries no transport headers.
+/// An ingestor message that carries no transport headers.
 pub struct NoIngestHeaders;
 
 impl IngestMessageHeaders for NoIngestHeaders {
@@ -116,8 +116,9 @@ impl<'a> IngestRowHeaders<'a> {
 
 /// Where a message's metadata values go: exactly one call for each field its entity declares, in
 /// the order the declaration lists them: the call of the field's declared type, `absent` where the
-/// message carries no value for that field, or `unrepresentable` where it carries one the field's
-/// declared type cannot hold.
+/// message carries no value, `unrepresentable` where its declared type cannot hold the value, or
+/// `invalid` where its transport cannot supply a valid value. A `deferred` call supplies one of
+/// these only if the sink requests the field.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -126,6 +127,14 @@ impl<'a> IngestRowHeaders<'a> {
     )
 )]
 pub trait IngestMetadataValues {
+    /// Produces one field of type `ty` only when its value is needed. The callback emits exactly
+    /// one value through this sink. An owned capture requests every field; a projection requests
+    /// only the fields its programs read.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the connector supplies a synchronous, borrowed field producer")
+    )]
+    fn deferred(&mut self, ty: IngestorMetadataType, emit: &dyn Fn(&mut dyn IngestMetadataValues));
     /// The value of a `STRING` field.
     fn string(&mut self, value: &str);
     /// The value of a `STRING` field the message writes in place rather than holding as text, such
@@ -156,7 +165,36 @@ pub trait IngestMetadataValues {
     /// wrote it, never with payload content. The host refuses the message where a program reads
     /// the field and refuses nothing where none does: the value never reads as null.
     fn unrepresentable(&mut self, ty: IngestorMetadataType, value: &dyn fmt::Display);
+    /// The transport cannot supply a valid value for this field. Its typed cause survives capture
+    /// and replay and becomes a row refusal only where a program reads the field.
+    fn invalid(&mut self, ty: IngestorMetadataType, failure: &IngestMetadataFailure);
 }
+
+/// An immutable typed transport-field failure shared by retained metadata and its replay.
+/// Equality identifies the same failure instance, which a capture and its clones retain together.
+/// The thin shared pointer fits the existing scalar and projection-refusal slots. Valid values
+/// and fields no program requests create no failure allocation.
+#[derive(Clone, Debug)]
+pub struct IngestMetadataFailure(StdArc<Box<dyn Error + Send + Sync>>);
+
+impl IngestMetadataFailure {
+    pub fn new(error: impl Error + Send + Sync + 'static) -> Self {
+        Self(StdArc::new(Box::new(error)))
+    }
+
+    /// The original typed error, including its source chain.
+    pub fn error(&self) -> &(dyn Error + Send + Sync + 'static) {
+        self.0.as_ref().as_ref()
+    }
+}
+
+impl PartialEq for IngestMetadataFailure {
+    fn eq(&self, other: &Self) -> bool {
+        StdArc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for IngestMetadataFailure {}
 
 /// The typed metadata of one ingestor message, which hands the host the value of every field the
 /// message's entity declares.
@@ -208,6 +246,11 @@ pub enum RetainedIngestMetadataValue {
         ty: IngestorMetadataType,
         value: String,
     },
+    /// The field could not be read, with its original typed cause retained.
+    Invalid {
+        ty: IngestorMetadataType,
+        failure: IngestMetadataFailure,
+    },
 }
 
 impl RetainedIngestMetadataValue {
@@ -227,13 +270,14 @@ impl RetainedIngestMetadataValue {
             Self::U64(_) => Some(IngestorMetadataType::U64),
             Self::Datetime(_) => Some(IngestorMetadataType::Datetime),
             Self::Unrepresentable { ty, .. } => Some(*ty),
+            Self::Invalid { ty, .. } => Some(*ty),
         }
     }
 }
 
 /// The metadata values of a message copied out of it, in its entity's declared order, so they
 /// outlive it: the quiesce buffer replays them long after the message was dropped, and a paced
-/// source returns its poll's messages owned.
+/// ingestor returns its poll's messages owned.
 ///
 /// A clone shares the values rather than copying them, so messages that carry the same values, such
 /// as the samples of one poll, hold them once however many there are. A declaration without fields
@@ -289,6 +333,9 @@ impl IngestMessageMetadata for RetainedIngestMetadata {
                 RetainedIngestMetadataValue::Unrepresentable { ty, value } => {
                     values.unrepresentable(*ty, value);
                 }
+                RetainedIngestMetadataValue::Invalid { ty, failure } => {
+                    values.invalid(*ty, failure);
+                }
             }
         }
     }
@@ -298,6 +345,14 @@ impl IngestMessageMetadata for RetainedIngestMetadata {
 struct RetainedIngestMetadataCapture<'a>(&'a mut Vec<RetainedIngestMetadataValue>);
 
 impl IngestMetadataValues for RetainedIngestMetadataCapture<'_> {
+    fn deferred(
+        &mut self,
+        _ty: IngestorMetadataType,
+        emit: &dyn Fn(&mut dyn IngestMetadataValues),
+    ) {
+        emit(self);
+    }
+
     fn string(&mut self, value: &str) {
         self.0
             .push(RetainedIngestMetadataValue::String(value.to_string()));
@@ -353,6 +408,13 @@ impl IngestMetadataValues for RetainedIngestMetadataCapture<'_> {
         self.0.push(RetainedIngestMetadataValue::Unrepresentable {
             ty,
             value: value.to_string(),
+        });
+    }
+
+    fn invalid(&mut self, ty: IngestorMetadataType, failure: &IngestMetadataFailure) {
+        self.0.push(RetainedIngestMetadataValue::Invalid {
+            ty,
+            failure: failure.clone(),
         });
     }
 }

@@ -147,7 +147,9 @@ impl Failure {
             ClientError::RequestDeadline { .. } | ClientError::RetryDeadline => {
                 FailureKind::Deadline
             }
-            ClientError::UncertainCommand { .. }
+            ClientError::LastUnresolvedAnswer { .. }
+            | ClientError::RestoreStreamRefused { .. }
+            | ClientError::UncertainCommand { .. }
             | ClientError::UncertainUpload { .. }
             | ClientError::SettlementUnknown { .. } => FailureKind::Uncertain,
             ClientError::EventOverflow { .. } => FailureKind::Overflow,
@@ -163,6 +165,7 @@ impl Failure {
             | ClientError::InvalidUploadReply
             | ClientError::InvalidRestoreReply
             | ClientError::ExecutionReferenceMismatch { .. }
+            | ClientError::ReplyKindMismatch { .. }
             | ClientError::UploadIdentityMismatch { .. } => FailureKind::Protocol,
             ClientError::SessionClosed => FailureKind::Closed,
             ClientError::ConsumerSessionUnavailable => FailureKind::Connect,
@@ -308,7 +311,10 @@ mod endpoint_recovery_tests {
 #[cfg(test)]
 mod call_cancellation_tests {
     use meticulous::ResultExt as _;
-    use nervix_client_core::{RequestKind, wire::CancellationStage};
+    use nervix_client_core::{
+        CommandDisposition, RequestKind,
+        wire::{CancellationStage, ReplyBodyKind, UnknownOutcomeCause},
+    };
 
     use super::*;
 
@@ -341,5 +347,118 @@ mod call_cancellation_tests {
             "the cancellation stays in the reported chain: {}",
             admitted.message()
         );
+    }
+
+    #[test]
+    fn a_foreign_execution_is_reported_as_uncertain_under_the_own_reference() {
+        let expected = CommandExecutionReference::parse("own-command").assured("a valid reference");
+        let received =
+            CommandExecutionReference::parse("foreign-command").assured("a valid reference");
+        let failure = Failure::from(
+            Report::new(ClientError::ExecutionReferenceMismatch {
+                expected: expected.clone(),
+                received,
+            })
+            .change_context(ClientError::UncertainCommand {
+                reference: expected.clone(),
+            }),
+        );
+        assert_eq!(failure.kind(), FailureKind::Uncertain);
+        assert_eq!(failure.execution_reference(), Some(&expected));
+        assert!(failure.message().contains("foreign-command"));
+    }
+
+    #[test]
+    fn a_later_restore_refusal_keeps_its_uncertainty_and_execution_reference() {
+        let refusal = || ClientError::RestoreStreamRefused {
+            failure: nervix_client_core::wire::RestoreUploadFailure::StagingFailed,
+            message: "the later stream could not be staged".to_string(),
+        };
+        assert_eq!(Failure::from(refusal()).kind(), FailureKind::Uncertain);
+        let reference = CommandExecutionReference::parse("restore-history")
+            .assured("the test execution reference is valid");
+        let failure = Failure::from(Report::new(refusal()).change_context(
+            ClientError::UncertainCommand {
+                reference: reference.clone(),
+            },
+        ));
+        assert_eq!(failure.kind(), FailureKind::Uncertain);
+        assert_eq!(failure.execution_reference(), Some(&reference));
+        assert!(failure.message().contains("StagingFailed"));
+        assert!(
+            failure
+                .message()
+                .contains("the later stream could not be staged")
+        );
+    }
+
+    #[test]
+    fn a_reply_of_another_kind_is_reported_as_uncertain_under_the_own_reference() {
+        let reference =
+            CommandExecutionReference::parse("own-command").assured("a valid reference");
+        let failure = Failure::from(
+            Report::new(ClientError::ReplyKindMismatch {
+                request: RequestKind::Command,
+                reply: ReplyBodyKind::DomainList,
+            })
+            .change_context(ClientError::RequestInterrupted {
+                request: RequestKind::Command,
+            })
+            .change_context(ClientError::UncertainCommand {
+                reference: reference.clone(),
+            }),
+        );
+        assert_eq!(failure.kind(), FailureKind::Uncertain);
+        assert_eq!(failure.execution_reference(), Some(&reference));
+        assert!(
+            failure
+                .message()
+                .contains("a domain_list reply cannot answer the command request"),
+            "the typed cause stays in the reported chain: {}",
+            failure.message()
+        );
+
+        let interrupted = Failure::from(
+            Report::new(ClientError::ReplyKindMismatch {
+                request: RequestKind::ListDomains,
+                reply: ReplyBodyKind::Command,
+            })
+            .change_context(ClientError::RequestInterrupted {
+                request: RequestKind::ListDomains,
+            }),
+        );
+        assert_eq!(interrupted.kind(), FailureKind::Transport);
+        let violation = Failure::from(ClientError::ReplyKindMismatch {
+            request: RequestKind::ListDomains,
+            reply: ReplyBodyKind::Command,
+        });
+        assert_eq!(violation.kind(), FailureKind::Protocol);
+    }
+
+    #[test]
+    fn an_unresolved_answer_stays_beneath_an_uncertain_host_failure() {
+        let reference = CommandExecutionReference::parse("command-1")
+            .assured("the test execution reference is valid");
+        let report = Report::new(ClientError::RetryDeadline)
+            .change_context(ClientError::LastUnresolvedAnswer {
+                disposition: CommandDisposition::OutcomeUnknown(
+                    UnknownOutcomeCause::LeadershipLost,
+                ),
+                message: "the lease could not be confirmed".to_string(),
+            })
+            .change_context(ClientError::UncertainCommand {
+                reference: reference.clone(),
+            });
+        let failure = Failure::from(report);
+
+        assert_eq!(failure.kind(), FailureKind::Uncertain);
+        assert_eq!(failure.execution_reference(), Some(&reference));
+        assert!(failure.message().contains("OutcomeUnknown(LeadershipLost)"));
+        assert!(
+            failure
+                .message()
+                .contains("the lease could not be confirmed")
+        );
+        assert!(failure.message().contains("session retry deadline expired"));
     }
 }

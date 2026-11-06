@@ -2,8 +2,8 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Ordered field controls, nested type layers, wire type and mode selection, and the
-//!   branch's typed schema reference control.
+//! - **Owns.** Ordered field controls, nested type layers, wire type and mode selection, the
+//!   AVRO array layers around an item type, and the branch's typed schema reference control.
 //! - **Depends on.** Browser draft signals, model-owned type variants, and the shared choice UI.
 //! - **Must not know.** Registry internals, statement parsing, or how a command is dispatched.
 
@@ -270,19 +270,25 @@ pub(super) fn WireSchemaEditor(
     }
 }
 
+/// The type choices of a wire field: every JSON and CBOR type, their bare `array` included, or
+/// the AVRO item types an array is built around.
 fn wire_types(format: WireFormat) -> Vec<WireFieldType> {
     match format {
         WireFormat::Json => JsonType::iter().map(WireFieldType::Json).collect(),
         WireFormat::Cbor => CborType::iter().map(WireFieldType::Cbor).collect(),
-        WireFormat::Avro => AvroType::iter().map(WireFieldType::Avro).collect(),
+        WireFormat::Avro => AvroType::scalar_variants()
+            .iter()
+            .cloned()
+            .map(WireFieldType::Avro)
+            .collect(),
     }
 }
 
-fn wire_type_label(ty: WireFieldType) -> String {
+fn wire_type_label(ty: &WireFieldType) -> String {
     match ty {
-        WireFieldType::Json(ty) => ty.as_ref().to_string(),
-        WireFieldType::Cbor(ty) => ty.as_ref().to_string(),
-        WireFieldType::Avro(ty) => ty.as_ref().to_string(),
+        WireFieldType::Json(ty) => ty.to_string(),
+        WireFieldType::Cbor(ty) => ty.to_string(),
+        WireFieldType::Avro(ty) => ty.to_string(),
     }
 }
 
@@ -337,21 +343,48 @@ fn WireFieldEditor(signals: CreateSignals, format: WireFormat, index: usize) -> 
             <fieldset class="create-field-type">
                 <legend>"Wire type"</legend>
                 <div class="create-type-options">
-                    <For each=move || { wire_types(format) } key=|ty| wire_type_label(*ty)
+                    <For each=move || { wire_types(format) } key=wire_type_label
                         children=move |ty| {
-                            let label = wire_type_label(ty);
+                            let label = wire_type_label(&ty);
+                            let choice = ty.clone();
                             view! {
                                 <button type="button" data-type=label.clone()
-                                    class:active=move || signals.structured.get().wire(format).fields.get(index).is_some_and(|field| field.ty == Some(ty))
+                                    class:active=move || signals.structured.get().wire(format).field_is_built_from(index, &choice)
                                     disabled=move || signals.progress.get().is_pending()
                                     on:click=move |_| {
-                                        signals.structured.update(|drafts| drafts.wire_mut(format).set_field_type(index, ty));
+                                        signals.structured.update(|drafts| drafts.wire_mut(format).set_field_type(index, ty.clone()));
                                         signals.edit();
                                     }>{label.clone()}</button>
                             }
                         } />
                 </div>
             </fieldset>
+            <Show when=move || format == WireFormat::Avro fallback=|| ()>
+                <div class="create-wire-array-layers">
+                    <span>"Array layers · inner to outer"</span>
+                    <For
+                        each=move || { (0..signals.structured.get().wire(format).field_array_layers(index)).collect::<Vec<_>>() }
+                        key=|layer| *layer
+                        children=move |layer| view! {
+                            <div class="create-wire-array-layer">
+                                <span>"Array"</span>
+                                <button type="button" aria-label=format!("Remove array layer {}", layer + 1)
+                                    disabled=move || signals.progress.get().is_pending()
+                                    on:click=move |_| {
+                                        signals.structured.update(|drafts| drafts.wire_mut(format).remove_field_array_layer(index));
+                                        signals.edit();
+                                    }>"Remove"</button>
+                            </div>
+                        }
+                    />
+                    <button class="create-add-wire-array" type="button"
+                        disabled=move || signals.progress.get().is_pending() || !signals.structured.get().wire(format).field_wraps_in_array(index)
+                        on:click=move |_| {
+                            signals.structured.update(|drafts| drafts.wire_mut(format).push_field_array_layer(index));
+                            signals.edit();
+                        }>"Wrap in array"</button>
+                </div>
+            </Show>
             <label class="create-check">
                 <input class="create-field-optional" type="checkbox"
                     prop:checked=move || signals.structured.get().wire(format).fields.get(index).is_some_and(|field| field.optional)
@@ -412,6 +445,17 @@ pub(super) fn BranchEditor(
                 on:input=move |event| {
                     let ttl = event_target_value(&event);
                     signals.structured.update(|drafts| drafts.branch.ttl = ttl);
+                    signals.edit();
+                } />
+        </label>
+        <label class="create-field">
+            <span>"Partitions"</span>
+            <input class="create-partitions" type="number" min="1" max="65535"
+                prop:value=move || signals.structured.get().branch.partitions
+                disabled=move || signals.progress.get().is_pending()
+                on:input=move |event| {
+                    let partitions = event_target_value(&event);
+                    signals.structured.update(|drafts| drafts.branch.partitions = partitions);
                     signals.edit();
                 } />
         </label>

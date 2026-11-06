@@ -99,7 +99,7 @@ const EXECUTION_FAMILIES: [ModelVariant; 13] = [
 
 /// Every aspect of a Model change, in declaration order. The vocabulary declares no iterator over
 /// the aspects, so the tests below read every archived aspect back to keep this list complete.
-const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 76] = [
+const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 77] = [
     ModelChangeAspect::RelayCapacity,
     ModelChangeAspect::RelaySchema,
     ModelChangeAspect::RelayBranching,
@@ -176,6 +176,7 @@ const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 76] = [
     ModelChangeAspect::EntityReplaced,
     ModelChangeAspect::EntityCreated,
     ModelChangeAspect::EntityDropped,
+    ModelChangeAspect::BranchPartitions,
 ];
 
 /// Every runtime state a Model change can make meaningless, in declaration order.
@@ -547,11 +548,13 @@ impl Arbitrary<'_> {
         operations: TransactionOperationRange,
     ) -> OwnershipMoveImpact {
         let node = ImpactNodeCoverage::all_executions(self.execution_node_ref());
+        let unit = self.unit();
         let source = self.cluster_node();
         let destination = self.cluster_node();
         let attribution = self.impact_attribution(operations);
         OwnershipMoveImpact {
             node,
+            unit,
             source,
             destination,
             attribution,
@@ -1103,7 +1106,25 @@ impl Arbitrary<'_> {
             relays.insert(self.name::<RelayName>());
         }
         TransactionEntityGatePlan {
-            affected_entities: affected_entities.into_iter().collect(),
+            targets: if self.entropy.flag() {
+                nervix_models::EntityGateTargets::Entities(affected_entities.into_iter().collect())
+            } else {
+                nervix_models::EntityGateTargets::Units(
+                    affected_entities
+                        .into_iter()
+                        .map(|node| {
+                            nervix_models::NodeUnitRef::new(
+                                node,
+                                if self.entropy.flag() {
+                                    nervix_models::Unit::FIRST_INSTANCE
+                                } else {
+                                    nervix_models::Unit::partition(1)
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+            },
             relays: relays.into_iter().collect(),
         }
     }
@@ -1267,7 +1288,10 @@ impl Arbitrary<'_> {
 
     /// A placement group of a schedule: any of the scheduled `identities`, and the cluster node it
     /// shares, or none.
-    fn schedule_group(&mut self, identities: &[NodeRef]) -> PlacementGroupSchedule {
+    fn schedule_group(
+        &mut self,
+        identities: &[nervix_models::NodeUnitRef],
+    ) -> PlacementGroupSchedule {
         let mut members = Vec::new();
         for identity in identities {
             if self.entropy.flag() {
@@ -1280,7 +1304,6 @@ impl Arbitrary<'_> {
             None
         };
         PlacementGroupSchedule {
-            unit: nervix_models::Unit::Single,
             members,
             primary_node,
         }
@@ -1295,7 +1318,16 @@ impl Arbitrary<'_> {
             entries.push(self.schedule_entry());
         }
         let mut schedule = DomainSchedule::new(domain.clone(), entries, Vec::new());
-        let identities = schedule.nodes.keys().cloned().collect::<Vec<_>>();
+        let identities = schedule
+            .nodes
+            .iter()
+            .flat_map(|(node, scheduled)| {
+                scheduled
+                    .units
+                    .keys()
+                    .map(|unit| nervix_models::NodeUnitRef::new(node.clone(), *unit))
+            })
+            .collect::<Vec<_>>();
         let group_count = self.entropy.count(ITEMS);
         for _ in 0..group_count {
             let group = self.schedule_group(&identities);
@@ -1493,7 +1525,7 @@ mod tests {
     const BYTES: usize = 8192;
 
     /// Every variant, family and shape the generators promise to reach, as [`Walk`] names them.
-    const EXPECTED: [&str; 107] = [
+    const EXPECTED: [&str; 109] = [
         "TransactionImpactReport::empty",
         "TransactionOperationRange::single",
         "TransactionOperationRange::several",
@@ -1591,7 +1623,9 @@ mod tests {
         "TransactionModelTransition::Create",
         "TransactionModelTransition::Replace",
         "TransactionModelTransition::Drop",
-        "TransactionEntityGatePlan::affected_entities",
+        "TransactionEntityGatePlan::targets",
+        "EntityGateTargets::Entities",
+        "EntityGateTargets::Units",
         "TransactionEntityGatePlan::relays",
         "DomainSchedule::entries",
         "DomainSchedule::placement_groups",
@@ -2222,19 +2256,19 @@ mod tests {
 
         /// Gated entities are execution nodes, and entities and relays are sorted and distinct.
         fn gates(&mut self, gates: &TransactionEntityGatePlan) {
-            if !gates.affected_entities.is_empty() {
-                self.see("TransactionEntityGatePlan::affected_entities");
+            if !gates.targets.entities().is_empty() {
+                self.see("TransactionEntityGatePlan::targets");
             }
+            self.see(match &gates.targets {
+                nervix_models::EntityGateTargets::Entities(_) => "EntityGateTargets::Entities",
+                nervix_models::EntityGateTargets::Units(_) => "EntityGateTargets::Units",
+            });
             if !gates.relays.is_empty() {
                 self.see("TransactionEntityGatePlan::relays");
             }
-            assert!(
-                gates
-                    .affected_entities
-                    .is_sorted_by(|left, right| left < right)
-            );
+            assert_eq!(gates.targets, gates.targets.normalized());
             assert!(gates.relays.is_sorted_by(|left, right| left < right));
-            for entity in &gates.affected_entities {
+            for entity in gates.targets.entities() {
                 assert!(EXECUTION_KINDS.contains(&entity.kind), "{entity:?}");
             }
         }
@@ -2252,18 +2286,22 @@ mod tests {
             for (identity, node) in &schedule.nodes {
                 assert_eq!(identity, &node.identity());
                 assert!(EXECUTION_KINDS.contains(&node.kind()), "{identity:?}");
-                assert!(
-                    node.single_unit()
-                        .assigned_nodes
-                        .is_sorted_by(|left, right| left < right)
-                );
+                for unit in node.units.values() {
+                    assert!(unit.assigned_nodes.is_sorted_by(|left, right| left < right));
+                }
                 if let Some(primary) = node.primary_node() {
                     assert!(node.is_assigned_to(primary), "{identity:?}");
                 }
             }
             for group in &schedule.placement_groups {
                 for member in &group.members {
-                    assert!(schedule.nodes.contains_key(member), "{member:?}");
+                    assert!(
+                        schedule
+                            .nodes
+                            .get(&member.node)
+                            .is_some_and(|node| node.units.contains_key(&member.unit)),
+                        "{member:?}"
+                    );
                 }
             }
         }

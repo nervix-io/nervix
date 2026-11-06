@@ -137,6 +137,12 @@ scope. A complete Plexus `SET TO` can change its payload selection, envelope and
 construction as part of the same atomic alteration; its head and replacement must retain the stored
 connector/entity kind.
 
+Adding, changing or removing an emitter's batching limits contributes `EMITTER_BATCH_POLICY` to
+the same impact report and requires entity pause. The old task drains its partial buffers and
+unanswered prepared output under the policy that admitted them before the replacement starts.
+A failed pre-commit drain keeps the previous policy and its owning task. A flush-only alteration
+continues to change the running task's cadence dynamically.
+
 A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
 emitter work. Force flush releases rows into that same wait; a read or network delivery does not
 finish the drain. A consumer settlement runs beside the session's ordered command lane, so an
@@ -150,10 +156,15 @@ version bindings, domain lifecycle, ownership moves, activations and deactivatio
 state resets, force flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore
 be `DYNAMIC` while every live node still installs a new listener certificate. A running-domain
 primary move raises an otherwise dynamic model or placement change to `ENTITY_PAUSE`; replica-role
-changes alone do not. Schedule reassignments identify the moved node and unit; the transaction
-report folds those identities to their logical node when attributing ownership and its affected
-subgraph. Current schedules have one `Single` unit, so the reported scope is unchanged. A schedule
-rebuild can raise a narrower model change to `DOMAIN_PAUSE`. In
+changes alone do not. Schedule reassignments identify the moved node and unit, and so does each
+ownership move in the report: a move of one partition of a partitioned relay names that partition,
+rendered as `unit=partition:<p>` after its node, while a node with one unit names no unit. The
+transaction report folds those identities to their logical node when attributing ownership and its
+affected subgraph, so moving one partition gates its relay. A schedule rebuild can raise a narrower
+model change to `DOMAIN_PAUSE`. `ALTER BRANCH ... SET PARTITIONS` is a `BranchPartitions` change,
+which needs a domain pause and which the registry accepts only while the domain is stopped, where it
+plans as `DYNAMIC` and takes effect at the next `START`; see
+[Relay Partitions](./relay.md#relay-partitions). In
 a stopped domain, a model or resource rebinding has no running work to pause and reports
 `DYNAMIC`, although the changed configuration still matters at the next start. Explicit `START`
 and `STOP` are individual `NO_PAUSE` steps with lifecycle effects; they determine whether later
@@ -435,3 +446,17 @@ without carrying sensitive payload values. Per-record details and hot-path buffe
 this inspection contract. Ingestor quiesce buffer metrics and current live observations remain in
 [Metrics And Observability](./metrics-and-observability.md); retained impact is the source for
 what this transaction required and actually engaged.
+
+## Unit-Qualified Intake Scope
+
+Persisted gate plans retain `EntityGateTargets`. A model mutation selects complete entities and
+expands every current instance, including retained work during publication. A schedule handoff
+selects the exact moved units and expands their exact placement component. Source instance `p`
+and relay partition `p` can therefore share one gate without selecting a sibling instance.
+Engagement, drain counters, ACK roots, capture authorization and release all preserve that unit
+selection. Logical entity names remain the inspection projection; they do not replace the stored
+selection or widen an ownership handoff. A change to an ingestor's declared unit set selects the
+union of preceding and target units. Its state transition consumes every preceding unit's cut,
+so an unchanged physical owner participates in that capture and receives a prepared target cut.
+Source confirmation checks the units the source actually owned; a newly introduced target
+instance is never treated as an existing source instance.

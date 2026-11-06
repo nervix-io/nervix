@@ -1,13 +1,13 @@
-//! HTTP endpoint ingestion boundary: the request path of the endpoint source.
+//! HTTP endpoint ingestion boundary: the request path of the endpoint ingestor.
 //!
 //! Layer: data plane.
 //! - **Owns.** Resolving a request's host and path to the endpoint routes and the ingestors bound
 //!   to them, the metadata a request or a WebSocket frame hands those ingestors, request admission,
 //!   the endpoint buffer, rejection with a retry delay, per-request dispatch, and response
 //!   disposition.
-//! - **Depends on.** The request intakes endpoint sources bind, Arrow decoding and actual-UTC
+//! - **Depends on.** The request intakes endpoint ingestors bind, Arrow decoding and actual-UTC
 //!   observation.
-//! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; Plexus
+//! - **Must not know.** When a route is bound or unbound, which the endpoint ingestor owns; Plexus
 //!   parsing, placement policy or consensus storage.
 
 #![cfg_attr(
@@ -48,7 +48,7 @@ pub(super) struct RoutedEndpoint {
 }
 
 /// The intake one ingestor admits an endpoint's requests through, bound to every route the
-/// endpoint publishes while the ingestor's endpoint source runs.
+/// endpoint publishes while that endpoint ingestor runs.
 pub(crate) struct EndpointIngestBinding {
     pub(super) request: EndpointRequestPolicy,
     pub(super) handles: IngestTaskHandles,
@@ -431,7 +431,7 @@ impl Runtime {
             BufferedIngestMetadata::retain(&metadata),
             actual_utc_now(),
         );
-        let admission = match binding.quiesce.intake(0, payload, true) {
+        let admission = match binding.quiesce.intake(payload, true) {
             IngestorQuiesceIntake::Dispatch(payload) => {
                 match self
                     .dispatch_endpoint_binding(binding, payload, protocol)

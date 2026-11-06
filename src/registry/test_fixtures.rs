@@ -78,7 +78,11 @@ pub(in crate::registry) fn unplaced_schedule(models: Vec<Model>) -> ScheduledNod
                     let schema = index
                         .configured::<CreateSchema>(&branch.schema)
                         .expect("the fixture declares every branch schema");
-                    ResolvedBranching::branched(branch_name.clone(), schema.clone())
+                    ResolvedBranching::branched(
+                        branch_name.clone(),
+                        schema.clone(),
+                        nervix_models::BranchPartitions::ONE,
+                    )
                 }
             };
             Some(resolved)
@@ -521,7 +525,7 @@ pub(in crate::registry) fn ingestor_statement(
                     group: KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                     start_at: nervix_models::IngestStartPosition::Earliest,
                 },
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: KafkaIngestMode::AckSequential {
                     timeout: "30s".to_string(),
                     retry_policy: nervix_models::RetryPolicy {

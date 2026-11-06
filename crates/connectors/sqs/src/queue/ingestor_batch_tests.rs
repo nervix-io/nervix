@@ -1,9 +1,9 @@
 //! How an SQS read gathers a batch, and how acknowledging and rejecting settle one.
 //!
 //! A batch window is observed against a scripted queue on a paused clock, whose long poll lets the
-//! clock run on as the service's own wait would. The requests a source sends are observed against
+//! clock run on as the service's own wait would. The requests an ingestor sends are observed against
 //! a loopback stand-in for the SQS service that answers each request it takes with the next answer
-//! of a script, closes its connection, and stops listening after its last answer, so a source that
+//! of a script, closes its connection, and stops listening after its last answer, so an ingestor that
 //! sent one request more would fail to connect.
 
 use std::{collections::VecDeque, net::Ipv4Addr, num::NonZeroUsize, time::Duration};
@@ -23,7 +23,7 @@ use super::{
     SqsQueueIngestorResult,
 };
 use crate::queue::connection_tests::{
-    Fixture, QUEUE, RefusedEndpoint, client_config, open_source, read_request,
+    Fixture, QUEUE, RefusedEndpoint, client_config, open_ingestor, read_request,
 };
 
 /// A message whose body is its id and whose receipt handle names it.
@@ -261,7 +261,7 @@ async fn a_message_without_a_receipt_handle_is_a_typed_read_failure() {
         SqsQueueIngestor::read_batch(&queue, request(1, None), &IngestorReadCancellation::new())
             .await
     else {
-        panic!("a message the source cannot settle fails the read");
+        panic!("a message the ingestor cannot settle fails the read");
     };
 
     assert_eq!(
@@ -304,17 +304,17 @@ async fn a_failure_left_by_the_last_read_fails_the_next_one_before_it_receives()
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
     let port = endpoint.port();
-    let mut source = open_source(
+    let mut ingestor = open_ingestor(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
     )
     .await;
-    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
-    source.failure = Some(Report::new(SqsQueueIngestorError::MissingReceiptHandle {
+    ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+    ingestor.failure = Some(Report::new(SqsQueueIngestorError::MissingReceiptHandle {
         message_id: None,
     }));
 
-    let Err(report) = source
+    let Err(report) = ingestor
         .next_batch(request(1, None), &IngestorReadCancellation::new())
         .await
     else {
@@ -328,7 +328,7 @@ async fn a_failure_left_by_the_last_read_fails_the_next_one_before_it_receives()
         ),
         "the read reported the left failure, not a refused receive: {report:?}"
     );
-    assert!(source.failure.is_none(), "a failure is reported once");
+    assert!(ingestor.failure.is_none(), "a failure is reported once");
 }
 
 /// A stand-in that answers one request per connection with the next body of `answers` and returns
@@ -341,7 +341,7 @@ fn scripted_service(listener: TcpListener, answers: Vec<String>) -> JoinHandle<V
             let (mut stream, _) = listener
                 .accept()
                 .await
-                .expect("the source under test dials this listener");
+                .expect("the ingestor under test dials this listener");
             requests.push(read_request(&mut stream).await);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/x-amz-json-1.0\r\nContent-Length: \
@@ -351,25 +351,25 @@ fn scripted_service(listener: TcpListener, answers: Vec<String>) -> JoinHandle<V
             stream
                 .write_all(response.as_bytes())
                 .await
-                .expect("the source under test waits for the answer");
+                .expect("the ingestor under test waits for the answer");
         }
         requests
     })
 }
 
 /// An ingestor instance whose queue URL names the stand-in on `listener`.
-async fn source_of(fixture: &Fixture, listener: &TcpListener) -> SqsQueueIngestor {
+async fn ingestor_of(fixture: &Fixture, listener: &TcpListener) -> SqsQueueIngestor {
     let port = listener
         .local_addr()
         .expect("a bound listener has an address")
         .port();
-    let mut source = open_source(
+    let mut ingestor = open_ingestor(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
     )
     .await;
-    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
-    source
+    ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+    ingestor
 }
 
 async fn loopback() -> TcpListener {
@@ -423,12 +423,12 @@ fn names_every_receipt_handle(request: &str, ids: std::ops::RangeInclusive<u64>)
 async fn a_read_asks_the_service_for_the_messages_its_batch_needs() {
     let fixture = Fixture::start().await;
     let listener = loopback().await;
-    let mut source = source_of(&fixture, &listener).await;
+    let mut ingestor = ingestor_of(&fixture, &listener).await;
     let answer =
         r#"{"Messages":[{"MessageId":"message-1","ReceiptHandle":"receipt-1","Body":"1"}]}"#;
     let service = scripted_service(listener, vec![answer.to_string()]);
 
-    let batch = source
+    let batch = ingestor
         .next_batch(request(7, None), &IngestorReadCancellation::new())
         .await
         .expect("a receive the service answers fails no read");
@@ -455,10 +455,10 @@ async fn a_read_asks_the_service_for_the_messages_its_batch_needs() {
 async fn acknowledging_deletes_a_batch_with_one_request() {
     let fixture = Fixture::start().await;
     let listener = loopback().await;
-    let mut source = source_of(&fixture, &listener).await;
+    let mut ingestor = ingestor_of(&fixture, &listener).await;
     let service = scripted_service(listener, vec![all_succeeded(3)]);
 
-    source
+    ingestor
         .acknowledge(&positions(1..=3))
         .await
         .expect("the service deleted every message");
@@ -480,10 +480,10 @@ async fn acknowledging_deletes_a_batch_with_one_request() {
 async fn acknowledging_more_than_ten_messages_sends_one_request_per_ten() {
     let fixture = Fixture::start().await;
     let listener = loopback().await;
-    let mut source = source_of(&fixture, &listener).await;
+    let mut ingestor = ingestor_of(&fixture, &listener).await;
     let service = scripted_service(listener, vec![all_succeeded(10), all_succeeded(2)]);
 
-    source
+    ingestor
         .acknowledge(&positions(1..=12))
         .await
         .expect("the service deleted every message");
@@ -510,10 +510,10 @@ fn targets(request: &str, action: &str) -> bool {
 async fn acknowledging_one_message_deletes_it_with_one_delete_message_request() {
     let fixture = Fixture::start().await;
     let listener = loopback().await;
-    let mut source = source_of(&fixture, &listener).await;
+    let mut ingestor = ingestor_of(&fixture, &listener).await;
     let service = scripted_service(listener, vec!["{}".to_string()]);
 
-    source
+    ingestor
         .acknowledge(&positions(1..=1))
         .await
         .expect("the service deleted the message");
@@ -534,10 +534,10 @@ async fn acknowledging_one_message_deletes_it_with_one_delete_message_request() 
 async fn a_message_left_alone_after_ten_takes_its_own_delete_message_request() {
     let fixture = Fixture::start().await;
     let listener = loopback().await;
-    let mut source = source_of(&fixture, &listener).await;
+    let mut ingestor = ingestor_of(&fixture, &listener).await;
     let service = scripted_service(listener, vec![all_succeeded(10), "{}".to_string()]);
 
-    source
+    ingestor
         .acknowledge(&positions(1..=11))
         .await
         .expect("the service deleted every message");
@@ -556,13 +556,13 @@ async fn a_message_left_alone_after_ten_takes_its_own_delete_message_request() {
 async fn a_deletion_the_service_refuses_fails_the_acknowledgement() {
     let fixture = Fixture::start().await;
     let listener = loopback().await;
-    let mut source = source_of(&fixture, &listener).await;
+    let mut ingestor = ingestor_of(&fixture, &listener).await;
     let service = scripted_service(
         listener,
         vec![first_failed(3, "ReceiptHandleIsInvalid", true)],
     );
 
-    let Err(report) = source.acknowledge(&positions(1..=3)).await else {
+    let Err(report) = ingestor.acknowledge(&positions(1..=3)).await else {
         panic!("a message the service did not delete is not acknowledged");
     };
 
@@ -586,19 +586,19 @@ async fn a_deletion_that_cannot_reach_the_service_fails_the_acknowledgement() {
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
     let port = endpoint.port();
-    let mut source = open_source(
+    let mut ingestor = open_ingestor(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
     )
     .await;
-    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+    ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
 
     for (acknowledged, request) in [
         (1..=1, "SQS DeleteMessage failed:"),
         (1..=2, "SQS DeleteMessageBatch failed:"),
     ] {
         nervix_primitives::task::consume_budget().await;
-        let Err(report) = source.acknowledge(&positions(acknowledged)).await else {
+        let Err(report) = ingestor.acknowledge(&positions(acknowledged)).await else {
             panic!("a refused connection deletes nothing");
         };
 
@@ -621,10 +621,10 @@ async fn a_deletion_that_cannot_reach_the_service_fails_the_acknowledgement() {
 async fn rejecting_makes_every_message_visible_again_at_once() {
     let fixture = Fixture::start().await;
     let listener = loopback().await;
-    let mut source = source_of(&fixture, &listener).await;
+    let mut ingestor = ingestor_of(&fixture, &listener).await;
     let service = scripted_service(listener, vec![all_succeeded(3)]);
 
-    source
+    ingestor
         .reject(&positions(1..=3))
         .await
         .expect("the service made every message visible");
@@ -651,10 +651,10 @@ async fn rejecting_makes_every_message_visible_again_at_once() {
 async fn a_rejected_message_no_longer_invisible_needs_nothing_more() {
     let fixture = Fixture::start().await;
     let listener = loopback().await;
-    let mut source = source_of(&fixture, &listener).await;
+    let mut ingestor = ingestor_of(&fixture, &listener).await;
     let service = scripted_service(listener, vec![first_failed(2, "MessageNotInflight", true)]);
 
-    source
+    ingestor
         .reject(&positions(1..=2))
         .await
         .expect("a message that is visible already needs no visibility change");
@@ -666,10 +666,10 @@ async fn a_rejected_message_no_longer_invisible_needs_nothing_more() {
 async fn a_visibility_change_the_service_fails_fails_the_rejection() {
     let fixture = Fixture::start().await;
     let listener = loopback().await;
-    let mut source = source_of(&fixture, &listener).await;
+    let mut ingestor = ingestor_of(&fixture, &listener).await;
     let service = scripted_service(listener, vec![first_failed(2, "InternalError", false)]);
 
-    let Err(report) = source.reject(&positions(1..=2)).await else {
+    let Err(report) = ingestor.reject(&positions(1..=2)).await else {
         panic!("a visibility change the service failed fails the rejection");
     };
 
@@ -692,19 +692,19 @@ async fn a_visibility_change_the_service_fails_fails_the_rejection() {
 async fn settling_no_messages_sends_no_request() {
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
-    // A source that never resumed has no queue URL, and an endpoint that refuses every connection
+    // An ingestor that never resumed has no queue URL, and an endpoint that refuses every connection
     // fails any request it would send.
-    let mut source = open_source(
+    let mut ingestor = open_ingestor(
         &client_config(&format!("http://127.0.0.1:{}", endpoint.port())),
         fixture.dns(),
     )
     .await;
 
-    source
+    ingestor
         .acknowledge(&[])
         .await
         .expect("acknowledging no messages deletes nothing");
-    source
+    ingestor
         .reject(&[])
         .await
         .expect("rejecting no messages changes no visibility");

@@ -35,7 +35,7 @@ connected to leader 'node-2'
 ```
 
 The console reports the leader each time its session connects, so the notice appears again when
-the session reconnects: after a lost connection, after a command whose outcome is not yet known, or
+the session reconnects: after a lost connection, after a reply that breaks the session contract, or
 after a leader change. A reconnect keeps the session's place: the console connects again where the
 redirect took it, selects its domain, attaches its clock, restores its subscription tabs and
 attaches its transaction again, and then sends its pending commands under their execution
@@ -62,9 +62,28 @@ The console is one screen with three regions:
 - the **execution graph** in the upper right
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
-The top bar carries the websocket connection state, the global **Create** menu, the **Backups**
-button, the domain lifecycle button, the selected clock state, and the theme picker. The clock panel below the domain
-selector shows the selected domain's clock in detail.
+The top bar carries the websocket connection state, the node panel, the global **Create** menu, the
+**Backups** button, the domain lifecycle button, the selected clock state, and the theme picker. The
+clock panel below the domain selector shows the selected domain's clock in detail.
+
+### Following cluster events
+
+The **Events** button beside the connection state counts the cluster events the console has
+received, and opens the node panel that lists them, newest first. They are the membership and
+leadership notices of the node the console is connected to: a node that joined, left or restarted
+as a new incarnation, the node's Raft transitions, and the membership operations it proposes while
+it leads. A membership event repeated within one session is shown once with its count, for example
+`node 'node-3' left ×2`. The panel keeps the events of earlier sessions after a reconnect, up to its
+newest 256 entries; the count on the button keeps every event received.
+
+```text
+node 'node-3' joined (incarnation 1793845627114630656)
+node 'node-3' left
+raft transition: state=Follower leader=node-2 term=3 last_log_index=41 last_applied=41
+```
+
+These events never enter the REPL transcript. Runtime and control-plane failures and committed
+cluster-parameter revisions still appear there as notice lines, beside the command outcomes.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.
@@ -143,8 +162,11 @@ branches. Schema fields are added in declaration order and can be moved or remov
 field selects its exact scalar type, then may wrap it in any sequence of variable vectors and
 fixed arrays; each fixed array needs a positive length. Optional and sensitive flags are separate
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
-mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; AVRO offers `boolean`,
-`int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
+mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; CBOR offers `integer`,
+`float`, `boolean`, `text`, `bytes`, and `array`, with native byte strings for `bytes`. AVRO offers
+the item types `boolean`, `int`, `long`, `float`, `double`, `string`, and `bytes`, and wraps the
+picked item type in one array per added layer, building `array<item>` the way an internal field
+builds vectors and fixed arrays; a layer can be removed again. Codec field encoding controls
 select `RFC3339` or `BASE64` for explicit text interchange, as described in
 [Schemas And Codecs](schemas-and-codecs.md#codecs).
 A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
@@ -152,7 +174,9 @@ share a name. The preview and submitted command come from the completed semantic
 canonical renderer, just as they do for the earlier forms.
 
 A branch form selects an internal key schema from a server-backed, searchable, paged list, then
-requires a TTL. It may set a positive maximum instance count with LRU eviction. The schema list
+requires a TTL. Its partition count starts at 1 and accepts a whole number from 1 through 65535; the
+preview omits `PARTITIONS 1` as `SHOW CREATE BRANCH` does. It may set a positive maximum instance
+count with LRU eviction. The schema list
 uses the draft's captured domain and the session's attached transaction prefix, so a schema staged
 earlier in the same transaction is selectable. Changing the captured domain keeps a previous
 selection visible but marks it invalid until it is selected again. An invalid branch key schema,
@@ -248,7 +272,7 @@ commands under the same session and domain.
 
 An ingestor form offers every connector and entity an ingestor reads through a transport:
 `HTTP REQUEST`, `HTTP ENDPOINT`, `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `NATS SUBJECT`,
-`RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
+`NATS STREAM`, `RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
 `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER`. Its client or endpoint is a
 typed choice limited to that pair: clients of its connector, or endpoints of the `TYPE` its head
 names. The preview writes the statement under that pair's head. The entity declaration supplies
@@ -471,8 +495,24 @@ follows leadership. When its outcome is not known yet, the console repeats it on
 after a wait that starts at 250 milliseconds and doubles to at most five seconds. The command keeps
 its position ahead of later held commands, while session messages continue to arrive. The selected
 domain, clock and relay tabs keep their existing attachments. A redirect or an ended connection
-triggers recovery; an uncertain reply alone leaves the connection open. The transaction id and
-status are replicated. If the WebSocket closes
+triggers recovery; an uncertain reply alone leaves the connection open. A reply whose outcome names
+another execution reference than its command's is a protocol violation: the console reports it with
+both references, takes nothing from that reply, neither its result nor its redirect, transaction or
+retry, and stops reading the connection. It reconnects as after a lost connection and sends the
+command again in its place under its own reference, so the leader answers with the command's own
+outcome; a Create form shows **Queued until reconnect** until then. The transaction id and
+status are replicated. A reply that cannot be decoded or reassembled also violates the session
+contract, and so does a readable reply of a kind that does not answer its request, such as a
+domain listing under a command's request identity: a request is answered only by its own outcome,
+a rejection or a cancellation. The console checks a reply's kind before it applies anything the
+reply carries, so it takes no listing, selection, subscription, clock attachment, transaction or
+redirect from a reply of another kind and never shows it as the command's failure. It reports why
+the reply broke the contract and stops reading that connection. Every command still waiting keeps
+its whole original request and its place in the issue order, including its reference, transaction
+position, preview and uncertain-outcome retry history. The next connection restores the session before repeating those commands; a visual Create
+waits for its own recovered outcome.
+
+If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
 commit remains pending through `COMMITTING` until its exact terminal result. A
@@ -666,9 +706,21 @@ message.
 
 A restore runs outside transactions, so the form refuses while the session holds one. Every attempt
 sends the same execution reference, statement, and archive: a lost connection or an unknown outcome
-streams the archive again, from its first byte, until the leader answers. If no answer arrives
-within about ten minutes, the dialog reports the restore's outcome as unknown and names its
-execution reference.
+streams the archive again, from its first byte, until the leader answers. After about ten minutes
+of retry pauses without learning the outcome, the dialog reports it as unknown and names its
+execution reference. An unreadable reply, or a reply naming another request or execution, stops
+that restore call and likewise reports **unknown** under the restore's original reference. It
+cannot establish that the restore was refused or that nothing changed; a foreign outcome is never
+shown as this restore's result.
+
+The leader admits a restore as soon as it holds the whole archive, so once an attempt has sent the
+whole archive without an answer the console can read, or the leader has answered that the outcome
+is not known yet, the restore may have run. If the restore then ends without its outcome, because
+the browser can no longer read the file, a reply cannot be read, the leader refuses a later
+stream, or the leader no longer holds the execution reference, the dialog reports the outcome as
+unknown under that reference, with what stopped it, and never as a refusal: a refusal of a later
+stream says nothing about the earlier one. A file the browser cannot read before any attempt has
+sent the whole archive changes nothing, and the dialog reports the restore as refused.
 
 The console never renders what an archive holds beyond the summary a backup reports and the report
 a restore returns.

@@ -2,7 +2,7 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** The source and emitter contracts: the client an ingestor or emitter may use, the
+//! - **Owns.** The ingestor and emitter contracts: the client an ingestor or emitter may use, the
 //!   publishing and mapping rules of each emitter, the headers each side supports, the timestamp
 //!   source an ingestor declares, and the hostnames and paths a listener claims.
 //! - **Depends on.** The connector Models and the schema rules.
@@ -244,7 +244,7 @@ fn validate_transport_delivery(
     Ok(())
 }
 
-/// A client source's ACK timeout and retry policy are positive durations, and its retry ceiling
+/// A client ingestor's ACK timeout and retry policy are positive durations, and its retry ceiling
 /// is at least its first backoff, so the plan and every producer read one valid policy.
 fn validate_client_ingest_mode(
     mode: &ClientIngestMode,
@@ -393,6 +393,9 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         EmitterEntity::Otel(connector) => {
             validate_otel_mapping_contract(domain, identifier, connector)?;
         }
+        EmitterEntity::Nats(nervix_models::NatsEmitter::Subject(_)) => {
+            validate_nats_reply_subject(domain, identifier, &emitter.envelope)?;
+        }
         EmitterEntity::Client(_)
         | EmitterEntity::Http(_)
         | EmitterEntity::Kafka(_)
@@ -400,7 +403,7 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         | EmitterEntity::RabbitMq(_)
         | EmitterEntity::Redis(_)
         | EmitterEntity::Mqtt(_)
-        | EmitterEntity::Nats(_)
+        | EmitterEntity::Nats(nervix_models::NatsEmitter::Stream(_))
         | EmitterEntity::ZeroMq(_)
         | EmitterEntity::Syslog(_)
         | EmitterEntity::Sentry(_)
@@ -412,6 +415,27 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
     }
 
     validate_emitter_value_keys(domain, identifier, emitter)?;
+    Ok(())
+}
+
+/// A literal reply subject is known before execution; computed subjects are validated by the
+/// connector when each record is handed over.
+fn validate_nats_reply_subject(
+    domain: &DomainName,
+    identifier: &ModelName,
+    envelope: &EmitterEnvelope,
+) -> Result<(), Report<RegistryError>> {
+    let Some(Expression::Literal(nervix_models::Literal::String(reply))) = &envelope.reply_to
+    else {
+        return Ok(());
+    };
+    nervix_models::NatsPublishSubjectName::try_from(reply.as_str()).map_err(|cause| {
+        Report::new(cause).change_context(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: NodeRef::new(ModelKind::Emitter, identifier.clone()),
+            issue: ConnectorDeclarationIssue::NatsReplySubject,
+        })
+    })?;
     Ok(())
 }
 

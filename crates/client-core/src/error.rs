@@ -15,7 +15,8 @@
 )]
 
 use nervix_client_wire::{
-    CancellationStage, ClientRequest, EmitterOpenRefusal, ReplyBody, RequestRejection,
+    CancellationStage, ClientRequest, ClientRequestKind, CommandDisposition, EmitterOpenRefusal,
+    ReplyBody, ReplyBodyKind, RequestRejection, RestoreUploadFailure,
 };
 use nervix_models::{ClientProducerRefusal, CommandExecutionReference, ResourceUploadIdentity};
 use thiserror::Error;
@@ -81,26 +82,32 @@ pub enum EventStreamKind {
 
 impl From<&ClientRequest> for RequestKind {
     fn from(request: &ClientRequest) -> Self {
+        Self::from(ClientRequestKind::from(request))
+    }
+}
+
+impl From<ClientRequestKind> for RequestKind {
+    fn from(request: ClientRequestKind) -> Self {
         match request {
-            ClientRequest::Command(_) => Self::Command,
-            ClientRequest::Suggest(_) => Self::Suggest,
-            ClientRequest::Choice(_) => Self::Choice,
-            ClientRequest::ListDomains => Self::ListDomains,
-            ClientRequest::SelectDomain(_) => Self::SelectDomain,
-            ClientRequest::AttachTransaction(_) => Self::AttachTransaction,
-            ClientRequest::InspectTransaction(_) => Self::InspectTransaction,
-            ClientRequest::Subscribe(_) => Self::Subscribe,
-            ClientRequest::Unsubscribe(_) => Self::Unsubscribe,
-            ClientRequest::Cancel(_) => Self::Cancel,
-            ClientRequest::AttachDomainClock(_) => Self::AttachDomainClock,
-            ClientRequest::DetachDomainClock(_) => Self::DetachDomainClock,
-            ClientRequest::OpenIngestor(_) => Self::OpenIngestor,
-            ClientRequest::SubmitBatch(_) => Self::SubmitBatch,
-            ClientRequest::CloseIngestor(_) => Self::CloseIngestor,
-            ClientRequest::OpenEmitter(_) => Self::OpenEmitter,
-            ClientRequest::ReadEmitterBatch(_) => Self::ReadEmitterBatch,
-            ClientRequest::SettleEmitterBatch(_) => Self::SettleEmitterBatch,
-            ClientRequest::CloseEmitter(_) => Self::CloseEmitter,
+            ClientRequestKind::Command => Self::Command,
+            ClientRequestKind::Suggest => Self::Suggest,
+            ClientRequestKind::Choice => Self::Choice,
+            ClientRequestKind::ListDomains => Self::ListDomains,
+            ClientRequestKind::SelectDomain => Self::SelectDomain,
+            ClientRequestKind::AttachTransaction => Self::AttachTransaction,
+            ClientRequestKind::InspectTransaction => Self::InspectTransaction,
+            ClientRequestKind::Subscribe => Self::Subscribe,
+            ClientRequestKind::Unsubscribe => Self::Unsubscribe,
+            ClientRequestKind::Cancel => Self::Cancel,
+            ClientRequestKind::AttachDomainClock => Self::AttachDomainClock,
+            ClientRequestKind::DetachDomainClock => Self::DetachDomainClock,
+            ClientRequestKind::OpenIngestor => Self::OpenIngestor,
+            ClientRequestKind::SubmitBatch => Self::SubmitBatch,
+            ClientRequestKind::CloseIngestor => Self::CloseIngestor,
+            ClientRequestKind::OpenEmitter => Self::OpenEmitter,
+            ClientRequestKind::ReadEmitterBatch => Self::ReadEmitterBatch,
+            ClientRequestKind::SettleEmitterBatch => Self::SettleEmitterBatch,
+            ClientRequestKind::CloseEmitter => Self::CloseEmitter,
         }
     }
 }
@@ -148,6 +155,13 @@ pub enum ClientError {
     RequestInterrupted { request: RequestKind },
     #[error("session retry deadline expired")]
     RetryDeadline,
+    /// The last server answer that still required repeating a command. It stays beneath the
+    /// uncertain command and above the retry deadline that ended its retry.
+    #[error("last unresolved command answer was {disposition:?}: {message}")]
+    LastUnresolvedAnswer {
+        disposition: CommandDisposition,
+        message: String,
+    },
     /// The command may have been admitted under `reference`, and its outcome did not arrive. The
     /// failure that left it unknown is beneath; running the same execution handle again recovers
     /// the outcome.
@@ -211,6 +225,14 @@ pub enum ClientError {
         expected: CommandExecutionReference,
         received: CommandExecutionReference,
     },
+    /// A reply named a request of the session and was of a kind that cannot answer it. The
+    /// session ended before anything applied the reply, and every request still waiting on it was
+    /// interrupted.
+    #[error("a {reply} reply cannot answer the {request} request")]
+    ReplyKindMismatch {
+        request: RequestKind,
+        reply: ReplyBodyKind,
+    },
     #[error("upload response identity '{received}' does not match request identity '{expected}'")]
     UploadIdentityMismatch {
         expected: ResourceUploadIdentity,
@@ -248,6 +270,12 @@ pub enum ClientError {
     EmptyRestoreArchive { path: std::path::PathBuf },
     #[error("restore request failed")]
     Restore(#[source] Box<tonic::Status>),
+    /// A later stream refusal cannot establish what an earlier uncertain restore did.
+    #[error("the restore stream was refused ({failure:?}): {message}")]
+    RestoreStreamRefused {
+        failure: RestoreUploadFailure,
+        message: String,
+    },
     /// The wire codec's report is beneath.
     #[error("the restore reply does not decode")]
     InvalidRestoreReply,
@@ -279,6 +307,8 @@ impl ClientError {
         match self {
             Self::RequestDeadline { .. }
             | Self::RequestInterrupted { .. }
+            | Self::ExecutionReferenceMismatch { .. }
+            | Self::ReplyKindMismatch { .. }
             | Self::ConnectServer(_)
             | Self::SessionOpenDeadline
             | Self::RetryDeadline
@@ -305,7 +335,9 @@ impl ClientError {
         match self {
             Self::SessionClosed
             | Self::RequestDeadline { .. }
-            | Self::RequestInterrupted { .. } => true,
+            | Self::RequestInterrupted { .. }
+            | Self::ExecutionReferenceMismatch { .. }
+            | Self::ReplyKindMismatch { .. } => true,
             Self::Transport(status) => matches!(
                 status.code(),
                 tonic::Code::Cancelled

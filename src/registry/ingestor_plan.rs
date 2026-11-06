@@ -3,8 +3,8 @@
 //! Layer: decisions.
 //!
 //! - **Owns.** Resolving an ingestor and the input it reads into one typed start plan, validating
-//!   its source name, source kind, client, codec and route identities together, and deciding a
-//!   client source's acknowledgement window, timeouts and endpoint contract.
+//!   its ingestor name, ingestor kind, client, codec and route identities together, and deciding a
+//!   client ingestor's acknowledgement window, timeouts and endpoint contract.
 //! - **Depends on.** Validated schedule Models, the entrypoint route planner and vocabulary
 //!   values.
 //! - **Must not know.** Tokio, locks, shared maps, connector I/O, node-local resources, or task
@@ -22,22 +22,22 @@ use std::{
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckWindow, ClientConfigEntry, ClientEndpointContract, ClientName, ClientProducerIngestor,
-    ClientProducerPolicy, ClientResourceMount, ClusterNodeName, CodecName, CreateClientWebsockets,
-    CreateIngestor, CreateSchema, DomainName, EndpointIngestMode, EndpointName, FlushPolicy,
-    GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestor,
-    IngestAcknowledgement, IngestQuiesceMode, IngestTimestampSource, IngestorEntity,
-    IngestorEntityKind, IngestorInput, IngestorName, KafkaIngestMode, KafkaIngestor,
-    KafkaOffsetMode, KafkaTopicIngestor, MessageErrorOperation, Model, ModelName, MqttIngestMode,
-    MqttIngestor, MqttTopicIngestor, NatsIngestor, NatsSubjectIngestor, PrometheusIngestor,
-    PulsarIngestMode, PulsarIngestor, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestor,
-    RabbitMqQueueIngestor, RedisIngestor, RedisPubSubIngestor, ResolvedBranching, ScheduledNode,
-    SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode, SqsIngestor, SqsQueueIngestor,
-    SyslogIngestor, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor,
-    parse_duration_text,
+    ClientProducerPolicy, ClientResourceMount, ClusterNodeName, CodecName, CreateClientNats,
+    CreateClientWebsockets, CreateIngestor, CreateSchema, DomainName, EndpointIngestMode,
+    EndpointName, FlushPolicy, GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor,
+    HttpRequestIngestor, IngestAcknowledgement, IngestQuiesceKind, IngestQuiesceMode,
+    IngestTimestampSource, IngestorEntity, IngestorEntityKind, IngestorInput, IngestorName,
+    KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, MessageErrorOperation,
+    Model, ModelName, MqttIngestMode, MqttIngestor, MqttTopicIngestor, NatsIngestor,
+    NatsStreamIngestor, NatsSubjectIngestor, PrometheusIngestor, PulsarIngestMode, PulsarIngestor,
+    PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor,
+    RedisIngestor, RedisPubSubIngestor, ResolvedBranching, ScheduledNode, SchemaField, SchemaName,
+    SignalingProtocolName, SqsIngestMode, SqsIngestor, SqsQueueIngestor, SyslogIngestor,
+    SyslogListenerIngestor, Unit, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -56,22 +56,24 @@ use crate::runtime_schema::CompiledSchema;
 /// and which quiesce modes it supports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeclaredIngestorInput {
-    input: IngestorInput,
+    entity: IngestorEntityKind,
+    quiesce: IngestQuiesceMode,
+    allowed_quiesce: Vec<IngestQuiesceKind>,
 }
 
 impl DeclaredIngestorInput {
     /// The entity kind of the input, which decides whether its messages carry headers and
     /// which metadata they expose to the ingestor's programs.
     pub(crate) fn entity_kind(&self) -> IngestorEntityKind {
-        self.input.entity_kind()
+        self.entity
     }
 
     pub(crate) fn quiesce_mode(&self) -> &IngestQuiesceMode {
-        self.input.quiesce()
+        &self.quiesce
     }
 
     pub(crate) fn supports_quiesce(&self, mode: &IngestQuiesceMode) -> bool {
-        self.input.supports_quiesce(mode)
+        self.allowed_quiesce.contains(&mode.kind())
     }
 }
 
@@ -80,6 +82,7 @@ impl DeclaredIngestorInput {
 pub(crate) struct IngestorSpec {
     pub(crate) domain: DomainName,
     pub(crate) name: IngestorName,
+    pub(crate) unit: Unit,
     /// Every output route in declared order, which is never empty.
     pub(crate) routes: Vec<PlannedEntryRoute>,
     pub(crate) timestamp_source: Option<IngestTimestampSource>,
@@ -104,7 +107,7 @@ pub(crate) struct IngestorClientSpec {
 }
 
 impl IngestorClientSpec {
-    /// The client a source reads through, once the client it resolved to is the one its statement
+    /// The client an ingestor reads through, once the client it resolved to is the one its statement
     /// names.
     fn resolved(
         ingestor: &IngestorName,
@@ -202,6 +205,11 @@ client_plan!(NatsSubjectIngestorStartPlan {
     queue_group: nervix_models::NatsQueueGroupName,
     instances: NonZeroU64,
     mode: nervix_models::NatsIngestMode,
+});
+client_plan!(NatsStreamIngestorStartPlan {
+    stream: nervix_models::NatsStreamName,
+    consumer: nervix_models::NatsConsumerName,
+    mode: nervix_models::NatsStreamIngestMode,
 });
 client_plan!(RabbitMqQueueIngestorStartPlan {
     queue: nervix_models::RabbitMqQueueName,
@@ -344,21 +352,21 @@ pub(crate) struct IngestorStartPlan {
 }
 
 /// The plan of what one ingestor reads. A transport's payloads are decoded by its codec; a client
-/// source's batches already carry its input schema, so it names none.
+/// ingestor's batches already carry its input schema, so it names none.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IngestorInputPlan {
     Transport(TransportInputPlan),
     Client(ClientIngestorStartPlan),
 }
 
-/// A transport source and the codec that decodes its payloads.
+/// A transport ingestor and the codec that decodes its payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TransportInputPlan {
     pub(crate) codec: CodecName,
     pub(crate) source: IngestorConnectorPlan,
 }
 
-/// A client source: the schema every submitted batch matches, the policy its producers submit
+/// A client ingestor: the schema every submitted batch matches, the policy its producers submit
 /// under, and the contract they attach to.
 #[derive(Debug, Clone)]
 pub(crate) struct ClientIngestorStartPlan {
@@ -393,8 +401,8 @@ impl PartialEq for ClientIngestorStartPlan {
     }
 }
 
-/// The plan of one ingestor's source, which the composition root maps to the connector that runs
-/// it.
+/// The plan of one ingestor's connector entity, mapped to its concrete implementation by the
+/// composition root.
 /// The topic entity planned for Kafka execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KafkaIngestorStartPlan {
@@ -425,10 +433,11 @@ pub(crate) enum MqttIngestorStartPlan {
     Topic(MqttTopicIngestorStartPlan),
 }
 
-/// The subject entity planned for Nats execution.
+/// The subject and stream entities planned for Nats execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NatsIngestorStartPlan {
     Subject(NatsSubjectIngestorStartPlan),
+    Stream(NatsStreamIngestorStartPlan),
 }
 
 /// The pull entity planned for ZeroMq execution.
@@ -487,10 +496,25 @@ pub(crate) enum IngestorConnectorPlan {
 }
 
 impl IngestorStartPlan {
+    pub(in crate::registry) fn for_unit(&self, unit: Unit, scheduled: &ScheduledNode) -> Self {
+        let mut plan = self.clone();
+        plan.ingestor.unit = unit;
+        if let IngestorInputPlan::Transport(transport) = &mut plan.input
+            && let IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(source)) =
+                &mut transport.source
+            && let KafkaOffsetPlan::Domain(offsets) = &mut source.offsets
+        {
+            offsets.primary_node = scheduled
+                .unit(unit)
+                .and_then(|placement| placement.primary_node.clone());
+        }
+        plan
+    }
+
     /// Whether replacing this input retires external state that outlives its execution.
     /// Routes and codecs do not identify the MQTT session, so changing them alone retains it.
-    /// A changed owned Pulsar source needs a resolved subscription comparison at composition;
-    /// an absent replacement removes the owned subscription after its source tasks stop.
+    /// A changed owned Pulsar ingestor needs a resolved subscription comparison at composition;
+    /// an absent replacement removes the owned subscription after its ingestor tasks stop.
     pub(crate) fn requires_entity_retirement(&self, replacement: Option<&Self>) -> bool {
         let IngestorInputPlan::Transport(input) = &self.input else {
             return false;
@@ -524,6 +548,7 @@ impl IngestorStartPlan {
             IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
             | IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(_))
             | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(_))
+            | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Stream(_))
             | IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(_))
             | IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(_))
             | IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(_))
@@ -537,19 +562,56 @@ impl IngestorStartPlan {
     }
 
     /// Decides the start plan of one scheduled ingestor from the node its input resolved to: the
-    /// client or endpoint a transport reads through, or the schema a client source's batches
+    /// client or endpoint a transport reads through, or the schema a client ingestor's batches
     /// carry.
     pub(in crate::registry) fn decide(
         domain: &DomainName,
         scheduled: &ScheduledNode,
+        unit: Unit,
         ingestor: &CreateIngestor,
         source_model: &Model,
         routes: &EntrypointRouteContext<'_>,
     ) -> Result<Self, Report<EntrypointPlanError>> {
+        let valid_units = match ingestor.input.instances() {
+            None => scheduled.units.len() == 1 && scheduled.units.contains_key(&Unit::SINGLE),
+            Some(nervix_models::IngestorInstances::Count(count)) => {
+                u64::try_from(scheduled.units.len()).ok() == Some(count.get())
+                    && (0..count.get()).all(|index| {
+                        scheduled.units.contains_key(
+                            &Unit::try_instance(index).assured(
+                                "the validated allocation layout bounds the instance index",
+                            ),
+                        )
+                    })
+            }
+            Some(nervix_models::IngestorInstances::PerPartition) => {
+                !scheduled.units.is_empty()
+                    && scheduled.units.len() <= usize::from(u16::MAX)
+                    && (0..scheduled.units.len()).all(|index| {
+                        scheduled.units.contains_key(
+                            &Unit::try_instance(
+                                u64::try_from(index).assured("an allocated unit count fits u64"),
+                            )
+                            .assured("the validated allocation layout bounds the instance index"),
+                        )
+                    })
+            }
+        };
+        if !valid_units || !scheduled.units.contains_key(&unit) {
+            return Err(Report::new(EntrypointPlanError::InvalidUnitDeclaration {
+                ingestor: ingestor.name.clone(),
+            }));
+        }
         let DecidedInput {
             plan: input,
             schema: input_schema,
-        } = IngestorInputPlan::decide(ingestor, source_model, scheduled, routes.activation())?;
+        } = IngestorInputPlan::decide(
+            ingestor,
+            source_model,
+            scheduled,
+            unit,
+            routes.activation(),
+        )?;
         let identifier = ModelName::from(&ingestor.name);
         let owner = EntrypointOwner::ingestor(&identifier, ingestor);
         let input_arrow_schema = input_schema.arrow_schema();
@@ -569,11 +631,23 @@ impl IngestorStartPlan {
         let ingestor = IngestorSpec {
             domain: domain.clone(),
             name: ingestor.name.clone(),
+            unit,
             routes,
             timestamp_source: ingestor.timestamp_source.clone(),
             filter_where,
             declared_input: DeclaredIngestorInput {
-                input: ingestor.input.clone(),
+                entity: ingestor.input.entity_kind(),
+                quiesce: ingestor.input.quiesce().clone(),
+                allowed_quiesce: [
+                    IngestQuiesceKind::Suspend,
+                    IngestQuiesceKind::Buffer,
+                    IngestQuiesceKind::Drop,
+                    IngestQuiesceKind::Reject,
+                    IngestQuiesceKind::EndpointBuffer,
+                ]
+                .into_iter()
+                .filter(|kind| ingestor.input.supports_quiesce_kind(*kind))
+                .collect(),
             },
             general_error_policy: ingestor.general_error_policy.clone(),
         };
@@ -581,7 +655,7 @@ impl IngestorStartPlan {
     }
 
     /// The acknowledgement a transport's delivery mode declares. A transport whose statement
-    /// declares no delivery mode acknowledges nothing. A client source acknowledges through its
+    /// declares no delivery mode acknowledges nothing. A client ingestor acknowledges through its
     /// own window and has no transport acknowledgement.
     pub(crate) fn transport_acknowledgement(&self) -> Option<IngestAcknowledgement<'_>> {
         let IngestorInputPlan::Transport(transport) = &self.input else {
@@ -598,6 +672,9 @@ impl IngestorStartPlan {
                 plan.mode.acknowledgement()
             }
             IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Stream(plan)) => {
                 plan.mode.acknowledgement()
             }
             IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(plan)) => {
@@ -659,6 +736,7 @@ impl IngestorInputPlan {
         ingestor: &CreateIngestor,
         source_model: &Model,
         scheduled: &ScheduledNode,
+        unit: Unit,
         activation: &DomainActivationPlan,
     ) -> Result<DecidedInput, Report<EntrypointPlanError>> {
         match &ingestor.input {
@@ -668,6 +746,7 @@ impl IngestorInputPlan {
                     &transport.source,
                     source_model,
                     scheduled,
+                    unit,
                 )?;
                 let Some(codec) = activation.codecs.get(&transport.codec) else {
                     return Err(Report::new(EntrypointPlanError::MissingCodec {
@@ -750,7 +829,7 @@ impl ClientIngestorStartPlan {
 }
 
 impl ClientIngestorStartPlan {
-    /// One policy duration of a client source. Validation admitted only positive durations, so a
+    /// One policy duration of a client ingestor. Validation admitted only positive durations, so a
     /// value that does not read as one here is a model the registry did not validate.
     fn duration(
         ingestor: &IngestorName,
@@ -804,7 +883,7 @@ fn client_endpoint_contract(
             .get(&route.relay)
             .map(|relay| &relay.branching);
         match branching {
-            Some(ResolvedBranching::Branched { branch, schema }) => {
+            Some(ResolvedBranching::Branched { branch, schema, .. }) => {
                 add(branch.as_str());
                 add(&schema
                     .to_canonical_plexus()
@@ -816,6 +895,56 @@ fn client_endpoint_contract(
     Ok(ClientEndpointContract::from_digest(
         *hasher.finalize().as_bytes(),
     ))
+}
+
+impl NatsIngestorStartPlan {
+    /// The declared NATS entity's plan, resolved through the NATS client `client`.
+    fn decide(
+        name: &IngestorName,
+        source: &NatsIngestor,
+        client: &CreateClientNats,
+        instance_count: NonZeroU64,
+    ) -> Result<Self, Report<EntrypointPlanError>> {
+        match source {
+            NatsIngestor::Subject(NatsSubjectIngestor {
+                client: expected,
+                subject,
+                queue_group,
+                mode,
+                ..
+            }) => Ok(Self::Subject(NatsSubjectIngestorStartPlan {
+                client: IngestorClientSpec::resolved(
+                    name,
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+                subject: subject.clone(),
+                queue_group: queue_group.clone(),
+                instances: instance_count,
+                mode: mode.clone(),
+            })),
+            NatsIngestor::Stream(NatsStreamIngestor {
+                client: expected,
+                stream,
+                consumer,
+                mode,
+                ..
+            }) => Ok(Self::Stream(NatsStreamIngestorStartPlan {
+                client: IngestorClientSpec::resolved(
+                    name,
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+                stream: stream.clone(),
+                consumer: consumer.clone(),
+                mode: mode.clone(),
+            })),
+        }
+    }
 }
 
 impl WebsocketsConnectionIngestorStartPlan {
@@ -848,7 +977,10 @@ impl IngestorConnectorPlan {
         source: &IngestorEntity,
         source_model: &Model,
         scheduled: &ScheduledNode,
+        unit: Unit,
     ) -> Result<Self, Report<EntrypointPlanError>> {
+        let instance_count = NonZeroU64::new(scheduled.units.len().arch_into())
+            .assured("a scheduled ingestor has at least one unit");
         match (source, source_model) {
             (
                 IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
@@ -881,7 +1013,6 @@ impl IngestorConnectorPlan {
                     client: expected,
                     topic,
                     offset_mode,
-                    instances,
                     mode,
                     ..
                 })),
@@ -889,7 +1020,9 @@ impl IngestorConnectorPlan {
             ) => {
                 let offsets = KafkaOffsetPlan::decide(
                     offset_mode,
-                    scheduled.single_unit().primary_node.as_ref(),
+                    scheduled
+                        .unit(unit)
+                        .and_then(|unit| unit.primary_node.as_ref()),
                 );
                 Ok(Self::Kafka(KafkaIngestorStartPlan::Topic(
                     KafkaTopicIngestorStartPlan {
@@ -902,7 +1035,7 @@ impl IngestorConnectorPlan {
                         )?,
                         topic: topic.clone(),
                         offsets,
-                        instances: *instances,
+                        instances: instance_count,
                         mode: mode.clone(),
                     },
                 )))
@@ -912,7 +1045,6 @@ impl IngestorConnectorPlan {
                     client: expected,
                     topic,
                     subscription,
-                    instances,
                     mode,
                     ..
                 })),
@@ -928,7 +1060,7 @@ impl IngestorConnectorPlan {
                     )?,
                     topic: topic.clone(),
                     subscription: subscription.clone(),
-                    instances: *instances,
+                    instances: instance_count,
                     mode: mode.clone(),
                 },
             ))),
@@ -936,7 +1068,6 @@ impl IngestorConnectorPlan {
                 IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                     client: expected,
                     topic,
-                    instances,
                     session,
                     qos,
                     mode,
@@ -953,42 +1084,19 @@ impl IngestorConnectorPlan {
                         &resolved.config,
                     )?,
                     topic: topic.clone(),
-                    instances: *instances,
+                    instances: instance_count,
                     session: *session,
                     qos: *qos,
                     mode: mode.clone(),
                 },
             ))),
-            (
-                IngestorEntity::Nats(NatsIngestor::Subject(NatsSubjectIngestor {
-                    client: expected,
-                    subject,
-                    queue_group,
-                    instances,
-                    mode,
-                    ..
-                })),
-                Model::ClientNats(resolved),
-            ) => Ok(Self::Nats(NatsIngestorStartPlan::Subject(
-                NatsSubjectIngestorStartPlan {
-                    client: IngestorClientSpec::resolved(
-                        name,
-                        expected,
-                        &resolved.name,
-                        resolved.mount.as_ref(),
-                        &resolved.config,
-                    )?,
-                    subject: subject.clone(),
-                    queue_group: queue_group.clone(),
-                    instances: *instances,
-                    mode: mode.clone(),
-                },
-            ))),
+            (IngestorEntity::Nats(source), Model::ClientNats(resolved)) => Ok(Self::Nats(
+                NatsIngestorStartPlan::decide(name, source, resolved, instance_count)?,
+            )),
             (
                 IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                     client: expected,
                     queue,
-                    instances,
                     mode,
                     ..
                 })),
@@ -1003,7 +1111,7 @@ impl IngestorConnectorPlan {
                         &resolved.config,
                     )?,
                     queue: queue.clone(),
-                    instances: *instances,
+                    instances: instance_count,
                     mode: mode.clone(),
                 },
             ))),
@@ -1068,7 +1176,6 @@ impl IngestorConnectorPlan {
                 IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor {
                     client: expected,
                     queue,
-                    instances,
                     mode,
                     ..
                 })),
@@ -1083,7 +1190,7 @@ impl IngestorConnectorPlan {
                         &resolved.config,
                     )?,
                     queue: queue.clone(),
-                    instances: *instances,
+                    instances: instance_count,
                     mode: mode.clone(),
                 },
             ))),
@@ -1152,7 +1259,6 @@ impl IngestorConnectorPlan {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
     use nervix_models::{
         ClientPoolBounds, CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
         CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
@@ -1196,7 +1302,7 @@ mod tests {
     }
 
     /// The domain one ingestor reads from `source_model` in: its schema, codec, relay and the
-    /// VHOST an endpoint source publishes on.
+    /// VHOST an endpoint ingestor publishes on.
     fn domain_models(source: IngestorEntity, source_model: Model) -> Vec<Model> {
         vec![
             schema("payload"),
@@ -1211,7 +1317,8 @@ mod tests {
 
     fn start_plan(plans: &EntrypointPlans) -> &IngestorStartPlan {
         plans
-            .ingestor(&named::<IngestorName>("source"))
+            .ingestors()
+            .find(|plan| plan.ingestor.name == named::<IngestorName>("source"))
             .assured("the fixture schedules the ingestor named source")
     }
 
@@ -1257,7 +1364,7 @@ mod tests {
         }
     }
 
-    /// One source statement, the model it resolves to, and the source plan and header access they
+    /// One ingestor statement, the model it resolves to, and the ingestor plan and header access they
     /// decide.
     struct IngestorCase {
         source: IngestorEntity,
@@ -1304,7 +1411,7 @@ mod tests {
                     group: named("nervix"),
                     start_at: nervix_models::IngestStartPosition::Earliest,
                 },
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: KafkaIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
@@ -1335,7 +1442,7 @@ mod tests {
                 client: named("upstream"),
                 topic: named("events"),
                 subscription: pulsar_subscription(),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: PulsarIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
@@ -1363,7 +1470,7 @@ mod tests {
                 client: named("upstream"),
                 topic: nervix_models::MqttTopicFilter::parse("events/#")
                     .expect("valid topic filter"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 session: MqttSession::Clean,
                 qos: MqttQos::Qos0,
                 mode: MqttIngestMode::NoAck,
@@ -1395,7 +1502,7 @@ mod tests {
                 client: named("upstream"),
                 subject: named("events"),
                 queue_group: named("nervix"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: nervix_models::NatsIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             })),
@@ -1429,7 +1536,7 @@ mod tests {
             source: IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                 client: named("upstream"),
                 queue: named("events"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: rabbitmq_mode(),
                 quiesce: IngestQuiesceMode::Suspend,
             })),
@@ -1538,7 +1645,7 @@ mod tests {
             source: IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor {
                 client: named("upstream"),
                 queue: named("events"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: sqs_mode(),
                 quiesce: IngestQuiesceMode::Suspend,
             })),
@@ -1775,7 +1882,7 @@ mod tests {
             client: named("upstream"),
             topic: named("events"),
             offset_mode: KafkaOffsetMode::Domain,
-            instances: nonzero!(2u64),
+            instances: nervix_models::IngestorInstances::Count(nonzero!(2u64)),
             mode: KafkaIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
         }));
@@ -1787,7 +1894,9 @@ mod tests {
                 named::<ModelName>("source"),
             ))
             .assured("the fixture schedules the ingestor")
-            .single_unit_mut()
+            .units
+            .get_mut(&Unit::FIRST_INSTANCE)
+            .assured("the first declared instance exists")
             .primary_node = Some(named("node-a"));
         let activation =
             crate::registry::DomainActivationPlan::from_scheduled_nodes(&domain, &nodes)
@@ -1845,7 +1954,7 @@ mod tests {
         assert!(owned.requires_entity_retirement(None));
         assert!(!owned.requires_entity_retirement(Some(owned)));
 
-        // Codec and route changes do not change the source that reads the subscription.
+        // Codec and route changes do not change the ingestor that reads the subscription.
         let mut replacement = owned.clone();
         let mut input = transport_plan(owned).clone();
         input.codec = named("alternate_json");
@@ -1866,7 +1975,7 @@ mod tests {
         assert!(latest.requires_entity_retirement(None));
         assert!(!latest.requires_entity_retirement(Some(&latest)));
 
-        // Changed sources require the composition root to compare their resolved subscriptions.
+        // Changed ingestors require the composition root to compare their resolved subscriptions.
         let mut input = transport_plan(owned).clone();
         let IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) =
             &mut input.source
@@ -1947,6 +2056,7 @@ mod tests {
                 ingestor_model(case.source.clone()),
                 nervix_models::SchemaFingerprint::from_digest([1; 32]),
             ),
+            Unit::SINGLE,
         )
         .expect_err("a differently named source must not be planned");
 
@@ -2065,7 +2175,7 @@ mod tests {
     #[test]
     fn rejects_a_resolved_source_of_another_kind() {
         let mut models = domain_models(http_case().source, http_case().source_model);
-        // The HTTP source names the client `upstream`; schedule a Kafka client under that name.
+        // The HTTP ingestor names the client `upstream`; schedule a Kafka client under that name.
         models.retain(|model| !matches!(model, Model::ClientHttp(_)));
         models.push(kafka_case().source_model);
 

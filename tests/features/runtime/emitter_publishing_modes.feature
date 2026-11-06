@@ -137,9 +137,9 @@ Feature: Emitter publishing modes
           MODE NO ACK RETRY POLICY BACKOFF 110ms MAX 11s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE NATS SUBJECT EMITTER nats_jetstream FROM outgoing
-        TO nats_main SUBJECT 'nats_jetstream'
-          MODE JETSTREAM ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
+      CREATE NATS STREAM EMITTER nats_jetstream FROM outgoing
+        TO nats_main STREAM 'nats_jetstream' SUBJECT 'nats_jetstream'
+          MODE ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -311,7 +311,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE JETSTREAM ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
+      MODE ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -675,7 +675,7 @@ Feature: Emitter publishing modes
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge http-{{test_id}}-set-mode-timeout.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED

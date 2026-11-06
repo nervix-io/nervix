@@ -74,11 +74,15 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 | `LeadershipObserved` | Which node leads, first on every session and again on every change |
 | `DomainsObserved` | The domain list, second on every session and again on every change |
 | `DomainSnapshotObserved`, `ClusterObserved` | The selected domain's live graph and entities, and the cluster summary, after `SelectDomainRequest` |
-| `ServerNotice` | Text for display at `Info`, `Warning`, or `Error` |
+| `ServerNotice` | Text for display at `Info`, `Warning`, or `Error`, of one kind: `Membership`, `Leadership`, `ClusterParameters`, `Runtime`, or `ControlPlane` |
 | `SubscriptionRows`, `SubscriptionDeliveryLost`, `SubscriptionRowsSkipped`, `SubscriptionEnded` | Frames of one subscription generation |
 | `DomainClockObserved`, `DomainClockTicked`, `DomainClockAttachmentEnded` | State, accepted tick progress, and end frames of one domain clock attachment |
 | `ProducerAdmissionChanged`, `ProducerEnded` | The admission state and the end of one producer |
 | `SessionEnding` | The last frame of a session the server ends |
+
+A client that presents notices MUST route each by its `kind`, as [What A Session Is
+Told](./client-session-protocol.md#what-a-session-is-told) defines the kinds, and MUST NOT derive
+meaning from a notice's text, which is for display only.
 
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
 the download of a backup's archive; see [Backup Downloads](#backup-downloads), and a restore with its
@@ -154,7 +158,8 @@ archive; see [Restore Streams](#restore-streams).
   `Authorization: Basic` header or in the `auth` query parameter, percent-encoded, because the
   server decodes the query as a form and would read a raw `+` as a space.
 - **T-5.** On `UNAUTHENTICATED`, or `401` for the WebSocket, a client MUST NOT retry with the same
-  credentials automatically. The server paces a user's attempts after a failure. `UNAVAILABLE`, or
+  credentials automatically. The server paces a presented name's attempts after a failure even
+  when that name identifies no user; a delay does not identify an existing user. `UNAVAILABLE`, or
   `503` for the WebSocket, means the node could not verify the credentials now and judged nothing,
   so a client MAY retry with the same credentials after backing off, as it does after any other
   transport failure.
@@ -212,6 +217,14 @@ archive; see [Restore Streams](#restore-streams).
 - **C-10.** A client that stops waiting without sending `CancelRequest` MUST treat the request
   exactly as a cancellation after admission: the effect may happen, and a command's outcome is
   recovered by its execution reference.
+- **C-11.** A reply that names a request still waiting for its reply MUST be of a kind that answers
+  that request: its own outcome, `RequestRejected`, or `RequestCancelled` for any request but
+  `CancelRequest` and `SubmitBatchRequest`, as
+  [Which Replies Answer A Request](./client-session-protocol.md#which-replies-answer-a-request)
+  lists. A client MUST check the kind before it applies anything the reply carries, and MUST treat
+  a reply of any other kind as a protocol violation under F-8. It MUST NOT adopt the subscription,
+  clock attachment, producer, transaction or redirect such a reply carries. A reply whose request
+  no longer waits is routed under C-3, whatever its kind.
 
 ## Structured Choice Lookups
 
@@ -273,6 +286,10 @@ use.
   name.
 
 ## Commands And Execution Identity
+
+An instance placement identity carries an unsigned 64-bit index in the `PlacementUnit` union;
+partition indices remain unsigned 32-bit values. Client encoders and decoders preserve the full
+instance index when reporting transaction impact and execution placement.
 
 Treat client CONFIG validation refusals as ordinary failed commands under the rules below.
 Show their client/key diagnostic without retrying invalid input automatically. A refused queued
@@ -352,7 +369,9 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   `LeadershipObserved`, and try them, and its configured seeds, when its session is lost.
 - **D-4.** A client MUST bound every call with a deadline of its own. When a deadline passes before
   a command's outcome is known, the client MUST report the command as uncertain, naming its
-  reference, and never as failed or completed.
+  reference, and never as failed or completed. The Rust client keeps the last nonterminal answer's
+  typed disposition and message in the report chain when one arrived before the deadline; that
+  answer remains diagnostic evidence rather than a completed outcome.
 - **D-5.** After it loses a session, a client that restores session state MUST, in this order: open
   a new session; attach the domain clocks it follows; open the subscriptions it keeps again, each as
   a new generation, reporting the gap; attach its transaction; and only then repeat outstanding
@@ -386,14 +405,20 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   preview even when its queued Models still fit the limits. A client MUST NOT replace that
   reviewed identity from an informational parameter-change notice.
 - **X-5.** While a commit is `COMMITTING`, a client MUST keep waiting for the commit's own outcome,
-  repeating the commit under its reference after any interruption.
+  repeating the commit under its reference after any interruption, including an
+  `OutcomeUnknown(StillApplying)` reply from a failed execution attempt. A later `COMMITTED` or
+  `FAILED` transaction status does not stand in for the outcome under that reference.
 - **X-6.** On `TransactionDetached`, a client MUST send `AttachTransactionRequest` for the
   transaction, adopt the domain of the attached transaction, and repeat the command under the same
   reference and position. `TransactionAlreadyFinished` reports the final status and aggregate
   outcome of a transaction that ended; the client MUST NOT treat it as the outcome of an outstanding
   append or commit. After a finished or failed attach, the client MUST repeat each outstanding
   command under its own reference and original position to obtain its recorded outcome or a
-  definitive failure for a command that was never admitted.
+  definitive failure for a command that was never admitted. If the session still held a transaction
+  whose tombstone has been removed, a COMMIT, REVERT, or attach reporting that transaction unknown
+  releases the server binding. The client MAY then begin a new transaction in that session. It MUST
+  keep recovering an earlier uncertain command under that command's original reference; an unknown
+  result for a new request is not proof of the earlier command's outcome.
 - **X-7.** Ending a session cleanly, by half-closing the gRPC request stream or sending a WebSocket
   close with no request in flight, reverts the open transaction the session holds. A client MUST end
   a session that way only when it intends that revert. An append or commit whose `OutcomeUnknown`
@@ -436,8 +461,11 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   on the next session, unless the server ended it (S-4), and report the time between as a gap. If
   its user deletes a subscription while an opening or reopening is in flight, a late successful
   reply MUST be followed by an unsubscribe before the name is used again. When the new session
-  refuses the reopening, or leaves it unanswered, the client MUST report the refusal and SHOULD send
+  refuses the reopening, the client MUST report the refusal and SHOULD send
   it again on that session after a wait that grows with each refusal, rather than at a fixed rate. A
+  reopening left unanswered past the request timeout ends that session. Its reader MUST be woken
+  even when the transport remains connected, and MUST open the next session to restore the desired
+  subscription; the unanswered request is not a server refusal to retry on the ended session. A
   client MUST complete the deletion of a subscription no open session holds, because the session
   that held it ended or the current session refused to open it again, without sending
   `UnsubscribeRequest`, and MUST release its name; a deletion whose session ends before it is
@@ -748,13 +776,20 @@ payload, infinity, and nullable and sensitive branch key fields.
   known. Every attempt MUST send all three unchanged, and the digest MUST be computed over exactly
   the bytes the client streams.
 - **W-3.** A client MUST check that the reply's `request_id`, when present, equals the start's, and
-  that a `CommandOutcome` names the execution reference it sent.
+  that a `CommandOutcome` names the execution reference it sent. A reply that fails frame
+  verification, exceeds the transport's receive bound, cannot be decoded or fails either identity
+  check is a protocol violation under F-8 and D-6. Only the session selected for that attempt ends;
+  a session installed while the reply was outstanding MUST remain usable. The client MUST retain
+  the rejection's typed cause beneath uncertainty under its own execution reference or recover
+  the original execution under E-3. A client MAY stop the call and report that uncertainty; the
+  reply cannot establish that the restore was refused, and the client MUST NOT apply another
+  execution's outcome to this restore.
 - **W-4.** A client MUST act on the reply:
   - `RestoreUploadFailed` with `InvalidStream`, `InvalidStatement`, `SizeMismatch`, or
-    `DigestMismatch` changed nothing, and the client MUST NOT send the same stream again
-    unchanged.
-  - `RestoreUploadFailed` with `QuotaExceeded` or `StagingFailed` changed nothing, and the client
-    MAY send the same stream again later.
+    `DigestMismatch` changed nothing on that stream (W-5 says what it settles after an earlier
+    attempt), and the client MUST NOT send the same stream again unchanged.
+  - `RestoreUploadFailed` with `QuotaExceeded` or `StagingFailed` changed nothing on that stream,
+    and the client MAY send the same stream again later.
   - A `CommandOutcome` is the restore's outcome, decided from its disposition as E-6 to E-8 decide
     a command's: `LeaderRedirect` means the client streams the restore again, under the same
     reference, to the leader; `OutcomeUnknown` means it streams it again after a backoff; and
@@ -766,10 +801,19 @@ payload, infinity, and nullable and sensitive branch key fields.
     `DomainInfo` from domain lists and domain-change events, and MUST reject missing required
     generation or status fields rather than supply a default.
 - **W-5.** When a call fails in transport, or a frame or the reply does not arrive in time, the
-  restore's outcome is uncertain. A client MUST stream the whole archive again, from its first
-  byte, under the same reference to learn it, and MUST NOT create a new reference for it. It MUST
-  NOT bound a call by the command's request deadline, and SHOULD bound each frame, and the wait
-  for the reply once the last frame was sent, instead.
+  restore's outcome is uncertain. The same holds when the reply fails W-3 validation; an invalid
+  reply cannot establish that the restore changed nothing. A client MUST stream the whole archive
+  again, from its first byte, under the same reference to learn it, and MUST NOT create a new
+  reference for it. It MUST NOT bound a call by the command's request deadline, and SHOULD bound
+  each frame, and the wait for the reply once the last frame was sent, instead. Once an attempt has
+  sent the whole archive without learning the outcome, or a reply has answered `OutcomeUnknown`,
+  only a `CommandOutcome` that gives the restore's outcome under its reference settles it. A later
+  attempt the client cannot complete, such as one whose archive it can no longer read, a reply it
+  cannot accept, a `RestoreUploadFailed` of a later stream, and `ExecutionReferenceExpired` settle
+  nothing: a client that stops then MUST report the outcome as uncertain under the reference, never
+  that the restore changed nothing. A leader refuses some streams before it looks the restore up,
+  and stages the archive again for a restore it finds admitted without it, so a refusal of a later
+  stream says nothing about an earlier one.
 
 ## Using The Shared Binding
 
@@ -1007,22 +1051,24 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | Rules | Executable evidence |
 | --- | --- |
 | F-1 to F-7 | `the_checked_in_corpus_is_what_the_encoder_writes_and_reads`, the frame and transfer tests of `nervix-client-wire` such as `a_union_discriminant_without_its_member_is_refused`, `parts_must_belong_to_the_transfer_and_arrive_in_order`, and `corrupting_a_row_batch_never_panics`; the scenario `A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote` for Go, Node.js, and Bun |
-| F-8, D-6 | `a_frame_the_contract_does_not_describe_ends_the_exchange` and `a_session_ending_frame_closes_the_waiters_of_its_exchange` in `nervix-client-core`; `A native session is told its node is shutting down before its call ends` in `session_protocol.feature` |
-| T-1 to T-6 | `Authentication, framing and protocol failures end a native session with their status` and `The console WebSocket closes a connection that sends something other than a session frame` in `session_protocol.feature`; `non_frame_messages_end_the_connection_with_a_close_code` |
+| F-8, D-6 | `a_frame_the_contract_does_not_describe_ends_the_exchange` and `a_session_ending_frame_closes_the_waiters_of_its_exchange` and `a_foreign_command_reply_interrupts_every_waiter_and_leaves_its_own_reference_uncertain` and `a_command_answered_by_a_reply_of_another_kind_interrupts_every_waiter_and_leaves_its_own_reference_uncertain` in `nervix-client-core`; `A native session is told its node is shutting down before its call ends` in `session_protocol.feature` |
+| F-3, F-4, F-7, F-8, D-6, E-3 (console) | `an_unreadable_reply_preserves_the_whole_command_and_issue_order`, `an_unreadable_split_reply_preserves_the_whole_command_and_issue_order`, `an_unreadable_joined_reply_keeps_its_command`, `an_unreadable_visual_create_keeps_waiting_for_its_own_outcome` and `an_unreadable_split_visual_create_keeps_waiting_for_its_own_outcome` in `nervix-web-console`; `An unreadable REPL reply interrupts the session and recovers its command once` and `An unreadable visual Create reply interrupts the session and recovers its command once` in `unreadable_replies.feature`, each for decoder refusal and split-transfer failure on one and three nodes |
+| T-1 to T-6 | `Authentication, framing and protocol failures end a native session with their status` and `The console WebSocket closes a connection that sends something other than a session frame` in `session_protocol.feature`; `Repeated refused credentials are paced for <username> on <cluster_size> nodes` in `client_traffic.feature`; `non_frame_messages_end_the_connection_with_a_close_code` |
 | T-3a | Every scenario of `backup_restore.feature` in the web console suite; `a_console_download_answers_its_request_and_closes_normally`, `a_console_restore_is_answered_once_its_declared_bytes_arrived`, `a_console_restore_whose_client_leaves_early_is_not_answered`, `a_second_request_on_a_console_download_breaks_the_call`, `a_console_download_stops_at_its_client_close_while_frames_remain`, and the shutdown cases in `nervix-server`; `each_console_websocket_refuses_the_frames_of_another_call` in `nervix-client-wire` |
 | T-7 | `Web console opened on a follower connects to the leader` and `Web console reconnects after leader switchover` in `connection_status.feature` |
 | T-9 | `Graceful shutdown cancels an accepted resource upload <progress>` in `shutdown_deadline.feature`; `a_call_its_stopping_node_ended_is_sent_again_under_its_identity` in `nervix-client-core` |
 | C-1 to C-7 | `request_identities_start_at_one_and_are_never_reused`, `response_reordering_cannot_take_another_requests_waiter`, `a_reply_no_request_waits_for_is_dropped`, `saturated_event_consumer_cannot_block_a_command_reply`, and `replies_reach_their_requests_in_whatever_order_they_arrive` in `nervix-client-core`; `untracked_domain_push_cannot_discard_a_pending_websocket_request`, `every_control_waits_for_a_place_in_the_session_request_window`, `superseding_a_lookup_does_not_release_its_server_request_place`, `a_waiting_transaction_attach_precedes_held_commands_and_releases_them`, and `ordered_requests_beyond_the_in_flight_limit_wait_in_order_for_earlier_replies` in the console; `Web console refuses a command past its outstanding requests and recovers once they complete` and `Web console completes its latest input after a full command request window drains` in `plexus_repl.feature` |
 | C-8 | `A malformed request is refused with a typed rejection and the session keeps serving` in `session_protocol.feature`; `a_rejected_request_surfaces_as_a_typed_error` |
 | C-9, C-10 | `A long command leaves the session responsive and a waiter cancelled before admission admits nothing` and `Cancelling a durably admitted command ends only the wait for it` in `session_protocol.feature`; `Ctrl-C cancels a CLI command the leader has not admitted`, `A CLI command cancelled after admission is uncertain until its execution reference recovers it` and `The CLI REPL survives a cancelled and an uncertain command, and running the uncertain one again recovers it` in `cli_session.feature`; `cancelling_a_command_releases_its_pending_reply`, `a_command_cancelled_before_admission_fails_as_cancelled_with_no_effect`, `a_command_cancelled_after_admission_is_uncertain_under_its_reference`, `a_command_that_finished_before_its_cancellation_returns_its_outcome`, `a_call_cancelled_between_attempts_sends_nothing_more` and `a_cancellation_the_ended_session_cannot_send_leaves_the_command_uncertain` in `nervix-client-core` |
+| C-11 | `a_request_is_answered_by_its_outcome_a_rejection_or_a_cancellation_that_can_reach_it` in `nervix-client-wire`; `a_command_answered_by_a_reply_of_another_kind_interrupts_every_waiter_and_leaves_its_own_reference_uncertain`, `a_read_answered_by_a_command_outcome_is_interrupted_without_adopting_it`, `a_reply_of_another_kind_ends_the_exchange_before_the_reader_follows_it`, `a_reply_no_request_waits_for_is_still_followed_whatever_its_kind` and `a_rejection_answers_any_request_and_a_cancellation_only_one_it_can_reach` in `nervix-client-core`; `a_reply_answers_a_console_request_only_when_the_contract_says_its_kind_does`, `a_reply_of_another_kind_preserves_the_whole_command_and_issue_order`, `a_visual_create_answered_with_a_reply_of_another_kind_keeps_waiting_for_its_own_outcome` and `a_reply_of_another_kind_to_a_superseded_lookup_is_discarded_without_ending_the_session` in `nervix-web-console`; `A native command recovers its own execution after a reply of another kind on <cluster_size> nodes` in `client_wire_failures.feature`, `The CLI recovers its own execution after a reply of another kind on <cluster_size> nodes` in `cli_session.feature`, and `A REPL command answered with a reply of another kind recovers its own execution on <cluster_size> nodes` and `A visual Create answered with a reply of another kind recovers its own execution on <cluster_size> nodes` in the web console's `reply_kind.feature` |
 | Q-1, Q-2 | `configured_choices` unit tests for exact wire-schema, resource, version, VHOST, signaling, and dependency choices; `typed_choices_and_lookup_states_round_trip` in `nervix-client-wire`; `A resource-backed codec selects a completed version and file explicitly` and `A codec can choose a wire schema staged earlier in its transaction` in `visual_create_codec.feature`; `WebSocket client and endpoint select an existing signaling protocol` in `visual_create_client_endpoint.feature`; Go and Node.js corpus probes in `client_conformance.feature` |
 | L-1 to L-3 | `use_domain_is_served_by_the_client`, `list_domains_is_served_from_a_domain_list_request`, `execute_rejects_mixed_client_local_multi_statement_request`, `execute_rejects_client_local_command_during_transaction`, and `a_create_subscription_statement_is_sent_as_a_subscribe_request`; `Implicit multi-command requests are rejected` in `plexus_transactions.feature` |
-| E-1 to E-5 | In `client_wire_failures.feature`: `A command lost after durable admission is recovered by its request identity`, `A reclaimed command identity stays expired after a durable restart`, `A race across leaders recovers a typed execution reference conflict`, `A command identity outside its retry window starts no effect`, `A full command history refuses new identities and keeps every retained result`, `Concurrent exact BEGIN retries join one durable execution`, and `Reusing a durable transaction identity with different content fails semantically`; `a_command_reply_for_another_execution_cannot_claim_success` |
-| E-6 to E-8 | `Leadership lost after durable admission leaves an unknown outcome that a retry recovers` and `A leader that cannot confirm its lease during <phase> reports that, not a move` in `session_protocol.feature`; `Web console recovers an uncertain command on its existing session` in `plexus_repl.feature`; `an_unknown_outcome_is_recovered_with_the_same_execution_reference`, `replies_ask_for_the_routing_their_disposition_needs` and `an_unknown_command_waits_before_repeating_on_its_open_connection` |
+| E-1 to E-5 | In `client_wire_failures.feature`: `A command lost after durable admission is recovered by its request identity`, `A reclaimed command identity stays expired after a durable restart`, `A race across leaders recovers a typed execution reference conflict`, `A command identity outside its retry window starts no effect`, `A full command history refuses new identities and keeps every retained result`, `Concurrent exact BEGIN retries join one durable execution`, and `Reusing a durable transaction identity with different content fails semantically`; `A native command recovers its own execution after a foreign command reply on <cluster_size> nodes` in `client_wire_failures.feature` and `The CLI recovers its own execution after a foreign command reply on <cluster_size> nodes` in `cli_session.feature`; `Web console refuses a command outcome that names another execution and recovers its own` in `plexus_repl.feature`; `a_foreign_command_reply_interrupts_every_waiter_and_leaves_its_own_reference_uncertain` in `nervix-client-core`; `a_repl_command_answered_with_another_execution_is_repeated_under_its_own_reference` and `a_visual_create_answered_with_another_execution_keeps_waiting_for_its_own_outcome` in the console |
+| E-6 to E-8, D-4 | `Leadership lost after durable admission leaves an unknown outcome that a retry recovers` and `A leader that cannot confirm its lease during <phase> reports that, not a move` in `session_protocol.feature`; `Web console recovers an uncertain command on its existing session` in `plexus_repl.feature`; `an_unknown_outcome_is_recovered_with_the_same_execution_reference`, `replies_ask_for_the_routing_their_disposition_needs`, `an_unknown_command_waits_before_repeating_on_its_open_connection` and `an_uncertain_command_deadline_names_its_last_server_answer` in `nervix-client-core` |
 | D-1 to D-5 | `A redirect names no endpoint for a leader that discovery cannot reach` in `session_protocol.feature`; `The Rust client reconnects through its original seed after the leader stops` in `client_wire_failures.feature`; `a_command_redirect_keeps_its_execution_reference`, `a_command_waits_for_an_election_and_is_sent_again_with_its_reference`, `a_closed_session_recovers_through_a_configured_seed`, and `a_reconnected_session_restores_subscriptions_before_it_attaches_its_transaction` |
 | X-1 to X-3 | In `client_wire_failures.feature`: `A command missing from a committed transaction cannot report aggregate success`, `Replaying a BEGIN whose response was lost returns the original transaction`, `Replaying an accepted <append_kind> append does not preflight or append it again`, and the three exact transaction batch retries, including `A committed transaction batch keeps its one outcome when leadership moves while each attempt records it`; `lost_begin_append_and_commit_replies_retry_the_exact_request` and `concurrent_commands_capture_transaction_position_in_send_order` |
-| X-4, X-5 | `A commit fenced to a preview the transaction outgrew is refused and stays open` in `plexus_transactions.feature`; `a_commit_fences_against_the_basis_its_own_transaction_reported`, `a_refused_commit_does_not_adopt_an_unreviewed_basis`, and `an_older_inspection_cannot_replace_a_newer_queue_preview` |
-| X-6 | `A session whose leader lost its binding re-attaches instead of failing`, `Attaching from a second session takes over an open transaction`, `A resumed commit that reaches the leader after its transaction finished reports the commit` and `A session that re-attaches a transaction which finished meanwhile begins a new one` in `plexus_transactions.feature`; `Web console recovers a reverted command's own outcome after its reply is lost` and `Web console resolves a Create command held when its transaction finishes during reconnect` in `plexus_repl.feature`; `a_detached_transaction_is_attached_again_before_the_command_is_retried` |
+| X-4, X-5 | `A commit fenced to a preview the transaction outgrew is refused and stays open` in `plexus_transactions.feature`; `An obsolete failed COMMIT attempt reports the commit another coordinator finished` in `explicit_commit_recovery.feature`; `a_commit_fences_against_the_basis_its_own_transaction_reported`, `a_refused_commit_does_not_adopt_an_unreviewed_basis`, and `an_older_inspection_cannot_replace_a_newer_queue_preview` |
+| X-6 | `A session whose leader lost its binding re-attaches instead of failing`, `Attaching from a second session takes over an open transaction`, `A resumed commit that reaches the leader after its transaction finished reports the commit`, `A session that re-attaches a transaction which finished meanwhile begins a new one`, and `A session begins another transaction after the one it held loses its tombstone` in `plexus_transactions.feature`; `Web console recovers a reverted command's own outcome after its reply is lost` and `Web console resolves a Create command held when its transaction finishes during reconnect` in `plexus_repl.feature`; `a_detached_transaction_is_attached_again_before_the_command_is_retried` and `a_session_releases_a_transaction_after_its_finished_record_is_reclaimed` |
 | X-7, X-8 | `A clean session close reverts its open transaction` and `An orphaned transaction expires and retains its outcome` in `plexus_transactions.feature`; `A stalled commit cannot block expiry, another domain, or tombstone cleanup` in `client_wire_failures.feature`; `Physical inactivity while every node is stopped expires an open transaction` in `client_wire_process_restart.feature` |
 | S-1 to S-6 | Every scenario of `session_subscription_lifecycle.feature` and `session_subscription_options.feature`; `Published interest starts, reopens, and stops remote subscription fan-out` in `subscription_interest.feature`; `A native client does not restore a subscription the server ended and opens its name again on request` in `client_wire_failures.feature`; `Web console ends a relay tab the server ended and resubscribes it on request` in `plexus_repl.feature`; `a_subscription_type_must_be_selected_and_supported`, `a_subscription_the_server_ended_is_not_opened_again_on_a_new_session`, `an_end_its_session_lost_before_it_was_read_is_still_reported`, and, in the console, `a_generation_the_server_ended_ends_its_tab_which_keeps_its_rows_and_is_not_restored` |
 | S-7, S-8 | In `client_wire_failures.feature`: `A reconnected native client restores acknowledged subscriptions`, `A native client deletes a subscription its lost session held and opens the name again`, `A native client reports a refused subscription restoration and deletes the subscription without the server`, and `A native client keeps a subscription active while it receives a row that fills most of a frame`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `Web console restores a relay tab after its transaction finished while it reconnected`, `Web console restores a relay tab before it attaches its open transaction again`, and `Web console bounds a busy relay tab and keeps its REPL responsive` in `plexus_repl.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, `a_refused_restoration_is_repeated_after_a_growing_delay`, `deleting_a_subscription_whose_restoration_was_refused_needs_no_server`, `a_subscription_requested_on_a_closed_session_opens_on_a_new_session`, `one_subscription_overflow_preserves_other_subscription_events`, `each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it`, `a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions`, and `a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription` |
@@ -1040,7 +1086,10 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi` |
 | N-1 to N-5 | The three outlines of `client_conformance.feature` for CPython over the Python package, on one and three nodes, whose probe also checks a retained frame view, a wait cancelled from another thread and Arrow data pyarrow builds and reads; `a_wait_releases_the_gil_and_another_python_thread_cancels_it`, `every_failure_kind_raises_its_exception`, `a_frame_view_keeps_its_event_alive`, `a_producer_outlives_its_session` and `a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds` in `nervix-client-python`; `bolero_host_columns_round_trip_through_the_arrow_c_data_interface` and `bolero_typed_field_descriptions_round_trip` in `nervix-client-host` |
 | J-1 to J-5 | Java 21's three one-/three-node conformance outlines; `BoundaryTests` checks columns, Cleaner release and cancellation from another Java thread; `nervix-client-jvm` embeds the JVM to check every host failure kind, restoration messages/waits, and registered complete JNI field/column properties. The Java row probe checks native Cleaner release and derived-buffer retention after its session closes. |
-| W-1 to W-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`; `Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference` in `cli_session.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
+| W-1 to W-5, B-10 | `A <client> recovers a completed restore after <reply> on <cluster_size> nodes` in `client_restore_reply_validation.feature` (native client and CLI, both invalid replies, one and three nodes), the `restore_reply` owner tests in `nervix-client-core` (typed uncertainty, exact-session interruption, replacement preservation, local failures and known refusals); every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`, including `A console restore whose reply was lost after it applied stays unknown when a later attempt cannot read the archive`; the console's restore driver tests in `nervix-web-console`, including `a_restore_whose_reply_was_lost_stays_unknown_when_the_next_attempt_cannot_read_the_archive` and `a_restore_whose_reply_was_lost_stays_unknown_when_the_leader_refuses_a_later_stream`; `Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference` in `cli_session.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; `a_foreign_restore_reply_ends_its_session_and_reports_its_own_reference_uncertain` in `nervix-client-core`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
+| W-3, W-5 (console) | `an_unreadable_restore_reply_naming_another_execution_leaves_its_own_outcome_unknown`, `an_unreadable_restore_reply_leaves_its_outcome_unknown`, and `an_unreadable_restore_reply_answering_another_request_leaves_its_outcome_unknown` in `nervix-web-console`; `A restore reply naming another execution leaves the restore outcome unknown` in `unreadable_replies.feature`, on one and three nodes |
+| F-8, D-6, E-3, W-3, W-5: unreadable native restore replies | The structural/size rejection and typed-cause owner tests, replacement, refusal, archive and retry controls in `crates/client-core/src/tests/session/restore_codec.rs`; all eight native/CLI one-/three-node examples in `client_restore_codec_rejection.feature`, whose peer waits for a real completed restore before replacing its reply and whose recovery repeats the original execution. The native cases also read the shared failure kind and original reference through the C ABI. |
+| W-5: uncertainty across restore attempts | The scripted real-gRPC owner cases in `restore_codec/restore_uncertainty.rs` cover later archive-open/read failures, stream and request refusals and expired references after transport loss or `OutcomeUnknown`, with definitive and recovered-outcome controls. `A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes` in `client_restore_uncertainty.feature` checks the native client, C ABI classification and CLI status 3 after a real completed restore loses its answer and its archive, then recovers that execution. |
 
 The [client representation properties](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
 add complete generated-value evidence for F-1 to F-7, R-1 to R-5 and B-1 to B-7. They preserve

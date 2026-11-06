@@ -32,40 +32,34 @@ fn json_type<'src>()
 fn cbor_type<'src>()
 -> impl Parser<'src, &'src [Token], CborType, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        kw(Identifier::String).to(CborType::String),
-        kw(Identifier::Number).to(CborType::Number),
         kw(Identifier::Integer).to(CborType::Integer),
-        kw(Identifier::Object).to(CborType::Object),
-        kw(Identifier::Array).to(CborType::Array),
+        kw(Identifier::Float).to(CborType::Float),
         kw(Identifier::Boolean).to(CborType::Boolean),
-        kw(Identifier::Null).to(CborType::Null),
-        kw(Identifier::U8).to(CborType::U8),
-        kw(Identifier::I8).to(CborType::I8),
-        kw(Identifier::U16).to(CborType::U16),
-        kw(Identifier::I16).to(CborType::I16),
-        kw(Identifier::U32).to(CborType::U32),
-        kw(Identifier::I32).to(CborType::I32),
-        kw(Identifier::U64).to(CborType::U64),
-        kw(Identifier::I64).to(CborType::I64),
-        kw(Identifier::Datetime).to(CborType::Datetime),
-        kw(Identifier::F32).to(CborType::F32),
-        kw(Identifier::F64).to(CborType::F64),
+        kw(Identifier::Text).to(CborType::Text),
         kw(Identifier::Bytes).to(CborType::Bytes),
+        kw(Identifier::Array).to(CborType::Array),
     )
 }
 
+/// An AVRO field type: a primitive type, or `array<item>` whose item is any AVRO type, arrays
+/// included, because an Avro array schema always names its items.
 fn avro_type<'src>()
 -> impl Parser<'src, &'src [Token], AvroType, extra::Err<ParseError<'src>>> + Clone {
-    boxed_choice!(
-        kw(Identifier::Boolean).to(AvroType::Boolean),
-        kw(Identifier::Int).to(AvroType::Int),
-        kw(Identifier::Long).to(AvroType::Long),
-        kw(Identifier::Float).to(AvroType::Float),
-        kw(Identifier::Double).to(AvroType::Double),
-        kw(Identifier::Bytes).to(AvroType::Bytes),
-        kw(Identifier::String).to(AvroType::String),
-        kw(Identifier::Array).to(AvroType::Array),
-    )
+    recursive(|ty| {
+        let primitive = boxed_choice!(
+            kw(Identifier::Boolean).to(AvroType::Boolean),
+            kw(Identifier::Int).to(AvroType::Int),
+            kw(Identifier::Long).to(AvroType::Long),
+            kw(Identifier::Float).to(AvroType::Float),
+            kw(Identifier::Double).to(AvroType::Double),
+            kw(Identifier::Bytes).to(AvroType::Bytes),
+            kw(Identifier::String).to(AvroType::String),
+        );
+        let array = kw(Identifier::Array)
+            .ignore_then(ty.delimited_by(tok(Token::Lt), tok(Token::Gt)))
+            .map(AvroType::array_of);
+        choice((array, primitive)).boxed()
+    })
 }
 
 pub(crate) fn nervix_type<'src>()
@@ -890,7 +884,7 @@ mod tests {
         let input = r#"
             CREATE WIRE CBOR SCHEMA notification MODE LOOSE (
                 user_id integer,
-                payload object OPTIONAL
+                payload bytes OPTIONAL
             );
         "#;
 
@@ -903,6 +897,7 @@ mod tests {
         };
         assert_eq!(schema.strictness, WireSchemaStrictness::Loose);
         assert_eq!(schema.fields[0].ty, CborType::Integer);
+        assert_eq!(schema.fields[1].ty, CborType::Bytes);
         assert!(schema.fields[1].optional);
     }
 
@@ -931,6 +926,146 @@ mod tests {
             panic!("expected AVRO wire schema");
         };
         assert_eq!(schema.fields[0].ty, AvroType::Long);
+    }
+
+    /// Renders the one AVRO wire schema `input` creates, after it parsed.
+    fn canonical_avro_wire_schema(input: &str) -> String {
+        let parsed = parse_create_wire_schema(input).expect("the AVRO wire schema parses");
+        let Statement::Create(create) = parsed else {
+            panic!("the statement creates a wire schema");
+        };
+        let Model::WireAvroSchema(_) = *create.body else {
+            panic!("the statement declares an AVRO wire schema");
+        };
+        create
+            .body
+            .to_canonical_plexus()
+            .expect("a parsed AVRO wire schema renders")
+    }
+
+    #[test]
+    fn parses_avro_arrays_with_their_item_types_at_every_depth() {
+        let rendered = canonical_avro_wire_schema(
+            "CREATE WIRE AVRO SCHEMA lists MODE STRICT (counts array<int>, totals ARRAY<long> \
+             OPTIONAL, matrix array<array<double>>, raw Array < Bytes >, stamps \
+             array<array<array<string>>>);",
+        );
+        assert_eq!(
+            rendered,
+            "CREATE WIRE AVRO SCHEMA lists MODE STRICT (\n  counts ARRAY<INT>,\n  totals \
+             ARRAY<LONG> OPTIONAL,\n  matrix ARRAY<ARRAY<DOUBLE>>,\n  raw ARRAY<BYTES>,\n  stamps \
+             ARRAY<ARRAY<ARRAY<STRING>>>\n);"
+        );
+
+        let Statement::Create(create) =
+            parse_create_wire_schema(&rendered).expect("the canonical rendering parses back")
+        else {
+            panic!("the statement creates a wire schema");
+        };
+        let Model::WireAvroSchema(schema) = *create.body else {
+            panic!("the statement declares an AVRO wire schema");
+        };
+        let types: Vec<_> = schema.fields.iter().map(|field| field.ty.clone()).collect();
+        assert_eq!(
+            types,
+            [
+                AvroType::array_of(AvroType::Int),
+                AvroType::array_of(AvroType::Long),
+                AvroType::array_of(AvroType::array_of(AvroType::Double)),
+                AvroType::array_of(AvroType::Bytes),
+                AvroType::array_of(AvroType::array_of(AvroType::array_of(AvroType::String))),
+            ]
+        );
+        assert!(schema.fields[1].optional);
+    }
+
+    #[test]
+    fn parses_every_avro_item_type_inside_an_array() {
+        for item in [
+            "boolean", "int", "long", "float", "double", "string", "bytes",
+        ] {
+            let rendered = canonical_avro_wire_schema(&format!(
+                "CREATE WIRE AVRO SCHEMA lists MODE STRICT (value array<{item}>);"
+            ));
+            let expected = format!("  value ARRAY<{}>\n", item.to_ascii_uppercase());
+            assert!(rendered.contains(&expected), "{item}: {rendered}");
+        }
+    }
+
+    #[test]
+    fn alters_an_avro_field_to_an_array_of_its_item_type() {
+        let parsed = parse_alter_wire_schema(
+            "ALTER WIRE AVRO SCHEMA lists ADD FIELD added array<long> OPTIONAL, ALTER FIELD \
+             counts SET TYPE array<array<int>>;",
+        )
+        .expect("both array operations parse");
+        let Statement::AlterWireAvroSchema(alter) = parsed else {
+            panic!("the statement alters an AVRO wire schema");
+        };
+        assert_eq!(
+            nervix_models::alter_avro_wire_schema_to_canonical_plexus(&alter)
+                .expect("the alteration renders"),
+            "ALTER WIRE AVRO SCHEMA lists ADD FIELD added ARRAY<LONG> OPTIONAL, ALTER FIELD \
+             counts SET TYPE ARRAY<ARRAY<INT>>;"
+        );
+    }
+
+    #[test]
+    fn rejects_an_avro_array_without_one_known_item_type() {
+        for field in [
+            "value array<>",
+            "value array<int",
+            "value array<int, long>",
+            "value array<int, 2>",
+            "value array<integer>",
+            "value array<U32>",
+            "value array<text>",
+            "value array<array<>>",
+            "value array<int>>",
+        ] {
+            let input = format!("CREATE WIRE AVRO SCHEMA lists MODE STRICT ({field});");
+            assert!(
+                parse_create_wire_schema(&input).is_err(),
+                "{field} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn suggests_avro_item_types_inside_an_array_without_other_vocabularies() {
+        for input in [
+            "CREATE WIRE AVRO SCHEMA s MODE STRICT (matrix array<",
+            "CREATE WIRE AVRO SCHEMA s MODE STRICT (matrix array<array<",
+            "ALTER WIRE AVRO SCHEMA s ALTER FIELD matrix SET TYPE array<",
+        ] {
+            let mut suggestions = crate::statement::suggest_statement(input, input.len());
+            suggestions.sort();
+            assert_eq!(
+                suggestions,
+                [
+                    "ARRAY", "BOOLEAN", "BYTES", "DOUBLE", "FLOAT", "INT", "LONG", "STRING"
+                ],
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn suggests_closing_an_avro_array_after_its_item_type() {
+        let input = "CREATE WIRE AVRO SCHEMA s MODE STRICT (matrix array<double ";
+        let suggestions = crate::statement::suggest_statement(input, input.len());
+        assert_eq!(suggestions, [">"], "{input}");
+
+        let input = "CREATE WIRE AVRO SCHEMA s MODE STRICT (matrix array<double> ";
+        let suggestions = crate::statement::suggest_statement(input, input.len());
+        assert!(
+            suggestions.contains(&"OPTIONAL".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(
+            !suggestions.contains(&"LONG".to_string()),
+            "{suggestions:?}"
+        );
     }
 
     #[test]
@@ -964,7 +1099,14 @@ mod tests {
             (
                 "AVRO",
                 &[
-                    "boolean", "int", "long", "float", "double", "string", "bytes", "array",
+                    "boolean",
+                    "int",
+                    "long",
+                    "float",
+                    "double",
+                    "string",
+                    "bytes",
+                    "array<long>",
                 ][..],
             ),
         ] {
@@ -1090,12 +1232,53 @@ mod tests {
     fn suggests_types_from_cbor_wire_schema_grammar() {
         let input = "CREATE WIRE CBOR SCHEMA s MODE LOOSE (id ";
         let suggestions = suggest_create_wire_schema(input, input.len());
-        assert!(suggestions.contains(&"STRING".to_string()));
-        assert!(suggestions.contains(&"INTEGER".to_string()));
-        assert!(suggestions.contains(&"OBJECT".to_string()));
-        assert!(suggestions.contains(&"U32".to_string()));
-        assert!(suggestions.contains(&"DATETIME".to_string()));
-        assert!(!suggestions.contains(&"BOOL".to_string()));
+        assert_eq!(suggestions.len(), 6);
+        for ty in ["INTEGER", "FLOAT", "BOOLEAN", "TEXT", "BYTES", "ARRAY"] {
+            assert!(suggestions.contains(&ty.to_string()), "missing {ty}");
+        }
+    }
+
+    #[test]
+    fn parses_each_cbor_wire_representation() {
+        let input = "CREATE WIRE CBOR SCHEMA values MODE STRICT (a integer, b float, c boolean, d \
+                     text, e bytes, f array);";
+        let Statement::Create(create) =
+            parse_create_wire_schema(input).expect("all six CBOR types parse")
+        else {
+            panic!("the statement creates a wire schema");
+        };
+        let Model::WireCborSchema(schema) = *create.body else {
+            panic!("the statement declares CBOR");
+        };
+        let types: Vec<_> = schema.fields.iter().map(|field| field.ty).collect();
+        assert_eq!(
+            types,
+            [
+                CborType::Integer,
+                CborType::Float,
+                CborType::Boolean,
+                CborType::Text,
+                CborType::Bytes,
+                CborType::Array,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_types_outside_the_cbor_wire_vocabulary() {
+        for ty in ["map", "tag", "undefined", "binary"] {
+            let input = format!("CREATE WIRE CBOR SCHEMA s MODE STRICT (payload {ty});");
+            assert!(
+                parse_create_wire_schema(&input).is_err(),
+                "{ty} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_repeated_cbor_field_optionality() {
+        let input = "CREATE WIRE CBOR SCHEMA s MODE STRICT (payload bytes OPTIONAL OPTIONAL);";
+        assert!(parse_create_wire_schema(input).is_err());
     }
 
     #[test]
@@ -1140,7 +1323,7 @@ mod tests {
 
     #[test]
     fn parses_all_wire_schema_alter_operations_for_each_format() {
-        let cases = [("JSON", "STRING"), ("CBOR", "OBJECT"), ("AVRO", "LONG")];
+        let cases = [("JSON", "STRING"), ("CBOR", "TEXT"), ("AVRO", "LONG")];
         for (format, ty) in cases {
             let input = format!(
                 "ALTER WIRE {format} SCHEMA payload ADD FIELD added {ty} OPTIONAL, DROP FIELD \

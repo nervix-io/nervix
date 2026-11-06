@@ -1,4 +1,4 @@
-//! Incomplete source settings for a visual ingestor.
+//! Incomplete entity settings for a visual ingestor.
 //!
 //! Layer: edges.
 //!
@@ -23,18 +23,18 @@ use nervix_models::{
     IngestorEntity, IngestorEntityKind, KafkaConsumerGroupName, KafkaIngestMode,
     KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName, ModelName,
     MqttIngestMode, MqttIngestorEntity, MqttQos, MqttSession, MqttTopicFilter, MqttTopicIngestor,
-    NatsIngestMode, NatsIngestorEntity, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName,
-    NodeRef, PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity,
-    PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
-    PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarSubscriptionType,
-    PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
-    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisChannelPattern,
-    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget,
-    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SqsReceiveMax,
-    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity,
-    WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity,
-    ZeroMqPullIngestor,
+    NatsConsumerName, NatsIngestMode, NatsIngestorEntity, NatsQueueGroupName, NatsStreamIngestMode,
+    NatsStreamIngestor, NatsStreamName, NatsSubjectIngestor, NatsSubjectName, NodeRef,
+    PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor,
+    PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarSubscriptionType, PulsarTopicIngestor, PulsarTopicName,
+    RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName,
+    RedisChannelName, RedisChannelPattern, RedisIngestorEntity, RedisPubSubIngestMode,
+    RedisPubSubIngestor, RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
+    SqsQueueIngestor, SqsQueueName, SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestMode, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
+    WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
@@ -121,6 +121,8 @@ pub(super) struct IngestorEntityDraft {
     pub(super) pattern: String,
     pub(super) subject: String,
     pub(super) queue_group: String,
+    pub(super) stream: String,
+    pub(super) consumer: String,
     pub(super) subscription: String,
     pub(super) subscription_ownership: Option<PulsarSubscriptionOwnership>,
     pub(super) subscription_type: Option<PulsarSubscriptionType>,
@@ -234,6 +236,13 @@ impl IngestorEntityDraft {
 
     pub(super) fn chosen_option(&self, keywords: &str) -> Option<&'static str> {
         let selected = match keywords {
+            "INSTANCES" => Some(
+                if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") {
+                    "PER PARTITION"
+                } else {
+                    "<count>"
+                },
+            ),
             "SESSION" => self.mqtt_session.map(|session| session.keyword()),
             "QOS" => self.mqtt_qos.map(|qos| qos.spelling()),
             "SUBSCRIPTION" => self
@@ -248,6 +257,13 @@ impl IngestorEntityDraft {
 
     pub(super) fn choose_option(&mut self, keywords: &str, choice: &str) {
         match keywords {
+            "INSTANCES" => match choice {
+                "PER PARTITION" => self.instances = "PER PARTITION".to_owned(),
+                "<count>" if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") => {
+                    self.instances.clear()
+                }
+                _ => {}
+            },
             "SESSION" => {
                 self.mqtt_session = MqttSession::iter().find(|value| value.keyword() == choice)
             }
@@ -313,7 +329,7 @@ impl IngestorEntityDraft {
         let kind = self
             .kind
             .ok_or_else(|| Report::new(IngestorEntityDraftError::Kind))?;
-        // The form offers transport sources only; a client source names no client or endpoint.
+        // The form offers transport ingestors only; a client input names no client or endpoint.
         if let IngestorEntityKind::Client(ClientIngestorEntity::Producer) = kind {
             return Err(Report::new(IngestorEntityDraftError::ClientInput));
         }
@@ -401,6 +417,16 @@ impl IngestorEntityDraft {
                     .change_context(IngestorEntityDraftError::QueueGroup)?,
                 instances: self.instances()?,
                 mode: NatsIngestMode::NoAck,
+                quiesce,
+            }
+            .into(),
+            IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => NatsStreamIngestor {
+                client: self.client()?,
+                stream: NatsStreamName::parse(&self.stream)
+                    .change_context(IngestorEntityDraftError::Stream)?,
+                consumer: NatsConsumerName::parse(&self.consumer)
+                    .change_context(IngestorEntityDraftError::Consumer)?,
+                mode: self.nats_stream_mode()?,
                 quiesce,
             }
             .into(),
@@ -527,15 +553,21 @@ impl IngestorEntityDraft {
         Ok(value.trim().to_string())
     }
 
-    fn instances(&self) -> error_stack::Result<NonZeroU64, IngestorEntityDraftError> {
+    fn instances(
+        &self,
+    ) -> error_stack::Result<nervix_models::IngestorInstances, IngestorEntityDraftError> {
         let value = if self.instances.trim().is_empty() {
             self.option_default("INSTANCES").unwrap_or("")
         } else {
             self.instances.trim()
         };
-        value
-            .parse::<NonZeroU64>()
-            .map_err(|cause| Report::new(cause).change_context(IngestorEntityDraftError::Instances))
+        if value.eq_ignore_ascii_case("PER PARTITION") {
+            return Ok(nervix_models::IngestorInstances::PerPartition);
+        }
+        let count = value.parse::<NonZeroU64>().map_err(|cause| {
+            Report::new(cause).change_context(IngestorEntityDraftError::Instances)
+        })?;
+        Ok(nervix_models::IngestorInstances::Count(count))
     }
 
     fn every(&self) -> error_stack::Result<DomainClockPeriod, IngestorEntityDraftError> {
@@ -545,7 +577,7 @@ impl IngestorEntityDraft {
             .map_err(|_| Report::new(IngestorEntityDraftError::Every))
     }
 
-    /// The subscription a Pulsar source reads through, who the draft says owns it, and the type it
+    /// The subscription a Pulsar ingestor reads through, who the draft says owns it, and the type it
     /// reads it as, which every statement declares.
     fn pulsar_subscription(
         &self,
@@ -675,6 +707,27 @@ impl IngestorEntityDraft {
         WebsocketsUpgradeHeaders::parse(&self.upgrade_headers)
             .change_context(IngestorEntityDraftError::UpgradeHeaders)?;
         Ok(self.upgrade_headers.clone())
+    }
+
+    fn nats_stream_mode(
+        &self,
+    ) -> error_stack::Result<NatsStreamIngestMode, IngestorEntityDraftError> {
+        match self.delivery {
+            Some(IngestDeliveryKind::AckSequential) => Ok(NatsStreamIngestMode::AckSequential {
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::AckParallel) => Ok(NatsStreamIngestMode::AckParallel {
+                max: self.ack_max()?,
+                batch_timeout: self
+                    .required(&self.batch_timeout, IngestorEntityDraftError::BatchTimeout)?,
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::NoAck | IngestDeliveryKind::AckRequest) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
+        }
     }
 
     fn rabbitmq_mode(&self) -> error_stack::Result<RabbitMqIngestMode, IngestorEntityDraftError> {
@@ -817,6 +870,10 @@ pub(super) enum IngestorEntityDraftError {
     Subject,
     #[error("Enter a valid queue group")]
     QueueGroup,
+    #[error("Enter a valid stream")]
+    Stream,
+    #[error("Enter a valid consumer")]
+    Consumer,
     #[error("Enter a valid subscription")]
     Subscription,
     #[error("Choose whether the ingestor owns the subscription or an operator provisioned it")]
@@ -833,13 +890,13 @@ pub(super) enum IngestorEntityDraftError {
     UpgradeHeaders,
     #[error("EVERY must be a positive domain-clock duration")]
     Every,
-    #[error("INSTANCES must be a positive integer")]
+    #[error("INSTANCES must be a positive 64-bit count or PER PARTITION")]
     Instances,
     #[error("Choose Kafka offset ownership")]
     Offset,
     #[error("Enter a valid consumer group")]
     ConsumerGroup,
-    #[error("Choose a supported source delivery mode")]
+    #[error("Choose a supported ingestor delivery mode")]
     Mode,
     #[error("ACK MAX must be a positive integer")]
     AckMax,
@@ -859,7 +916,7 @@ pub(super) enum IngestorEntityDraftError {
     OptionRequirement { requirement: ChoiceRequirement },
     #[error("Choose an ON QUIESCE mode")]
     Quiesce,
-    #[error("This source cannot use the selected ON QUIESCE mode")]
+    #[error("This ingestor cannot use the selected ON QUIESCE mode")]
     UnsupportedQuiesce,
     #[error("BUFFER MAX SIZE must be positive")]
     BufferSize,
@@ -875,6 +932,8 @@ pub(super) enum IngestorEntityDraftError {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::num::NonZeroU64;
+
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, HttpRequestHeader,
@@ -1031,6 +1090,10 @@ mod tests {
                 draft.queue_group = entity.queue_group.to_string();
                 draft.instances = entity.instances.to_string();
             }
+            IngestorEntity::Nats(NatsIngestor::Stream(entity)) => {
+                draft.stream = entity.stream.to_string();
+                draft.consumer = entity.consumer.to_string();
+            }
             IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(entity)) => {
                 draft.queue = entity.queue.to_string();
                 draft.instances = entity.instances.to_string();
@@ -1134,6 +1197,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_instance_draft_preserves_the_full_positive_64_bit_count() {
+        for count in [1, 65_536, u64::from(u32::MAX) + 1, u64::MAX] {
+            let mut draft = complete(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic));
+            draft.instances = count.to_string();
+            assert_eq!(
+                draft
+                    .instances()
+                    .assured("the complete positive count is accepted"),
+                nervix_models::IngestorInstances::Count(
+                    NonZeroU64::new(count).assured("each boundary is positive")
+                )
+            );
+            let entity = draft
+                .build()
+                .assured("the complete form preserves the count");
+            assert_eq!(filled_from(&entity).instances, count.to_string());
+        }
+    }
+
     fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {
         let mut draft = IngestorEntityDraft::default();
         draft.choose_kind(kind);
@@ -1147,6 +1230,8 @@ mod tests {
         draft.channel = "events".into();
         draft.subject = "events".into();
         draft.queue_group = "workers".into();
+        draft.stream = "events".into();
+        draft.consumer = "workers".into();
         draft.subscription = "workers".into();
         draft.subscription_ownership = Some(PulsarSubscriptionOwnership::Provisioned);
         draft.subscription_type = Some(nervix_models::PulsarSubscriptionType::Shared);

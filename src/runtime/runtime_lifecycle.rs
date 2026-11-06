@@ -493,6 +493,18 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_explicit_commit_failure_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        transaction_id: &str,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_explicit_commit_failure_if_armed(node, transaction_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection
@@ -798,23 +810,25 @@ impl Runtime {
             emitter_task.finish_by(emitter_finish_deadline);
         }
         execution.shutdown.send_replace(true);
-        for (relay, task) in execution.relay_owner_tasks {
+        for (owned, task) in execution.relay_owner_tasks {
             nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(self.branch_task_stop_timeout()).await {
                 warn!(
                     domain = domain.as_str(),
-                    relay = relay.as_str(),
+                    relay = owned.relay.as_str(),
+                    unit = ?owned.unit,
                     reason = %format_args!("{reason:#}"),
                     "relay owner task did not stop cleanly"
                 );
             }
         }
-        for (relay, task) in execution.relay_state_tasks {
+        for (owned, task) in execution.relay_state_tasks {
             nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE).await {
                 warn!(
                     domain = domain.as_str(),
-                    relay = relay.as_str(),
+                    relay = owned.relay.as_str(),
+                    unit = ?owned.unit,
                     reason = %format_args!("{reason:#}"),
                     "relay state task did not stop cleanly"
                 );
@@ -902,7 +916,7 @@ impl Runtime {
             .inner
             .node_quiesce_counters
             .iter()
-            .filter(|entry| &entry.key().domain == domain)
+            .filter(|entry| &entry.key().entity.domain == domain)
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in quiesce_keys {
@@ -942,17 +956,21 @@ impl Runtime {
             .ingestors
             .iter()
             .map(|entry| entry.key().clone())
-            .filter(|key| &key.domain == domain)
+            .filter(|key| &key.entity.domain == domain)
             .collect::<Vec<_>>();
 
         for key in ingestors {
             if let Err(error) = self
-                .stop_ingestor(domain, &IngestorName::from(key.identifier()))
+                .stop_ingestor_unit(
+                    domain,
+                    &IngestorName::from(key.entity.identifier()),
+                    key.unit,
+                )
                 .await
             {
                 warn!(
                     domain = domain.as_str(),
-                    ingestor = key.identifier().as_str(),
+                    ingestor = key.entity.identifier().as_str(),
                     error = %format_args!("{error:#}"),
                     "failed to stop domain ingestor during schedule rebuild"
                 );

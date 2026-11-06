@@ -58,6 +58,8 @@ enum RelocationError {
         member: NodeRef,
         owner: ClusterNodeName,
     },
+    #[error("{kind} '{name}' in domain '{domain}' has multiple execution units; RELOCATE requires a member with one owner", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
+    MemberMultipleUnits { domain: DomainName, member: NodeRef },
 }
 
 /// One unit member with the assignment the relocation gives it.
@@ -607,10 +609,14 @@ fn planned_relocation_schedule(
                 .filter(|replica| live_nodes.contains(*replica))
                 .cloned(),
         );
-        if let Some(desired_node) = desired.nodes.get(member) {
+        // The graph may divide this member into partitions that its current schedule, written
+        // before a stopped domain's partition count changed, does not have yet. Such a desired
+        // entry has no single assignment to borrow replica slots from.
+        if let Some(desired_node) = desired.nodes.get(member)
+            && let Some(desired_unit) = desired_node.sole_unit()
+        {
             candidates.extend(
-                desired_node
-                    .single_unit()
+                desired_unit
                     .assigned_nodes
                     .iter()
                     .filter(|node_id| schedulable_nodes.contains(*node_id))
@@ -635,15 +641,18 @@ fn planned_relocation_schedule(
                 .checked_add(1)
                 .assured("a slot count clamped to a collected list leaves room for the primary"),
         );
-        node.single_unit_mut().primary_node = Some(destination.clone());
-        node.single_unit_mut().assigned_nodes = assigned_nodes;
+        let unit = node
+            .sole_unit_mut()
+            .assured("relocation validated that each member has exactly one unit");
+        unit.primary_node = Some(destination.clone());
+        unit.assigned_nodes = assigned_nodes;
     }
 
     for group in &mut planned.placement_groups {
         if group
             .members
             .iter()
-            .any(|group_member| moved.contains(group_member))
+            .any(|group_member| moved.contains(&group_member.node))
         {
             group.primary_node = Some(destination.clone());
         }
@@ -714,6 +723,12 @@ fn relocation_member_owner<'a>(
             member: member.clone(),
         }));
     };
+    if node.units.len() > 1 {
+        return Err(Report::new(RelocationError::MemberMultipleUnits {
+            domain: domain.clone(),
+            member: member.clone(),
+        }));
+    }
     let Some(owner) = node.execution_node() else {
         return Err(Report::new(RelocationError::MemberWithoutOwner {
             domain: domain.clone(),

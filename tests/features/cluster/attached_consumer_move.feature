@@ -25,7 +25,7 @@ Feature: Attached acknowledgements across consumer moves
       CREATE KAFKA CLIENT moved_sink_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR moved_sink_source
+      CREATE KAFKA TOPIC INGESTOR moved_emitter_ingestor
         FROM moved_sink_kafka TOPIC 'moved_sink_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'moved_sink_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
@@ -34,7 +34,7 @@ Feature: Attached acknowledgements across consumer moves
           BRANCHED BY moved_sink_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER moved_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER moved_emitter
         FROM moved_sink_records
         TO moved_sink_kafka TOPIC 'moved_sink_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
@@ -44,14 +44,14 @@ Feature: Attached acknowledgements across consumer moves
       """
     And these Plexus commands are executed on the leader node
       """
-      RELOCATE INGESTOR moved_sink_source ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR moved_emitter_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY moved_sink_records ONTO NODE node-1 IGNORE PREFERENCES;
-      RELOCATE EMITTER moved_sink ONTO NODE node-3 IGNORE PREFERENCES;
+      RELOCATE EMITTER moved_emitter ONTO NODE node-3 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=moved_sink_source owner=node-1
+      - domain={{domain}} kind=ingestor name=moved_emitter_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -59,7 +59,7 @@ Feature: Attached acknowledgements across consumer moves
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=emitter name=moved_sink owner=node-3
+      - domain={{domain}} kind=emitter name=moved_emitter owner=node-3
       """
     When Kafka message is published to topic "moved_sink_in_{{test_id}}"
       """
@@ -78,12 +78,12 @@ Feature: Attached acknowledgements across consumer moves
     Then the admitted remote relay dispatch pause for domain "{{domain}}" is reached
     When these Plexus commands are executed on the leader node
       """
-      RELOCATE EMITTER moved_sink ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE EMITTER moved_emitter ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=emitter name=moved_sink owner=node-2
+      - domain={{domain}} kind=emitter name=moved_emitter owner=node-2
       """
     When the admitted remote relay dispatch pause for domain "{{domain}}" is released
     Then within "60s" Kafka consumer group "moved_sink_group_{{test_id}}" next offset for topic "moved_sink_in_{{test_id}}" partition 0 is "at least 2"
@@ -122,7 +122,7 @@ Feature: Attached acknowledgements across consumer moves
       CREATE KAFKA CLIENT owner_move_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR owner_move_source
+      CREATE KAFKA TOPIC INGESTOR owner_move_ingestor
         FROM owner_move_kafka TOPIC 'owner_move_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'owner_move_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
@@ -146,7 +146,7 @@ Feature: Attached acknowledgements across consumer moves
       """
     And these Plexus commands are executed on the leader node
       """
-      RELOCATE INGESTOR owner_move_source ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR owner_move_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY owner_move_records ONTO NODE node-2 IGNORE PREFERENCES;
       RELOCATE EMITTER owner_move_sibling ONTO NODE node-2 IGNORE PREFERENCES;
       RELOCATE EMITTER owner_move_target ONTO NODE node-2 IGNORE PREFERENCES;
@@ -154,7 +154,7 @@ Feature: Attached acknowledgements across consumer moves
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=owner_move_source owner=node-1
+      - domain={{domain}} kind=ingestor name=owner_move_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """

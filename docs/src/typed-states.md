@@ -2,6 +2,18 @@
 
 *Plexus, the Nervix graph definition language.*
 
+`nervix-rate-limit::Quota` validates count, period, burst and nanosecond horizon bounds once;
+`Charge` carries a nonzero 32-bit cost and distinguishes direct from fingerprint-keyed accounting.
+A `Limiter` rejects a mismatched charge vector before changing any allowance. Direct horizon zero
+is a real instant at its epoch, denoting full replenishment, rather than missing state. A saved
+direct horizon uses `Option<Duration>` for live debt; keyed generations carry every retained
+fingerprint, positive remaining horizon, age and LRU ordinal. Generation validation refuses
+duplicate identities, capacity excess, invalid horizon or age bounds, and unordered ordinals.
+Each retained key's age plus remaining debt fits its quota's burst horizon, as every accepted
+charge did when its last-use instant was recorded.
+Restoration creates fresh stores only from a validated generation. UTC conversion omits elapsed
+horizons and expired keys instead of reconstructing allowance debt from absent state.
+
 Client configuration declarations distinguish required, optional, defaulted and address-scheme-dependent keys, Nervix and driver
 ownership, typed value rules, TLS certificate/identity file roles and delegated property namespaces.
 `All` is an explicit driver namespace, not an empty-prefix sentinel. The vocabulary schema owns
@@ -68,6 +80,11 @@ stand for a missing value or a different state. The owner of each state decides 
 required, validates it there, and passes the resulting typed value to the next layer. This keeps
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
+
+The native client's open request-registry variant owns the sender that keeps its exchange reader
+waiting for frames. Closing the registry drops that sender and its pending reply senders together.
+The closed variant owns neither: reader termination follows the typed state's lifetime, without a
+second boolean that can disagree with whether requests are admitted.
 
 The resolved node identity distinguishes a plaintext gRPC transport from an HTTPS transport that
 carries its listen and advertised addresses and both provisioned TLS paths. The CLI edge refuses
@@ -297,22 +314,44 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
+
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX WIRE TYPE` archive signature identifies the current Model layout, including
-the separate JSON and CBOR wire type enums, the AVRO representation types, explicit `BASE64`
-codec encoding, a Pulsar subscription's required type, an owned Pulsar subscription's required
-start position, a Kafka
-consumer group's required start position, the required branch partition count, Sentry platform, an
-ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the
-receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
+The NATS driver's ordered transport header projection owns either validated frame bytes with
+checked compact ranges or the emitter's owned ordered pairs. Names, values and payloads keep
+their ownership through publication; neither a cast nor a fabricated range stands for a failed
+transport offset conversion. The SDK's indexed authoring and typed-inspection views preserve
+empty JSON value arrays. These driver representations never enter semantic Models or plans.
+
+A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
+The registry's `NERVIX AVRO ITEM` archive signature identifies the current Model layout, including
+the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
+encoding, a Pulsar subscription's required type and an owned subscription's required start position,
+a Kafka consumer group's required start position, the required 16-bit branch partition count,
+typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
+an SQS QUEUE emitter's `SEND` request shape,
+the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
-emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either
-a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_wire_alter_` keyspaces and
-current state metadata encoding identify its stored shapes, the statements a transaction keeps
-included. An unrecognized signature, namespace or encoding fails with the owning storage error and
-requires the stored data to be recreated.
+emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
+mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
+that header state, and inferencer state bindings with their initial expressions.
+Consensus's `raft_inference_avro_` keyspaces and current `ClusterState`
+metadata encoding, 14, identify its stored shapes, including the partition count of every resolved branch
+declaration in the committed schedule and the statements a transaction keeps, including per-entity
+`ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
+`ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
+unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
+Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
+registry's instancing boundary checks native count conversion and the layout of the scheduled
+unit entries before materialization. An unaddressable declaration is a typed validation failure;
+its full-width Model remains representable independently of the target's execution capacity. The
+client placement union carries an instance index as an unsigned 64-bit value. Backup format
+major `5` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
+`NervixKafkaState` checkpoint contains
+positions and an optional applied explicit-start generation. Pending canonical starts and
+subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or
+encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
 
@@ -622,6 +661,19 @@ reachable member through an empty address. Other service advertisements, includi
 may be absent independently. Absence says the service is unavailable; it does not invent a reason.
 Peer selection and transport handling follow the [interconnect contract](./interconnect.md).
 
+**Voting configuration.** A membership planning snapshot retains OpenRaft's effective and
+committed membership publications, with every constituent voter set. It derives the voter union
+only for identity and admission checks; the union cannot stand in for the joint configuration's
+quorum state or its last target set. Completing a joint transition is a distinct planned mutation.
+The completion boundary checks that state and proposes any continuation in one OpenRaft Core
+turn. Its typed outcome distinguishes unchanged effective and committed records, an applied
+continuation carrying its returned voter set, and the original membership write error. A prior joint
+observation cannot force a uniform Core to append a duplicate entry. Only the continuation proposes
+a membership entry, using the Core's current joint target. The expected
+uniform target is complete only when its effective membership entry is committed.
+These are observation and planning values, not a second persisted membership encoding. See
+[Consensus Storage And Replication](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion).
+
 **Startup voter evidence.** The reconciliation task owns a process-local set of typed node names
 actually observed live, including observations made while following. An absent voter in that set
 means no live observation; Chitchat's current dead verdict does not supply one. A first relayed
@@ -823,7 +875,7 @@ a nearby instant: a program or `TIMESTAMP AT` that reads the field refuses the m
 `validation` message error naming the field, and a field nothing reads costs nothing. The retained
 copy a quiesce buffer replays keeps the unrepresentable state with its description.
 
-The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
+The MongoDB emitter also distinguishes each failed write's document answers: delivered, rejected with
 the server's definitive refusal code, or unresolved. An insert's implicit applied-document account
 and a verbose bulk write's explicit applied indexes are separate request variants. The unsatisfied
 write concern remains an optional failure beside those answers; it never replaces the documents'
@@ -957,6 +1009,14 @@ the required runtime-state identity. Runtime owners enforce transitions that dep
 execution or recovery. Connectors and the session edge validate external representations when
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
+
+NATS stream metadata crosses that boundary with nonzero stream sequence and delivery counts and
+a typed publication timestamp. Requested fields are decoded from the opaque acknowledgement during
+a synchronous metadata visit. An invalid field retains its typed cause as `IngestMetadataFailure`,
+with one immutable failure identity shared by capture and replay; its equality identifies that same
+failure instance. A Core message's absent reply subject remains absent and reads as a typed null;
+a conversion failure is a distinct state and refuses a row only where the field is read. Deferred
+field producers emit exactly one value, and the host validates that boundary.
 
 The Iceberg emitter validates its configured location into a URL before creating its storage factory.
 The initialized operator belongs to that storage root: a later object path must match its scheme,
@@ -1281,3 +1341,30 @@ defers native release until an admitted short call returns; it refuses nested ac
 borrow cannot overlap itself. Blocking calls own independent leases. A `Fields` lease is a
 complete validated description snapshot, while a mutable builder has no shared lease. Direct
 read-only buffers retain the native allocation through their root rather than a raw unowned address.
+
+## Intake Unit And Gate Identity
+
+An instancing declaration is `Count(NonZeroU64)` or `PerPartition`; entity capabilities admit the
+forms before placement. Its native and archived representations occupy eight bytes. The archive
+encodes `PerPartition` as zero and each positive count as its exact unsigned 64-bit value; semantic
+JSON retains the tagged forms. A resolved source unit uses the shared `NodeUnitRef` and
+`DomainNodeUnitRef` identities throughout plans, runtime registrations and durable state placement.
+There is no node-local index conversion. A source's readiness is one scalar whose retirement ends
+that exact lifetime.
+The shared `Unit` identity occupies eight bytes with four-byte archive alignment. Its private rank
+orders `Single`, all 32-bit partitions, and then instance indices. `UnitKind` is its semantic view;
+JSON uses that tagged view and validates an instance index through `Unit::try_instance`.
+Every rank is valid. The maximum instance index is `u64::MAX - (2^32 + 1)`, above every vector
+position on supported targets; this representation therefore admits every materializable source
+unit while preserving the full-width count declaration. Archive and transport records retain the
+same footprint for single, partition and instance units. Stored tagged key segments and the client
+placement union validate their 64-bit instance value before constructing the identity.
+Singleton placement inspection selects by cardinality: one `Instance(0)` has one owner just as one
+`Single` does. Several instances have separate placements and no entity-wide execution node.
+
+`EntityGateTargets` distinguishes whole `Entities(Vec<NodeRef>)` from exact
+`Units(Vec<NodeUnitRef>)`. Model operations select the former; ownership handoffs select the latter.
+Normalization sorts and deduplicates within the selected form. Persisted transaction gate plans,
+interconnect requests and runtime holds retain that choice. A held lease must contain the exact
+unit and its exact freeze before it authorizes a handoff checkpoint. Placement groups also carry
+exact unit members, allowing a source instance and a relay partition in the same component.

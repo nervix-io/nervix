@@ -454,7 +454,7 @@ impl SessionServiceImpl {
                 ClusterEntityGateScope {
                     domain,
                     relays: &plan.relays,
-                    affected_entities: std::slice::from_ref(&plan.entity),
+                    targets: &nervix_models::EntityGateTargets::Entities(vec![plan.entity.clone()]),
                     purpose,
                     participants: EntityGateParticipants::EveryAvailableNode,
                 },

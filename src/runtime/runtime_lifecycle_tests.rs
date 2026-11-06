@@ -48,6 +48,7 @@ fn unresponsive_task() -> JoinHandle<()> {
 fn idle_execution(domain: &DomainName) -> DomainExecution {
     let (shutdown, _) = watch::channel(false);
     DomainExecution {
+        mqtt_ingestor_clients: HashMap::default(),
         revision: test_execution_revision(domain, Vec::new()),
         start_version: 0,
         domain_clock: test_domain_clock(domain),
@@ -61,8 +62,8 @@ fn idle_execution(domain: &DomainName) -> DomainExecution {
         generator_tasks: HashMap::default(),
         reingestor_tasks: HashMap::default(),
         placement_tasks: HashMap::default(),
-        relay_state_tasks: HashMap::default(),
-        relay_owner_tasks: HashMap::default(),
+        relay_state_tasks: BTreeMap::default(),
+        relay_owner_tasks: BTreeMap::default(),
         tasks: Vec::new(),
     }
 }
@@ -305,7 +306,7 @@ impl PublishedWindow {
             },
             kind: ModelKind::WindowProcessor,
             identifier: named("latency_window"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let state = runtime
@@ -623,7 +624,7 @@ impl AppliedRelay {
             },
             kind: ModelKind::Relay,
             identifier: named("latest_orders"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let schema = test_schema(&[("status", ParseAsType::String)]);
@@ -775,7 +776,10 @@ async fn a_stopping_domain_writes_a_materialized_relays_last_checkpoint_once_its
     let (told_to_stop, stop_reached) = oneshot::channel();
     let (apply, applying) = oneshot::channel();
     execution.relay_state_tasks.insert(
-        RelayName::from(&checkpoints.placement.identifier),
+        RelayUnitRef::new(
+            RelayName::from(&checkpoints.placement.identifier),
+            checkpoints.placement.unit,
+        ),
         relay_state_task_applying_as_it_stops(
             &checkpoints.runtime,
             state,

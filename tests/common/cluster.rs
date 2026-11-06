@@ -1,6 +1,7 @@
 mod byte_pace;
 mod paced_interconnect;
 mod snapshot_receive;
+mod status;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -67,6 +68,7 @@ use nervix_primitives::{
 };
 use nervix_test_environment::workspace_root;
 use paced_interconnect::PacedInterconnect;
+use status::ClusterStatus;
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
@@ -1566,6 +1568,16 @@ impl Cluster {
             .map_err(io::Error::other)
     }
 
+    /// Start a new member without accepting a joint voter union as convergence.
+    pub(crate) async fn add_node_without_waiting_for_voters(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        self.register_new_node(node_id)?;
+        self.start_node_without_waiting_for_raft_catch_up(node_id)
+            .await
+    }
+
     pub(crate) async fn add_node(&mut self, node_id: &str) -> io::Result<()> {
         self.register_new_node(node_id)?;
         self.start_node(node_id).await?;
@@ -1661,7 +1673,7 @@ impl Cluster {
                 return Ok(JoinAttempt::Stopped(outcome.to_string()));
             }
             if let Ok(status) = handle.cluster_status(deadline).await
-                && status.is_voter(node_id)
+                && status.is_ready_voter(node_id)
             {
                 return Ok(JoinAttempt::Admitted);
             }
@@ -2327,16 +2339,8 @@ impl Cluster {
             .iter()
             .map(|value| (*value).to_string())
             .collect::<BTreeSet<_>>();
-        self.wait_until(node_id, |status| {
-            status
-                .membership
-                .iter()
-                .filter(|(_, role)| role == &&"voter".to_string())
-                .map(|(node, _)| node.clone())
-                .collect::<BTreeSet<_>>()
-                == expected
-        })
-        .await
+        self.wait_until(node_id, |status| status.has_ready_voters(&expected))
+            .await
     }
 
     pub(crate) async fn wait_for_kafka_consumer_group_members(
@@ -3107,6 +3111,24 @@ impl Cluster {
         publish_nats(&self.dependencies, subject, payload).await
     }
 
+    pub(crate) async fn publish_nats_with_reply(
+        &self,
+        subject: &str,
+        reply: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        let client = nats_client(&self.dependencies).await?;
+        client
+            .publish_with_reply(
+                subject.to_string(),
+                reply.to_string(),
+                payload.as_bytes().to_vec().into(),
+            )
+            .await
+            .map_err(io::Error::other)?;
+        client.flush().await.map_err(io::Error::other)
+    }
+
     pub(crate) async fn provision_nats_stream(
         &self,
         stream: &str,
@@ -3137,6 +3159,51 @@ impl Cluster {
         field: &str,
     ) -> io::Result<Vec<i64>> {
         nats_stream_field_values(&self.dependencies, stream, field).await
+    }
+
+    /// Provisions the durable pull consumer `consumer` on JetStream `stream`, as an operator does.
+    pub(crate) async fn provision_nats_pull_consumer(
+        &self,
+        stream: &str,
+        consumer: &str,
+    ) -> io::Result<()> {
+        provision_nats_pull_consumer(&self.dependencies, stream, consumer).await
+    }
+
+    /// Publishes `payload` to `subject` once, through JetStream, and returns once the stream that
+    /// captures the subject stored it.
+    pub(crate) async fn publish_nats_jetstream(
+        &self,
+        subject: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        publish_nats_jetstream(&self.dependencies, subject, payload).await
+    }
+
+    /// Waits up to `duration` for JetStream consumer `consumer` of `stream` to stand at `expected`.
+    pub(crate) async fn wait_for_nats_consumer_position(
+        &self,
+        stream: &str,
+        consumer: &str,
+        expected: NatsConsumerPosition,
+        duration: Duration,
+    ) -> io::Result<()> {
+        wait_for_nats_consumer_position(&self.dependencies, stream, consumer, expected, duration)
+            .await
+    }
+
+    /// Whether the NATS server holds JetStream stream `stream`.
+    pub(crate) async fn nats_stream_exists(&self, stream: &str) -> io::Result<bool> {
+        nats_stream_exists(&self.dependencies, stream).await
+    }
+
+    /// Whether JetStream `stream` holds consumer `consumer`.
+    pub(crate) async fn nats_consumer_exists(
+        &self,
+        stream: &str,
+        consumer: &str,
+    ) -> io::Result<bool> {
+        nats_consumer_exists(&self.dependencies, stream, consumer).await
     }
 
     pub(crate) async fn publish_nats_payloads(
@@ -3521,6 +3588,22 @@ impl Cluster {
     pub(crate) fn release_application_revision_responses_from(&self, node_id: &str) {
         self.fault_injection
             .release_application_revision_responses_from(&node_name(node_id));
+    }
+
+    pub(crate) fn pause_application_progress_reports_from(&self, node_id: &str) {
+        self.fault_injection
+            .pause_application_progress_reports_from(node_name(node_id));
+    }
+
+    pub(crate) async fn wait_for_application_progress_report_pause(&self, node_id: &str) {
+        self.fault_injection
+            .wait_for_application_progress_report_pause(&node_name(node_id))
+            .await;
+    }
+
+    pub(crate) fn release_application_progress_reports_from(&self, node_id: &str) {
+        self.fault_injection
+            .release_application_progress_reports_from(&node_name(node_id));
     }
 
     pub(crate) fn fail_health_responses_from(&self, responding_node_id: &str) {
@@ -4050,6 +4133,19 @@ impl Cluster {
                 io::Error::other(format!("node '{node_id}' status request failed: {error:#}"))
             })?;
         Ok(status.current_leader)
+    }
+
+    pub(crate) async fn current_leadership(&self, node_id: &str) -> io::Result<(String, u64)> {
+        let status = self
+            .cluster_status(node_id, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+            .await
+            .map_err(|error| {
+                io::Error::other(format!("node '{node_id}' status request failed: {error:#}"))
+            })?;
+        status
+            .leadership()
+            .map(|leadership| (leadership.leader, leadership.term))
+            .ok_or_else(|| io::Error::other(format!("node '{node_id}' has no reported leadership")))
     }
 
     /// The leader every reachable node agrees on, ignoring nodes a scenario has stopped.
@@ -5466,6 +5562,42 @@ pub(crate) struct AcknowledgedHttpPublisher {
 }
 
 impl AcknowledgedHttpPublisher {
+    /// Posts once and requires a completed graph acknowledgement. A refusal stays a failure;
+    /// there is no replay that could introduce another row into a cardinality assertion.
+    pub(crate) async fn publish_once(&self, payload: &str) -> io::Result<()> {
+        nervix_primitives::time::timeout(self.wait, async {
+            let response = self
+                .client
+                .post(&self.uri)
+                .header("Host", &self.host)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload.to_owned())
+                .send()
+                .await
+                .map_err(io::Error::other)?;
+            let status = response.status();
+            let body = response.bytes().await.map_err(io::Error::other)?;
+            if status != reqwest::StatusCode::OK {
+                return Err(io::Error::other(format!(
+                    "the single post received {status} {} instead of its completed graph \
+                     acknowledgement",
+                    String::from_utf8_lossy(&body)
+                )));
+            }
+            let outcome: serde_json::Value =
+                serde_json::from_slice(&body).map_err(io::Error::other)?;
+            if outcome != serde_json::json!({ "outcome": "completed", "cause": "none" }) {
+                return Err(io::Error::other(format!(
+                    "the single post received {status} {outcome} instead of its completed graph \
+                     acknowledgement"
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
+    }
+
     /// Bounds the complete request and its explicit refusal retries, including a stalled request
     /// or response body. Run this on an owned runtime task when the scenario runner can stall.
     pub(crate) async fn publish_bounded(&self, payload: &str) -> io::Result<()> {
@@ -5678,92 +5810,6 @@ async fn publish_secure_websocket(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct ClusterStatus {
-    raw: String,
-    current_leader: Option<String>,
-    current_term: Option<u64>,
-    raft_state: Option<String>,
-    last_applied: Option<u64>,
-    membership: BTreeMap<String, String>,
-    interconnect: BTreeMap<String, String>,
-}
-
-impl ClusterStatus {
-    fn parse(raw: String) -> Self {
-        let mut current_leader = None;
-        let mut current_term = None;
-        let mut raft_state = None;
-        let mut last_applied = None;
-        let mut membership = BTreeMap::new();
-        let mut interconnect = BTreeMap::new();
-        let mut in_membership = false;
-        let mut in_interconnect = false;
-
-        for line in raw.lines() {
-            if let Some(value) = line.strip_prefix("raft.current_leader: ") {
-                let trimmed = value.trim();
-                if trimmed != "(none)" {
-                    current_leader = Some(trimmed.to_string());
-                }
-            }
-
-            if let Some(value) = line.strip_prefix("raft.current_term: ") {
-                current_term = value.trim().parse::<u64>().ok();
-            }
-
-            if let Some(value) = line.strip_prefix("raft.state: ") {
-                raft_state = Some(value.trim().to_string());
-            }
-
-            if let Some(value) = line.strip_prefix("raft.last_applied: ") {
-                let trimmed = value.trim();
-                if trimmed != "(none)" {
-                    last_applied = trimmed.parse::<u64>().ok();
-                }
-            }
-
-            if line == "raft.membership:" {
-                in_membership = true;
-                in_interconnect = false;
-                continue;
-            }
-
-            if line == "[interconnect]" {
-                in_interconnect = true;
-                in_membership = false;
-                continue;
-            }
-
-            if in_membership {
-                if !line.starts_with("- ") {
-                    in_membership = false;
-                } else if let Some((node_id, role)) = parse_membership_line(line) {
-                    membership.insert(node_id, role);
-                }
-            }
-
-            if in_interconnect {
-                if !line.starts_with("- ") {
-                    in_interconnect = false;
-                } else if let Some((node_id, status)) = parse_interconnect_line(line) {
-                    interconnect.insert(node_id, status);
-                }
-            }
-        }
-
-        Self {
-            raw,
-            current_leader,
-            current_term,
-            raft_state,
-            last_applied,
-            membership,
-            interconnect,
-        }
-    }
-}
-
 impl ClusterStatus {
     /// The leadership this status reports: the leader it names in the term it reports, when it
     /// names both.
@@ -5771,14 +5817,6 @@ impl ClusterStatus {
         let leader = self.current_leader.clone()?;
         let term = self.current_term?;
         Some(ReportedLeadership { leader, term })
-    }
-
-    /// Whether the membership this status reports holds `node_id` as a voter.
-    fn is_voter(&self, node_id: &str) -> bool {
-        match self.membership.get(node_id) {
-            Some(role) => role == "voter",
-            None => false,
-        }
     }
 }
 
@@ -5788,20 +5826,6 @@ pub(crate) fn interconnect_status_from_text(raw: &str, peer: &str) -> Option<Str
         .interconnect
         .get(peer)
         .cloned()
-}
-
-fn parse_membership_line(line: &str) -> Option<(String, String)> {
-    let item = line.strip_prefix("- ")?;
-    let (node_id, rest) = item.split_once(" [")?;
-    let (role, _) = rest.split_once(']')?;
-    Some((node_id.to_string(), role.to_string()))
-}
-
-fn parse_interconnect_line(line: &str) -> Option<(String, String)> {
-    let item = line.strip_prefix("- ")?;
-    let (node_id, rest) = item.split_once(": ")?;
-    let (_, status) = rest.split_once("status=")?;
-    Some((node_id.to_string(), status.to_string()))
 }
 
 /// Renders a client outcome as its aggregate message followed by every non-empty statement
@@ -7342,10 +7366,12 @@ async fn publish_nats_with_headers(
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
     let client = nats_client(dependencies).await?;
-    let mut header_map = async_nats::HeaderMap::new();
-    for (name, value) in headers {
-        header_map.append(*name, *value);
-    }
+    let header_map = async_nats::HeaderMap::from_ordered(
+        headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+    );
     client
         .publish_with_headers(
             subject.to_string(),
@@ -7997,7 +8023,9 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
 }
 
 async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
-    async_nats::connect(dependencies.get(NATS_ADDR)?)
+    async_nats::ConnectOptions::new()
+        .ordered_headers()
+        .connect(dependencies.get(NATS_ADDR)?)
         .await
         .map_err(io::Error::other)
 }
@@ -8123,9 +8151,135 @@ async fn nats_stream_field_values(
     Ok(values)
 }
 
+/// Where a JetStream consumer stands: the messages it still holds for delivery, the deliveries it
+/// awaits an acknowledgement for, and the stream sequence through which every message is
+/// acknowledged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NatsConsumerPosition {
+    pub(crate) pending: u64,
+    pub(crate) awaiting_acknowledgement: usize,
+    pub(crate) acknowledged_through: u64,
+}
+
+async fn provision_nats_pull_consumer(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    consumer: &str,
+) -> io::Result<()> {
+    let client = nats_client(dependencies).await?;
+    let stream_handle = async_nats::jetstream::new(client)
+        .get_stream(stream)
+        .await
+        .map_err(io::Error::other)?;
+    stream_handle
+        .create_consumer(async_nats::jetstream::consumer::pull::Config {
+            durable_name: Some(consumer.to_string()),
+            ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+            ..Default::default()
+        })
+        .await
+        .map_err(io::Error::other)?;
+    Ok(())
+}
+
+async fn publish_nats_jetstream(
+    dependencies: &DependencyEndpoints,
+    subject: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let client = nats_client(dependencies).await?;
+    // The context holds the step's only client, whose connection carries the stream's answer, so
+    // it lives until that answer arrives.
+    let context = async_nats::jetstream::new(client);
+    let stored = context
+        .publish(subject.to_string(), payload.as_bytes().to_vec().into())
+        .await
+        .map_err(io::Error::other)?;
+    stored.await.map_err(io::Error::other)?;
+    Ok(())
+}
+
+async fn nats_consumer_position(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    consumer: &str,
+) -> io::Result<NatsConsumerPosition> {
+    let client = nats_client(dependencies).await?;
+    let info = async_nats::jetstream::new(client)
+        .get_stream_no_info(stream)
+        .await
+        .map_err(io::Error::other)?
+        .consumer_info(consumer)
+        .await
+        .map_err(io::Error::other)?;
+    Ok(NatsConsumerPosition {
+        pending: info.num_pending,
+        awaiting_acknowledgement: info.num_ack_pending,
+        acknowledged_through: info.ack_floor.stream_sequence,
+    })
+}
+
+async fn wait_for_nats_consumer_position(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    consumer: &str,
+    expected: NatsConsumerPosition,
+    duration: Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let last_observation = match nats_consumer_position(dependencies, stream, consumer).await {
+            Ok(position) if position == expected => return Ok(()),
+            Ok(position) => format!("{position:?}"),
+            Err(error) => format!("error {error}"),
+        };
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "timed out waiting for NATS JetStream consumer '{consumer}' of stream '{stream}' \
+                 to stand at {expected:?}; last observation: {last_observation}"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn nats_stream_exists(dependencies: &DependencyEndpoints, stream: &str) -> io::Result<bool> {
+    let client = nats_client(dependencies).await?;
+    let mut names = async_nats::jetstream::new(client).stream_names();
+    while let Some(name) = names.next().await {
+        nervix_primitives::task::consume_budget().await;
+        if name.map_err(io::Error::other)? == stream {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn nats_consumer_exists(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    consumer: &str,
+) -> io::Result<bool> {
+    let client = nats_client(dependencies).await?;
+    let stream_handle = async_nats::jetstream::new(client)
+        .get_stream_no_info(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let mut names = stream_handle.consumer_names();
+    while let Some(name) = names.next().await {
+        nervix_primitives::task::consume_budget().await;
+        if name.map_err(io::Error::other)? == consumer {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
     let ca_path = dependencies.tls_ca_path()?;
     async_nats::ConnectOptions::new()
+        .ordered_headers()
         .add_root_certificates(ca_path.to_path_buf())
         .require_tls(true)
         .connect(dependencies.get(NATS_TLS_ADDR)?)

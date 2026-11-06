@@ -1,9 +1,9 @@
-//! Published server endpoint definitions and source intake lifetimes.
+//! Published server endpoint definitions and ingestor intake lifetimes.
 //!
 //! Layer: data plane.
 //! - **Owns.** Whole-table endpoint publication and the exact lifetime of each bound intake.
 //! - **Depends on.** Typed domain identities, prepared endpoint metadata, and publication primitives.
-//! - **Must not know.** Decoding, request transport, graph planning, or source task scheduling.
+//! - **Must not know.** Decoding, request transport, graph planning, or ingestor task scheduling.
 
 #![cfg_attr(
     nervix_lint,

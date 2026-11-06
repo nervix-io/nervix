@@ -384,7 +384,11 @@ The current leader owns membership changes and serializes them one at a time. Le
 catch-up and voting-membership changes each have a ten-second wait deadline. When that deadline
 expires, Nervix stops waiting and observes effective committed membership again before a later
 retry. It does not infer that the change was rolled back: an admitted learner may continue catching
-up after the timed wait ends.
+up after the timed wait ends, and an applied joint configuration may still need its uniform step.
+Reconciliation completes that recorded transition before calculating another change. A voter union
+alone never establishes convergence; the expected uniform configuration must be committed. See
+[Follower Catch-Up And Learner Promotion](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion)
+for the quorum and status contract.
 
 An automatic schedule candidate carries the leader identity and term under which it was computed,
 plus the full applied control-plane revision of its inputs. Publication succeeds only during the
@@ -650,9 +654,12 @@ recorded stay applied.
 
 Node drain, the ownership move of a graceful-shutdown drain, placement consolidation, and `RELOCATE`
 are planned ownership handoffs.
-The schedule names each moved execution by its logical node and `Unit`; current graphs use one
-`Single` unit per node. Capture, preparation, activation, freeze and forced-recovery records carry
-that unit, so a sibling unit's checkpoint or prepared transition cannot satisfy the move.
+The schedule names each moved execution by its logical node and `Unit`: one `Partition` unit per
+partition for a relay of a partitioned branch, each moving on its own, and one `Single` unit for
+every other node. Capture, preparation, activation, freeze and forced-recovery records carry that
+unit, so a sibling unit's checkpoint or prepared transition cannot satisfy the move. A gate freezes
+every unit of the entities it holds, and a handoff that checks its gate reads the freeze of the unit
+it moves.
 Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
 the affected subgraph boundary on every live node that runs part of it, stops new intake for each
 moved ingestor, and drains work already admitted to the moved unit. Ownership-handoff intake does

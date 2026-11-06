@@ -110,6 +110,10 @@ mod domain_mutation;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
+mod membership_interruption;
+#[cfg(feature = "testing")]
+pub use membership_interruption::InterruptedMembership;
+use membership_interruption::MembershipInterruption;
 #[cfg(test)]
 mod planning_parameter_fence_tests;
 mod raft_record;
@@ -1133,13 +1137,20 @@ impl AutomaticScheduleInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MembershipSnapshot {
-    voters: BTreeSet<ClusterNodeName>,
-    /// The address Raft holds for each member, in the `BasicNode` form openraft stores.
-    nodes: BTreeMap<ClusterNodeName, String>,
+    /// OpenRaft owns these immutable publications; planning retains its complete configurations
+    /// without copying the voter sets and node-address table into another representation.
+    effective: StdArc<StoredMembershipOf>,
+    committed: StdArc<StoredMembershipOf>,
+}
+
+enum MembershipCompletion {
+    NoJointChange { current: MembershipSnapshot },
+    Applied { voters: BTreeSet<ClusterNodeName> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MembershipMutation {
+    CompleteVoterChange,
     UpdateAddress {
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
@@ -1154,21 +1165,55 @@ enum MembershipMutation {
 }
 
 impl MembershipSnapshot {
+    fn voter_ids(&self) -> BTreeSet<ClusterNodeName> {
+        self.effective.membership().voter_ids().collect()
+    }
+
+    fn node(&self, node_id: &ClusterNodeName) -> Option<&Node> {
+        self.effective.membership().get_node(node_id)
+    }
+
+    fn target_voters(&self) -> Option<&BTreeSet<ClusterNodeName>> {
+        self.effective.membership().get_joint_config().last()
+    }
+
+    fn joint_target(&self) -> Option<&BTreeSet<ClusterNodeName>> {
+        if self.effective.membership().get_joint_config().len() > 1 {
+            return self.target_voters();
+        }
+        None
+    }
+
+    fn is_committed_uniform(&self, voters: &BTreeSet<ClusterNodeName>) -> bool {
+        let [uniform] = self.effective.membership().get_joint_config().as_slice() else {
+            return false;
+        };
+        uniform == voters && self.effective.log_id() == self.committed.log_id()
+    }
+
     fn automatic_mutations(
         &self,
         gossip: &GossipState,
         admission_fences: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
     ) -> MembershipPlan {
         let candidates = gossip.latest_admission_candidates();
+        let voters = self.voter_ids();
         let VoterJudgment {
             accepted,
             mut verdicts,
             mut refusals,
-        } = self.judge_voter_runs(&candidates);
+        } = self.judge_voter_runs(&candidates, &voters);
+        if self.joint_target().is_some() {
+            return MembershipPlan {
+                mutations: vec![MembershipMutation::CompleteVoterChange],
+                refusals,
+                verdicts,
+            };
+        }
         let mut mutations = Vec::new();
-        let mut desired_voters = self.voters.clone();
+        let mut desired_voters = voters.clone();
         for node in candidates.into_values() {
-            if !self.voters.contains(&node.node_id)
+            if !voters.contains(&node.node_id)
                 && let Some(reason) = AdmissionRefusalReason::of(&node, &accepted)
             {
                 if let AdmissionRefusalReason::Incompatible { voter, mismatch } = &reason {
@@ -1198,10 +1243,13 @@ impl MembershipSnapshot {
             }
 
             let advertised = endpoint.to_string();
-            let known_address = self.nodes.get(&node.node_id);
-            let is_voter = self.voters.contains(&node.node_id);
-            let address_changed = known_address != Some(&advertised);
-            if known_address.is_some() && address_changed {
+            let known_node = self.node(&node.node_id);
+            let is_voter = voters.contains(&node.node_id);
+            let address_changed = match known_node {
+                Some(known) => known.addr != advertised,
+                None => true,
+            };
+            if known_node.is_some() && address_changed {
                 mutations.push(MembershipMutation::UpdateAddress {
                     node_id: node.node_id.clone(),
                     endpoint: endpoint.clone(),
@@ -1216,7 +1264,7 @@ impl MembershipSnapshot {
             desired_voters.insert(node.node_id);
         }
 
-        if desired_voters != self.voters {
+        if desired_voters != voters {
             mutations.push(MembershipMutation::ChangeVoters {
                 voters: desired_voters,
             });
@@ -1238,10 +1286,11 @@ impl MembershipSnapshot {
     fn judge_voter_runs(
         &self,
         candidates: &BTreeMap<ClusterNodeName, GossipNode>,
+        voters: &BTreeSet<ClusterNodeName>,
     ) -> VoterJudgment {
         let mut oldest_first = BTreeMap::new();
         for node in candidates.values() {
-            if self.voters.contains(&node.node_id) {
+            if voters.contains(&node.node_id) {
                 oldest_first.insert(RunStart::of(node), node);
             }
         }
@@ -2124,6 +2173,7 @@ struct ConsensusState {
     connectivity: ConnectivityFault,
     /// A test harness's refusal of one command execution's proposal; inert outside test builds.
     lease_refusal: LeaseRefusal,
+    membership_interruption: MembershipInterruption,
     raft_retention: RaftRetentionPolicy,
     /// Serializes membership changes, and holds the admission refusals the leader has reported.
     membership_mutation: AsyncMutex<ReportedAdmissionRefusals>,
@@ -2152,6 +2202,7 @@ struct ConsensusTestProbeState {
     append_stream_counts: Mutex<BTreeMap<ClusterNodeName, AppendStreamCounts>>,
     connectivity: ConnectivityFault,
     lease_refusal: LeaseRefusal,
+    membership_interruption: MembershipInterruption,
     append_submission_fault: AppendSubmissionFaults,
 }
 
@@ -2164,6 +2215,21 @@ struct AppendStreamCounts {
 
 #[cfg(feature = "testing")]
 impl ConsensusTestProbe {
+    /// Refuse the uniform continuation after a promotion's joint entry has applied.
+    pub async fn interrupt_voter_promotion(&self, joining: ClusterNodeName) {
+        self.inner
+            .membership_interruption
+            .arm(joining, self.inner.storage_fault.clone())
+            .await;
+    }
+
+    pub async fn interrupted_membership(
+        &self,
+        joining: &ClusterNodeName,
+    ) -> Option<InterruptedMembership> {
+        self.inner.membership_interruption.witness(joining).await
+    }
+
     /// Fail this node's next nonempty append submission to `target`, then allow later traffic.
     pub async fn fail_next_append_submission(&self, target: ClusterNodeName) {
         self.inner.append_submission_fault.arm(target).await;
@@ -2180,6 +2246,15 @@ impl ConsensusTestProbe {
     /// Delay every completed consensus storage sync; a zero duration disables the delay.
     pub fn set_storage_commit_delay(&self, delay: Duration) {
         self.inner.storage_fault.set_after_sync_delay(delay);
+    }
+
+    /// Delay each empty append answer after the follower has processed it.
+    pub fn set_heartbeat_response_delay(&self, delay: Duration) {
+        self.inner.connectivity.set_heartbeat_response_delay(delay);
+    }
+
+    pub fn delayed_heartbeat_requests(&self) -> u64 {
+        self.inner.connectivity.delayed_heartbeat_requests()
     }
 
     pub fn append_stream_open_count(&self, target: &ClusterNodeName) -> u64 {
@@ -2249,6 +2324,10 @@ trait AppendStreamOpenRecorder: Clone + Send + Sync + 'static {
     fn record_append_stream_attempt(&self, target: &ClusterNodeName);
     fn connectivity_fault(&self) -> ConnectivityFault;
     fn lease_refusal(&self) -> LeaseRefusal;
+    fn membership_interruption(&self) -> MembershipInterruption {
+        MembershipInterruption::default()
+    }
+
     fn append_submission_fault(&self, _target: &ClusterNodeName) -> AppendSubmissionFault {
         AppendSubmissionFault::default()
     }
@@ -2264,6 +2343,10 @@ impl AppendStreamOpenRecorder for () {
 
     fn lease_refusal(&self) -> LeaseRefusal {
         LeaseRefusal::default()
+    }
+
+    fn membership_interruption(&self) -> MembershipInterruption {
+        MembershipInterruption::default()
     }
 }
 
@@ -2287,6 +2370,10 @@ impl AppendStreamOpenRecorder for ConsensusTestProbe {
 
     fn lease_refusal(&self) -> LeaseRefusal {
         self.inner.lease_refusal.clone()
+    }
+
+    fn membership_interruption(&self) -> MembershipInterruption {
+        self.inner.membership_interruption.clone()
     }
 }
 
@@ -2471,6 +2558,7 @@ impl Consensus {
 
         let connectivity = append_stream_open_recorder.connectivity_fault();
         let lease_refusal = append_stream_open_recorder.lease_refusal();
+        let membership_interruption = append_stream_open_recorder.membership_interruption();
         let network = NetworkFactory {
             local_node_id: settings.node_id.clone(),
             interconnect: settings.interconnect.clone(),
@@ -2539,6 +2627,7 @@ impl Consensus {
                 interconnect: settings.interconnect,
                 connectivity,
                 lease_refusal,
+                membership_interruption,
                 raft_retention: retention,
                 membership_mutation: AsyncMutex::new(ReportedAdmissionRefusals::default()),
                 admission_verdicts: watch::channel(None).0,
@@ -2605,10 +2694,10 @@ impl Consensus {
                         }
                     };
                     {
-                        let mapping_input = receiver
-                            .append_entries(request)
-                            .await
-                            .map(wire::AppendEntriesResponseRecord::from);
+                        let response = receiver.append_entries(request).await;
+                        #[cfg(feature = "testing")]
+                        receiver.inner.connectivity.after_heartbeat_append().await;
+                        let mapping_input = response.map(wire::AppendEntriesResponseRecord::from);
                         match mapping_input {
                             Ok(mapped_value) => Ok(mapped_value),
                             Err(mapping_error) => {
@@ -2919,6 +3008,14 @@ impl Observer {
             Some(log_id) => log_id.index,
             None => 0,
         }
+    }
+
+    /// The index of the newest log entry this node applied, absent until it applies one. The
+    /// first entry of a cluster is its initial membership at index 0, so 0 is an applied revision.
+    pub fn applied_revision(&self) -> Option<u64> {
+        let state = self.inner.store.inner.state();
+        let log_id = state.last_applied_log_id.as_ref()?;
+        Some(log_id.index)
     }
     pub async fn current_domains(&self) -> BTreeMap<DomainName, DomainState> {
         (&self.inner.store.inner.state().domains).into()
@@ -3241,6 +3338,19 @@ impl Observer {
             None => "(none)".to_string(),
         };
         lines.push(format!("raft.last_applied: {last_applied}"));
+        lines.push(format!(
+            "raft.membership_joint: {}",
+            metrics
+                .membership_config
+                .membership()
+                .get_joint_config()
+                .len()
+                > 1
+        ));
+        lines.push(format!(
+            "raft.membership_committed: {}",
+            metrics.membership_config.log_id() == metrics.committed_membership_config.log_id()
+        ));
         lines.push("raft.membership:".to_string());
         for (node_id, node) in metrics.membership_config.nodes() {
             let role = if metrics
@@ -4245,107 +4355,239 @@ impl Administrator {
             return Ok(());
         }
 
-        let before = self.effective_membership();
+        let before = self.membership_snapshot();
         let state = self.inner.store.inner.state();
         let admission_fences = (&state.node_admission_fences).into();
-        let MembershipPlan {
-            mutations,
-            refusals,
-            verdicts,
-        } = before.automatic_mutations(&gossip, &admission_fences);
-        reported_refusals.report(&refusals);
-        self.inner
-            .admission_verdicts
-            .send_replace(Some(AdmissionVerdicts::new(metrics.current_term, verdicts)));
-        for mutation in mutations {
+        let mut next_snapshot = Some(before.clone());
+        // A completion returns a current uniform snapshot, whose plan cannot request another
+        // completion. The second pass preserves further admission/address work in this call.
+        while let Some(current) = next_snapshot.take() {
             nervix_primitives::task::consume_budget().await;
-            match mutation {
-                MembershipMutation::UpdateAddress { node_id, endpoint } => {
-                    let operation = format!("update address of '{node_id}' to {endpoint}");
-                    self.inner.events.report(format!("raft {operation}"));
-                    let proposed_under = self.inner.leader_tenure();
-                    let update = timeout(
-                        MEMBERSHIP_MUTATION_TIMEOUT,
-                        self.inner.raft.change_membership(
-                            ChangeMembers::SetNodes(BTreeMap::from([(
+            let MembershipPlan {
+                mutations,
+                refusals,
+                verdicts,
+            } = current.automatic_mutations(&gossip, &admission_fences);
+            reported_refusals.report(&refusals);
+            self.inner
+                .admission_verdicts
+                .send_replace(Some(AdmissionVerdicts::new(metrics.current_term, verdicts)));
+            for mutation in mutations {
+                nervix_primitives::task::consume_budget().await;
+                match mutation {
+                    MembershipMutation::CompleteVoterChange => {
+                        next_snapshot = Some(self.complete_voter_change().await?);
+                    }
+                    MembershipMutation::UpdateAddress { node_id, endpoint } => {
+                        let operation = format!("update address of '{node_id}' to {endpoint}");
+                        self.inner.events.report(format!("raft {operation}"));
+                        let proposed_under = self.inner.leader_tenure();
+                        let update = timeout(
+                            MEMBERSHIP_MUTATION_TIMEOUT,
+                            self.inner.raft.change_membership(
+                                ChangeMembers::SetNodes(BTreeMap::from([(
+                                    node_id,
+                                    BasicNode::new(endpoint.to_string()),
+                                )])),
+                                true,
+                            ),
+                        )
+                        .await;
+                        let result = match update {
+                            Ok(result) => result,
+                            Err(_) => {
+                                let observed = self.membership_snapshot();
+                                return Err(Report::new(
+                                    self.membership_timeout(operation, &observed),
+                                ));
+                            }
+                        };
+                        if let Err(error) = result {
+                            return Err(self.inner.write_failure(error, proposed_under));
+                        }
+                    }
+                    MembershipMutation::AddLearner { node_id, endpoint } => {
+                        let operation = if current.node(&node_id).is_some() {
+                            format!("wait for learner '{node_id}' to catch up at {endpoint}")
+                        } else {
+                            format!("add learner '{node_id}' at {endpoint}")
+                        };
+                        self.inner.events.report(format!("raft {operation}"));
+                        let proposed_under = self.inner.leader_tenure();
+                        let admission = timeout(
+                            MEMBERSHIP_MUTATION_TIMEOUT,
+                            self.inner.raft.add_learner(
                                 node_id,
                                 BasicNode::new(endpoint.to_string()),
-                            )])),
-                            true,
-                        ),
-                    )
-                    .await;
-                    let result = match update {
-                        Ok(result) => result,
-                        Err(_) => {
-                            let observed = self.effective_membership();
-                            return Err(Report::new(self.membership_timeout(operation, &observed)));
-                        }
-                    };
-                    if let Err(error) = result {
-                        return Err(self.inner.write_failure(error, proposed_under));
-                    }
-                }
-                MembershipMutation::AddLearner { node_id, endpoint } => {
-                    let operation = if before.nodes.contains_key(&node_id) {
-                        format!("wait for learner '{node_id}' to catch up at {endpoint}")
-                    } else {
-                        format!("add learner '{node_id}' at {endpoint}")
-                    };
-                    self.inner.events.report(format!("raft {operation}"));
-                    let proposed_under = self.inner.leader_tenure();
-                    let admission = timeout(
-                        MEMBERSHIP_MUTATION_TIMEOUT,
-                        self.inner.raft.add_learner(
-                            node_id,
-                            BasicNode::new(endpoint.to_string()),
-                            true,
-                        ),
-                    )
-                    .await;
-                    let result = match admission {
-                        Ok(result) => result,
-                        Err(_) => {
-                            let observed = self.effective_membership();
-                            return Err(Report::new(self.membership_timeout(operation, &observed)));
-                        }
-                    };
-                    if let Err(error) = result {
-                        return Err(self.inner.write_failure(error, proposed_under));
-                    }
-                }
-                MembershipMutation::ChangeVoters { voters } => {
-                    let operation = format!("promote voters {voters:?}");
-                    let proposed_under = self.inner.leader_tenure();
-                    let membership = timeout(
-                        MEMBERSHIP_MUTATION_TIMEOUT,
-                        self.inner.raft.change_membership(voters.clone(), true),
-                    )
-                    .await;
-                    let result = match membership {
-                        Ok(result) => result,
-                        Err(_) => {
-                            let observed = self.effective_membership();
-                            if observed.voters == voters {
-                                continue;
+                                true,
+                            ),
+                        )
+                        .await;
+                        let result = match admission {
+                            Ok(result) => result,
+                            Err(_) => {
+                                let observed = self.membership_snapshot();
+                                return Err(Report::new(
+                                    self.membership_timeout(operation, &observed),
+                                ));
                             }
-                            return Err(Report::new(self.membership_timeout(operation, &observed)));
+                        };
+                        if let Err(error) = result {
+                            return Err(self.inner.write_failure(error, proposed_under));
                         }
-                    };
-                    if let Err(error) = result {
-                        return Err(self.inner.write_failure(error, proposed_under));
+                    }
+                    MembershipMutation::ChangeVoters { voters } => {
+                        let operation = format!("promote voters {voters:?}");
+                        let proposed_under = self.inner.leader_tenure();
+                        let membership = timeout(
+                            MEMBERSHIP_MUTATION_TIMEOUT,
+                            self.inner
+                                .membership_interruption
+                                .change(&self.inner.raft, voters.clone()),
+                        )
+                        .await;
+                        let result = match membership {
+                            Ok(result) => result,
+                            Err(_) => {
+                                let observed = self.membership_snapshot();
+                                if observed.is_committed_uniform(&voters) {
+                                    continue;
+                                }
+                                return Err(Report::new(
+                                    self.membership_timeout(operation, &observed),
+                                ));
+                            }
+                        };
+                        if let Err(error) = result {
+                            return Err(self.inner.write_failure(error, proposed_under));
+                        }
                     }
                 }
             }
         }
 
-        let after = self.effective_membership();
-        if before.voters != after.voters {
+        let after = self.membership_snapshot();
+        if before.effective.membership().get_joint_config()
+            != after.effective.membership().get_joint_config()
+        {
             self.inner
                 .events
-                .report(format!("raft membership updated: {:?}", after.voters));
+                .report(format!("raft membership updated: {:?}", after.voter_ids()));
         }
         Ok(())
+    }
+
+    /// Finish the existing transition's target, preserving ordinary learners and removing voters
+    /// excluded by a pending DROP NODE. Further discovery work uses the current publication.
+    async fn complete_voter_change(
+        &self,
+    ) -> error_stack::Result<MembershipSnapshot, ConsensusError> {
+        let operation = "complete recorded voter change".to_string();
+        let proposed_under = self.inner.leader_tenure();
+        let completion = async {
+            let result = async {
+                let current = self
+                    .inner
+                    .raft
+                    .with_raft_state(|state| MembershipSnapshot {
+                        effective: state.membership_state.effective().clone(),
+                        committed: state.membership_state.committed().clone(),
+                    })
+                    .await
+                    .map_err(RaftError::Fatal)?;
+                Self::propose_voter_change_completion(&self.inner.raft, &self.inner.events, current)
+                    .await
+            }
+            .await
+            .map_err(|error| self.inner.write_failure(error, proposed_under))?;
+            match result {
+                MembershipCompletion::NoJointChange { current } => Ok(current),
+                MembershipCompletion::Applied { voters } => {
+                    self.wait_for_committed_membership(&voters).await
+                }
+            }
+        };
+        match timeout(MEMBERSHIP_MUTATION_TIMEOUT, completion).await {
+            Ok(result) => result,
+            Err(_) => {
+                let observed = self.membership_snapshot();
+                if observed
+                    .target_voters()
+                    .is_some_and(|voters| observed.is_committed_uniform(voters))
+                {
+                    return Ok(observed);
+                }
+                Err(Report::new(self.membership_timeout(operation, &observed)))
+            }
+        }
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            library,
+            reason = "preserves OpenRaft's membership result for the consensus reporting boundary"
+        )
+    )]
+    async fn propose_voter_change_completion(
+        raft: &NervixRaft,
+        events: &ConsensusEvents,
+        current: MembershipSnapshot,
+    ) -> Result<MembershipCompletion, RaftError<TypeConfig, ClientWriteError<TypeConfig>>> {
+        let Some(target) = current.joint_target() else {
+            return Ok(MembershipCompletion::NoJointChange { current });
+        };
+        events.report(format!("raft complete voter change towards {target:?}"));
+        // Core checks and completes its current joint target in one turn, preserving learners.
+        let response = match raft
+            .complete_membership(false)
+            .await
+            .map_err(RaftError::Fatal)?
+        {
+            openraft::MembershipCompletion::Unchanged {
+                effective,
+                committed,
+            } => {
+                return Ok(MembershipCompletion::NoJointChange {
+                    current: MembershipSnapshot {
+                        effective,
+                        committed,
+                    },
+                });
+            }
+            openraft::MembershipCompletion::Applied(response) => response,
+            openraft::MembershipCompletion::WriteError(error) => {
+                return Err(RaftError::APIError(error));
+            }
+        };
+        let membership = response
+            .membership
+            .verified("a completed membership write carries its uniform membership");
+        Ok(MembershipCompletion::Applied {
+            voters: membership.voter_ids().collect(),
+        })
+    }
+
+    async fn wait_for_committed_membership(
+        &self,
+        voters: &BTreeSet<ClusterNodeName>,
+    ) -> error_stack::Result<MembershipSnapshot, ConsensusError> {
+        let mut metrics = self.inner.raft.metrics();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let observed = metrics.borrow_watched().clone();
+            let snapshot = MembershipSnapshot {
+                effective: observed.membership_config,
+                committed: observed.committed_membership_config,
+            };
+            if snapshot.is_committed_uniform(voters) {
+                return Ok(snapshot);
+            }
+            metrics
+                .changed()
+                .await
+                .map_err(|error| Report::new(error).change_context(ConsensusError::RaftWrite))?;
+        }
     }
 
     /// The verdicts on live runs this node holds while it leads, as its last membership
@@ -4367,14 +4609,17 @@ impl Administrator {
         }
 
         let _membership_mutation = self.inner.membership_mutation.lock().await;
-        let before = self.effective_membership();
-        if !before.nodes.contains_key(node_id) {
+        let before = self.membership_snapshot();
+        if before.node(node_id).is_none() {
             return Err(Report::new(ConsensusError::NodeNotFound(
                 node_id.to_string(),
             )));
         }
 
-        let mut desired_voters = before.voters;
+        let mut desired_voters = before
+            .target_voters()
+            .cloned()
+            .ok_or_else(|| Report::new(ConsensusError::UnexpectedResponse))?;
         let was_voter = desired_voters.remove(node_id);
         if was_voter && desired_voters.is_empty() {
             return Err(Report::new(ConsensusError::RemoveLastVoter(
@@ -4421,8 +4666,10 @@ impl Administrator {
         let result = match membership {
             Ok(result) => result,
             Err(_) => {
-                let observed = self.effective_membership();
-                if !observed.nodes.contains_key(node_id) {
+                let observed = self.membership_snapshot();
+                if observed.node(node_id).is_none()
+                    && observed.is_committed_uniform(&desired_voters)
+                {
                     self.inner
                         .events
                         .report(format!("raft node removed after timed wait: {node_id}"));
@@ -4441,15 +4688,11 @@ impl Administrator {
         Ok(())
     }
 
-    fn effective_membership(&self) -> MembershipSnapshot {
+    fn membership_snapshot(&self) -> MembershipSnapshot {
         let metrics = self.inner.raft.metrics().borrow_watched().clone();
         MembershipSnapshot {
-            voters: metrics.membership_config.membership().voter_ids().collect(),
-            nodes: metrics
-                .membership_config
-                .nodes()
-                .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
-                .collect(),
+            effective: metrics.membership_config,
+            committed: metrics.committed_membership_config,
         }
     }
 
@@ -4458,10 +4701,16 @@ impl Administrator {
         operation: String,
         observed: &MembershipSnapshot,
     ) -> ConsensusError {
+        let nodes = observed
+            .effective
+            .nodes()
+            .map(|(node_id, node)| (node_id, &node.addr))
+            .collect::<BTreeMap<_, _>>();
         self.inner.events.report(format!(
             "raft membership wait timed out after {MEMBERSHIP_MUTATION_TIMEOUT:?}: {operation}; \
              observed effective voters {:?} and nodes {:?}",
-            observed.voters, observed.nodes
+            observed.voter_ids(),
+            nodes
         ));
         ConsensusError::MembershipChangeTimeout {
             operation,
@@ -4877,7 +5126,7 @@ where
                     .request_with_timeout(
                         &self.target,
                         wire::HeartbeatRequest(record),
-                        replication::heartbeat_deadline(&option),
+                        replication::append_request_deadline(&option, self.append_path),
                     )
                     .await
                     .map_err(io_error);
@@ -7097,7 +7346,7 @@ mod tests {
         entry::RaftEntry,
         storage::{RaftLogReader, RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
         type_config::alias::{CommittedLeaderIdOf, EntryOf, LeaderIdOf},
-        vote::RaftLeaderIdExt,
+        vote::{RaftLeaderId as _, RaftLeaderIdExt},
     };
     use tempfile::tempdir;
 
@@ -7573,13 +7822,13 @@ mod tests {
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([
                 (first.clone(), "node-1.test:7443".to_string()),
                 (joining.clone(), "node-2.test:7443".to_string()),
             ]),
-        };
+        );
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
@@ -7606,10 +7855,10 @@ mod tests {
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([(first, "node-1.test:7443".to_string())]),
-        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([(first, "node-1.test:7443".to_string())]),
+        );
         let admission_fences = BTreeMap::new();
 
         assert!(
@@ -7632,10 +7881,7 @@ mod tests {
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::new(),
-        };
+        let membership = voters(&["node-1"]);
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
@@ -7668,13 +7914,13 @@ mod tests {
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([
                 (first.clone(), "node-1.test:7443".to_string()),
                 (joining.clone(), current_address),
             ]),
-        };
+        );
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
@@ -7710,13 +7956,13 @@ mod tests {
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let mut membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone(), restarted.clone()]),
-            nodes: BTreeMap::from([
+        let mut membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone(), restarted.clone()]),
+            BTreeMap::from([
                 (first, "node-1.test:7443".to_string()),
                 (restarted.clone(), "node-2.test:7443".to_string()),
             ]),
-        };
+        );
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
@@ -7729,7 +7975,15 @@ mod tests {
             }]
         );
 
-        membership.nodes.insert(restarted, endpoint.to_string());
+        let node_addresses = membership
+            .effective
+            .membership()
+            .nodes()
+            .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
+            .collect();
+        let mut updated_addresses: BTreeMap<_, _> = node_addresses;
+        updated_addresses.insert(restarted, endpoint.to_string());
+        membership = uniform_membership_snapshot(membership.voter_ids(), updated_addresses);
         assert!(
             membership
                 .automatic_mutations(&gossip, &admission_fences)
@@ -7750,10 +8004,10 @@ mod tests {
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
-        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
+        );
         let admission_fences = BTreeMap::from([(joining.clone(), ClusterNodeIncarnation::new(2))]);
 
         assert!(
@@ -7822,10 +8076,10 @@ mod tests {
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([(first, "node-1.test:7443".to_string())]),
-        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([(first, "node-1.test:7443".to_string())]),
+        );
 
         let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
 
@@ -7859,10 +8113,10 @@ mod tests {
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
-        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
+        );
 
         let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
 
@@ -7916,10 +8170,10 @@ mod tests {
             dead_node_ids: BTreeSet::new(),
             dead_node_identities: BTreeSet::new(),
         };
-        let membership = MembershipSnapshot {
-            voters: BTreeSet::from([first.clone()]),
-            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
-        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
+        );
 
         let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
 
@@ -7952,6 +8206,24 @@ mod tests {
         }
     }
 
+    fn uniform_membership_snapshot(
+        voters: BTreeSet<ClusterNodeName>,
+        nodes: BTreeMap<ClusterNodeName, String>,
+    ) -> MembershipSnapshot {
+        let nodes = nodes
+            .into_iter()
+            .map(|(node_id, address)| (node_id, super::Node::new(address)))
+            .collect::<BTreeMap<_, _>>();
+        let membership = openraft::Membership::new(vec![voters], nodes)
+            .assured("each fixture voter has its declared node address");
+        let published =
+            nervix_primitives::sync::StdArc::new(StoredMembership::new(None, membership));
+        MembershipSnapshot {
+            effective: published.clone(),
+            committed: published,
+        }
+    }
+
     /// The membership whose voters are `names`, each at its test endpoint.
     fn voters(names: &[&str]) -> MembershipSnapshot {
         let mut voters = BTreeSet::new();
@@ -7961,7 +8233,341 @@ mod tests {
             voters.insert(node_id.clone());
             nodes.insert(node_id, format!("{name}.test:7443"));
         }
-        MembershipSnapshot { voters, nodes }
+        uniform_membership_snapshot(voters, nodes)
+    }
+
+    fn joint_membership_snapshot(
+        previous: &[&str],
+        target: &[&str],
+        members: &[&str],
+    ) -> MembershipSnapshot {
+        let nodes = voters(members)
+            .effective
+            .membership()
+            .nodes()
+            .map(|(node_id, node)| (node_id.clone(), node.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let membership = openraft::Membership::new(
+            vec![voters(previous).voter_ids(), voters(target).voter_ids()],
+            nodes,
+        )
+        .assured("every fixture voter has a node address");
+        let published =
+            nervix_primitives::sync::StdArc::new(StoredMembership::new(None, membership));
+        MembershipSnapshot {
+            effective: published.clone(),
+            committed: published,
+        }
+    }
+
+    #[test]
+    fn membership_completes_a_joint_promotion_before_planning_another_admission() {
+        let target = ["node-1", "node-2", "node-3"];
+        let joint = joint_membership_snapshot(
+            &["node-1", "node-2"],
+            &target,
+            &["node-1", "node-2", "node-3", "node-4"],
+        );
+        let gossip = GossipState {
+            live_nodes: vec![live_voter("node-4", 4, Duration::from_millis(166))],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        assert_eq!(
+            joint
+                .automatic_mutations(&gossip, &BTreeMap::new())
+                .mutations,
+            vec![MembershipMutation::CompleteVoterChange]
+        );
+        assert_eq!(joint.joint_target(), Some(&voters(&target).voter_ids()));
+        assert!(
+            joint
+                .node(&ClusterNodeName::parse("node-4").assured("valid test node"))
+                .is_some(),
+            "the pending membership retains its existing learner"
+        );
+        let uniform = voters(&target);
+        assert_eq!(
+            uniform
+                .automatic_mutations(&gossip, &BTreeMap::new())
+                .mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: ClusterNodeName::parse("node-4").assured("valid test node"),
+                    endpoint: node_endpoint("node-4.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: voters(&["node-1", "node-2", "node-3", "node-4"]).voter_ids(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn membership_completes_a_joint_removal_towards_its_target_without_readmitting_the_fenced_run()
+    {
+        let target = ["node-1", "node-2"];
+        let joint = joint_membership_snapshot(
+            &["node-1", "node-2", "node-3"],
+            &target,
+            &["node-1", "node-2", "node-3", "node-4"],
+        );
+        let removed = ClusterNodeName::parse("node-3").assured("valid test node");
+        let gossip = GossipState {
+            live_nodes: vec![live_voter("node-3", 3, Duration::from_millis(166))],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let fences = BTreeMap::from([(removed, ClusterNodeIncarnation::new(3))]);
+        assert_eq!(
+            joint.automatic_mutations(&gossip, &fences).mutations,
+            vec![MembershipMutation::CompleteVoterChange]
+        );
+        assert_eq!(joint.joint_target(), Some(&voters(&target).voter_ids()));
+        assert!(
+            voters(&target)
+                .automatic_mutations(&gossip, &fences)
+                .mutations
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn membership_timeout_success_requires_the_expected_uniform_configuration_to_be_committed() {
+        let target = ["node-1", "node-2", "node-3"];
+        let expected = voters(&target).voter_ids();
+        let joint = joint_membership_snapshot(&["node-1", "node-2"], &target, &target);
+        assert!(!joint.is_committed_uniform(&expected));
+        let mut snapshot = voters(&target);
+        let entry = openraft::LogId::new(
+            CommittedLeaderIdOf::<TypeConfig>::new(
+                1,
+                ClusterNodeName::parse("node-1").assured("valid test node"),
+            ),
+            5,
+        );
+        snapshot.effective = nervix_primitives::sync::StdArc::new(StoredMembership::new(
+            Some(entry),
+            snapshot.effective.membership().clone(),
+        ));
+        assert!(!snapshot.is_committed_uniform(&expected));
+        snapshot.committed = snapshot.effective.clone();
+        assert!(snapshot.is_committed_uniform(&expected));
+        assert!(!snapshot.is_committed_uniform(&voters(&["node-1", "node-2"]).voter_ids()));
+    }
+
+    struct SingleNodeMembershipNetwork;
+
+    impl openraft::RaftNetworkFactory<TypeConfig> for SingleNodeMembershipNetwork {
+        type Network = super::NetworkClient<()>;
+
+        async fn new_client(
+            &mut self,
+            _target: ClusterNodeName,
+            _node: &super::Node,
+        ) -> Self::Network {
+            panic!("a single-node membership fixture has no remote peer")
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn membership_completion_leaves_an_already_uniform_core_log_unchanged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let node = ClusterNodeName::parse("node-1")?;
+        let store =
+            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
+                .await?;
+        let config = nervix_primitives::sync::StdArc::new(super::Config::default().validate()?);
+        let raft = super::NervixRaft::new(
+            node.clone(),
+            config,
+            SingleNodeMembershipNetwork,
+            store.clone(),
+            store,
+        )
+        .await?;
+        raft.initialize(BTreeMap::from([(
+            node.clone(),
+            super::Node::new("127.0.0.1:1"),
+        )]))
+        .await?;
+        raft.wait(Some(super::MEMBERSHIP_MUTATION_TIMEOUT))
+            .metrics(
+                |metrics| {
+                    metrics.current_leader.as_ref() == Some(&node)
+                        && metrics.last_applied.as_ref().map(|entry| entry.index)
+                            == metrics.last_log_index
+                        && metrics
+                            .membership_config
+                            .membership()
+                            .get_joint_config()
+                            .len()
+                            == 1
+                        && metrics.membership_config.log_id()
+                            == metrics.committed_membership_config.log_id()
+                },
+                "the single-node leader has applied its committed uniform membership",
+            )
+            .await?;
+        let (before, current) = raft
+            .with_raft_state(|state| {
+                (
+                    state.log_ids.last().cloned(),
+                    MembershipSnapshot {
+                        effective: state.membership_state.effective().clone(),
+                        committed: state.membership_state.committed().clone(),
+                    },
+                )
+            })
+            .await?;
+        let completion = super::timeout(
+            super::MEMBERSHIP_MUTATION_TIMEOUT,
+            super::Administrator::propose_voter_change_completion(
+                &raft,
+                &super::ConsensusEvents::new(),
+                current,
+            ),
+        )
+        .await;
+        let after = raft
+            .with_raft_state(|state| state.log_ids.last().cloned())
+            .await;
+        raft.shutdown()
+            .await
+            .expect("the fixture Raft task should stop");
+
+        let outcome = completion.expect("membership completion should answer within its bound")?;
+        let super::MembershipCompletion::NoJointChange { current } = outcome else {
+            panic!("the core already has its uniform configuration");
+        };
+        assert!(current.is_committed_uniform(&BTreeSet::from([node])));
+        assert_eq!(
+            after?, before,
+            "an already uniform core needs no membership log entry"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn membership_completion_keeps_the_write_response_channel_footprint() {
+        type Write = openraft::raft::ClientWriteResult<TypeConfig>;
+        type Completion = openraft::MembershipCompletion<TypeConfig>;
+        assert!(std::mem::size_of::<Completion>() <= std::mem::size_of::<Write>());
+        assert!(std::mem::align_of::<Completion>() <= std::mem::align_of::<Write>());
+        assert_eq!(
+            std::mem::size_of::<openraft::impls::ProgressResponder<TypeConfig, Completion>>(),
+            std::mem::size_of::<openraft::impls::ProgressResponder<TypeConfig, Write>>()
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn membership_completion_uses_the_core_after_a_joint_observation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let node = ClusterNodeName::parse("node-1")?;
+        let mut store =
+            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
+                .await?;
+        let voters = BTreeSet::from([node.clone()]);
+        // Both recorded quorum sets use the fixture voter, so the real Core can apply the
+        // joint-to-uniform transition without a remote peer.
+        let joint = openraft::Membership::new(
+            vec![voters.clone(), voters.clone()],
+            BTreeMap::from([(node.clone(), super::Node::new("127.0.0.1:1"))]),
+        )?;
+        let entry = <EntryOf<TypeConfig> as RaftEntry>::new_membership(
+            LogIdOf::new(committed_leader(0), 0),
+            joint,
+        );
+        RaftLogStorageExt::<TypeConfig>::blocking_append(&mut store, [entry]).await?;
+        let config = nervix_primitives::sync::StdArc::new(super::Config::default().validate()?);
+        let raft = super::NervixRaft::new(
+            node.clone(),
+            config,
+            SingleNodeMembershipNetwork,
+            store.clone(),
+            store,
+        )
+        .await?;
+        raft.wait(Some(super::MEMBERSHIP_MUTATION_TIMEOUT))
+            .metrics(
+                |metrics| {
+                    metrics.current_leader.as_ref() == Some(&node)
+                        && metrics.last_applied.as_ref().map(|entry| entry.index)
+                            == metrics.last_log_index
+                        && metrics
+                            .membership_config
+                            .membership()
+                            .get_joint_config()
+                            .len()
+                            == 2
+                        && metrics.membership_config.log_id()
+                            == metrics.committed_membership_config.log_id()
+                },
+                "the single-node leader has applied its committed joint membership",
+            )
+            .await?;
+        let (observed, joint_log) = raft
+            .with_raft_state(|state| {
+                (
+                    MembershipSnapshot {
+                        effective: state.membership_state.effective().clone(),
+                        committed: state.membership_state.committed().clone(),
+                    },
+                    state.log_ids.last().cloned(),
+                )
+            })
+            .await?;
+        let initial = super::timeout(
+            super::MEMBERSHIP_MUTATION_TIMEOUT,
+            super::Administrator::propose_voter_change_completion(
+                &raft,
+                &super::ConsensusEvents::new(),
+                observed.clone(),
+            ),
+        )
+        .await
+        .expect("the recorded joint completion should answer within its bound")?;
+        let before = raft
+            .with_raft_state(|state| state.log_ids.last().cloned())
+            .await?;
+        let completion = super::timeout(
+            super::MEMBERSHIP_MUTATION_TIMEOUT,
+            super::Administrator::propose_voter_change_completion(
+                &raft,
+                &super::ConsensusEvents::new(),
+                observed,
+            ),
+        )
+        .await;
+        let after = raft
+            .with_raft_state(|state| state.log_ids.last().cloned())
+            .await;
+        raft.shutdown()
+            .await
+            .expect("the fixture Raft task should stop");
+
+        let super::MembershipCompletion::Applied {
+            voters: initial_voters,
+        } = initial
+        else {
+            panic!("the first completion applies the recorded joint target");
+        };
+        assert_eq!(initial_voters, voters);
+        assert_eq!(
+            before.as_ref().map(|entry| entry.index),
+            joint_log.as_ref().map(|entry| entry.index + 1),
+            "the joint completion appends exactly one uniform entry"
+        );
+        assert_eq!(
+            after?, before,
+            "completion must recheck the Core after its joint observation"
+        );
+        let outcome = completion.expect("membership completion should answer within its bound")?;
+        let super::MembershipCompletion::NoJointChange { current } = outcome else {
+            panic!("the Core has already completed the observed joint membership");
+        };
+        assert!(current.is_committed_uniform(&voters));
+        Ok(())
     }
 
     fn heartbeat_mismatch(voter: Duration, run: Duration) -> PrerequisiteMismatch {
@@ -9545,11 +10151,11 @@ mod tests {
             schedule: Some(Box::new(after.clone())),
             no_op_operations: Vec::new(),
             model_gate: nervix_models::TransactionEntityGatePlan {
-                affected_entities: Vec::new(),
+                targets: nervix_models::EntityGateTargets::default(),
                 relays: Vec::new(),
             },
             ownership_gate: nervix_models::TransactionEntityGatePlan {
-                affected_entities: Vec::new(),
+                targets: nervix_models::EntityGateTargets::default(),
                 relays: Vec::new(),
             },
         };

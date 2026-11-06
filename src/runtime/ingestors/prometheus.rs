@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn the_declared_intake_batch_is_one_ingest_group() {
         let [_, intake_batch] = PrometheusQueryIngestor::CAPABILITIES.bounds.buffers else {
-            panic!("a query source declares its response and its intake batch");
+            panic!("a query ingestor declares its response and its intake batch");
         };
         let group = u64::try_from(INGEST_GROUP_MAX_ROWS)
             .assured("the ingest group bound fits u64 on every supported target");
