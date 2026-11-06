@@ -99,14 +99,6 @@ struct ForwardExchange {
     state: Arc<PeerState>,
 }
 
-impl ForwardExchange {
-    fn outbound<R: nervix_client_wire::FrameRoot>(
-        frame: Result<VerifiedFrame<R>, Status>,
-    ) -> Result<Vec<u8>, Status> {
-        frame.map(|frame| frame.into_bytes().to_vec())
-    }
-}
-
 impl StreamingService<VerifiedFrame<ClientFrame>> for ForwardExchange {
     type Response = Vec<u8>;
     type ResponseStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, Status>> + Send>>;
@@ -119,9 +111,12 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for ForwardExchange {
             // A client dropping its session ends forwarded input. Only successfully decoded
             // messages reach tonic's outbound message stream.
             let incoming = incoming.take_while(|frame| futures_util::future::ready(frame.is_ok()));
-            let outgoing = incoming.map(ForwardExchange::outbound::<ClientFrame>);
-            let outgoing = outgoing
-                .map(|frame| frame.assured("the preceding take_while retained only valid frames"));
+            let outgoing = incoming.map(|frame| {
+                frame
+                    .assured("the preceding take_while retained only valid frames")
+                    .into_bytes()
+                    .to_vec()
+            });
             let request = Request::from_parts(metadata, extensions, outgoing);
             let mut client = tonic::client::Grpc::new(channel);
             client
@@ -137,7 +132,7 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for ForwardExchange {
                 .await?;
             let outgoing = response
                 .into_inner()
-                .map(ForwardExchange::outbound::<ServerFrame>);
+                .map(|frame| frame.map(|frame| frame.into_bytes().to_vec()));
             let outgoing: Self::ResponseStream = Box::pin(outgoing);
             Ok(Response::new(outgoing))
         })

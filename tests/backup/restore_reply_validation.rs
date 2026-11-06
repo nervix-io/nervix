@@ -15,7 +15,7 @@ use crate::common::{
 };
 
 enum InitialResult {
-    Native(Result<nervix_client_core::CommandOutcome, Failure>),
+    Native(Result<Box<nervix_client_core::CommandOutcome>, Failure>),
     Cli(Output),
 }
 
@@ -91,7 +91,7 @@ async fn when_restore_receives_invalid_reply(
             .await
             .assured("the native restore ends within the scenario budget");
             drop(client);
-            InitialResult::Native(result.map_err(Failure::from))
+            InitialResult::Native(result.map(Box::new).map_err(Failure::from))
         }
         "CLI" => {
             let mut command = tokio::process::Command::new(scenario_cli_binary());
