@@ -40,6 +40,7 @@ pub(crate) mod rabbitmq_confirm_order;
 pub(crate) mod rabbitmq_queue;
 pub(crate) mod raw_session;
 pub(crate) mod redis_client;
+pub(crate) mod restore_reply_peer;
 pub(crate) mod runner_lag;
 pub(crate) mod runner_observation;
 pub(crate) mod runner_offload;

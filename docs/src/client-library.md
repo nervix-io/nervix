@@ -240,6 +240,13 @@ returns `UncertainCommand` under the restore's own reference, above
 failure. Repeat with `restore_with_reference` and the original reference, statement and archive to
 learn the restore's own outcome.
 
+A verified reply that cannot be decoded or names another transport request also leaves the restore
+uncertain: it may already have completed. The error retains its typed validation cause and the
+restore's own reference. The client ends the session used by that attempt and interrupts its pending
+requests, while preserving any replacement session installed during the restore. Retain the same
+statement, archive bytes and reference for recovery. An unreadable or empty local archive and a
+valid stream refusal remain definitive failures.
+
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.
 A stream the leader refused before the restore ran is a failed outcome whose message names the
