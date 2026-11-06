@@ -2888,8 +2888,14 @@ completed backup's archive was not downloaded, never as a failure of the backup.
 failure names an archive file the browser could not read or that is empty, a transport failure, a
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
-execution reference. A refusal of the stream is shown as `restore refused (<failure>): <message>`,
-and the restore's own outcome as the dispatcher renders any command's. A session reply whose
+execution reference. Once an attempt has sent the whole archive without learning the outcome, or
+the leader has answered that the outcome is unknown, the restore may have been admitted. A failure
+that then ends it, a refusal of a later stream, and an execution reference the leader no longer
+holds all sit beneath `the console stopped before learning the outcome of a restore the leader may
+have admitted`, and the dialog reports the outcome as unknown naming the execution reference. The
+dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
+could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
+restore's own outcome as the dispatcher renders any command's. A session reply whose
 command outcome names another execution reference than its command's is a protocol violation: the
 dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
 '<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
