@@ -152,7 +152,11 @@ impl LeaderRoutes {
                     }
                 }
                 let attempted = match probe.as_deref_mut() {
-                    Some(probe) => probe.observe(command.run(&mut session)).await,
+                    Some(probe) => {
+                        probe
+                            .observe(Some(node.as_str()), command.run(&mut session))
+                            .await
+                    }
                     None => command
                         .run(&mut session)
                         .await

@@ -10,7 +10,9 @@
     nervix::context(outside, reason = "owns private keys of testing-only command pauses")
 )]
 
-use nervix_models::{ClusterNodeName, DomainName, DomainNodeRef, RestoreStep};
+use nervix_models::{
+    ClusterNodeName, CommandExecutionReference, DomainName, DomainNodeRef, RestoreStep,
+};
 
 use super::{DomainResumeBoundary, StandaloneTransactionBoundary};
 
@@ -40,6 +42,10 @@ pub(super) enum CommandPausePoint {
     ApplicationRevisionResponse(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
+    Reconciliation {
+        node: ClusterNodeName,
+        reference: CommandExecutionReference,
+    },
     Finalization(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
