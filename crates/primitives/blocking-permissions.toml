@@ -264,6 +264,13 @@ path = "src/application/backup/retained.rs"
 reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
 
 [[permission]]
+bound = "Each model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Application progress Shuttle checks."
+path = "src/application/completion/progress.rs"
+reason = "Model participants exercise the progress owner concurrently outside a node executor under the selected scheduler."
+
+[[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
 items = ["thread::spawn"]
 owner = "Restore-installation Shuttle checks."

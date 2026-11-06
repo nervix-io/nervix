@@ -45,9 +45,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_dns::DnsLookupError;
 use nervix_interconnect::{
-    ApplicationRevisionResponse, BootstrapExpectation, InterconnectRequest, PeerTarget, PoolClass,
-    RequestContext, RequestError, RequestSubquota, Transport as InterconnectTransport,
-    TransportError,
+    BootstrapExpectation, InterconnectRequest, PeerTarget, PoolClass, RequestContext, RequestError,
+    RequestSubquota, Transport as InterconnectTransport, TransportError,
 };
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodePrerequisites,
@@ -94,9 +93,6 @@ const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
 const KEY_CLUSTER_PARAMETERS: &str = "cluster_parameters";
 const KEY_TERMINATING: &str = "terminating";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
-const KEY_AUTHORITATIVE_REVISION_APPLIED: &str = "authoritative_revision_applied";
-const KEY_RUNTIME_REVISION_PREPARED: &str = "runtime_revision_prepared";
-const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
 /// The runtime revision through which every domain clock the node holds is the committed one.
 const KEY_DOMAIN_CLOCK_REVISION_INSTALLED: &str = "domain_clock_revision_installed";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
@@ -1630,73 +1626,16 @@ impl ClusterHandle {
         chitchat.self_node_state().get(KEY_TERMINATING).is_some()
     }
 
-    pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
-        self.set_local_revision(KEY_RUNTIME_REVISION_READY, revision)
-            .await;
-    }
-
-    pub async fn set_local_authoritative_revision(&self, revision: u64) {
-        self.set_local_revision(KEY_AUTHORITATIVE_REVISION_APPLIED, revision)
-            .await;
-    }
-
-    pub async fn nodes_at_authoritative_revision(
-        &self,
-        revision: u64,
-    ) -> BTreeSet<ClusterNodeIdentity> {
-        self.nodes_at_revision(KEY_AUTHORITATIVE_REVISION_APPLIED, revision)
-            .await
-    }
-
-    pub async fn set_local_runtime_revision_prepared(&self, revision: u64) {
-        self.set_local_revision(KEY_RUNTIME_REVISION_PREPARED, revision)
-            .await;
-    }
-
-    async fn set_local_revision(&self, key: &str, revision: u64) {
-        let chitchat_handle = self.chitchat.clone();
-        let mut chitchat = chitchat_handle.lock().await;
-        advance_revision(chitchat.self_node_state(), key, revision);
-    }
-
-    pub async fn local_application_revision(&self) -> ApplicationRevisionResponse {
-        let chitchat_handle = self.chitchat.clone();
-        let chitchat = chitchat_handle.lock().await;
-        let self_id = chitchat.self_chitchat_id();
-        let identity = cluster_node_identity(self_id)
-            .assured("the local Chitchat identity contains the validated server node name");
-        let state = chitchat
-            .node_state(self_id)
-            .assured("Chitchat retains its own node state for the server lifetime");
-        ApplicationRevisionResponse {
-            identity,
-            authoritative: revision_or_zero(state, KEY_AUTHORITATIVE_REVISION_APPLIED),
-            runtime_prepared: revision_or_zero(state, KEY_RUNTIME_REVISION_PREPARED),
-            runtime_ready: revision_or_zero(state, KEY_RUNTIME_REVISION_READY),
-        }
-    }
-
-    pub async fn nodes_prepared_for_runtime_revision(
-        &self,
-        revision: u64,
-    ) -> BTreeSet<ClusterNodeIdentity> {
-        self.nodes_at_revision(KEY_RUNTIME_REVISION_PREPARED, revision)
-            .await
-    }
-
-    pub async fn nodes_ready_for_runtime_revision(
-        &self,
-        revision: u64,
-    ) -> BTreeSet<ClusterNodeIdentity> {
-        self.nodes_at_revision(KEY_RUNTIME_REVISION_READY, revision)
-            .await
-    }
-
     /// Advertises that every domain clock this node holds, authority fence included, is the
     /// committed one of runtime `revision`.
     pub async fn set_local_domain_clock_revision_installed(&self, revision: u64) {
-        self.set_local_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
-            .await;
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        advance_revision(
+            chitchat.self_node_state(),
+            KEY_DOMAIN_CLOCK_REVISION_INSTALLED,
+            revision,
+        );
     }
 
     /// The incarnations whose domain clocks match runtime `revision` or a later one.
@@ -1949,15 +1888,6 @@ fn revision_is_at_least(state: &NodeState, key: &str, revision: u64) -> bool {
         return false;
     };
     ready_revision >= revision
-}
-
-fn revision_or_zero(state: &NodeState, key: &str) -> u64 {
-    let Some(value) = state.get(key) else {
-        return 0;
-    };
-    value
-        .parse::<u64>()
-        .assured("application revision values are written from a u64")
 }
 
 fn advance_revision(state: &mut NodeState, key: &str, revision: u64) {
