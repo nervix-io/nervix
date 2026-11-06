@@ -88,14 +88,6 @@ pub(crate) struct TestSubscriptionEvent {
     pub payload: String,
 }
 
-/// A command's outcome together with the size of the frames that carried it.
-#[derive(Debug)]
-pub(crate) struct TestCommandObservation {
-    pub(crate) result: CommandOutcome,
-    pub(crate) request_frame_bytes: usize,
-    pub(crate) response_frame_bytes: usize,
-}
-
 /// A notice, or a subscription failure, the server sent without a request.
 #[derive(Debug, Clone)]
 pub(crate) struct TestServerEvent {
@@ -133,12 +125,6 @@ pub(crate) enum TestClockLogEntry {
     /// The terminal reply to an attach or detach request.
     Reply(RequestId),
     Frame(TestClockFrame),
-}
-
-/// A reply and the bytes of the frames that carried it.
-struct ReceivedReply {
-    body: ReplyBody,
-    frame_bytes: usize,
 }
 
 /// Sends frames as they are given, so a scenario can send bytes that are not a valid frame.
@@ -187,7 +173,7 @@ pub(crate) struct TestSession {
     responses: Streaming<VerifiedFrame<ServerFrame>>,
     next_request: NonZeroU64,
     outstanding: BTreeSet<RequestId>,
-    replies: BTreeMap<RequestId, ReceivedReply>,
+    replies: BTreeMap<RequestId, ReplyBody>,
     transfers: BTreeMap<RequestId, TransferAssembly>,
     subscriptions: HashMap<SubscriptionHandle, OpenSubscription>,
     /// Generations a reply deleted or an event ended. No frame about one of them may follow.
@@ -776,20 +762,18 @@ impl PreparedCommand {
 
     /// Repeats the exact request, independently of a session's newer transaction position.
     pub(crate) async fn run(&self, session: &mut TestSession) -> io::Result<CommandOutcome> {
-        let observation = session
-            .observe_command_request(self.request.clone())
-            .await?;
-        if observation.result.execution_reference != self.request.execution_reference {
+        let outcome = session.run_command_request(self.request.clone()).await?;
+        if outcome.execution_reference != self.request.execution_reference {
             return Err(io::Error::other(
                 "a command reply changed its execution reference",
             ));
         }
-        Ok(observation.result)
+        Ok(outcome)
     }
 
     /// A named raw request gets a new correlation id while retaining its durable identity.
     pub(crate) async fn send(&self, session: &mut TestSession) -> io::Result<RequestId> {
-        let (id, _) = session
+        let id = session
             .send_request(ClientRequest::Command(self.request.clone()))
             .await?;
         Ok(id)
@@ -922,11 +906,8 @@ impl TestSession {
         id
     }
 
-    /// Sends one request and returns its identity and the bytes of its frame.
-    pub(crate) async fn send_request(
-        &mut self,
-        request: ClientRequest,
-    ) -> io::Result<(RequestId, usize)> {
+    /// Sends one request and returns its identity.
+    pub(crate) async fn send_request(&mut self, request: ClientRequest) -> io::Result<RequestId> {
         let request_id = self.next_request_id();
         let message = ClientMessage {
             request_id,
@@ -934,10 +915,9 @@ impl TestSession {
         };
         let frame = message.encode(&self.limits).map_err(io::Error::other)?;
         let bytes = frame.into_bytes();
-        let frame_bytes = bytes.len();
         self.send_raw_frame(bytes).await?;
         self.outstanding.insert(request_id);
-        Ok((request_id, frame_bytes))
+        Ok(request_id)
     }
 
     /// Sends bytes as one gRPC message, whether or not they are a valid frame.
@@ -964,10 +944,9 @@ impl TestSession {
                 return Ok(false);
             }
         };
-        let frame_bytes = frame.bytes().len();
         let message = ServerMessage::decode(&frame).map_err(io::Error::other)?;
         match message {
-            ServerMessage::Reply(reply) => self.file_reply(reply, frame_bytes),
+            ServerMessage::Reply(reply) => self.file_reply(reply),
             ServerMessage::TransferPart(part) => {
                 let request_id = part.request_id();
                 let limits = self.limits;
@@ -981,9 +960,8 @@ impl TestSession {
                         .transfers
                         .remove(&request_id)
                         .expect("the assembly was just appended to");
-                    let total = assembly.received_bytes();
                     let reply = assembly.finish().map_err(io::Error::other)?;
-                    self.file_reply(reply, total);
+                    self.file_reply(reply);
                 }
             }
             ServerMessage::Event(event) => self.file_event(event)?,
@@ -991,7 +969,7 @@ impl TestSession {
         Ok(true)
     }
 
-    fn file_reply(&mut self, reply: Reply, frame_bytes: usize) {
+    fn file_reply(&mut self, reply: Reply) {
         let Reply { request_id, body } = reply;
         match &body {
             ReplyBody::Subscribe(outcome) => {
@@ -1024,8 +1002,7 @@ impl TestSession {
             }
             _ => {}
         }
-        self.replies
-            .insert(request_id, ReceivedReply { body, frame_bytes });
+        self.replies.insert(request_id, body);
     }
 
     fn file_event(&mut self, event: ServerEvent) -> io::Result<()> {
@@ -1127,7 +1104,7 @@ impl TestSession {
         domain: DomainName,
     ) -> io::Result<RequestId> {
         let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
-        let (request_id, _) = self.send_request(request).await?;
+        let request_id = self.send_request(request).await?;
         Ok(request_id)
     }
 
@@ -1138,7 +1115,7 @@ impl TestSession {
         domain: DomainName,
     ) -> io::Result<RequestId> {
         let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
-        let (request_id, _) = self.send_request(request).await?;
+        let request_id = self.send_request(request).await?;
         Ok(request_id)
     }
 
@@ -1192,11 +1169,6 @@ impl TestSession {
 
     /// Waits for the terminal reply of `request_id`.
     pub(crate) async fn reply_to(&mut self, request_id: RequestId) -> io::Result<ReplyBody> {
-        let reply = self.received_reply(request_id).await?;
-        Ok(reply.body)
-    }
-
-    async fn received_reply(&mut self, request_id: RequestId) -> io::Result<ReceivedReply> {
         let deadline = Instant::now() + REPLY_TIMEOUT;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -1287,7 +1259,7 @@ impl TestSession {
         execution_reference: &str,
     ) -> io::Result<RequestId> {
         let request = self.command_request(query, execution_reference, self.expected_position());
-        let (request_id, _) = self.send_request(ClientRequest::Command(request)).await?;
+        let request_id = self.send_request(ClientRequest::Command(request)).await?;
         Ok(request_id)
     }
 
@@ -1372,10 +1344,8 @@ impl TestSession {
         query: &str,
         execution_reference: &str,
     ) -> io::Result<CommandOutcome> {
-        let observation = self
-            .observe_command_with_reference(query, execution_reference, self.expected_position())
-            .await?;
-        Ok(observation.result)
+        let request = self.command_request(query, execution_reference, self.expected_position());
+        self.run_command_request(request).await
     }
 
     pub(crate) async fn run_command_result_with_reference_at_position(
@@ -1384,40 +1354,15 @@ impl TestSession {
         execution_reference: &str,
         expected_transaction_position: usize,
     ) -> io::Result<CommandOutcome> {
-        let observation = self
-            .observe_command_with_reference(
-                query,
-                execution_reference,
-                Some(TransactionPosition::new(expected_transaction_position)),
-            )
-            .await?;
-        Ok(observation.result)
+        let request = self.command_request(
+            query,
+            execution_reference,
+            Some(TransactionPosition::new(expected_transaction_position)),
+        );
+        self.run_command_request(request).await
     }
 
-    pub(crate) async fn observe_command(
-        &mut self,
-        query: &str,
-    ) -> io::Result<TestCommandObservation> {
-        let execution_reference = fresh_execution_reference();
-        self.observe_command_with_reference(query, &execution_reference, self.expected_position())
-            .await
-    }
-
-    async fn observe_command_with_reference(
-        &mut self,
-        query: &str,
-        execution_reference: &str,
-        expected_transaction_position: Option<TransactionPosition>,
-    ) -> io::Result<TestCommandObservation> {
-        let request =
-            self.command_request(query, execution_reference, expected_transaction_position);
-        self.observe_command_request(request).await
-    }
-
-    async fn observe_command_request(
-        &mut self,
-        request: CommandRequest,
-    ) -> io::Result<TestCommandObservation> {
+    async fn run_command_request(&mut self, request: CommandRequest) -> io::Result<CommandOutcome> {
         match Self::route(&request.query)? {
             CommandRoute::Command => {}
             CommandRoute::Subscribe => {
@@ -1431,13 +1376,11 @@ impl TestSession {
                     .await;
             }
         }
-        let (request_id, request_frame_bytes) =
-            self.send_request(ClientRequest::Command(request)).await?;
-        let reply = self.received_reply(request_id).await?;
-        let ReplyBody::Command(outcome) = reply.body else {
+        let request_id = self.send_request(ClientRequest::Command(request)).await?;
+        let body = self.reply_to(request_id).await?;
+        let ReplyBody::Command(outcome) = body else {
             return Err(io::Error::other(format!(
-                "a command was answered with {:?}",
-                reply.body
+                "a command was answered with {body:?}"
             )));
         };
         if outcome.transaction.is_some() {
@@ -1448,18 +1391,14 @@ impl TestSession {
         {
             self.transaction = None;
         }
-        Ok(TestCommandObservation {
-            result: *outcome,
-            request_frame_bytes,
-            response_frame_bytes: reply.frame_bytes,
-        })
+        Ok(*outcome)
     }
 
     async fn subscribe(
         &mut self,
         statement: &str,
         execution_reference: &str,
-    ) -> io::Result<TestCommandObservation> {
+    ) -> io::Result<CommandOutcome> {
         let domain = self
             .domain
             .clone()
@@ -1469,55 +1408,44 @@ impl TestSession {
             statement: statement.to_string(),
             subscription_type: SubscriptionType::Row,
         };
-        let (request_id, request_frame_bytes) =
-            self.send_request(ClientRequest::Subscribe(request)).await?;
-        let reply = self.received_reply(request_id).await?;
-        let ReplyBody::Subscribe(outcome) = reply.body else {
+        let request_id = self.send_request(ClientRequest::Subscribe(request)).await?;
+        let body = self.reply_to(request_id).await?;
+        let ReplyBody::Subscribe(outcome) = body else {
             return Err(io::Error::other(format!(
-                "a subscribe request was answered with {:?}",
-                reply.body
+                "a subscribe request was answered with {body:?}"
             )));
         };
         let succeeded = matches!(outcome.disposition, SubscribeDisposition::Opened(_));
-        Ok(TestCommandObservation {
-            result: subscription_outcome(
-                self::execution_reference(execution_reference),
-                succeeded,
-                outcome.message,
-                outcome.diagnostics,
-            ),
-            request_frame_bytes,
-            response_frame_bytes: reply.frame_bytes,
-        })
+        Ok(subscription_outcome(
+            self::execution_reference(execution_reference),
+            succeeded,
+            outcome.message,
+            outcome.diagnostics,
+        ))
     }
 
     async fn unsubscribe(
         &mut self,
         subscription: SubscriptionName,
         execution_reference: &str,
-    ) -> io::Result<TestCommandObservation> {
+    ) -> io::Result<CommandOutcome> {
         let request = UnsubscribeRequest { subscription };
-        let (request_id, request_frame_bytes) = self
+        let request_id = self
             .send_request(ClientRequest::Unsubscribe(request))
             .await?;
-        let reply = self.received_reply(request_id).await?;
-        let ReplyBody::Unsubscribe(outcome) = reply.body else {
+        let body = self.reply_to(request_id).await?;
+        let ReplyBody::Unsubscribe(outcome) = body else {
             return Err(io::Error::other(format!(
-                "an unsubscribe request was answered with {:?}",
-                reply.body
+                "an unsubscribe request was answered with {body:?}"
             )));
         };
         let succeeded = matches!(outcome.disposition, UnsubscribeDisposition::Deleted(_));
-        Ok(TestCommandObservation {
-            result: subscription_outcome(
-                self::execution_reference(execution_reference),
-                succeeded,
-                outcome.message,
-                outcome.diagnostics,
-            ),
-            request_frame_bytes,
-            response_frame_bytes: reply.frame_bytes,
-        })
+        Ok(subscription_outcome(
+            self::execution_reference(execution_reference),
+            succeeded,
+            outcome.message,
+            outcome.diagnostics,
+        ))
     }
 
     pub(crate) async fn attach_transaction(
@@ -1527,7 +1455,7 @@ impl TestSession {
         let request = AttachTransactionRequest {
             transaction_id: transaction_id.to_string(),
         };
-        let (request_id, _) = self
+        let request_id = self
             .send_request(ClientRequest::AttachTransaction(request))
             .await?;
         let body = self.reply_to(request_id).await?;
@@ -1544,7 +1472,7 @@ impl TestSession {
 
     /// Asks the server to stop waiting for `target` and returns the cancel request's identity.
     pub(crate) async fn cancel(&mut self, target: RequestId) -> io::Result<RequestId> {
-        let (request_id, _) = self
+        let request_id = self
             .send_request(ClientRequest::Cancel(CancelRequest { target }))
             .await?;
         Ok(request_id)
@@ -1599,7 +1527,7 @@ impl TestSession {
         subscription: SubscriptionName,
     ) -> io::Result<RequestId> {
         let request = UnsubscribeRequest { subscription };
-        let (request_id, _) = self
+        let request_id = self
             .send_request(ClientRequest::Unsubscribe(request))
             .await?;
         Ok(request_id)

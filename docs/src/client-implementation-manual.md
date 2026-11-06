@@ -762,12 +762,14 @@ payload, infinity, and nullable and sensitive branch key fields.
   known. Every attempt MUST send all three unchanged, and the digest MUST be computed over exactly
   the bytes the client streams.
 - **W-3.** A client MUST check that the reply's `request_id`, when present, equals the start's, and
-  that a `CommandOutcome` names the execution reference it sent. A reply that cannot be decoded
-  or fails either identity check is a protocol violation: F-8 and D-6 apply to the session used by
-  that attempt. The restore remains uncertain under its own execution reference; the reply cannot
-  establish that it was refused. A client MAY stop the call and report that uncertainty, and MUST
-  NOT apply another execution's outcome to this restore. A replacement session MUST NOT be ended
-  because an earlier attempt received an invalid reply.
+  that a `CommandOutcome` names the execution reference it sent. A reply that fails frame
+  verification, exceeds the transport's receive bound, cannot be decoded or fails either identity
+  check is a protocol violation under F-8 and D-6. Only the session selected for that attempt ends;
+  a session installed while the reply was outstanding MUST remain usable. The client MUST retain
+  the rejection's typed cause beneath uncertainty under its own execution reference or recover
+  the original execution under E-3. A client MAY stop the call and report that uncertainty; the
+  reply cannot establish that the restore was refused, and the client MUST NOT apply another
+  execution's outcome to this restore.
 - **W-4.** A client MUST act on the reply:
   - `RestoreUploadFailed` with `InvalidStream`, `InvalidStatement`, `SizeMismatch`, or
     `DigestMismatch` changed nothing on that stream (W-5 says what it settles after an earlier
@@ -1071,6 +1073,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | J-1 to J-5 | Java 21's three one-/three-node conformance outlines; `BoundaryTests` checks columns, Cleaner release and cancellation from another Java thread; `nervix-client-jvm` embeds the JVM to check every host failure kind, restoration messages/waits, and registered complete JNI field/column properties. The Java row probe checks native Cleaner release and derived-buffer retention after its session closes. |
 | W-1 to W-5, B-10 | `A <client> recovers a completed restore after <reply> on <cluster_size> nodes` in `client_restore_reply_validation.feature` (native client and CLI, both invalid replies, one and three nodes), the `restore_reply` owner tests in `nervix-client-core` (typed uncertainty, exact-session interruption, replacement preservation, local failures and known refusals); every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`, including `A console restore whose reply was lost after it applied stays unknown when a later attempt cannot read the archive`; the console's restore driver tests in `nervix-web-console`, including `a_restore_whose_reply_was_lost_stays_unknown_when_the_next_attempt_cannot_read_the_archive` and `a_restore_whose_reply_was_lost_stays_unknown_when_the_leader_refuses_a_later_stream`; `Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference` in `cli_session.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; `a_foreign_restore_reply_ends_its_session_and_reports_its_own_reference_uncertain` in `nervix-client-core`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 | W-3, W-5 (console) | `an_unreadable_restore_reply_naming_another_execution_leaves_its_own_outcome_unknown`, `an_unreadable_restore_reply_leaves_its_outcome_unknown`, and `an_unreadable_restore_reply_answering_another_request_leaves_its_outcome_unknown` in `nervix-web-console`; `A restore reply naming another execution leaves the restore outcome unknown` in `unreadable_replies.feature`, on one and three nodes |
+| F-8, D-6, E-3, W-3, W-5: unreadable native restore replies | The structural/size rejection and typed-cause owner tests, replacement, refusal, archive and retry controls in `crates/client-core/src/tests/session/restore_codec.rs`; all eight native/CLI one-/three-node examples in `client_restore_codec_rejection.feature`, whose peer waits for a real completed restore before replacing its reply and whose recovery repeats the original execution. The native cases also read the shared failure kind and original reference through the C ABI. |
 
 The [client representation properties](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
 add complete generated-value evidence for F-1 to F-7, R-1 to R-5 and B-1 to B-7. They preserve
