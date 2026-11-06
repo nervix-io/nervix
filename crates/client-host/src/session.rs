@@ -136,7 +136,7 @@ impl Session {
 
     /// Runs a prepared statement. A durable command whose outcome remains open names its
     /// execution reference, and running the same execution again recovers that outcome. Repeating
-    /// a session-local request may be refused or confirm current state after it took effect.
+    /// a session-local request may be refused after it took effect.
     pub fn execute(
         &self,
         execution: &Execution,

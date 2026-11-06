@@ -473,9 +473,10 @@ void nx_execution_free(nx_execution *execution);
 /* Runs a prepared statement. For a durable command, running the same execution again after an
    uncertain, cancelled or expired call recovers its outcome instead of running it twice. CREATE
    SUBSCRIPTION, DELETE SUBSCRIPTION and ATTACH or DETACH DOMAIN CLOCK are session-local requests.
-   A repeated CREATE or ATTACH may be refused after the first succeeded; a repeated DELETE may
-   confirm that the subscription is already absent. None recovers the earlier outcome under the
-   execution reference. Inspect the session or its events to establish current state. */
+   A repeated CREATE, DELETE or ATTACH may be refused after the first succeeded; for example a
+   repeated DELETE fails when the subscription is already absent. None recovers the earlier
+   outcome under the execution reference. Inspect the session or its events to establish current
+   state. */
 nx_error *nx_session_execute(nx_session *session, const nx_execution *execution,
                              const nx_cancel *cancel, nx_outcome **out);
 

@@ -825,7 +825,7 @@ A host of the C ABI, `nervix-client-ffi`, follows the contract in
   `NX_ERROR_DEADLINE` to recover its outcome. It MUST NOT prepare a new execution for a durable
   command whose outcome is uncertain. CREATE SUBSCRIPTION, DELETE SUBSCRIPTION and ATTACH or
   DETACH DOMAIN CLOCK are session-local requests without durable outcome identity. Repeating a
-  CREATE or ATTACH MAY be refused after the first took effect; repeating DELETE MAY confirm that
+  CREATE, DELETE or ATTACH MAY be refused after the first took effect; a repeated DELETE fails when
   the subscription is already absent. The host MUST inspect its current session state or events
   rather than interpret the repeat as outcome recovery.
 - **B-2.** A host MUST release every object it receives exactly once, with that object's release

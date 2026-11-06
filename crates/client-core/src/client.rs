@@ -94,9 +94,9 @@ pub(crate) const LOCAL_STATEMENT_IN_TRANSACTION: &str =
 /// after a cancelled waiter or an uncertain transport result: every attempt uses the same domain,
 /// transaction fence and durable execution reference. CREATE SUBSCRIPTION, DELETE SUBSCRIPTION,
 /// ATTACH DOMAIN CLOCK and DETACH DOMAIN CLOCK are session-local requests. Their reference is not
-/// a durable identity. Repeating CREATE or ATTACH sends another request that may be refused after
-/// the first succeeded; repeating DELETE can confirm the subscription is already absent. Inspect
-/// the current session state to learn their effect.
+/// a durable identity. Repeating any of these requests may be refused after the first succeeded;
+/// for example, a repeated DELETE fails when the subscription is already absent. Inspect the
+/// current session state to learn their effect.
 #[derive(Debug, Clone)]
 pub struct ExecutionHandle {
     query: String,
@@ -543,8 +543,8 @@ impl Client {
     }
 
     /// Runs a prepared statement under the identity its handle captured. A durable command can
-    /// recover its outcome under that identity; a session-local request may be refused or confirm
-    /// current state after an earlier attempt succeeded.
+    /// recover its outcome under that identity; a session-local request may be refused after an
+    /// earlier attempt succeeded.
     ///
     /// The call is the prepared execution itself rather than a future that awaits it, so a host
     /// blocking on it carries no extra frame on its thread's stack.

@@ -2215,8 +2215,8 @@ The C ABI's lifecycle follows from that choice:
   anything is sent. For a durable command, `nx_session_execute` reuses that reference, so running
   the same prepared execution after uncertainty, cancellation or timeout recovers its outcome.
   CREATE SUBSCRIPTION, DELETE SUBSCRIPTION and ATTACH or DETACH DOMAIN CLOCK are session-local
-  requests without durable outcome identity. Repeating CREATE or ATTACH can be refused even when
-  the first succeeded, while repeating DELETE can confirm the subscription is already absent.
+  requests without durable outcome identity. Repeating CREATE, DELETE or ATTACH can be refused
+  even when the first succeeded; a repeated DELETE fails when the subscription is already absent.
   The host inspects the session state or events to establish the earlier effect.
 - **Threads.** Each session runs on a runtime of its own, with two threads the library owns. The
   library never calls host code, so no host function ever runs on a library thread. Every blocking

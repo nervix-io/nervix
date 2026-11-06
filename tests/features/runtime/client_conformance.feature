@@ -216,7 +216,7 @@ Feature: Cross-language client conformance
       EVENT wait=deadline
       ATTACH first=completed replay=failed
       SUBSCRIBE first=completed replay=failed
-      DELETE first=completed replay=completed
+      DELETE first=completed replay=failed
       CHECKS ok
       PASS
       """
