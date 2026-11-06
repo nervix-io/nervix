@@ -64,6 +64,12 @@ process that recovers what an earlier one left uncertain builds the handle again
 reference or identity, with `ExecutionHandle::with_reference` or
 `ExecutionHandle::with_upload_identity`.
 
+A command reply naming another execution reference ends its session as a protocol violation.
+Every request still waiting on that session is interrupted, and the client repeats the original
+command through normal session recovery, preserving its reference, query, domain, transaction
+position and preview. If recovery cannot finish, the call reports `UncertainCommand` under the
+original reference. It never returns the foreign outcome or adopts its transaction or redirect.
+
 `execute_prepared_with_cancellation` takes a `CancellationToken` its caller may cancel. While a
 command, `BACKUP` included, waits for its reply, cancelling the token sends `CancelRequest` for it,
 and the call keeps waiting for the reply that ends the command. A command the server cancelled
@@ -227,6 +233,19 @@ the same execution reference, which joins the restore or returns its recorded ou
 change resumes a restore instead of repeating it. An error that may hide an admitted restore is
 `ClientError::UncertainCommand` with the restore's execution reference, and running the restore
 again under that reference recovers its outcome.
+
+A restore reply naming another execution reference ends the session used for its attempt and
+returns `UncertainCommand` under the restore's own reference, above
+`ExecutionReferenceMismatch`. The outcome remains unknown even if the foreign reply reports a
+failure. Repeat with `restore_with_reference` and the original reference, statement and archive to
+learn the restore's own outcome.
+
+A verified reply that cannot be decoded or names another transport request also leaves the restore
+uncertain: it may already have completed. The error retains its typed validation cause and the
+restore's own reference. The client ends the session used by that attempt and interrupts its pending
+requests, while preserving any replacement session installed during the restore. Retain the same
+statement, archive bytes and reference for recovery. An unreadable or empty local archive and a
+valid stream refusal remain definitive failures.
 
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.

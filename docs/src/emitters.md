@@ -1491,6 +1491,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-emit).
 <!-- connector-matrix:emit-pulsar-topic:end -->
 
+The emitter uses the same [Pulsar topic names](ingestors.md#pulsar-topic-names) as the ingestor:
+short names use the client's namespace and fully qualified persistent or non-persistent names are
+sent as written. Provision the output topic before starting the emitter. `SUBSCRIPTION`, `TYPE`
+and `INSTANCES` configure consumption and are unavailable on an emitter.
+
 `ACK` waits for each broker receipt, for up to `ACK TIMEOUT` after that record's hand-over. The
 driver uses the same timeout, including values longer than thirty seconds. If a later enqueue
 fails, receipts already given are settled before retry, so confirmed records are not sent again.
@@ -1561,7 +1566,8 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
   topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
   to `public/default`. Fully qualified topic names are sent as written.
-- optional `'auth_token'`: the token the client authenticates with
+- optional `'auth_token'`: the token the client authenticates with; `DESCRIBE CLIENT` and
+  `SHOW CREATE CLIENT` show it redacted
 - optional `'tls_ca_file'`: PEM-encoded CA bundle a `pulsar+ssl://...` connection trusts beside the
   bundled public roots and the host's trust store
 - optional `'tls_cert_file'` and `'tls_key_file'`: the PEM-encoded client certificate the client
@@ -1571,8 +1577,8 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'tls_hostname_verification_enabled'`: `false` accepts a certificate from a trusted
   authority whatever address it names; defaults to `true`
 
-The [ingestor manual](ingestors.md#pulsar) states what each credential authenticates as and what
-each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
+The [Pulsar client reference](ingestors.md#pulsar-client) states what each credential authenticates
+as and what each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
 `pulsar://...` address and a `namespace` that is not exactly a tenant and a namespace.
 
 The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry

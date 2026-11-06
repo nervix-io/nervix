@@ -3,14 +3,14 @@
 //!
 //! Test harness outside the product layer order.
 //! - **Owns.** Connections that answer from a script and record what was sent, timers that elapse
-//!   at once and are recorded, archives kept and saved in memory, archive files held as bytes, and
-//!   a storage map.
+//!   at once and are recorded, archives kept and saved in memory, archive files held as bytes that
+//!   may stop being readable after a number of reads, and a storage map.
 //! - **Depends on.** The browser traits the dialog's drivers and its pending backup record speak
 //!   to.
 //! - **Must not know.** What a download, a restore or a record decides.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, VecDeque},
     future::{Future, pending},
     rc::Rc,
@@ -226,10 +226,36 @@ impl DownloadedArchive for MemoryArchive {
     }
 }
 
-/// An archive file held as bytes. An unreadable one fails every read.
+/// An archive file held as bytes, which may stop being readable after some reads, as a file does
+/// when the operator changes or removes it after the browser read it.
 pub(crate) struct MemoryFile {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) unreadable: bool,
+    bytes: Vec<u8>,
+    /// How many more reads succeed before every later one fails, or `None` when every read
+    /// succeeds.
+    readable_reads: Cell<Option<usize>>,
+}
+
+impl MemoryFile {
+    /// A file every read of which succeeds.
+    pub(crate) fn readable(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            readable_reads: Cell::new(None),
+        }
+    }
+
+    /// A file every read of which fails.
+    pub(crate) fn unreadable(bytes: Vec<u8>) -> Self {
+        Self::readable_for(bytes, 0)
+    }
+
+    /// A file whose first `reads` reads succeed and every later one fails.
+    pub(crate) fn readable_for(bytes: Vec<u8>, reads: usize) -> Self {
+        Self {
+            bytes,
+            readable_reads: Cell::new(Some(reads)),
+        }
+    }
 }
 
 impl ArchiveFile for MemoryFile {
@@ -238,8 +264,10 @@ impl ArchiveFile for MemoryFile {
     }
 
     async fn read(&self, start: u64, end: u64) -> Option<Vec<u8>> {
-        if self.unreadable {
-            return None;
+        if let Some(left) = self.readable_reads.get() {
+            // A file that has served its last readable read fails this one and every later one.
+            let left = left.checked_sub(1)?;
+            self.readable_reads.set(Some(left));
         }
         let start = usize::try_from(start).ok()?;
         let end = usize::try_from(end).ok()?;

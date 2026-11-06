@@ -593,6 +593,14 @@ session is bound to while the command was served, the operation admission when t
 one operation into the transaction, the typed inspection, WASM state, or resource description a
 describing statement produced, and the summary of a backup's archive or the report of a restore.
 
+Before interpreting any outcome, the client checks that its execution reference equals the
+request's. A matching transport request identity alone does not establish that the outcome belongs
+to the command. A mismatch is a protocol violation: the client stops reading that session,
+interrupts every request still waiting on it, and keeps each command uncertain under its own
+reference. The Rust client uses its ordinary lost-session recovery to repeat the whole command on
+a restored session, or reports `UncertainCommand` with that reference if recovery cannot finish.
+No disposition, redirect or transaction carried by the foreign outcome is adopted.
+
 The disposition is the one field a client decides from; the message is for a person. Each
 disposition belongs to one phase of the command and makes one statement about its effect:
 
@@ -1950,7 +1958,25 @@ hold it, or a `RestoreUploadFailed` that refuses the stream itself and leaves no
 | `QuotaExceeded` | The archive is larger than one staged artifact may be, or the leader's staging area cannot hold it now. |
 | `StagingFailed` | The leader could not write the archive to its staging area. |
 
-A refusal of the stream is not recorded; sending the stream again stages the archive again. Every
+A command outcome that names another execution reference is a protocol violation, even when the
+reply has the correct request identity. It cannot establish that the restore was refused or
+completed. The Rust client ends the session used for that attempt and reports `UncertainCommand`
+under the restore's own reference, with the typed reference mismatch beneath it. Recovering the
+restore streams the same statement and archive again under that reference.
+
+A reply must decode, and its request identity, when present, must equal the start's. A verified
+frame that fails semantic decoding or names another request is a protocol violation, not evidence
+that the restore was refused: the node may already have applied it. The Rust client ends the exact
+session used by that attempt, interrupts its pending requests, and returns `UncertainCommand`
+under the restore's own execution reference with the typed validation cause beneath it. A session
+installed while the restore was in flight remains usable. Keep the statement, archive bytes and
+reference unchanged when repeating the restore to recover its outcome.
+
+A refusal of the stream is not recorded; sending the stream again stages the archive again. A
+refusal answers the one stream it ends, not the restore: a leader refuses a stream whose start or
+statement it cannot read, or while its cluster parameters are unavailable, before it looks the
+restore up, and stages the archive again for a restore it finds admitted without it, so a refusal
+of a repeated stream says nothing about whether an earlier stream had the restore admitted. Every
 other answer is a `CommandOutcome` under the start's execution reference:
 
 - A follower reads the start, answers `LeaderRedirect`, and reads no chunk.
@@ -2001,7 +2027,11 @@ it before the start, and again as it streams. The stream ends with the chunk tha
 declared size instead of a half-close, and the console watches for a reply that arrives before
 every chunk was sent. It repeats a redirected, interrupted, or still-applying restore under the
 same reference, statement and archive, and reports the outcome as unknown, naming the reference,
-when ten minutes of repetitions leave it unknown.
+when ten minutes of repetitions leave it unknown. It reports the outcome as unknown as well when
+the restore ends without it after an attempt may have had the restore admitted, by sending the
+whole archive without learning the outcome or by an `OutcomeUnknown` answer: when the file can no
+longer be read, a reply cannot be accepted, the leader refuses a later stream, or the leader no
+longer holds the reference.
 
 ## Node Stop And Restart As A Client Observes Them
 

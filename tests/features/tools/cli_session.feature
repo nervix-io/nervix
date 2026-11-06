@@ -513,3 +513,23 @@ Feature: CLI public session dispatch
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: The CLI recovers its own execution after a foreign command reply on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the next successful reply to native command "CREATE SCHEMA cli_identity (value STRING);" names another execution
+    When the CLI executes "CREATE SCHEMA cli_identity (value STRING);" on node "{{leader}}"
+    Then the CLI exited with status 0 and printed "quiesce level:"
+    And the CLI output does not contain "another execution's failure"
+    And the native command recovered only its own execution reference
+    When the CLI executes "SHOW CREATE SCHEMA cli_identity;" on node "{{leader}}"
+    Then the CLI output contains "cli_identity"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

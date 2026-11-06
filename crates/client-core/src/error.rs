@@ -287,6 +287,7 @@ impl ClientError {
         match self {
             Self::RequestDeadline { .. }
             | Self::RequestInterrupted { .. }
+            | Self::ExecutionReferenceMismatch { .. }
             | Self::ConnectServer(_)
             | Self::SessionOpenDeadline
             | Self::RetryDeadline
@@ -313,7 +314,8 @@ impl ClientError {
         match self {
             Self::SessionClosed
             | Self::RequestDeadline { .. }
-            | Self::RequestInterrupted { .. } => true,
+            | Self::RequestInterrupted { .. }
+            | Self::ExecutionReferenceMismatch { .. } => true,
             Self::Transport(status) => matches!(
                 status.code(),
                 tonic::Code::Cancelled

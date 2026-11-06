@@ -1136,7 +1136,10 @@ declaration scenarios qualify these facts together.
 `.`-separated tokens, none empty, without whitespace or control characters, kept exactly as
 written. A subscription may write `*` for one token and `>` for every remaining token, each only
 as a whole token and `>` only last; a publication subject admits neither, since a message is
-published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
+published to one literal subject. The vocabulary owns the isolated parser for this NATS server
+2.11 subject contract; its 1,024-byte bound and refusal of embedded wildcard characters are
+Nervix restrictions, rather than server limits. The queue-group name has a separate rule because
+it has no subject-token grammar. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
 `INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
 acknowledgement for a subscriber. Both directions retain every header pair in wire order, including
 interleaved repeated names, and match names exactly. The ingestor declares `metadata.subject` and
