@@ -367,11 +367,13 @@ configuration requires a majority of each constituent voter set; its union is no
 If the second step is refused or interrupted, reconciliation finishes the recorded target before
 planning another admission or address update. It preserves existing learners and completes the
 removal of voters excluded by a `DROP NODE`, rather than deriving a replacement target from the
-joint union or from gossip. Before proposing that continuation, it reads the effective and committed
-membership together in OpenRaft's serialized core: a previously timed-out request may have finished
-before the metrics publication catches up. An already uniform core needs no additional membership
-entry. Otherwise OpenRaft's neutral voter change flattens the core's current joint target, and
-reconciliation waits for the returned uniform membership to be committed. A timed wait counts as
+joint union or from gossip. The maintained OpenRaft completion operation checks the effective
+membership and proposes its continuation in one synchronous Core turn. A read before the request
+is only an observation: another request or a peer update can finish that transition before Core
+handles completion. An already uniform Core returns its effective and committed records without
+proposing an entry. A still-joint Core flattens its current target through the ordinary membership
+commitment, leader and lease gates, preserving independent learners and the existing removed-voter
+policy. Nervix then waits for the returned uniform membership to be committed. A timed wait counts as
 success only when the observed configuration is committed and uniform. Leadership changes and
 retries can continue the same committed joint transition.
 

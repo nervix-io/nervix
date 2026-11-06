@@ -2432,9 +2432,12 @@ Membership timeout success is decided from both the effective configuration and 
 publication. A matching voter union does not convert that timeout into success while the expected
 uniform target remains joint or uncommitted. A refusal of a uniform continuation keeps the same
 typed Raft write classification; it does not mean the preceding joint entry was rolled back.
-A fatal failure reading the serialized core before that continuation passes through the same Raft
-write classifier with its original cause. Finding that the core is already uniform is an ordinary
-completion outcome and proposes no additional membership entry.
+A fatal failure reading Core or submitting its conditional completion passes through the same
+Raft write classifier with its original cause. The completion responder retains the original
+membership write error, including uncertainty, rather than interpreting it as a definite refusal.
+Finding that Core is already uniform is an ordinary completion outcome carrying its separate
+effective and committed records; it proposes no additional membership entry, even when a preceding
+joint observation became stale before Core handled the request.
 
 Trace-level vote and pre-vote transport completion events record the existing nested result before
 its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
