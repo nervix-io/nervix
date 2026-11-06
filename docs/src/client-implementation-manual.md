@@ -154,7 +154,8 @@ archive; see [Restore Streams](#restore-streams).
   `Authorization: Basic` header or in the `auth` query parameter, percent-encoded, because the
   server decodes the query as a form and would read a raw `+` as a space.
 - **T-5.** On `UNAUTHENTICATED`, or `401` for the WebSocket, a client MUST NOT retry with the same
-  credentials automatically. The server paces a user's attempts after a failure. `UNAVAILABLE`, or
+  credentials automatically. The server paces a presented name's attempts after a failure even
+  when that name identifies no user; a delay does not identify an existing user. `UNAVAILABLE`, or
   `503` for the WebSocket, means the node could not verify the credentials now and judged nothing,
   so a client MAY retry with the same credentials after backing off, as it does after any other
   transport failure.
@@ -1017,7 +1018,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | --- | --- |
 | F-1 to F-7 | `the_checked_in_corpus_is_what_the_encoder_writes_and_reads`, the frame and transfer tests of `nervix-client-wire` such as `a_union_discriminant_without_its_member_is_refused`, `parts_must_belong_to_the_transfer_and_arrive_in_order`, and `corrupting_a_row_batch_never_panics`; the scenario `A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote` for Go, Node.js, and Bun |
 | F-8, D-6 | `a_frame_the_contract_does_not_describe_ends_the_exchange` and `a_session_ending_frame_closes_the_waiters_of_its_exchange` in `nervix-client-core`; `A native session is told its node is shutting down before its call ends` in `session_protocol.feature` |
-| T-1 to T-6 | `Authentication, framing and protocol failures end a native session with their status` and `The console WebSocket closes a connection that sends something other than a session frame` in `session_protocol.feature`; `non_frame_messages_end_the_connection_with_a_close_code` |
+| T-1 to T-6 | `Authentication, framing and protocol failures end a native session with their status` and `The console WebSocket closes a connection that sends something other than a session frame` in `session_protocol.feature`; `Repeated refused credentials are paced for <username> on <cluster_size> nodes` in `client_traffic.feature`; `non_frame_messages_end_the_connection_with_a_close_code` |
 | T-3a | Every scenario of `backup_restore.feature` in the web console suite; `a_console_download_answers_its_request_and_closes_normally`, `a_console_restore_is_answered_once_its_declared_bytes_arrived`, `a_console_restore_whose_client_leaves_early_is_not_answered`, `a_second_request_on_a_console_download_breaks_the_call`, `a_console_download_stops_at_its_client_close_while_frames_remain`, and the shutdown cases in `nervix-server`; `each_console_websocket_refuses_the_frames_of_another_call` in `nervix-client-wire` |
 | T-7 | `Web console opened on a follower connects to the leader` and `Web console reconnects after leader switchover` in `connection_status.feature` |
 | T-9 | `Graceful shutdown cancels an accepted resource upload <progress>` in `shutdown_deadline.feature`; `a_call_its_stopping_node_ended_is_sent_again_under_its_identity` in `nervix-client-core` |

@@ -2521,7 +2521,10 @@ describes impact inspection.
 The session service's own edges report the same way. A gRPC call whose credentials do not
 authenticate it fails as a `GrpcAuthenticationError` report, `Required`, `Failed` or `Busy`, and the
 call ends with `UNAUTHENTICATED`, or with `UNAVAILABLE` when the node could not verify the
-credentials now; the status names only the refusal. A command on a transaction its session is no
+credentials now; the status names only the refusal. Known, unknown and invalid names use the same
+per-name pacing and generic rejection; the delay never carries a separate user-existence outcome.
+An unavailable verification establishes no failure bucket and preserves any existing pacing.
+A command on a transaction its session is no
 longer bound to fails as a `SessionTransactionBindingError` report, whose current context selects
 the `TransactionTakenOver` or `TransactionDetached` disposition and whose chain is the command's
 message. A domain snapshot that cannot be encoded for a session is `SnapshotEncodingError::Graph`
@@ -3326,6 +3329,17 @@ owner and compiled configuration context. Missing, stale or incomplete compiler 
 gate; compiler findings feed no debt count. These are repository validation errors and add no
 runtime failure variants.
 [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
+
+`nervix-ratchet` keeps orchestration refusals in typed `error-stack` reports through its command
+boundary. Evidence failures retain the configuration, file and target or package identity;
+measurement refusals retain the peak and declared bound. The command renders the complete report,
+including diagnostic attachments. Cargo progress text is ignored; malformed JSON records stop
+analysis with their log path and typed parser cause. Authored-token provenance retains its typed
+parser cause beneath the source-file context. Driver compilation records preserve exit status or
+signal, resident peak, cgroup OOM observations and admission outcome, so a failed compiler, failed
+driver and interrupted compiler keep distinct diagnoses.
+[Architecture enforcement](architecture-enforcement.md) owns the matrix, shared admission protocol
+and cache evidence that produce these tooling reports.
 
 The isolated architecture compiler emits sixteen ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
