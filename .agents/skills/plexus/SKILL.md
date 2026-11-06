@@ -113,6 +113,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
+- For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
+  before choosing port bindings, initialization, branch isolation or recovery guarantees.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
@@ -310,7 +312,8 @@ During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain avail
 
 Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
 for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
-selected domain. Read `Node Settings` for the complete parameter set, positive duration bounds,
+selected domain. Read `Domains And Time` → `Duration Literals` for duration spelling, and
+`Node Settings` for the complete parameter set, positive duration bounds,
 existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
 belong only to the first bootstrap, including when their value equals the default. Later starts,
 including the returning bootstrap node, omit them.

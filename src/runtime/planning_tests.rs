@@ -71,6 +71,7 @@ fn inferencer_node(input_relays: Vec<RelayName>) -> BranchedProcessorSpec {
             resource_version: 1,
             file: "models/fraud.onnx".to_string(),
             inputs: Vec::new(),
+            state: None,
             output_schema: Vec::new(),
         },
     }
@@ -265,6 +266,7 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
                 schema: inferencer_tensor_schema(nonzero!(2u32)),
                 expression: expression("input.vector"),
             }],
+            state: None,
             output_schema: vec![InferencerTensorDeclaration {
                 tensor: "score".to_string(),
                 schema: inferencer_tensor_schema(nonzero!(1u32)),
@@ -1081,6 +1083,7 @@ fn inferencer_input_mappings_compile_when_template_is_materialized() {
                 expression: nervix_plexus::parse_expression("input.missing")
                     .expect("test expression must parse"),
             }],
+            state: None,
             output_schema: vec![InferencerTensorDeclaration {
                 tensor: "score".to_string(),
                 schema: inferencer_tensor_schema(nonzero!(1u32)),
@@ -1475,6 +1478,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                         schema: inferencer_tensor_schema(nonzero!(2u32)),
                         expression: expression("input.vector"),
                     }],
+                    state: Vec::new(),
                     output_schema: vec![InferencerTensorDeclaration {
                         tensor: "score".to_string(),
                         schema: inferencer_tensor_schema(nonzero!(1u32)),
@@ -1519,12 +1523,14 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
         resource_version,
         file,
         inputs,
+        state,
         output_schema,
         ..
     } = &inferencer.spec.operation
     else {
         panic!("expected inferencer branch node");
     };
+    assert!(state.is_none());
     let output = output_routes
         .routes
         .first()

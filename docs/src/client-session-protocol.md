@@ -408,6 +408,47 @@ new request identity, that repeats the same execution reference. Confusing the t
 guarantees: repeating a request identity cannot recover an effect, and minting a new execution
 reference for a retry can apply an effect twice.
 
+### Which Replies Answer A Request
+
+A request is answered by its own outcome, by `RequestRejected`, which can refuse any request, or by
+`RequestCancelled`, which ends a request a cancellation reached before its outcome. A
+`CancelRequest` is answered at once, so nothing cancels it, and a submitted batch cannot be
+withdrawn, so `RequestCancelled` never answers either of them.
+
+| Request | Its outcome |
+| --- | --- |
+| `CommandRequest` | `CommandOutcome` |
+| `SuggestRequest` | `SuggestOutcome` |
+| `ChoiceLookupRequest` | `ChoiceOutcome` |
+| `ListDomainsRequest` | `DomainList` |
+| `SelectDomainRequest` | `DomainSelectionOutcome` |
+| `AttachTransactionRequest` | `AttachOutcome` |
+| `InspectTransactionRequest` | `InspectionOutcome` |
+| `SubscribeRequest` | `SubscribeOutcome` |
+| `UnsubscribeRequest` | `UnsubscribeOutcome` |
+| `CancelRequest` | `CancelOutcome` |
+| `AttachDomainClockRequest` | `DomainClockAttachOutcome` |
+| `DetachDomainClockRequest` | `DomainClockDetachOutcome` |
+| `OpenIngestorRequest` | `OpenIngestorOutcome` |
+| `SubmitBatchRequest` | `SubmissionOutcome` |
+| `CloseIngestorRequest` | `CloseIngestorOutcome` |
+| `OpenEmitterRequest` | `OpenEmitterOutcome` |
+| `ReadEmitterBatchRequest` | `ReadEmitterBatchOutcome` |
+| `SettleEmitterBatchRequest` | `SettleEmitterBatchOutcome` |
+| `CloseEmitterRequest` | `CloseEmitterOutcome` |
+
+A matching request identity alone does not make a reply the answer to its request. A reply of any
+other kind under the identity of a request that waits for its reply is a protocol violation. The
+client checks the reply's kind before it applies anything the reply carries. On a violation it
+stops reading that session, interrupts every request still waiting on it, and keeps each command
+among them uncertain under its own reference. It adopts no subscription, clock attachment,
+producer, transaction or redirect from the reply. The Rust client recovers each interrupted request
+as after any other lost session: it repeats a command under its original reference on a restored
+session, or reports `UncertainCommand` with that reference when recovery cannot finish. A reply
+whose request no longer waits, because its caller stopped waiting, is not this violation: it
+completes no request, and the reader still follows the subscription, clock or producer it opens,
+as it does for every late reply.
+
 ### Two Lanes
 
 A session serves each request on one of two lanes:
@@ -1444,6 +1485,12 @@ reassembly; the final part releases its place. Waiting connection-local requests
 connection, while ordered commands retain their issue order and execution references. A request
 past either outstanding bound is not sent, and the control that issued it reports why.
 
+A reply the console cannot decode or reassemble, or whose body does not answer its request kind,
+ends that session as a protocol violation. The unanswered commands retain their complete requests,
+issue order, execution references and uncertain-outcome retry delays. Recovery restores the
+session before sending them again through the same bounded window; an unreadable reply never
+settles a command as failed.
+
 A tab whose generation the server ended with `SubscriptionEnded` turns ended in the web console. It
 keeps its rows and the reason, and it is not restored on a later connection, which would not change
 why the server ended it. The operator resubscribes it under the same name, which opens a new
@@ -2320,7 +2367,8 @@ bulk to avoid paying a host-language call for each cell.
 The protocol guarantees:
 
 - **Correlation.** A reply completes exactly the request whose identity it names, in whatever order
-  replies arrive, and never a request of another session.
+  replies arrive, and never a request of another session. A reply completes it only when its kind
+  answers that request; a reply of another kind ends the session instead.
 - **Bounded, verified frames.** Every frame fits the session limits and is verified before it is
   read. A reply larger than a frame arrives whole or not at all.
 - **One outcome per identity.** Repeating a command under the execution reference that admitted it

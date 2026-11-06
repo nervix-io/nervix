@@ -1671,6 +1671,25 @@ operator can distinguish memory waiting, worker waiting and dependency work. The
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
 
+The shared ONNX environment reports native diagnostics with a static message, the native severity
+and code site. It preserves the `ort::logging` tracing target and the `ort` span's identity and
+location. Native diagnostic text may contain tensor values, so it never enters the log, including
+under trace logging; this projection applies to model inspection and both inference modes.
+
+Stateful inferencer validation names the inferencer and offending port when a declaration repeats
+a port, uses a non-fixed state axis, mixes `BATCH` with `STATE`, or supplies an `INITIAL` expression
+that reads fields, is nondeterministic, or has the wrong type, shape or nullability. Model binding
+validation checks both ports of each state pair and requires complete input and output coverage.
+These are configuration refusals before activation.
+
+At stateful admission, an `INPUTS` row error or model refusal goes through that route's
+`ON MESSAGE ERROR` policy with the original input and captured materialized-state snapshot. It
+does not advance the branch's tensors or discard other rows of the input batch. A worker admission
+refusal that evaluated nothing remains an execution failure, with its typed cause; it is not a
+model rejection. A route construction error occurs after the model's successful invocation and
+does not undo that invocation. A later flush dispatches its buffered outputs without running the
+model again.
+
 ### Client Inspection Admission
 
 Client inspection during incoming preflight may refuse full command-memory or filesystem queue
@@ -2704,7 +2723,12 @@ the server's `RequestCancelled` at `BeforeAdmission` for a command that never ra
 violation at the exchange reader, which ends that session before reading another frame. The call
 recovers under its own reference through the ordinary session-loss path, or reports
 `UncertainCommand` if recovery cannot finish. A restore's reference mismatch ends the session
-used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. Hosts read
+used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. A reply whose
+kind cannot answer its request, such as a domain listing under a command's request identity, is
+reported the same way at the exchange reader, as `ReplyKindMismatch` naming the request and the
+reply's kind, before anything the reply carries is applied. Every request still waiting on that
+session is interrupted. A call that cannot recover reports `RequestInterrupted` above that cause,
+and a command `UncertainCommand` above both. Hosts read
 `FailureKind::Uncertain` and the original execution reference from that outer context; the CLI
 reports an unknown outcome with exit status `3` when recovery did not complete.
 The client decides retries, session
@@ -2943,18 +2967,25 @@ completed backup's archive was not downloaded, never as a failure of the backup.
 failure names an archive file the browser could not read or that is empty, a transport failure, a
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
-execution reference. Once an attempt has sent the whole archive without learning the outcome, or
-the leader has answered that the outcome is unknown, the restore may have been admitted. A failure
-that then ends it, a refusal of a later stream, and an execution reference the leader no longer
-holds all sit beneath `the console stopped before learning the outcome of a restore the leader may
-have admitted`, and the dialog reports the outcome as unknown naming the execution reference. The
-dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
+execution reference. A reply that cannot be read or answers another request or execution stops
+the restore call with its typed failure and `the outcome of restore '<own>' is unknown`. It never
+establishes a refusal or applies another execution's result. Once an attempt has sent the whole
+archive without learning the outcome, or the leader has answered that the outcome is unknown, the
+restore may have been admitted. If a later archive read, missing console address, stream refusal or
+expired execution reference ends it, that failure sits beneath `the console stopped before learning
+the outcome of a restore the leader may have admitted`; the dialog reports the outcome as unknown
+naming the execution reference. An already uncertain reply failure keeps its own typed context.
+The dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
 could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
 restore's own outcome as the dispatcher renders any command's. A session reply whose
 command outcome names another execution reference than its command's is a protocol violation: the
 dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
 '<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
 connection, and recovers the command under its own reference on the next one. The console WebSocket
+session also stops on a reply that cannot be decoded or reassembled, or carries an unexpected body
+kind. It reports `protocol violation:` with the cause and that pending command outcomes are unknown.
+It recovers every waiting command whole, under its original reference and issue order, after the
+new connection restores the session. The console WebSocket
 transport closes a call whose client broke its framing with the codec's close code, a second
 download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
 the node stops with `1001`.

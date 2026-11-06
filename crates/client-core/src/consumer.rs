@@ -1103,9 +1103,12 @@ mod shuttle_tests {
                     attachment.clone(),
                 )));
                 let parked = StdArc::new(ParkedReads::default());
+                let read = ClientRequest::ReadEmitterBatch(ReadEmitterBatchRequest {
+                    consumer: attachment.id,
+                });
                 let request = attachment
                     .exchange
-                    .register()
+                    .register_for(&read)
                     .assured("a fresh exchange registers requests");
                 let parking = {
                     let parked = parked.clone();

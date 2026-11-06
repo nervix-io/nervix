@@ -1136,25 +1136,25 @@ async fn serve_command(
         return None;
     };
     let outcome = command_outcome(execution_reference, response);
+    #[cfg(not(feature = "testing"))]
+    let body = ReplyBody::Command(Box::new(outcome));
     #[cfg(feature = "testing")]
-    let outcome = {
-        let mut outcome = outcome;
-        shared
-            .service
-            .inner
-            .runtime
-            .fault_injection()
-            .substitute_command_reply(&reply_script_request, &mut outcome);
-        outcome
-    };
-    let disposition = if tracing::enabled!(tracing::Level::DEBUG) {
+    let body = shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .script_command_reply(&reply_script_request, outcome);
+    // Only a testing script answers a command with a reply of another kind, which has no
+    // command disposition.
+    let disposition = if tracing::enabled!(tracing::Level::DEBUG)
+        && let ReplyBody::Command(outcome) = &body
+    {
         Some(outcome.disposition.clone())
     } else {
         None
     };
-    let queued = shared
-        .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
-        .await;
+    let queued = shared.finish_with(request_id, body).await;
     if queued == QueuedReply::Reply {
         disposition
     } else {

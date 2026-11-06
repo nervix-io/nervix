@@ -1421,9 +1421,11 @@ returns once. Timeout revocation is covered by the ordinary owner and public sce
 
 ### Rust client request interruption
 
-Each command waiter retains its expected execution reference in the exchange's existing pending
-registry. The reader compares that reference before delivering the outcome. A mismatch closes the
-registry under the same mutex that removes the waiter, retaining the first typed ending cause.
+Each waiter retains what its reply must be in the exchange's existing pending registry: the kind
+of the request it answers and, for a command, its expected execution reference. The reader checks
+the reply's kind against that request, then a command outcome's reference, before it applies
+anything the reply carries or delivers it. A reply of another kind or a mismatched reference closes
+the registry under the same mutex that removes the waiter, retaining the first typed ending cause.
 Registration racing that end either obtains a waiter that is interrupted or observes the closed
 registry; it cannot leave a request waiting on an ended exchange. The reader routes no later frame
 after the mismatch. Dropping its future, including task abortion, closes the remaining waiters and
@@ -1437,9 +1439,11 @@ interruption while the reader has not yet stopped, then requires close to finish
 cleanup. The foreign-restore owner witness also requires recovery to serve a new request.
 
 `shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter` drives the production reader
-and pending registry with registration and cancellation racing the mismatched reply. It requires
-every remaining waiter to be interrupted, the first mismatch cause to survive, and the later
-leadership frame to remain unread. It makes no claim about real network scheduling.
+and pending registry with registration and cancellation racing the mismatched reply, and
+`shuttle_a_reply_of_another_kind_racing_registration_interrupts_every_waiter` drives the same
+interleavings with a domain listing under the command's identity. Each requires every remaining
+waiter to be interrupted, its first typed cause to survive, and the later leadership frame to
+remain unread. They make no claim about real network scheduling.
 
 A restore stream captures its channel and session generation together. A foreign restore outcome
 ends that generation only if it still owns the current session, so an intervening replacement is
@@ -2476,6 +2480,11 @@ The `@restarted_voter_observation` workload also reaches concurrent live-policy 
 test-only reconciliation gate releases after leadership is established and remains outside the
 detector's tracked lock graph.
 
+The `parameters.multi-span-duration` workload belongs to the existing `cluster-parameters`
+invocation in every selection. It observes committed and running policy through the existing
+installation and status owners. Plexus duration parsing adds no tracked synchronization; its
+grammar and canonical round-trip checks own literal correctness.
+
 The lane builds all selected executables and diagnostic drivers before starting its workload clock.
 For each prepared invocation it lists what the build holds or reads
 the tagged scenarios from the feature files, and refuses a registered workload that the build no
@@ -2672,10 +2681,10 @@ stressed-restore records require recovery under the original execution reference
 archive with both quiesced domain cuts. The refusal owner's asynchronous mutex and the command's
 retry waits remain outside the detector; the public scenario and typed response-boundary tests
 establish their recovery and definitive-timeout outcomes without claiming an interleaving model.
-The native foreign-command-reply workload reaches pending registration, mismatch termination and
-session recovery on one and three nodes. Its active/order and stress records name the client and
-exchange owners; Deloxide observes their blocking registry locks, while the production-owner
-Shuttle check covers registration racing the reader's termination.
+The native foreign-command-reply and reply-kind workloads reach pending registration, mismatch
+termination and session recovery on one and three nodes. Their active/order and stress records name
+the client and exchange owners; Deloxide observes their blocking registry locks, while the
+production-owner Shuttle checks cover registration racing the reader's termination.
 Async command and reconnect mutexes, physical deadlines and network scheduling remain outside
 its observation; the public scenarios and client-session regressions assert their wait, expiry,
 leader-change and recovery outcomes directly. The bounded native-client case runs inside the
@@ -2749,6 +2758,17 @@ for each batch of two interleaved branches. Each of the three runs on one and th
 nodes with a replica, the deduplicator, window and guest-save restore scenarios leave the owner's
 lifecycle and branch checkpoint announcements with the replica's lifecycle handle, where the
 replica task takes them under the same lock.
+
+The stateful inferencer instead owns its native session exclusively in the concrete branch task.
+Each admitted row awaits one extension-class executor job, which returns the session even when
+the model refuses the row. The previous tensor generation remains installed until all successor
+state and public output tensors validate; successor tensors move from ONNX output handles into
+the next generation without Arrow decoding. Route timers dispatch the already constructed
+results and never invoke the model. INITIAL tensors are prepared before publication and shared
+immutably by new branches. No tracked lock or shared-map protocol is added: Deloxide, Shuttle,
+Loom and Turmoil do not observe the opaque native operator. The ordinary public scenarios in
+`inferencer_state.feature` exercise ordered, interleaved branches on one and three nodes, different
+route cadences, filtered and refused inputs, and atomic state preservation after a native failure.
 
 The ONNX inspection admission scenario saturates the leader's bulk workers and wait queue, observes
 the typed CREATE INFERENCER refusal, releases the occupancy and creates the same inferencer on one

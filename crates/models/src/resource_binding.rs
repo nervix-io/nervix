@@ -296,6 +296,7 @@ impl<Version> CreateInferencer<Version> {
             resource_version,
             file: self.file,
             inputs: self.inputs,
+            state: self.state,
             output_schema: self.output_schema,
             mode: self.mode,
             filter_where: self.filter_where,

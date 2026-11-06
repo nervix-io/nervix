@@ -151,13 +151,13 @@ impl RestoreStreamError {
             | Self::Stalled
             | Self::NoReply
             | Self::Exhausted
+            | Self::InvalidReply
+            | Self::UnexpectedReply
+            | Self::ReferenceMismatch { .. }
             | Self::UnresolvedAdmission => true,
             Self::ReadArchive
             | Self::EmptyArchive
             | Self::NoAddress
-            | Self::InvalidReply
-            | Self::UnexpectedReply
-            | Self::ReferenceMismatch { .. }
             | Self::StreamRefused { .. }
             | Self::ReferenceExpired { .. } => false,
         }

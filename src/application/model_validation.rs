@@ -161,6 +161,16 @@ enum InferencerBindingValidationError {
         direction: TensorDirection,
         tensor: String,
     },
+    #[error("inferencer '{node}' missing ONNX input STATE tensor '{tensor}'")]
+    MissingStateInput {
+        node: InferencerName,
+        tensor: String,
+    },
+    #[error("inferencer '{node}' missing ONNX output STATE tensor '{tensor}'")]
+    MissingStateOutput {
+        node: InferencerName,
+        tensor: String,
+    },
     #[error("inferencer '{node}' missing ONNX {direction} tensor '{tensor}'")]
     MissingTensor {
         node: InferencerName,
@@ -237,13 +247,32 @@ impl OnnxModelMetadata {
         &self,
         processor: &CreateInferencer,
     ) -> error_stack::Result<(), InferencerBindingValidationError> {
+        for state in &processor.state {
+            if !self.inputs.contains_key(&state.input) {
+                return Err(Report::new(
+                    InferencerBindingValidationError::MissingStateInput {
+                        node: processor.name.clone(),
+                        tensor: state.input.clone(),
+                    },
+                ));
+            }
+            if !self.outputs.contains_key(&state.output) {
+                return Err(Report::new(
+                    InferencerBindingValidationError::MissingStateOutput {
+                        node: processor.name.clone(),
+                        tensor: state.output.clone(),
+                    },
+                ));
+            }
+        }
         self.validate_direction_binding_names(
             processor,
             TensorDirection::Input,
             processor
                 .inputs
                 .iter()
-                .map(|mapping| mapping.tensor.as_str()),
+                .map(|mapping| mapping.tensor.as_str())
+                .chain(processor.state.iter().map(|state| state.input.as_str())),
             &self.inputs,
         )?;
         self.validate_direction_binding_names(
@@ -252,7 +281,8 @@ impl OnnxModelMetadata {
             processor
                 .output_schema
                 .iter()
-                .map(|declaration| declaration.tensor.as_str()),
+                .map(|declaration| declaration.tensor.as_str())
+                .chain(processor.state.iter().map(|state| state.output.as_str())),
             &self.outputs,
         )
     }
@@ -599,6 +629,25 @@ impl SessionServiceImpl {
             )?;
         }
 
+        for state in &processor.state {
+            for (direction, port, tensors) in [
+                (
+                    TensorDirection::Input,
+                    state.input.as_str(),
+                    &model_metadata.inputs,
+                ),
+                (
+                    TensorDirection::Output,
+                    state.output.as_str(),
+                    &model_metadata.outputs,
+                ),
+            ] {
+                let model_type = tensors
+                    .get(port)
+                    .verified("binding names proved every state port exists");
+                model_type.validate_declared_schema(processor, direction, port, &state.schema)?;
+            }
+        }
         for declaration in &processor.output_schema {
             let model_type = model_metadata.outputs.get(&declaration.tensor).verified(
                 "validate_binding_names above rejected any mapping this metadata does not carry",
@@ -1265,6 +1314,7 @@ mod tests {
                 schema: matrix.clone(),
                 expression: nervix_models::Expression::Literal(nervix_models::Literal::Null),
             }],
+            state: Vec::new(),
             output_schema: vec![nervix_models::InferencerTensorDeclaration {
                 tensor: "transformed".to_string(),
                 schema: matrix,
@@ -1457,6 +1507,7 @@ mod tests {
             resource_version: 1,
             file: "model.onnx".to_string(),
             inputs: Vec::new(),
+            state: Vec::new(),
             output_schema: Vec::new(),
             mode: AckMode::Attached,
             filter_where: None,
@@ -1588,6 +1639,7 @@ mod tests {
                 schema: matrix.clone(),
                 expression: nervix_models::Expression::Literal(nervix_models::Literal::Null),
             }],
+            state: Vec::new(),
             output_schema: vec![nervix_models::InferencerTensorDeclaration {
                 tensor: "transformed".to_string(),
                 schema: matrix,

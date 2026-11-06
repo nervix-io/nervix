@@ -253,6 +253,8 @@ pub enum Identifier {
     Base64,
     File,
     Inputs,
+    Initial,
+    Zeros,
     InnerInput,
     InnerOutput,
     Dense,

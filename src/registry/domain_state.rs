@@ -60,12 +60,12 @@ use crate::registry::{
             validate_model_message_error_policies,
         },
         processor::{
-            add_correlation_timeout_action_edges, add_processor_output_edges,
-            effective_processor_output_filter_map_schema, ensure_deduplicator_key_compiles,
-            ensure_inferencer_input_mappings, ensure_processor_output_flush_policies,
-            ensure_processor_output_schemas, ensure_wasm_processor_output_schemas,
-            ensure_window_processor_output_schemas, parse_window_bound_duration,
-            processor_input_schemas, validate_correlator,
+            InferencerRegistrySchema as _, add_correlation_timeout_action_edges,
+            add_processor_output_edges, effective_processor_output_filter_map_schema,
+            ensure_deduplicator_key_compiles, ensure_inferencer_input_mappings,
+            ensure_processor_output_flush_policies, ensure_processor_output_schemas,
+            ensure_wasm_processor_output_schemas, ensure_window_processor_output_schemas,
+            parse_window_bound_duration, processor_input_schemas, validate_correlator,
             validate_correlator_input_sides_do_not_overlap, validate_correlator_output,
             validate_filter_where_for_internal_schemas, validate_from_where_for_internal_schemas,
             validate_generator_output, validate_inferencer_output_filter_map,
@@ -213,6 +213,17 @@ impl DomainState {
                 _ => {}
             }
 
+            if let Model::Inferencer(processor) = model {
+                processor.execution_mode().change_context(
+                    RegistryError::InferencerTensorSchemas {
+                        domain: domain.clone(),
+                        node: identifier.clone(),
+                    },
+                )?;
+                super::validation::inferencer_state::ensure_inferencer_state(
+                    domain, identifier, models, processor,
+                )?;
+            }
             let materialized_state = model_materialized_state_dependencies(model);
             add_materialized_state_dependency_edges(
                 domain,
@@ -396,9 +407,6 @@ impl DomainState {
                         identifier,
                         &processor.output_routes,
                     )?;
-                    processor.execution_mode().map_err(|rejection| {
-                        RegistryError::invalid_model(domain, identifier.as_str(), rejection)
-                    })?;
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -445,7 +453,7 @@ impl DomainState {
                         branch_schema,
                         processor.filter_where.as_ref(),
                     )?;
-                    ensure_inferencer_input_mappings(
+                    let generated_sensitive = ensure_inferencer_input_mappings(
                         domain,
                         identifier,
                         models,
@@ -455,6 +463,11 @@ impl DomainState {
                     for output in processor.output_routes.outputs() {
                         let consumer_schema =
                             schema_for_ack_model(domain, identifier, models, &output.relay)?;
+                        let generated_schema = processor.inner_output_schema(
+                            domain,
+                            identifier,
+                            generated_sensitive,
+                        )?;
                         validate_inferencer_output_filter_map(
                             domain,
                             identifier,
@@ -462,7 +475,7 @@ impl DomainState {
                             output,
                             consumer_schema,
                             branch_schema,
-                            processor,
+                            &generated_schema,
                         )?;
                     }
                     add_output_message_error_policy_edges(

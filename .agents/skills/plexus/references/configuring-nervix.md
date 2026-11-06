@@ -75,14 +75,16 @@ and [Client Implementation Manual](https://docs.nervix.io/client-implementation-
 S-7 and K-5. Keep an unanswered reopening distinct from a refusal, and account for the live-edge gap.
 
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
-the open session, a reply that names another execution, and reconnect behavior, read
+the open session, unreadable replies, replies naming another execution, uncertain restore outcomes,
+and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
 [Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
 directly. Follow the same documentation version as the selected index; these client chapters are
 outside the curated Plexus index.
 
-For native command or restore recovery after an execution-reference mismatch, read
-[Client Library](https://docs.nervix.io/client-library.html) and the command and restore contracts in
+For native command or restore recovery after an execution-reference mismatch or a reply of another
+kind than its request, read [Client Library](https://docs.nervix.io/client-library.html) and the
+command and restore contracts in
 [Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html) directly.
 Keep the original execution reference when recovering an uncertain outcome.
 
@@ -172,6 +174,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Order records by expressions within a time bound | `REORDERER` |
 | Produce width/step aggregates | `WINDOW PROCESSOR` |
 | Run an ONNX model | `INFERENCER` |
+| Carry ONNX state between rows of each branch | `INFERENCER`; read `Runtime Nodes` → `State tensors` for the fixed-shape, initialization and reset contract |
 | Run custom guest processing | `WASM PROCESSOR` |
 | Reuse trusted batch-column logic inside expressions | `UDF` |
 | Match records from left and right relay sets | `CORRELATOR` |

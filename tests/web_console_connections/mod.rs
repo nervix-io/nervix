@@ -37,6 +37,7 @@ pub(super) enum InitialSession {
     Deliver,
     Hold,
     ObserveRequests,
+    UnreadableReplies,
 }
 
 /// A bounded gate installed after the recorder and before the console's own scripts.
@@ -55,7 +56,9 @@ pub(super) async fn record_console_connections(
     initial_session: InitialSession,
 ) -> playwright_rs::Result<()> {
     let initial_hold = match initial_session {
-        InitialSession::Deliver | InitialSession::ObserveRequests => "false",
+        InitialSession::Deliver
+        | InitialSession::ObserveRequests
+        | InitialSession::UnreadableReplies => "false",
         InitialSession::Hold => "true",
     };
     let path = serde_json::to_string(CONSOLE_SESSION_PATH)
@@ -66,6 +69,10 @@ pub(super) async fn record_console_connections(
     let script = format!("{RECORDER}\n{gate}");
     let script = match initial_session {
         InitialSession::Deliver | InitialSession::Hold => script,
+        InitialSession::UnreadableReplies => {
+            let fixture = super::web_console_unreadable::fixture_script();
+            format!("{script}\n{fixture}")
+        }
         InitialSession::ObserveRequests => {
             let observer = super::web_console_request_window::observer_script();
             format!("{script}\n{observer}")
