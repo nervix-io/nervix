@@ -43,6 +43,16 @@ The selections share a diagnostic build directory, as the canonical lane does, a
 attempt records for each selection.
 `just test-client-recovery-runner` checks scope completeness against feature discovery.
 
+## Focused Wire Schema List Scenarios
+
+`just test-wire-schema-lists` runs `tests/features/runtime/wire_schema_lists.feature` through the
+ordinary harness on one and three nodes: AVRO arrays with declared item types, JSON and CBOR list
+elements under their codec rules, and the refusals of lists a wire type cannot carry. It builds the
+server's console assets and WASM guests and loads the ONNX runtime, which every in-process node
+needs. These cases start no CLI, paced simulation or Python driver, so the recipe does not build
+those tools. Its arguments reach the scenario runner unchanged, such as `--name`, `--concurrency`
+and `--retry`. Broad `just test-scenarios` and CI keep their complete tool prerequisites.
+
 ## Delayed Consensus Heartbeat Answers
 
 The leader-lease regression uses a testing-only control on each follower's consensus probe. The

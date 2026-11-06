@@ -591,6 +591,16 @@ test-command-recovery-scenarios: build-web-console wasm-processor-guests downloa
         --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
         --concurrency 1 --retry 0
 
+# Exercise list fields of every schemaful wire format through the in-process cluster: AVRO item
+# types, list-element ENCODE rules and the refusals of lists a wire type cannot carry.
+[positional-arguments]
+test-wire-schema-lists *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/wire_schema_lists.feature "$@"
+
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
     cargo test --package nervix-test-environment {{ args }}

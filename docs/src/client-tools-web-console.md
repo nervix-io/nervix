@@ -164,7 +164,9 @@ fixed arrays; each fixed array needs a positive length. Optional and sensitive f
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
 mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; CBOR offers `integer`,
 `float`, `boolean`, `text`, `bytes`, and `array`, with native byte strings for `bytes`. AVRO offers
-`boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
+the item types `boolean`, `int`, `long`, `float`, `double`, `string`, and `bytes`, and wraps the
+picked item type in one array per added layer, building `array<item>` the way an internal field
+builds vectors and fixed arrays; a layer can be removed again. Codec field encoding controls
 select `RFC3339` or `BASE64` for explicit text interchange, as described in
 [Schemas And Codecs](schemas-and-codecs.md#codecs).
 A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may

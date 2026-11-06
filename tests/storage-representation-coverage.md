@@ -42,10 +42,11 @@ with either required `START AT` position. Statement generators mix typed `SET ST
 ingestor operations. The Model, registry and consensus properties preserve those complete values.
 
 Wire-schema generators carry each format's declared types, and codec generators carry explicit
-`BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
-own wire type enums. The Model/archive, registry and consensus properties preserve those complete
-values. The `NERVIX CBOR NATS` registry signature and `raft_cbor_nats_` consensus namespace identify
-the current Model layout before decoding.
+`BASE64` byte-text rules alongside `RFC3339` datetime-text rules, on scalar fields and on lists of
+datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; an AVRO array nests its
+item type, arrays included, to a bounded depth. The Model/archive, registry and consensus
+properties preserve those complete values. The `NERVIX AVRO LIST` registry signature and
+`raft_avro_list_` consensus namespace identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
 own grammar writes: a locator, a declared option and the `DROP` of an optional one, `SET MODE`,
@@ -53,7 +54,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_cbor_nats_` consensus namespace identifies the statement layout the transactions it
+and the `raft_avro_list_` consensus namespace identifies the statement layout the transactions it
 keeps are stored in before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the

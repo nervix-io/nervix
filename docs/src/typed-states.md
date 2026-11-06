@@ -321,9 +321,10 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored
-declaration holds the archived union of both. The registry's `NERVIX CBOR NATS` archive
+declaration holds the archived union of both. The registry's `NERVIX AVRO LIST` archive
 signature identifies the current Model layout, including those unions, separate JSON and CBOR wire
-type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec encoding, a
+type enums (CBOR has six types), AVRO representation types whose arrays declare their item type,
+explicit `BASE64` codec encoding, a
 Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the required 16-bit branch partition count, Sentry
 platform, an ingestor's `TIMESTAMP AT
@@ -331,7 +332,7 @@ metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the recei
 QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
 ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside
 its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
-`PATTERN`, and that header state. Consensus's `raft_cbor_nats_` keyspaces and current state metadata
+`PATTERN`, and that header state. Consensus's `raft_avro_list_` keyspaces and current state metadata
 encoding identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps. The runtime state
 store's `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps,

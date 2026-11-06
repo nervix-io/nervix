@@ -611,6 +611,13 @@ revision restores the save under the active clock at `START`.
 
 ### Codecs And Ingress
 
+Before a schemaful codec is accepted, the registry refuses a wire field that cannot carry its
+internal field with `RegistryError::IncompatibleSchema`, naming the codec and the field: a type
+mismatch, an AVRO array nested to another depth than the internal `ARRAY` and `VEC` levels, a
+`DATETIME` or `BYTES` value or list element that travels as text without its `ENCODE` rule, or a
+`BASE64` rule on bytes the format carries natively. A rule whose field's innermost elements are not
+of the rule's type is the registry's `InvalidModel` refusal of the codec.
+
 Codec compilation, decoding and encoding return `CodecError` reports. The codec context names the
 codec, and the field when one is at fault, and the typed reason stays beneath it: a
 `CodecContractError` for a declaration or use the wire format does not support, such as a missing
