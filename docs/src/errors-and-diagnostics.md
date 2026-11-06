@@ -2521,7 +2521,10 @@ describes impact inspection.
 The session service's own edges report the same way. A gRPC call whose credentials do not
 authenticate it fails as a `GrpcAuthenticationError` report, `Required`, `Failed` or `Busy`, and the
 call ends with `UNAUTHENTICATED`, or with `UNAVAILABLE` when the node could not verify the
-credentials now; the status names only the refusal. A command on a transaction its session is no
+credentials now; the status names only the refusal. Known, unknown and invalid names use the same
+per-name pacing and generic rejection; the delay never carries a separate user-existence outcome.
+An unavailable verification establishes no failure bucket and preserves any existing pacing.
+A command on a transaction its session is no
 longer bound to fails as a `SessionTransactionBindingError` report, whose current context selects
 the `TransactionTakenOver` or `TransactionDetached` disposition and whose chain is the command's
 message. A domain snapshot that cannot be encoded for a session is `SnapshotEncodingError::Graph`

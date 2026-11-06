@@ -590,6 +590,17 @@ test-web-console *args:
 test-harness-liveness *args: tests-deps
     cargo test --package nervix-scenarios --test harness_liveness -- {{ args }}
 
+# Exercise command-probe causality through its ordinary owner and the server's assets.
+test-command-probes *args: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test harness_liveness -- command_probe_tests {{ quote(args) }}
+
+# Exercise the two committed-batch recovery fixtures through the in-process cluster.
+test-command-recovery-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/client_wire_failures.feature \
+        --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
+        --concurrency 1 --retry 0
+
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
     cargo test --package nervix-test-environment {{ args }}
@@ -1407,9 +1418,9 @@ test-expiry-map:
 
 # Bolero reads its checked-in corpus from the source tree, which Miri's isolation forbids, so the
 # Miri run lifts isolation and bounds the property's random cases beside that corpus.
-test-expiry-map-miri:
+test-expiry-map-miri *args:
     MIRIFLAGS="-Zmiri-disable-isolation" BOLERO_RANDOM_ITERATIONS=4 BOLERO_RANDOM_MAX_LEN=512 \
-        cargo +nightly miri test --package nervix-expiry-map
+        cargo +nightly miri test --package nervix-expiry-map -- {{ args }}
 
 test-expiry-map-mutants:
     cargo mutants --package nervix-expiry-map --timeout 120
@@ -2616,6 +2627,10 @@ cargo-fmt:
 # Format one package during a focused implementation cycle.
 cargo-fmt-package package:
     cargo +nightly fmt --package {{ package }}
+
+# Format one Rust module and its children during a focused edit.
+rustfmt-file file:
+    rustfmt +nightly {{ quote(file) }}
 
 # Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:

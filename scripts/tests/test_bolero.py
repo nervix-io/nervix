@@ -353,6 +353,7 @@ class InventoryTests(unittest.TestCase):
             "wasm-generated-pools",
             "wasm-generated-pools-malformed",
             "expiry-map-operations",
+            "authentication-quota-clock",
             "rate-limit-quota-bounds",
             "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
