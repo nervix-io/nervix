@@ -1174,9 +1174,14 @@ authentication keys `token`, `credentials_file` and `nkey_seed`. Its schema decl
 three mutually exclusive and confidential, and identifies `credentials_file` as a mounted file.
 Both sides build authentication and TLS options through one connector-owned builder, then attach
 their own connection-loss notifications or reconnect policy. Token authentication uses the driver;
-nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The connector validates
-the fixed-size user seed's base32, user prefix and transcription checksum, and reads a mounted
-credentials file through the node's filesystem workers. Its immutable mounted length is charged to
+nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The maintained
+format-only [NKey fork](https://github.com/nervix-io/nkeys) validates the fixed-size user seed's
+canonical base32, exact user prefix and transcription checksum, and encodes its public key.
+The maintained [NATS driver fork](https://github.com/nervix-io/nats.rs) parses credentials into
+borrowed JWT and seed sections without enabling its signing backend. Parsing preserves LF/CRLF,
+trimmed lines, either section order, explanatory text and an end marker at EOF, without allocating
+or caching a regular expression. Public-key encoding allocates only its returned string.
+The connector reads a mounted credentials file through the node's filesystem workers. Its immutable mounted length is charged to
 credentials memory before allocation or reading, and that charge stays until the temporary bytes
 are cleared. Cancellation is checked before and after the bounded file read. Admission or execution
 refusal judges no credential and remains a retryable initialization failure, distinct from invalid

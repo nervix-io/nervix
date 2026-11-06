@@ -67,8 +67,8 @@ A site that uses a non-approved hash records its non-security purpose where it i
 register lists it with the site and the hash. The count recognises no recorded BLAKE3 purpose yet,
 so it holds every BLAKE3 site as unclassified.
 
-The NATS authentication wire codec in
-`crates/connectors/nats/src/client/authentication.rs` uses CRC-16/XMODEM only to detect transcription
+The maintained format-only [NKey fork](https://github.com/nervix-io/nkeys), called by
+`crates/connectors/nats/src/client/authentication.rs`, uses CRC-16/XMODEM only to detect transcription
 errors in a seed or public-key encoding, as the [NATS nkeys format](https://github.com/nats-io/nkeys/blob/main/strkey.go)
 requires. It makes no authenticity decision from the checksum; AWS-LC signs the server nonce.
 
@@ -179,9 +179,13 @@ generated authored location and the complete source and site representations.
 
 NATS nkey and credentials-file authentication signs the server's nonce through AWS-LC Ed25519.
 The connector uses async-nats' authentication callback, and the product does not enable that
-driver's `nkeys` feature. The independent `nkeys` signer is a test-only interoperability oracle
-and scenario fixture, outside the release product graph. Adding the callback therefore adds no
-non-AWS-LC cryptography edge and leaves the count unchanged.
+driver's `nkeys` feature. The organization-owned NKey fork is consumed with default features
+disabled: only its format codec is present, with no signing, hashing or random backend. The driver
+fork exposes borrowed credentials parsing independently of nonce signing. Both dependencies are
+pinned to immutable commits. The published `nkeys` signer remains an independent test-only
+interoperability oracle and scenario fixture, outside the release product graph. This arrangement
+adds no non-AWS-LC cryptography edge. Seed decoding clears both its intermediate record and its
+returned bytes; neither the codec nor credentials parser includes secret values in refusals.
 
 The signing operation currently lives in `crates/connectors/nats/src/client/authentication.rs`
 while `nervix-crypto` is still a target. FIPS Prep 02 moves it into the boundary; wire decoding
