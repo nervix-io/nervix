@@ -32,6 +32,35 @@ selections = [
 ]
 target = "lib"
 
+[[invocation]]
+bound_seconds = 120
+evidence = true
+features = ["testing"]
+id = "emitter-branch-retirement"
+kind = "libtest-each"
+marker = "runtime::emitter_buffer::tests::retiring_one_source_branch_settles_only_its_unresolved_host_rows"
+package = "nervix-server"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+target = "lib"
+
+[[workload]]
+coverage = "Production buffer retirement settles real ACK roots through the tracked completion-sender mutex, preserves connector-staged ownership and counts delivered rows once. The exclusively owned branch collections, async timer and parked-wait orchestration are outside detector evidence."
+id = "owner.emitter-branch-retirement"
+invariant = "Retiring a source branch NoACKs only its unresolved host rows and leaves independent source/key rows and connector-owned acknowledgements intact."
+invocation = "emitter-branch-retirement"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "runtime::emitter_buffer::tests::retiring_one_source_branch_settles_only_its_unresolved_host_rows"
+
 [[workload]]
 coverage = "The engine's selected blocking shard locks, concurrent key leases, exact rollback, global eviction, TTL removal and fresh keyed-store restoration; governor internals and atomic memory ordering are outside detector evidence."
 id = "owner.rate-limit-keyed-transactions"
@@ -421,6 +450,7 @@ kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@client_restore_codec_native",
   "@kafka_record_metadata",
   "@mqtt_metadata",
   "@nats_authentication",
@@ -451,10 +481,12 @@ tags = [
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
   "@client_io_03_generation",
+  "@client_wire_subscription_timeout",
   "@remote_ack_owners",
   "@backup_wait",
   "@client_wire_backup_outage",
   "@client_foreign_execution",
+  "@client_restore_reply_validation",
   "@stopped_checkpoint_writes",
   "@backup_cut_diagnostics",
   "@backup_parked_wait",
@@ -1795,6 +1827,26 @@ invariant = "An HTTP ingestor started above the memory high watermark on one and
 invocation = "scenarios"
 scenario = "Memory high watermark pauses scheduled ingestors"
 selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The real Rust client's tracked request registry and event queues end a silent exchange after one held reopening reply exceeds its request timeout, on one and three nodes. Async watch and transport waits are untracked and have a production-owner Shuttle check."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-subscription-timeout"
+invariant = "A waiting reader reopens its acknowledged subscription in another session and receives exactly one row from one post while the first reopening reply remains held."
+invocation = "scenarios"
+scenario = "An unanswered subscription reopening lets a waiting native reader open another session"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the real Rust client's tracked request registry and event queues end a silent exchange after one unanswered reopening, on one and three nodes. Async watch and transport waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-subscription-timeout"
+invariant = "A waiting reader reopens its acknowledged subscription in another session and receives exactly one row from one post while the first reopening reply remains held."
+invocation = "stress-scenarios"
+scenario = "An unanswered subscription reopening lets a waiting native reader open another session"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Rust client consumers, producers and the attached domain clock resuming across a cluster restart."
@@ -3575,8 +3627,14 @@ workloads = [
 [[owner]]
 path = "crates/client-core/src/client.rs"
 workloads = [
+  "scenario.client-restore-reply-validation",
+  "stress.client-restore-reply-validation",
+  "stress.client-restore-reply-validation-restore",
   "scenario.client-foreign-execution",
   "stress.client-foreign-execution",
+  "scenario.restore-codec-rejection",
+  "stress.restore-codec-rejection",
+  "stress.restore-codec-rejection-restore",
   "paced.reopen-generation",
   "paced.delayed-refusal",
   "scenario.backup-lease-release-recovery",
@@ -3622,8 +3680,16 @@ workloads = [
 gap = "The listed workloads reach the pending-replies lock through every request's registration, the replies its reader routes and the close of an exchange. None cancels a command through the Rust client: its only caller, nervix-cli, has no diagnostic form, and the lane starts an ordinary CLI binary, so ExchangeRequests::cancel, which registers a CancelRequest under the same single unnested acquisition every request takes and closes the registry when the frame cannot be sent, is exercised only by the client-core unit tests and the CLI scenarios, outside the lane."
 path = "crates/client-core/src/exchange.rs"
 workloads = [
+  "scenario.client-subscription-timeout",
+  "stress.client-subscription-timeout",
+  "scenario.client-restore-reply-validation",
+  "stress.client-restore-reply-validation",
+  "stress.client-restore-reply-validation-restore",
   "scenario.client-foreign-execution",
   "stress.client-foreign-execution",
+  "scenario.restore-codec-rejection",
+  "stress.restore-codec-rejection",
+  "stress.restore-codec-rejection-restore",
   "scenario.client-alter-drain",
   "paced.reopen-generation",
   "scenario.backup-lease-release-recovery",
@@ -4308,6 +4374,7 @@ workloads = [
 [[owner]]
 path = "src/runtime_ack.rs"
 workloads = [
+  "owner.emitter-branch-retirement",
   "scenario.sqs-parallel-batch",
   "stress.sqs-parallel-batch",
   "scenario.client-alter-drain",
@@ -5189,3 +5256,62 @@ invariant = "A foreign command outcome ends its session and the client recovers 
 invocation = "stress-scenarios"
 scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
 selections = ["deloxide-stress"]
+[[workload]]
+coverage = "Native restores through the real one- and three-node cluster and a bounded gRPC peer that replaces only a completed restore's reply. Rejection ends the selected client's tracked pending registry, and original-reference recovery opens a new session; tonic buffering and async transport are untracked. The ordinary CLI examples are outside this diagnostic selection."
+examples = 4
+feature = "tests/features/runtime/client_restore_codec_rejection.feature"
+id = "scenario.restore-codec-rejection"
+invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
+invocation = "scenarios"
+scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the four native malformed and oversized restore replies reach the same tracked client pending registry and original-reference recovery on one and three nodes. Async transport, tonic buffering and the ordinary CLI process remain outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/client_restore_codec_rejection.feature"
+id = "stress.restore-codec-rejection"
+invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
+invocation = "stress-scenarios"
+scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the four native malformed and oversized restore replies reach the same tracked client pending registry and original-reference recovery on one and three nodes. Async transport, tonic buffering and the ordinary CLI process remain outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/client_restore_codec_rejection.feature"
+id = "stress.restore-codec-rejection-restore"
+invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
+invocation = "stress-restore-scenarios"
+scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/client_restore_reply_validation.feature"
+id = "scenario.client-restore-reply-validation"
+invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
+invocation = "scenarios"
+scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/client_restore_reply_validation.feature"
+id = "stress.client-restore-reply-validation"
+invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
+invocation = "stress-scenarios"
+scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/client_restore_reply_validation.feature"
+id = "stress.client-restore-reply-validation-restore"
+invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
+invocation = "stress-restore-scenarios"
+scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]

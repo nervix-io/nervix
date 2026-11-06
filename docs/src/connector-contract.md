@@ -120,7 +120,7 @@ connector crate.
 | Decision and composition | Convert a validated Model into a typed source or emitter start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define ingestor and emitter operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the ingestor contract, the emitter contract, or both. |
-| Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse Plexus or read a Model during data-plane execution. |
+| Host data plane | Own tasks, intake and Arrow decoding, branch routing and retention of held emitter work, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse Plexus or read a Model during data-plane execution. |
 
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
@@ -1720,7 +1720,7 @@ when its transport stays connected with bounded memory while nothing reads it:
 | Source | Unacknowledged admission | The transport while its loop is held |
 | --- | --- | --- |
 | HTTP polling, Prometheus | Waits for a place | Nothing is read. The next poll is delayed, and the domain cadence coalesces the occurrences it missed. |
-| NATS | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
+| NATS SUBJECT | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
 | ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
 | Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
 | MQTT | Refused and counted | The connection's driver task keeps the event loop, and with it the keep-alive, running while the loop is held, but under `NO ACK` reads only 64 publishes ahead of it. Once those fill, the driver stops reading, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
@@ -3064,14 +3064,17 @@ sequenceDiagram
   The one retry left in the driver is a partitioned topic's: a consumer of one partition whose
   single reconnect fails ends, and the multi-topic consumer resubscribes it at its 30-second topic
   refresh while the other partitions keep flowing.
-- **NATS source.** Each source instance owns one client and its queue subscription. The client
-  reports a lost connection through its event callback, and the instance ends the subscription
-  with a read failure once it has handed over every message the client received before the loss,
-  so the host shows the loss as a transient error and resumes the instance on its reconnect
-  cadence, which connects and subscribes again. The client never reconnects in the background:
-  the driver cannot be told to make no attempt of its own, so it makes one, which only lets its
-  connection task end. Core NATS retains nothing for a subscription that is not connected, so
-  messages published while the instance reconnects never reach it.
+- **NATS sources.** Each source instance owns one client and its queue subscription or its pull
+  of a durable consumer. The client reports a lost connection through its event callback, and the
+  instance ends the subscription or pull with a read failure once it has handed over every message
+  the client received before the loss, so the host shows the loss as a transient error and resumes
+  the instance: a `NATS SUBJECT` instance on its reconnect cadence, which connects and subscribes
+  again, and a `NATS STREAM` instance on its `RETRY POLICY`, which connects, looks its consumer up
+  and pulls again. The client never reconnects in the background: the driver cannot be told to
+  make no attempt of its own, so it makes one, which only lets its connection task end. Core NATS
+  retains nothing for a subscription that is not connected, so messages published while a
+  `NATS SUBJECT` instance reconnects never reach it, while a stream keeps them for its consumer as
+  long as its retention and limits allow.
 - **Syslog stream listener.** Each accepted TCP or TLS connection has one task that owns its frame
   buffer and reads into it directly, at most 8 KiB per read and never beyond the connection's
   frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its

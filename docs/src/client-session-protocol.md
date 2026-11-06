@@ -1128,6 +1128,14 @@ session starts again from one second. An attach answered `DomainClockAlreadyAtta
 session already holds the attachment, so the client follows the clock on that session and reads its
 frames from then on.
 
+Closing the native client's request registry also wakes its exchange reader, even while the
+transport remains live and silent. The reader stops routing frames before it interrupts that
+generation's attachments and event queues. A subscription or clock reader already waiting there
+can therefore open the next session; it does not need another command, a later back-off timer, or
+a transport failure to make progress. An unanswered reopening ends its session; the
+`RestorationFailed` event reports attempts that failed while the session stays open, including
+server refusals and local encoding failures.
+
 The client's event streams outlive the session. A caller reading subscription events, clock events,
 or notices keeps reading across the replacement: the interruptions mark the gap, and events of the
 new session follow them. Reading subscription or clock events opens a new session
@@ -1964,7 +1972,19 @@ completed. The Rust client ends the session used for that attempt and reports `U
 under the restore's own reference, with the typed reference mismatch beneath it. Recovering the
 restore streams the same statement and archive again under that reference.
 
-A refusal of the stream is not recorded; sending the stream again stages the archive again. Every
+A reply must decode, and its request identity, when present, must equal the start's. A verified
+frame that fails semantic decoding or names another request is a protocol violation, not evidence
+that the restore was refused: the node may already have applied it. The Rust client ends the exact
+session used by that attempt, interrupts its pending requests, and returns `UncertainCommand`
+under the restore's own execution reference with the typed validation cause beneath it. A session
+installed while the restore was in flight remains usable. Keep the statement, archive bytes and
+reference unchanged when repeating the restore to recover its outcome.
+
+A refusal of the stream is not recorded; sending the stream again stages the archive again. A
+refusal answers the one stream it ends, not the restore: a leader refuses a stream whose start or
+statement it cannot read, or while its cluster parameters are unavailable, before it looks the
+restore up, and stages the archive again for a restore it finds admitted without it, so a refusal
+of a repeated stream says nothing about whether an earlier stream had the restore admitted. Every
 other answer is a `CommandOutcome` under the start's execution reference:
 
 - A follower reads the start, answers `LeaderRedirect`, and reads no chunk.
@@ -2003,6 +2023,14 @@ no longer tied to the call: a client that goes away does not stop it, and repeat
 under the same reference returns its outcome. A call that ends before the whole archive arrived
 changes nothing and releases what the leader staged for it.
 
+A reply that fails frame verification or exceeds the native transport's receive limit cannot
+establish a restore outcome. The native client ends the exact session whose channel carried that
+attempt, leaving a replacement session intact, and reports the original restore reference as
+uncertain. Repeating the same statement and archive under that reference recovers the outcome.
+If no earlier attempt could have been admitted, authentication or other server refusals received
+before a response, a declared `RestoreUploadFailed`, and local archive refusals keep their
+definitive meaning. An unreadable reply is no evidence of refusal.
+
 Only the leader the archive was streamed to holds it, until the restore finishes or the retry
 validity of its reference ends. If leadership moves, or that leader restarts, while the restore
 applies, the reply is a `LeaderRedirect` or the call fails, and repeating the stream on the new
@@ -2015,7 +2043,11 @@ it before the start, and again as it streams. The stream ends with the chunk tha
 declared size instead of a half-close, and the console watches for a reply that arrives before
 every chunk was sent. It repeats a redirected, interrupted, or still-applying restore under the
 same reference, statement and archive, and reports the outcome as unknown, naming the reference,
-when ten minutes of repetitions leave it unknown.
+when ten minutes of repetitions leave it unknown. It reports the outcome as unknown as well when
+the restore ends without it after an attempt may have had the restore admitted, by sending the
+whole archive without learning the outcome or by an `OutcomeUnknown` answer: when the file can no
+longer be read, a reply cannot be accepted, the leader refuses a later stream, or the leader no
+longer holds the reference.
 
 ## Node Stop And Restart As A Client Observes Them
 
@@ -2250,6 +2282,10 @@ reproduction commands, tested revisions and regression alarms, and
 [Client Wire 18](https://app.clickup.com/t/86bc8cx3h) the command preparation and transport report
 with its paired samples. Measurements qualify their recorded workload, build profile and host; they
 do not establish throughput guarantees for another revision.
+
+The broad baseline instrument used by those reports is retired. Its archived commands reproduce
+only the recorded revisions; current measurements use the focused instruments below. The original
+measurements, budgets and conclusions remain on their ClickUp tasks.
 
 Before it sends a command, a native client classifies the statements by parsing them with the
 client statement grammar. Building that grammar constructs the parser of every Plexus statement

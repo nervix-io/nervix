@@ -183,6 +183,12 @@ reads the state a subscription is in. `subscribe` and `unsubscribe` reopen a clo
 every other call. Deleting a subscription that no open session holds, because its session ended or
 the current session refused to open it again, completes without a request and releases the name.
 
+An unanswered reopening ends its session at `request_timeout`. The exchange reader then stops
+routing frames and wakes the subscription reader, which opens the next session even when the
+preceding transport is still connected. The client reports no `RestorationFailed` event for an
+unanswered request. The subscription stays desired and resumes at the new session's live edge;
+records published during its gap are not replayed.
+
 ## Backing Up
 
 `execute` runs `BACKUP CLUSTER TO '<file>';` and `BACKUP DOMAIN [<name>] TO '<file>';` as one
@@ -239,6 +245,17 @@ returns `UncertainCommand` under the restore's own reference, above
 `ExecutionReferenceMismatch`. The outcome remains unknown even if the foreign reply reports a
 failure. Repeat with `restore_with_reference` and the original reference, statement and archive to
 learn the restore's own outcome.
+
+An unreadable restore reply, including a malformed frame, a message above the receive limit,
+a verified reply that cannot be decoded or one naming another transport request, leaves that
+original execution uncertain. The client ends the session selected for the stream and interrupts
+its pending requests, preserving any replacement installed while its reply was outstanding. Keep
+the exact statement and archive and pass their original reference to `restore_with_reference` to
+recover the outcome. The report retains the typed validation cause or tonic's bounded receive
+failure. Missing or empty local archives, authentication refusals and valid declared stream
+refusals remain definitive if no earlier attempt could have been admitted. The shared bindings
+classify uncertainty as `NX_ERROR_UNCERTAIN`;
+the CLI exits with status 3 and prints the execution reference.
 
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.

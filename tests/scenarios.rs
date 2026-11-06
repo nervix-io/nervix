@@ -255,9 +255,11 @@ mod restarted_voter;
 mod session_protocol;
 mod session_tls;
 mod standalone_transaction;
+mod subscription_restoration;
 mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
+mod web_console_restore_faults;
 mod websocket_lifecycle;
 mod wide_row_intake;
 
@@ -506,6 +508,10 @@ struct ScenarioWorld {
     saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
     /// How the last restore stream a scenario shaped itself ended.
     last_restore_end: Option<crate::backup::restore::RestoreStreamEnd>,
+    /// The real restore whose reply a bounded gRPC peer made unreadable to its client.
+    restore_codec_result: Option<crate::backup::restore_codec::Observation>,
+    /// A real restore whose test peer substituted its reply, and its exact-reference recovery.
+    restore_reply_validation: Option<Box<backup::restore_reply_validation::RestoreValidation>>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<crate::backup::restore::BackgroundRestore>,
     /// Real filesystem capacity held while an accepted restore tries its client inspection.
@@ -4170,20 +4176,6 @@ async fn then_server_process_cluster_has_schema(world: &mut ScenarioWorld, schem
     world.last_command_output = Some(output);
 }
 
-#[given("a release nervix-server process is started for the client-wire baseline")]
-async fn given_release_server_process_is_started_for_client_wire_baseline(
-    world: &mut ScenarioWorld,
-) {
-    let executable = std::env::var_os("NERVIX_CLIENT_WIRE_BASELINE_SERVER")
-        .verified("the client-wire baseline recipe supplies its release server executable");
-    start_ready_server_process_with_launch(
-        world,
-        ServerProcessLaunch::Executable(PathBuf::from(executable)),
-        &[],
-    )
-    .await;
-}
-
 #[given(expr = "a nervix-server process is started with drain timeout {string}")]
 async fn given_nervix_server_process_is_started_with_drain_timeout(
     world: &mut ScenarioWorld,
@@ -4751,35 +4743,6 @@ async fn when_server_process_is_restarted_from_existing_database(world: &mut Sce
         .restart()
         .await
         .unwrap_or_else(|error| panic!("failed to restart nervix-server: {error}"));
-}
-
-#[when("the current client-wire baseline is captured")]
-async fn when_current_client_wire_baseline_is_captured(world: &mut ScenarioWorld) {
-    let domain = world.domain.clone();
-    let test_id = world.test_id.clone();
-    let process = world
-        .server_process
-        .as_ref()
-        .verified("the preceding step started a nervix-server process");
-    let artifact = crate::common::client_wire_baseline::capture(process, &domain, &test_id)
-        .await
-        .unwrap_or_else(|error| panic!("client-wire baseline failed: {error:#}"));
-    world.placeholders.insert(
-        "client_wire_baseline_artifact".to_string(),
-        artifact.display().to_string(),
-    );
-}
-
-#[then("the client-wire baseline artifact exists")]
-fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
-    let artifact = world
-        .placeholders
-        .get("client_wire_baseline_artifact")
-        .verified("the preceding step captured the baseline artifact");
-    assert!(
-        Path::new(artifact).is_file(),
-        "client-wire baseline artifact was not written to {artifact}"
-    );
 }
 
 #[given(
@@ -36689,9 +36652,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
-            "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @client_wire_tls_cost) and (not @client_conformance_toolchain) and (not \
-             @deadlock_diagnostics)"
+            "(not @client_wire_expected_failure) and (not @client_wire_tls_cost) and (not \
+             @client_conformance_toolchain) and (not @deadlock_diagnostics)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
@@ -36787,6 +36749,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                         });
                 }
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
+                if let ScenarioBodyResult::StepFailed(_) | ScenarioBodyResult::BeforeHookFailed =
+                    &body
+                {
+                    web_console_connections::record_browser_state(world).await;
+                }
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
                 world.stop_consensus_load();

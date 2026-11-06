@@ -705,7 +705,7 @@ Transport-specific schemes and keys:
   client certificate. A plaintext `ws://...` endpoint reads no TLS file, so `CREATE WEBSOCKETS
   CLIENT` refuses all three with it; see [`WEBSOCKETS CONNECTION`](#websockets-connection).
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
-- `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `NATS`: use `tls://...` in `addr`. Nervix trusts the platform's native roots, or only `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client certificate; a `nats://` address uses TLS only when the server requires it. See [NATS](#nats).
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](#pulsar).
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix trusts the host's trust store, or only
@@ -1584,6 +1584,22 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-ingest).
 <!-- connector-matrix:ingest-pulsar-topic:end -->
 
+#### Pulsar topic names
+
+Both ingestion and emission write a quoted, case-preserving `TOPIC` name. A local name such as
+`TOPIC 'orders'` selects `persistent://<namespace>/orders`, using the client's `namespace`,
+`public/default` when omitted. A fully qualified name such as
+`TOPIC 'persistent://tenant-a/events/Orders'` or
+`TOPIC 'non-persistent://tenant-a/events/Orders'` is sent as written and does not use that default.
+
+A topic name is 1 to 1,024 UTF-8 bytes, without whitespace or control characters. A local name has
+no slash; a qualified name has exactly three nonempty levels after `persistent://` or
+`non-persistent://`: tenant, namespace and topic. `CREATE` and `ALTER` refuse other shapes.
+Provision the topic before starting the ingestor or emitter, and choose its subscription ownership
+separately as described below.
+
+#### Received message metadata
+
 A Pulsar message exposes these nullable metadata fields to routing expressions:
 
 | Field | Type | Value |
@@ -1615,6 +1631,8 @@ range and sequence ids above `I64::MAX` produce a typed read error identifying t
 and field. A valid prefix already gathered is delivered before that error. Pulsar's protocol defines
 an omitted redelivery count as zero, so the first delivery reports zero and a broker redelivery can
 report one. Every protocol `u32` count fits the declared `I64`.
+
+#### Subscriptions and consumers
 
 Pulsar ingestors read through a durable subscription. Every statement declares who owns the
 subscription, because the broker cannot say later who created one, and the type the ingestor reads
@@ -1706,7 +1724,9 @@ on drop; a failure does not prevent starting the replacement. `DESCRIBE INGESTOR
 shows the subscription name, its ownership and declared start position, `TYPE` and `INSTANCES`
 together in the declared `options:` row.
 
-Client config currently supports:
+#### Pulsar client
+
+The same `PULSAR CLIENT` keys configure ingestion and emission:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
 - optional `'auth_token'`: the token the client authenticates with. `DESCRIBE CLIENT` and
@@ -1737,6 +1757,8 @@ A client authenticates with what its keys hold, and both directions connect the 
 handshake. With both, the token names the role and the certificate satisfies a broker that requires
 one on connect. A client with neither presents no credential.
 
+#### Acknowledgements and recovery
+
 The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry.
 An ingestor that loses its broker shows the failure as its transient error and reconnects on its
 `RETRY POLICY`, or on the reconnect policy under `MODE NO ACK`. A consumer of one partition of a
@@ -1762,6 +1784,12 @@ broker does not answer it; a request the consumer cannot send, such as while it 
 broker it cannot reach, shows `the Pulsar consumer did not confirm sending a redelivery request`,
 and the broker redelivers the messages once the consumer reconnects. `MODE NO ACK` acknowledges
 each message without waiting for the broker's answer.
+
+In `MODE NO ACK`, a payload its codec refuses is consumed through the ingestor's `ON GENERAL ERROR`
+policy and counted as a decode rejection. The source queues its acknowledgement without waiting
+for the broker's answer. See
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload) for reporting and the separate
+contract of a message that decoded but failed in a route.
 
 Under `FAILOVER` and `EXCLUSIVE` the broker does not take one message back: a rejection rewinds the
 consumer to everything it has not acknowledged. The messages behind a rejected one arrive again,
@@ -2290,6 +2318,18 @@ again on its declared `RETRY POLICY`, or on the host's reconnect cadence in `MOD
 
 ### NATS
 
+NATS has two ingestor entities, one for each way a NATS server hands out messages, and both read
+through a `NATS CLIENT`. `NATS SUBJECT` subscribes to a subject through Core NATS as a member of a
+queue group: the server hands each message to one member of the group as it arrives and retains
+nothing, so the entity reads in `MODE NO ACK` and quiesces with `BUFFER` or `DROP`. `NATS STREAM`
+reads a JetStream stream through a durable pull consumer: the stream stores what is published to
+its subjects and keeps it for as long as its operator's retention policy and limits allow, and the
+consumer keeps the position, so the entity acknowledges each delivery in `MODE ACK SEQUENTIAL` or
+`MODE ACK PARALLEL` and can also quiesce with `SUSPEND`. A stream stores a Core publication to one
+of its subjects as it stores a JetStream one, and a subscription receives a JetStream publication
+to its subject as it receives a Core one, so either entity reads what either
+[NATS emitter](emitters.md#nats) publishes to a subject it reads.
+
 <!-- connector-matrix:ingest-nats-subject:start -->
 ```plexus,ignore
 CREATE NATS SUBJECT INGESTOR <name>
@@ -2344,7 +2384,11 @@ Mount a resource containing a credentials file and write its resolved path, such
 inspection. URL user information remains delegated to the NATS driver.
 
 Ingestors and emitters use the same authentication and TLS options. A `tls://` address requires
-TLS on both sides, with the configured CA and optional paired client certificate and key.
+TLS on every connection the client makes, reconnections and servers the cluster announces
+included, whichever direction it serves; a `nats://` address uses TLS only when the server
+announces that it requires it. The client verifies the server's certificate against the
+platform's native roots, or only against `tls_ca_file` when it is set, and presents
+`tls_cert_file` with `tls_key_file` as its client certificate.
 An unreadable or malformed credentials file is a configuration failure; a broker refusing the
 identity is a connection failure reported by the boundary's existing general error policy and
 retry cadence. Nervix does not create accounts or users on the broker.
@@ -2424,11 +2468,11 @@ bounds how often the consumer delivers a message, and JetStream stops delivering
 it.
 
 `SUSPEND` lets the instance's pull go: the instance unsubscribes the inbox its pull requests
-deliver to, so the consumer delivers nothing to it while it is suspended and the stream keeps
-everything published meanwhile for the consumer. A delivery the instance had received but not yet
-read when it suspends is negatively acknowledged, so the consumer delivers it again once the
-instance resumes, and one still on its way is delivered again once the consumer's `AckWait`
-passes. Under `BUFFER` and `DROP` the instance keeps pulling while it is quiesced and
+deliver to, so the consumer delivers nothing to it while it is suspended. What is published
+meanwhile waits in the stream for the consumer, unless the stream's own limits, such as a maximum
+age, discard it first. A delivery the instance had received but not yet read when it suspends is
+negatively acknowledged, so the consumer delivers it again once the instance resumes, and one
+still on its way is delivered again once the consumer's `AckWait` passes. Under `BUFFER` and `DROP` the instance keeps pulling while it is quiesced and
 acknowledges each delivery once the host buffered or dropped it, as every acknowledged source does
 in those modes.
 
