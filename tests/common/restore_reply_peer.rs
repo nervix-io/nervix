@@ -15,7 +15,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_util::{Stream, StreamExt as _};
+use futures_util::{Stream, StreamExt as _, TryStreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClientFrame, RestoreDisposition, RestoreFrame, RestoreMessage, RestoreReply, RestoreReplyFrame,
@@ -132,7 +132,7 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for ForwardExchange {
                 .await?;
             let outgoing = response
                 .into_inner()
-                .map(|frame| frame.map(|frame| frame.into_bytes().to_vec()));
+                .map_ok(|frame| frame.into_bytes().to_vec());
             let outgoing: Self::ResponseStream = Box::pin(outgoing);
             Ok(Response::new(outgoing))
         })
