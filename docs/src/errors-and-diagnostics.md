@@ -2503,6 +2503,17 @@ and a move never as an unconfirmed lease: the context's text says which, so an o
 rendered report or log line tells lease trouble from an election without a separate counter. The
 Raft or I/O error stays beneath the context as the report's cause.
 
+Membership timeout success is decided from both the effective configuration and its committed
+publication. A matching voter union does not convert that timeout into success while the expected
+uniform target remains joint or uncommitted. A refusal of a uniform continuation keeps the same
+typed Raft write classification; it does not mean the preceding joint entry was rolled back.
+A fatal failure reading Core or submitting its conditional completion passes through the same
+Raft write classifier with its original cause. The completion responder retains the original
+membership write error, including uncertainty, rather than interpreting it as a definite refusal.
+Finding that Core is already uniform is an ordinary completion outcome carrying its separate
+effective and committed records; it proposes no additional membership entry, even when a preceding
+joint observation became stale before Core handled the request.
+
 Trace-level vote and pre-vote transport completion events record the existing nested result before
 its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
 and a peer's typed refusal therefore remain distinguishable in the diagnostic. Cancellation by
