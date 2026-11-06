@@ -12,7 +12,7 @@
 
 use std::fmt::Debug;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, assert_remote_keys_eq};
 use nervix_execution::Executor;
 use nervix_models::{
@@ -115,13 +115,17 @@ impl<'a> Messages<'a> {
 
     fn ingestor_selection(&mut self) -> crate::IngestorUnitSelection {
         let count = self.arbitrary.positive_u64();
+        let last_declared_index = count
+            .get()
+            .checked_sub(1)
+            .assured("a positive instance count has a final index");
+        // Counts retain their full width; selected indices also fit the packed unit.
+        let maximum_index = last_declared_index.min(nervix_models::Unit::MAX_INSTANCE_INDEX);
         crate::IngestorUnitSelection {
             unit: nervix_models::Unit::try_instance(
-                self.arbitrary
-                    .entropy()
-                    .boundary_biased(0..=count.get() - 1),
+                self.arbitrary.entropy().boundary_biased(0..=maximum_index),
             )
-            .assured("the fixture index fits the execution-unit range"),
+            .assured("the generated index fits both the count and packed unit range"),
             count,
         }
     }
