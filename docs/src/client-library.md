@@ -193,6 +193,12 @@ reads the state a subscription is in. `subscribe` and `unsubscribe` reopen a clo
 every other call. Deleting a subscription that no open session holds, because its session ended or
 the current session refused to open it again, completes without a request and releases the name.
 
+An unanswered reopening ends its session at `request_timeout`. The exchange reader then stops
+routing frames and wakes the subscription reader, which opens the next session even when the
+preceding transport is still connected. The client reports no `RestorationFailed` event for an
+unanswered request. The subscription stays desired and resumes at the new session's live edge;
+records published during its gap are not replayed.
+
 ## Backing Up
 
 `execute` runs `BACKUP CLUSTER TO '<file>';` and `BACKUP DOMAIN [<name>] TO '<file>';` as one

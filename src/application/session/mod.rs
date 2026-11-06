@@ -1137,22 +1137,7 @@ async fn serve_command(
         return None;
     };
     let outcome = command_outcome(execution_reference, response);
-    #[cfg(feature = "testing")]
-    let outcome = {
-        let mut outcome = outcome;
-        shared
-            .service
-            .inner
-            .runtime
-            .fault_injection()
-            .substitute_command_reply(&reply_script_request, &mut outcome);
-        outcome
-    };
-    let disposition = if tracing::enabled!(tracing::Level::DEBUG) {
-        Some(outcome.disposition.clone())
-    } else {
-        None
-    };
+    #[cfg(not(feature = "testing"))]
     let body = ReplyBody::Command(Box::new(outcome));
     #[cfg(feature = "testing")]
     let body = shared
@@ -1160,7 +1145,16 @@ async fn serve_command(
         .inner
         .runtime
         .fault_injection()
-        .substitute_command_reply_kind(&reply_script_request, body);
+        .script_command_reply(&reply_script_request, outcome);
+    // Only a testing script answers a command with a reply of another kind, which has no
+    // command disposition.
+    let disposition = if tracing::enabled!(tracing::Level::DEBUG)
+        && let ReplyBody::Command(outcome) = &body
+    {
+        Some(outcome.disposition.clone())
+    } else {
+        None
+    };
     let queued = shared.finish_with(request_id, body).await;
     if queued == QueuedReply::Reply {
         disposition
@@ -1199,6 +1193,16 @@ async fn serve_subscribe(
         message,
         diagnostics: Vec::new(),
     };
+    #[cfg(feature = "testing")]
+    shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .pause_subscription_response_delivery_if_armed(
+            shared.service.inner.consensus.local_node_id(),
+        )
+        .await;
     // The rows follow the reply that announces their schema. A subscription whose reply was not
     // queued, because the request was cancelled, the session ended or the reply could not be
     // encoded, was never announced, so it is abandoned before it delivers anything.

@@ -1,17 +1,15 @@
-//! Controlled substitutions in replies to an already executed session command.
+//! Controlled delivery pauses and substitutions in replies to an executed session command.
 //!
 //! Layer: test harness, outside the product layer order.
-//! - **Owns.** A domain/query's scripted replies, three uncertain ones, one naming another
-//!   execution or one of another reply kind, and the execution identities the script observed.
+//! - **Owns.** A node's command-reply delivery pause, a domain/query's scripted replies, three
+//!   uncertain ones, one naming another execution or one of another reply kind, and the
+//!   identities the script observed.
 //! - **Depends on.** Public session outcomes, vocabulary identities and the shared test injector.
 //! - **Must not know.** Browser state, client retries, consensus implementation or graph execution.
 
 #![cfg_attr(
     nervix_lint,
-    nervix::context(
-        outside,
-        reason = "owns bounded testing-only command reply substitution"
-    )
+    nervix::context(outside, reason = "owns bounded testing-only command reply controls")
 )]
 
 use meticulous::ResultExt as _;
@@ -19,9 +17,11 @@ use nervix_client_wire::{
     CommandDisposition, CommandOutcome, CommandRequest, DomainInfo, DomainList, OutcomeOrigin,
     ReplyBody, UnknownOutcomeCause,
 };
-use nervix_models::{CommandExecutionReference, DomainName, DomainPace, DomainStatus};
+use nervix_models::{
+    ClusterNodeName, CommandExecutionReference, DomainName, DomainPace, DomainStatus,
+};
 
-use super::FaultInjection;
+use super::{CommandPausePoint, FaultInjection};
 
 /// The message of the failure a foreign-execution script answers with, which belongs to no
 /// command the scenario sent.
@@ -62,6 +62,26 @@ pub struct ForeignExecutionObservation {
 }
 
 impl FaultInjection {
+    /// Holds the next completed command after its result exists but before either public session
+    /// transport can deliver it.
+    pub fn pause_command_response_delivery_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ResponseDelivery(node_id));
+    }
+
+    pub async fn wait_for_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()));
+    }
+
+    pub(crate) async fn pause_command_response_delivery_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::ResponseDelivery(node_id.clone()))
+            .await;
+    }
+
     /// Replaces three successful replies for exactly this domain and query with the three
     /// current uncertainty causes. Execution and its stored outcome are left intact.
     pub fn make_command_replies_uncertain(&self, domain: DomainName, query: String) {
@@ -147,57 +167,42 @@ impl FaultInjection {
         })
     }
 
-    /// Applies the armed script only to a successful reply for its exact domain/query, recording
-    /// only as many references as its substitution observes, so further commands cannot grow the
-    /// retained observation.
-    pub(crate) fn substitute_command_reply(
+    /// The reply to a command whose execution produced `outcome`. The armed script applies only
+    /// to a successful reply for its exact domain/query, recording only as many references as its
+    /// substitution observes, so further commands cannot grow the retained observation. Every
+    /// other command is answered with its own outcome.
+    pub(crate) fn script_command_reply(
         &self,
         request: &CommandRequest,
-        outcome: &mut CommandOutcome,
-    ) {
-        let Some(domain) = &request.domain else {
-            return;
-        };
-        let Some(mut script) = self.inner.command_reply_scripts.get_mut(domain) else {
-            return;
-        };
-        if script.query != request.query
-            || !matches!(outcome.disposition, CommandDisposition::Completed { .. })
-        {
-            return;
-        }
-        script.substitute(request, outcome);
-    }
-
-    /// Replaces the reply of a successful outcome for the armed script's exact domain/query with
-    /// a reply of another kind when its substitution asks for one, recording only as many
-    /// references as it observes. Every other reply is returned unchanged.
-    pub(crate) fn substitute_command_reply_kind(
-        &self,
-        request: &CommandRequest,
-        body: ReplyBody,
+        mut outcome: CommandOutcome,
     ) -> ReplyBody {
         let Some(domain) = &request.domain else {
-            return body;
+            return ReplyBody::Command(Box::new(outcome));
         };
         let Some(mut script) = self.inner.command_reply_scripts.get_mut(domain) else {
-            return body;
-        };
-        let ReplyBody::Command(outcome) = &body else {
-            return body;
+            return ReplyBody::Command(Box::new(outcome));
         };
         if script.query != request.query
             || !matches!(outcome.disposition, CommandDisposition::Completed { .. })
         {
-            return body;
+            return ReplyBody::Command(Box::new(outcome));
         }
-        script.replace_kind(request, domain, body)
+        if let Some(reply) = script.substitute(request, domain, &mut outcome) {
+            return reply;
+        }
+        ReplyBody::Command(Box::new(outcome))
     }
 }
 
 impl CommandReplyScript {
-    /// Substitutes the reply its command's successful attempts have reached.
-    fn substitute(&mut self, request: &CommandRequest, outcome: &mut CommandOutcome) {
+    /// Substitutes the reply its command's successful attempts have reached: the outcome is
+    /// changed in place, or a reply of another kind is returned to answer the command instead.
+    fn substitute(
+        &mut self,
+        request: &CommandRequest,
+        domain: &DomainName,
+        outcome: &mut CommandOutcome,
+    ) -> Option<ReplyBody> {
         match &self.substitution {
             CommandReplySubstitution::Uncertain => {
                 let cause = match self.references.len() {
@@ -206,9 +211,9 @@ impl CommandReplyScript {
                     2 => UnknownOutcomeCause::NotYetAuthoritative,
                     3 => {
                         self.references.push(request.execution_reference.clone());
-                        return;
+                        return None;
                     }
-                    _ => return,
+                    _ => return None,
                 };
                 self.references.push(request.execution_reference.clone());
                 outcome.disposition = CommandDisposition::OutcomeUnknown(cause);
@@ -216,42 +221,31 @@ impl CommandReplyScript {
                                    authoritative yet"
                     .to_string();
                 outcome.statements.clear();
+                None
             }
-            CommandReplySubstitution::ForeignExecution { foreign } => match self.references.len() {
-                0 => {
-                    let foreign = foreign.clone();
-                    self.references.push(request.execution_reference.clone());
-                    *outcome = Self::foreign_failure(foreign);
+            CommandReplySubstitution::ForeignExecution { foreign } => {
+                match self.references.len() {
+                    0 => {
+                        let foreign = foreign.clone();
+                        self.references.push(request.execution_reference.clone());
+                        *outcome = Self::foreign_failure(foreign);
+                    }
+                    1 => self.references.push(request.execution_reference.clone()),
+                    _ => {}
                 }
-                1 => self.references.push(request.execution_reference.clone()),
-                _ => {}
+                None
+            }
+            CommandReplySubstitution::AnotherKind => match self.references.len() {
+                0 => {
+                    self.references.push(request.execution_reference.clone());
+                    Some(Self::domain_listing(domain))
+                }
+                1 => {
+                    self.references.push(request.execution_reference.clone());
+                    None
+                }
+                _ => None,
             },
-            // Its reply is replaced as a whole, after the outcome is built.
-            CommandReplySubstitution::AnotherKind => {}
-        }
-    }
-
-    /// The reply its command's successful attempts have reached, when the script replaces the
-    /// first one with a reply of another kind.
-    fn replace_kind(
-        &mut self,
-        request: &CommandRequest,
-        domain: &DomainName,
-        body: ReplyBody,
-    ) -> ReplyBody {
-        let CommandReplySubstitution::AnotherKind = &self.substitution else {
-            return body;
-        };
-        match self.references.len() {
-            0 => {
-                self.references.push(request.execution_reference.clone());
-                Self::domain_listing(domain)
-            }
-            1 => {
-                self.references.push(request.execution_reference.clone());
-                body
-            }
-            _ => body,
         }
     }
 

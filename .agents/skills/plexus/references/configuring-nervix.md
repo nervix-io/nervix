@@ -70,6 +70,10 @@ For the CLI's `subscribe` and `domain-clock` shell streams and their line format
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
 
+For native subscription and clock recovery, read [Rust Client Library](https://docs.nervix.io/client-library.html)
+and [Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html), especially
+S-7 and K-5. Keep an unanswered reopening distinct from a refusal, and account for the live-edge gap.
+
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
 the open session, a reply that names another execution, and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
