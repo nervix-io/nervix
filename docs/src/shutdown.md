@@ -1075,9 +1075,9 @@ serving their streams, so a peer's request the node has not answered fails inste
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.
 
-Runtime teardown stops a Kafka ingestor's instances like any other source's, and a Kafka emitter
-like any other emitter, and each stopped instance hands its consumer, and each emitter's sink its
-producer, to its retirement on the connector storage workers; see
+Runtime teardown stops a Kafka ingestor's instances like any other ingestor's, and a Kafka emitter
+like any other emitter, and each stopped instance hands its consumer, and each emitter its producer,
+to its retirement on the connector storage workers; see
 [Kafka client retirement](./connector-contract.md#kafka-client-retirement). Teardown does not wait
 for those retirements. The process's runtime does, as it stops once the application has returned: a
 retirement already running finishes, within the five seconds a joined consumer's coordinator has to
