@@ -11,6 +11,97 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/__fuzz__/representations__bolero_lease_round_trip/corpus"
+domain_version = 1
+features = []
+id = "typed-runner-lease"
+invariant = "Every field of the bounded current lease representation survives its production JSON encoding and decoding unchanged, including nullable values, Unicode, ordering and complete evidence."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/representations.rs"
+test = "representations::bolero_lease_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/__fuzz__/representations__bolero_policy_round_trip/corpus"
+domain_version = 1
+features = []
+id = "typed-runner-policy"
+invariant = "Every field of the bounded current policy representation survives its production JSON encoding and decoding unchanged, including nullable values, Unicode, ordering and complete evidence."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/representations.rs"
+test = "representations::bolero_policy_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/__fuzz__/representations__bolero_compilation_round_trip/corpus"
+domain_version = 1
+features = []
+id = "typed-runner-compilation"
+invariant = "Every field of the bounded current compilation representation survives its production JSON encoding and decoding unchanged, including nullable values, Unicode, ordering and complete evidence."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/representations.rs"
+test = "representations::bolero_compilation_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/__fuzz__/representations__bolero_completion_round_trip/corpus"
+domain_version = 1
+features = []
+id = "typed-runner-completion"
+invariant = "Every field of the bounded current completion representation survives its production JSON encoding and decoding unchanged, including nullable values, Unicode, ordering and complete evidence."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/representations.rs"
+test = "representations::bolero_completion_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/__fuzz__/representations__bolero_identity_round_trip/corpus"
+domain_version = 1
+features = []
+id = "typed-runner-identity"
+invariant = "Every field of the bounded current identity representation survives its production JSON encoding and decoding unchanged, including nullable values, Unicode, ordering and complete evidence."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/representations.rs"
+test = "representations::bolero_identity_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/__fuzz__/representations__bolero_matrix_round_trip/corpus"
+domain_version = 1
+features = []
+id = "typed-runner-matrix"
+invariant = "Every field of the bounded current matrix representation survives its production JSON encoding and decoding unchanged, including nullable values, Unicode, ordering and complete evidence."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/representations.rs"
+test = "representations::bolero_matrix_round_trip"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__clickhouse__tests__bolero_clickhouse_tls_pairing_matches_the_transport_contract/corpus"
 domain_version = 1
 features = []
