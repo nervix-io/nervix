@@ -263,6 +263,9 @@ For storage failures or uncertain administrative outcomes, consult `Control Plan
 and recovery` before suggesting a retry, and
 [Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery) for how a retry
 under the same execution reference recovers the recorded outcome instead of repeating the effect.
+An unreadable restore reply leaves its original execution uncertain, even after the server
+completed it. Keep the same statement, archive and execution reference for recovery; CLI status 3
+names that uncertainty. Follow `Client Library` → `Restoring` for the native-client contract.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and

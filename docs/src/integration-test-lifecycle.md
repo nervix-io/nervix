@@ -169,6 +169,12 @@ caller; the recipe does not expand their contents as shell code. The reuse recip
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
 
+`just test-restore-codec-replies` prepares the server assets, CLI and diagnostic reporter and runs
+only the restore reply rejection feature with the ordinary scenario runner. It forwards caller
+arguments by the same quoting rule. The bounded peer forwards the original upload to a real node,
+waits for its completed restore outcome and replaces only the reply; native and CLI cases then
+recover that outcome under the original execution reference on one- and three-node clusters.
+
 ## What Runs Where
 
 The emitter assembly outline observes the emitter's public received-message total before each
@@ -2843,11 +2849,11 @@ the whole server, so no build has to produce another file and no launch has to f
 `nervix-server`, and `main` reads `arg0` before it does anything else. A process of that name calls
 `run_server_process`, the entry point the `nervix-server` executable's own `main` calls, and none of
 the suite runs. Clap takes the program's name from the same `arg0`, so the command line a scenario
-reads is the product's. The dependency lifecycle helper is selected the same way. The launches of
-another file are the client protocol's measurements, whose subject is a release build:
-`just client-wire-baseline` and `just client-wire-tls-cost` build that server and name it to the
-suite. The transport cost starts two such processes that differ only in their session listener: one
-serves plaintext gRPC, and the other serves TLS on the port a plaintext listener would use,
+reads is the product's. The dependency lifecycle helper is selected the same way. The remaining
+measurement that launches another file is `just client-wire-tls-cost`, whose subject is a release
+build. It builds that server and names it to the suite. The transport cost starts two such
+processes that differ only in their session listener: one serves plaintext gRPC, and the other
+serves TLS on the port a plaintext listener would use,
 presenting the development certificate in-process TLS nodes present. The process's readiness probe
 and the clients the fixture opens follow the listener's transport.
 
