@@ -206,12 +206,12 @@ Feature: WASM guest-state checkpoint durability
     When the cluster is restarted after counting the runtime state each node stored for domain "{{domain}}"
     Then the stopped nodes stored at least <stored_checkpoints> runtime state checkpoints, each with one revision-index entry
     And node "node-1" eventually observes a stable leader
+    And within "120s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" eventually has 1 consumers
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
-    Then Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" eventually has 1 consumers
-    When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
       """
       {"value":4,"tenant":"alpha"}
       """

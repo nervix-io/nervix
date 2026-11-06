@@ -15986,6 +15986,25 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .expect("kafka consumer group did not reach expected member count");
 }
 
+/// A restarted node starts its ingestors only once it has prepared the cluster's runtime revision,
+/// so a group that regains its member shows the restarted runtime installed. The budget covers an
+/// installation that compiles WASM modules again on a loaded host.
+#[then(expr = "within {string} Kafka consumer group {string} eventually has {int} consumers")]
+async fn then_within_duration_kafka_consumer_group_eventually_has_consumers(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    expected: usize,
+) {
+    let budget = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_group_members_within(&group, expected, budget)
+        .await
+        .expect("kafka consumer group did not reach expected member count within the duration");
+}
+
 #[then(expr = "Kafka topic {string} does not exist")]
 async fn then_kafka_topic_does_not_exist(world: &mut ScenarioWorld, topic: String) {
     let topic = expand_placeholders(world, &topic);

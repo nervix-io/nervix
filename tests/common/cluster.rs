@@ -2394,7 +2394,19 @@ impl Cluster {
         group: &str,
         expected: usize,
     ) -> io::Result<()> {
-        let deadline = Instant::now() + STATUS_WAIT_BUDGET;
+        self.wait_for_kafka_consumer_group_members_within(group, expected, STATUS_WAIT_BUDGET)
+            .await
+    }
+
+    /// Waits until the Kafka consumer group `group` has exactly `expected` members, for at most
+    /// `budget`.
+    pub(crate) async fn wait_for_kafka_consumer_group_members_within(
+        &self,
+        group: &str,
+        expected: usize,
+        budget: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + budget;
         loop {
             nervix_primitives::task::consume_budget().await;
             match kafka_consumer_group_member_count(&self.dependencies, group) {
