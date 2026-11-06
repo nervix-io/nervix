@@ -560,6 +560,17 @@ test-web-console *args:
 test-harness-liveness *args: tests-deps
     cargo test --package nervix-scenarios --test harness_liveness -- {{ args }}
 
+# Exercise command-probe causality through its ordinary owner and the server's assets.
+test-command-probes *args: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test harness_liveness -- command_probe_tests {{ quote(args) }}
+
+# Exercise the two committed-batch recovery fixtures through the in-process cluster.
+test-command-recovery-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/client_wire_failures.feature \
+        --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
+        --concurrency 1 --retry 0
+
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
     cargo test --package nervix-test-environment {{ args }}
