@@ -23,6 +23,7 @@ mod reply_kind;
 #[cfg(not(feature = "shuttle"))]
 mod reports;
 mod request_kinds;
+mod requests;
 #[cfg(not(feature = "shuttle"))]
 mod restoration;
 #[cfg(not(feature = "shuttle"))]
@@ -64,15 +65,15 @@ use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc, watch};
 use tonic::{Status, transport::Channel};
 use url::Url;
 
+use self::requests::{command_request, listing, register, subscribe_request, unsubscribe_request};
 use crate::{
     Client, ClientError, CommandOutcome, ConnectOptions, RequestKind, ResourceUploadOutcome,
     ServerEvent, SubscriptionEvent, SubscriptionRequest, TlsRequirement,
     connection::{GrpcConnector, ServerDirectory},
     exchange::{
         EventQueue, EventQueueError, EventTargets, Exchange, ExchangeReader, ExchangeRequests,
-        ExpectedReply, PendingReplies, ReaderFlow, RegisteredRequest, SERVER_NOTICE_BYTES,
-        SESSION_LIMITS, SUBSCRIPTION_EVENT_BYTES, SUBSCRIPTION_RETAINED_BYTES,
-        SUBSCRIPTIONS_RETAINED_IN_FULL, SessionEvents,
+        PendingReplies, ReaderFlow, SERVER_NOTICE_BYTES, SESSION_LIMITS, SUBSCRIPTION_EVENT_BYTES,
+        SUBSCRIPTION_RETAINED_BYTES, SUBSCRIPTIONS_RETAINED_IN_FULL, SessionEvents,
     },
     outcome::Routing,
     split_query_statements,
@@ -438,47 +439,6 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
         leadership: observed_leadership,
         domains: observed_domains,
     }
-}
-
-/// What a listing's reply must be: a domain list, a rejection or a cancellation.
-fn listing() -> ExpectedReply {
-    ExpectedReply::of(&ClientRequest::ListDomains)
-}
-
-/// Registers a waiter for `request`, which a reply must answer as a server answers that request.
-async fn register(pending: &Mutex<PendingReplies>, request: &ClientRequest) -> RegisteredRequest {
-    pending
-        .lock()
-        .register(ExpectedReply::of(request))
-        .assured("an open exchange registers requests")
-}
-
-/// A command whose waiter an outcome under `execution_reference` answers.
-fn command_request(execution_reference: &str) -> ClientRequest {
-    ClientRequest::Command(nervix_client_wire::CommandRequest {
-        query: "SHOW CLUSTER STATUS;".to_string(),
-        domain: None,
-        execution_reference: reference(execution_reference),
-        expected_transaction_position: None,
-        expected_preview: None,
-    })
-}
-
-/// A subscription opening, whose waiter a subscribe outcome answers.
-fn subscribe_request() -> ClientRequest {
-    ClientRequest::Subscribe(nervix_client_wire::SubscribeRequest {
-        domain: domain("tenant"),
-        statement: "CREATE SUBSCRIPTION live FROM orders;".to_string(),
-        subscription_type: SubscriptionType::Row,
-    })
-}
-
-/// A subscription deletion, whose waiter an unsubscribe outcome answers.
-fn unsubscribe_request() -> ClientRequest {
-    ClientRequest::Unsubscribe(nervix_client_wire::UnsubscribeRequest {
-        subscription: SubscriptionName::parse("live")
-            .assured("the test subscription name is valid"),
-    })
 }
 
 #[test]
