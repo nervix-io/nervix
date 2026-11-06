@@ -737,6 +737,14 @@ only of its fixed archived root, so a reader checks a header's stored size befor
 decodes it, and a larger valid value is an inline checkpoint. A namespace's generation is separate
 from a WASM branch's guest-state lifetime and from a checkpoint's revision.
 
+Each placement has one revision-index entry for its selected checkpoint, inline or segmented.
+An ordinary checkpoint write replaces the header, removes the superseded revision's index entry,
+and inserts the current entry in one database batch under the installation barrier. A streamed
+checkpoint does so only after its chunks are durable. Restore staging keeps its own index entry
+and receipt until publication or cleanup; a selected header, rather than a stale index entry,
+decides which chunk set remains referenced. The storage format marker changes with this index
+invariant, so a directory written with the earlier shape is refused and must be recreated.
+
 Ordinary checkpoints use the same segmented form when they are large: a materialized relay, and a
 window whose retained rows exceed one 8 MiB snapshot section, seal in bounded pieces to quota-owned
 disk, cross-node generator reads stream the sealed file, and periodic persistence replaces a

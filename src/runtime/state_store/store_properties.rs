@@ -405,6 +405,80 @@ fn assert_listed(listed: &ListedCheckpoint, expected: &GeneratedCheckpoint) {
     assert_eq!(read, expected.payload);
 }
 
+#[test]
+fn replacing_checkpoints_keeps_only_the_current_revision_index() {
+    let directory = tempfile::tempdir().assured("the state directory opens");
+    let placement = RuntimeStatePlacement {
+        domain: DomainName::parse("orders").assured("domain parses"),
+        state: RuntimeState::WasmProcessor {
+            schema: SchemaFingerprint::from_digest([7; 32]),
+            generation: WasmStateGeneration::FIRST,
+        },
+        kind: ModelKind::WasmProcessor,
+        identifier: ModelName::parse("filter").assured("processor name parses"),
+        unit: Unit::Single,
+        branch_key: None,
+    };
+    let placement_key = StateNamespace::Initial
+        .key(&placement)
+        .assured("the placement key is bounded");
+    let mut index_prefix = placement_key.clone();
+    index_prefix.push(0);
+
+    let store = open_store(directory.path());
+    for revision in 1..=6 {
+        let payload = format!("checkpoint-{revision}").into_bytes();
+        if revision % 3 == 0 {
+            store
+                .checkpoint_stream_writer()
+                .publish_checkpoint_stream(
+                    &placement,
+                    CheckpointMetadata {
+                        lsm: revision,
+                        length: u64::try_from(payload.len()).assured("fixture length fits"),
+                        digest: *blake3::hash(&payload).as_bytes(),
+                    },
+                    Cursor::new(&payload),
+                    || Ok(()),
+                )
+                .assured("a segmented checkpoint publishes");
+        } else {
+            store
+                .publish_sealed_snapshot(&placement, revision, &payload)
+                .assured("an inline checkpoint publishes");
+        }
+        let index = store
+            .lsm_index
+            .prefix(&index_prefix)
+            .map(|entry| entry.key().assured("the revision key reads").to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(index, vec![index_key(&placement_key, revision)]);
+        let latest = store
+            .latest_snapshot(&placement)
+            .assured("the current checkpoint reads")
+            .assured("the checkpoint exists");
+        assert_eq!(latest.lsm, revision);
+        assert_eq!(latest.payload, payload);
+    }
+
+    drop(store);
+    let reopened = open_store(directory.path());
+    let index = reopened
+        .lsm_index
+        .prefix(&index_prefix)
+        .map(|entry| entry.key().assured("the revision key reads").to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(index, vec![index_key(&placement_key, 6)]);
+    assert_eq!(
+        reopened
+            .latest_snapshot(&placement)
+            .assured("the checkpoint reads after reopen")
+            .assured("the checkpoint exists")
+            .payload,
+        b"checkpoint-6"
+    );
+}
+
 /// Checkpoints of up to three placements of one domain, stored inline, as chunked streams or in a
 /// published restore generation, at, beside and between the chunk boundaries, read back byte for
 /// byte at their revisions through the latest-snapshot read and the streaming reader. A backup cut

@@ -958,10 +958,8 @@ impl LatestSnapshotWriter {
             let placement_key = namespace.key(placement)?;
             // A periodic encode can finish after the backup's forced publication. Preserve the
             // greater revision even when storage workers complete in the opposite order.
-            if self
-                .latest_lsm(placement)?
-                .is_some_and(|current| current > lsm || require_newer && current == lsm)
-            {
+            let current_lsm = self.latest_lsm(placement)?;
+            if current_lsm.is_some_and(|current| current > lsm || require_newer && current == lsm) {
                 return Ok(false);
             }
             let entry = PersistedRuntimeStateEntry {
@@ -969,16 +967,19 @@ impl LatestSnapshotWriter {
                 payload: payload.to_vec(),
             };
             let encoded = StoredCheckpoint::Inline(entry).encode()?;
-            self.latest
-                .insert(placement_key.clone(), encoded)
-                .map_err(|cause| {
-                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
-                })?;
-            self.lsm_index
-                .insert(index_key(&placement_key, lsm), placement_key)
-                .map_err(|cause| {
-                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
-                })?;
+            let mut batch = self.db.batch();
+            batch.insert(&self.latest, placement_key.clone(), encoded);
+            if let Some(previous_lsm) = current_lsm.filter(|previous| *previous != lsm) {
+                batch.remove(&self.lsm_index, index_key(&placement_key, previous_lsm));
+            }
+            batch.insert(
+                &self.lsm_index,
+                index_key(&placement_key, lsm),
+                placement_key,
+            );
+            batch.commit().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })?;
             Ok(true)
         })
     }

@@ -111,10 +111,11 @@ impl CheckpointStreamWriter {
                     &writer.restore_publications,
                     &placement.domain,
                 )?
-                || writer
-                    .latest_lsm(placement)?
-                    .is_some_and(|revision| revision >= metadata.lsm)
             {
+                return Ok(());
+            }
+            let current_lsm = writer.latest_lsm(placement)?;
+            if current_lsm.is_some_and(|revision| revision >= metadata.lsm) {
                 return Ok(());
             }
             let placement_key = namespace.key(placement)?;
@@ -163,6 +164,9 @@ impl CheckpointStreamWriter {
                 placement_key.clone(),
                 StoredCheckpoint::Segmented(metadata).encode()?,
             );
+            if let Some(previous_lsm) = current_lsm {
+                batch.remove(&writer.lsm_index, index_key(&placement_key, previous_lsm));
+            }
             batch.insert(
                 &writer.lsm_index,
                 index_key(&placement_key, metadata.lsm),
