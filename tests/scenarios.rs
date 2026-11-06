@@ -640,6 +640,9 @@ struct ScenarioWorld {
     mqtt_ingestors_by_domain: BTreeMap<String, BTreeSet<String>>,
     avro_http_field_order: Vec<String>,
     avro_http_optional_fields: BTreeSet<String>,
+    /// The type each declared AVRO wire field has, so a posted or expected payload writes every
+    /// field, array items included, as its wire schema declares.
+    avro_http_field_types: BTreeMap<String, nervix_models::AvroType>,
     fault_injection: FaultInjection,
     command_probes: CommandProbes,
     consensus_commit_delays: BTreeMap<String, Duration>,
@@ -810,6 +813,7 @@ impl fmt::Debug for ScenarioWorld {
                 "avro_http_optional_field_count",
                 &self.avro_http_optional_fields.len(),
             )
+            .field("avro_http_field_types", &self.avro_http_field_types)
             .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
             .field("saved_raft_log_heads", &self.saved_raft_log_heads)
             .field("transaction_qualification", &self.transaction_qualification)
@@ -2412,11 +2416,40 @@ async fn then_http_receiver_request_carries_encoded_payload(
         &payload,
         &world.avro_http_field_order,
         &world.avro_http_optional_fields,
+        &world.avro_http_field_types,
     );
     let request = captured_http_request(world, &name, position);
     assert_eq!(
         request.body, expected,
         "HTTP receiver '{name}' request {position} must carry the complete {wire_format} payload"
+    );
+}
+
+/// Compare a captured CBOR body, as the CBOR data item it decodes to, with the docstring's map in
+/// which every text element of `field` is the base64 spelling of a CBOR byte string. CBOR writes a
+/// map with a definite or an indefinite length; both are the same item.
+#[then(
+    expr = "HTTP receiver {string} request {int} carries this CBOR payload with byte string \
+            elements in field {string}"
+)]
+async fn then_http_receiver_request_carries_cbor_byte_string_elements(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    field: String,
+    #[step] step: &Step,
+) {
+    let payload = expand_placeholders(world, docstring(step));
+    let expected = cbor_fixture_with_byte_string_elements(&payload, &field);
+    let request = captured_http_request(world, &name, position);
+    let received: ciborium::value::Value = ciborium::from_reader(request.body.as_slice())
+        .unwrap_or_else(|error| {
+            panic!("HTTP receiver '{name}' request {position} must carry one CBOR item: {error}")
+        });
+    assert_eq!(
+        received, expected,
+        "HTTP receiver '{name}' request {position} must carry the complete CBOR payload with byte \
+         string elements in '{field}'"
     );
 }
 
@@ -13357,6 +13390,61 @@ async fn when_consensus_connectivity_for_node_is_restored(
         .restore_consensus_connectivity(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "the promotion of node {string} will be interrupted after its joint entry applies")]
+async fn given_voter_promotion_will_be_interrupted(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .interrupt_voter_promotion(crate::common::cluster::node_name(&node_id))
+        .await;
+}
+
+#[when(expr = "node {string} starts joining without waiting for voter convergence")]
+async fn when_node_starts_joining_without_voter_convergence(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .add_node_without_waiting_for_voters(&node_id)
+        .await
+        .expect("the joining node did not start");
+}
+
+#[then(expr = "the promotion of node {string} was interrupted in the applied joint configuration")]
+async fn then_promotion_was_interrupted_in_applied_joint_configuration(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let joining = crate::common::cluster::node_name(&node_id);
+    let witness = nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(witness) = world.fault_injection.interrupted_membership(&joining).await {
+                break witness;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the promotion did not reach its controlled interruption");
+    let node = crate::common::cluster::node_name;
+    assert_eq!(
+        witness.configurations,
+        vec![
+            BTreeSet::from([node("node-1"), node("node-2")]),
+            BTreeSet::from([node("node-1"), node("node-2"), node("node-3")]),
+        ],
+        "the refusal must leave both actual quorum configurations in the applied log"
+    );
+    assert!(
+        witness.log_index > 0,
+        "the joint configuration must have an applied log entry"
+    );
+}
+
 #[when(expr = "node {string} is added to the cluster")]
 async fn when_node_is_added_to_the_cluster(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -15964,6 +16052,7 @@ fn encode_http_payload_for_codec(
     payload: &str,
     avro_field_order: &[String],
     avro_optional_fields: &BTreeSet<String>,
+    avro_field_types: &BTreeMap<String, nervix_models::AvroType>,
 ) -> Vec<u8> {
     let json_value = serde_json::from_str::<serde_json::Value>(payload).unwrap_or_else(|error| {
         panic!("http payload must be valid JSON for {wire_format}: {error}")
@@ -15972,7 +16061,12 @@ fn encode_http_payload_for_codec(
     match wire_format.to_ascii_uppercase().as_str() {
         "JSON" => serde_json::to_vec(&json_value)
             .unwrap_or_else(|error| panic!("failed to encode JSON payload: {error}")),
-        "AVRO" => encode_avro_http_payload(&json_value, avro_field_order, avro_optional_fields),
+        "AVRO" => encode_avro_http_payload(
+            &json_value,
+            avro_field_order,
+            avro_optional_fields,
+            avro_field_types,
+        ),
         "CBOR" => {
             let mut encoded = Vec::new();
             ciborium::into_writer(&json_value, &mut encoded)
@@ -15987,6 +16081,7 @@ fn encode_avro_http_payload(
     json_value: &serde_json::Value,
     field_order: &[String],
     optional_fields: &BTreeSet<String>,
+    field_types: &BTreeMap<String, nervix_models::AvroType>,
 ) -> Vec<u8> {
     use apache_avro::{Schema as AvroSchema, to_avro_datum, types::Value as AvroValue};
 
@@ -16009,13 +16104,30 @@ fn encode_avro_http_payload(
     }
 
     for (name, value) in ordered_fields {
-        let (schema_ty, avro_value) = avro_field_from_json(value);
-        let schema_ty = if schema_ty.starts_with('{') {
-            schema_ty
-        } else {
-            format!(r#""{schema_ty}""#)
+        let (schema_ty, avro_value) = match field_types.get(name) {
+            Some(declared) if value.is_null() => {
+                (avro_declared_schema(declared).to_string(), AvroValue::Null)
+            }
+            Some(declared) => (
+                avro_declared_schema(declared).to_string(),
+                avro_declared_value(value, declared),
+            ),
+            None => {
+                let (schema_ty, avro_value) = avro_field_from_json(value);
+                let schema_ty = if schema_ty.starts_with('{') {
+                    schema_ty
+                } else {
+                    format!(r#""{schema_ty}""#)
+                };
+                (schema_ty, avro_value)
+            }
         };
-        let (schema_ty, avro_value) = if optional_fields.contains(name) {
+        let (schema_ty, avro_value) = if optional_fields.contains(name) && value.is_null() {
+            (
+                format!(r#"["null",{schema_ty}]"#),
+                AvroValue::Union(0, Box::new(AvroValue::Null)),
+            )
+        } else if optional_fields.contains(name) {
             (
                 format!(r#"["null",{schema_ty}]"#),
                 AvroValue::Union(1, Box::new(avro_value)),
@@ -16035,6 +16147,96 @@ fn encode_avro_http_payload(
         .unwrap_or_else(|error| panic!("failed to build avro payload schema: {error}"));
     to_avro_datum(&schema, AvroValue::Record(value_fields))
         .unwrap_or_else(|error| panic!("failed to encode avro payload: {error}"))
+}
+
+/// The Avro schema of a declared wire type, written by the fixture from the declaration alone.
+fn avro_declared_schema(ty: &nervix_models::AvroType) -> serde_json::Value {
+    use nervix_models::AvroType;
+
+    match ty {
+        AvroType::Array(item) => {
+            serde_json::json!({ "type": "array", "items": avro_declared_schema(item) })
+        }
+        AvroType::Boolean => serde_json::json!("boolean"),
+        AvroType::Int => serde_json::json!("int"),
+        AvroType::Long => serde_json::json!("long"),
+        AvroType::Float => serde_json::json!("float"),
+        AvroType::Double => serde_json::json!("double"),
+        AvroType::Bytes => serde_json::json!("bytes"),
+        AvroType::String => serde_json::json!("string"),
+    }
+}
+
+/// A JSON fixture value written as the declared wire type: an integer as the `int` or `long` the
+/// declaration names, a float as its `float` or `double`, a `bytes` value from base64 text, and an
+/// array element by element as its items.
+fn avro_declared_value(
+    value: &serde_json::Value,
+    ty: &nervix_models::AvroType,
+) -> apache_avro::types::Value {
+    use apache_avro::types::Value as AvroValue;
+    use nervix_models::AvroType;
+
+    match ty {
+        AvroType::Array(item) => {
+            let serde_json::Value::Array(values) = value else {
+                panic!("an avro fixture array field must be a JSON array, found {value}");
+            };
+            let mut items = Vec::with_capacity(values.len());
+            for value in values {
+                items.push(avro_declared_value(value, item));
+            }
+            AvroValue::Array(items)
+        }
+        AvroType::Boolean => {
+            AvroValue::Boolean(value.as_bool().unwrap_or_else(|| {
+                panic!("an avro fixture boolean must be a JSON boolean: {value}")
+            }))
+        }
+        AvroType::Int => {
+            let integer = value
+                .as_i64()
+                .unwrap_or_else(|| panic!("an avro fixture int must be a JSON integer: {value}"));
+            AvroValue::Int(
+                i32::try_from(integer)
+                    .unwrap_or_else(|_| panic!("an avro fixture int must fit i32: {value}")),
+            )
+        }
+        AvroType::Long => AvroValue::Long(
+            value
+                .as_i64()
+                .unwrap_or_else(|| panic!("an avro fixture long must be a JSON integer: {value}")),
+        ),
+        AvroType::Float => AvroValue::Float(
+            value
+                .as_f64()
+                .unwrap_or_else(|| panic!("an avro fixture float must be a JSON number: {value}"))
+                .approx_into(),
+        ),
+        AvroType::Double => AvroValue::Double(
+            value
+                .as_f64()
+                .unwrap_or_else(|| panic!("an avro fixture double must be a JSON number: {value}")),
+        ),
+        AvroType::String => AvroValue::String(
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("an avro fixture string must be JSON text: {value}"))
+                .to_string(),
+        ),
+        AvroType::Bytes => {
+            let encoded = value.as_str().unwrap_or_else(|| {
+                panic!("an avro fixture bytes value must be base64 text: {value}")
+            });
+            AvroValue::Bytes(
+                BASE64_STANDARD
+                    .decode(encoded.as_bytes())
+                    .unwrap_or_else(|_| {
+                        panic!("an avro fixture bytes value must be base64: {value}")
+                    }),
+            )
+        }
+    }
 }
 
 fn avro_field_from_json(value: &serde_json::Value) -> (String, apache_avro::types::Value) {
@@ -16307,6 +16509,24 @@ fn commands_update_subscription_state(current: bool, commands: &str) -> bool {
 }
 
 fn record_avro_wire_optional_fields(world: &mut ScenarioWorld, document: &CommandDocument<'_>) {
+    if let Some(parsed) = &document.parsed {
+        for statement in parsed {
+            let nervix_plexus::client_statement::ClientStatement::Server(
+                nervix_models::Statement::Create(create),
+            ) = &statement.statement
+            else {
+                continue;
+            };
+            let nervix_models::Model::WireAvroSchema(schema) = &*create.body else {
+                continue;
+            };
+            for field in &schema.fields {
+                world
+                    .avro_http_field_types
+                    .insert(field.name.as_str().to_string(), field.ty.clone());
+            }
+        }
+    }
     for statement in document.statements() {
         let normalized = statement.trim_start().to_ascii_uppercase();
         if !normalized.starts_with("CREATE WIRE AVRO SCHEMA ") {
@@ -28607,6 +28827,7 @@ async fn when_these_encoded_kafka_messages_are_rapidly_published(
             line,
             &world.avro_http_field_order,
             &world.avro_http_optional_fields,
+            &world.avro_http_field_types,
         ));
     }
     assert!(
@@ -30127,6 +30348,7 @@ async fn when_encoded_http_payload_is_posted(
         &payload,
         &world.avro_http_field_order,
         &world.avro_http_optional_fields,
+        &world.avro_http_field_types,
     );
     append_cucumber_log_line(&format!(
         "http publish: node=node-1 host={host} path={path} wire_format={wire_format} \
@@ -30186,6 +30408,71 @@ async fn when_cbor_http_payload_with_bytes_is_posted(
         .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
         .await
         .expect("failed to post CBOR payload with a byte string");
+}
+
+/// The CBOR map a JSON fixture describes, with every text element of the list `field`, at any
+/// nesting depth, replaced by the byte string its base64 spelling names.
+fn cbor_fixture_with_byte_string_elements(payload: &str, field: &str) -> ciborium::value::Value {
+    use ciborium::value::Value as CborValue;
+
+    fn byte_string_elements(value: &mut CborValue) {
+        match value {
+            CborValue::Array(elements) => {
+                for element in elements {
+                    byte_string_elements(element);
+                }
+            }
+            CborValue::Text(encoded) => {
+                let bytes = BASE64_STANDARD
+                    .decode(encoded.as_bytes())
+                    .expect("CBOR fixture byte string elements must be valid base64");
+                *value = CborValue::Bytes(bytes);
+            }
+            other => {
+                panic!("CBOR fixture byte string elements must be base64 text, found {other:?}")
+            }
+        }
+    }
+
+    let json: serde_json::Value =
+        serde_json::from_str(payload).expect("CBOR fixture must be valid JSON");
+    let mut cbor = CborValue::serialized(&json).expect("JSON fixture fits a CBOR value");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("CBOR fixture must be a map");
+    };
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == field))
+        .expect("CBOR fixture must contain the byte string list field");
+    let CborValue::Array(_) = value else {
+        panic!("CBOR fixture byte string list field must be an array");
+    };
+    byte_string_elements(value);
+    cbor
+}
+
+#[when(
+    expr = "http CBOR payload with byte string elements in field {string} is posted to host \
+            {string} path {string}"
+)]
+async fn when_cbor_http_payload_with_byte_string_elements_is_posted(
+    world: &mut ScenarioWorld,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let payload = expand_placeholders(world, docstring(step));
+    let cbor = cbor_fixture_with_byte_string_elements(&payload, &field);
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture must encode");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post CBOR payload with byte string elements");
 }
 
 #[when(
@@ -31243,6 +31530,7 @@ async fn then_within_duration_repeatedly_posting_encoded_http_payload_yields_sub
         &payload,
         &world.avro_http_field_order,
         &world.avro_http_optional_fields,
+        &world.avro_http_field_types,
     );
     let deadline = Instant::now() + duration;
 

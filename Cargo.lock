@@ -8871,7 +8871,7 @@ dependencies = [
 [[package]]
 name = "openraft"
 version = "0.10.0-alpha.33"
-source = "git+https://github.com/glebpom/openraft.git?rev=f54a099019f2d5090393209942e88eb0701b05f9#f54a099019f2d5090393209942e88eb0701b05f9"
+source = "git+https://github.com/nervix-io/openraft.git?rev=1fa0ac5345475d6f00d219ad55bea39b7f40a87d#1fa0ac5345475d6f00d219ad55bea39b7f40a87d"
 dependencies = [
  "anyerror",
  "backoff-series",
