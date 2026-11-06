@@ -234,6 +234,10 @@ current connection, retry and deadline limits.
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
 - CBOR wire fields use exactly `integer`, `float`, `boolean`, `text`, `bytes`, or `array`. `bytes`
   carries native CBOR byte strings; `DATETIME` binds `text` with `ENCODE field AS RFC3339`.
+- AVRO arrays declare their item type, `array<item>`, nested exactly as deep as the internal
+  `ARRAY`/`VEC` layers, and the item binds the innermost element as a scalar field would. JSON and
+  CBOR arrays stay bare; a `DATETIME` element in any format and a `BYTES` element carried as text
+  need the list field's `ENCODE field AS RFC3339|BASE64` rule.
 - Every codec explicitly declares text interchange with `ENCODE field AS RFC3339` for datetimes
   and `ENCODE field AS BASE64` for bytes in JSON or AVRO strings. Read `Schemas And Codecs` for
   the exact binding matrix and native byte representations. Every JAQ-backed
@@ -818,7 +822,10 @@ Choose checks relevant to the configured graph:
   `nx_session_domain_clock` before it uses a tick, and reads later states and ticks with
   `nx_session_next_clock_event`. The clock's projections give the logical time, the wait until a
   logical target, and the `TIMESTAMP AT` values the ingestor admits.
-- `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
+- `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable. Follow
+  [the membership status contract](https://docs.nervix.io/consensus-storage-and-replication.html#follower-catch-up-and-learner-promotion)
+  when deciding whether an observed voter list has converged; a joint configuration's union is
+  insufficient.
 - `DESCRIBE CLUSTER;` lists the prerequisites every live node brings and the nodes whose Raft
   heartbeat, gossip interval or clock-skew tolerance differs from the leader's. A node refused as it
   joins, or by its startup checks, names the setting and both values; read

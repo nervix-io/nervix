@@ -620,6 +620,13 @@ revision restores the save under the active clock at `START`.
 
 ### Codecs And Ingress
 
+Before a schemaful codec is accepted, the registry refuses a wire field that cannot carry its
+internal field with `RegistryError::IncompatibleSchema`, naming the codec and the field: a type
+mismatch, an AVRO array nested to another depth than the internal `ARRAY` and `VEC` levels, a
+`DATETIME` or `BYTES` value or list element that travels as text without its `ENCODE` rule, or a
+`BASE64` rule on bytes the format carries natively. A rule whose field's innermost elements are not
+of the rule's type is the registry's `InvalidModel` refusal of the codec.
+
 Codec compilation, decoding and encoding return `CodecError` reports. The codec context names the
 codec, and the field when one is at fault, and the typed reason stays beneath it: a
 `CodecContractError` for a declaration or use the wire format does not support, such as a missing
@@ -2490,6 +2497,17 @@ and a move never as an unconfirmed lease: the context's text says which, so an o
 rendered report or log line tells lease trouble from an election without a separate counter. The
 Raft or I/O error stays beneath the context as the report's cause.
 
+Membership timeout success is decided from both the effective configuration and its committed
+publication. A matching voter union does not convert that timeout into success while the expected
+uniform target remains joint or uncommitted. A refusal of a uniform continuation keeps the same
+typed Raft write classification; it does not mean the preceding joint entry was rolled back.
+A fatal failure reading Core or submitting its conditional completion passes through the same
+Raft write classifier with its original cause. The completion responder retains the original
+membership write error, including uncertainty, rather than interpreting it as a definite refusal.
+Finding that Core is already uniform is an ordinary completion outcome carrying its separate
+effective and committed records; it proposes no additional membership entry, even when a preceding
+joint observation became stale before Core handled the request.
+
 Trace-level vote and pre-vote transport completion events record the existing nested result before
 its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
 and a peer's typed refusal therefore remain distinguishable in the diagnostic. Cancellation by
@@ -3136,7 +3154,15 @@ no classification reads a status message. After ending only the session selected
 the client reports `UncertainCommand` under the original execution reference above
 `InvalidRestoreReply` and the receive failure. The shared binding exposes `NX_ERROR_UNCERTAIN`
 with that reference, and the CLI reports status 3. A replacement session and definitive local,
-authentication and declared stream refusals retain their meanings.
+authentication and declared stream refusals retain their meanings before an earlier attempt left
+the execution uncertain.
+
+The Rust client carries restore uncertainty across attempts. A later archive-open/read failure
+retains `ReadRestoreArchive` beneath `UncertainCommand`, rather than reporting the restore as
+refused locally. `RestoreStreamRefused` retains the later declared stream refusal, and
+`LastUnresolvedAnswer` the typed expired reference or unrecorded refusal, beneath that uncertainty.
+These outcomes preserve the original execution reference,
+`NX_ERROR_UNCERTAIN`, and CLI status 3 after an earlier complete upload or `OutcomeUnknown`.
 
 ## Sensitive Data And Observability
 

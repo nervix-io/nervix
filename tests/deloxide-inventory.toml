@@ -79,6 +79,26 @@ path = "crates/rate-limit/src/keyed.rs"
 workloads = ["owner.rate-limit-keyed-transactions"]
 
 [[workload]]
+coverage = "An actual applied joint promotion is interrupted at its uniform continuation through the consensus storage pause's tracked condition-variable wait and release; reconciliation finishes and both survivors apply commands after each possible voter stops. Async membership serialization and watches are untracked."
+examples = 3
+feature = "tests/features/cluster/membership_recovery.feature"
+id = "scenario.joint-membership-recovery"
+invariant = "An interrupted joint transition becomes the committed uniform target without a deadlock, and any two of its three voters can continue committing."
+invocation = "scenarios"
+scenario = "A refused uniform step is reconciled before any one of three voters stops"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the controlled joint promotion reaches the consensus storage pause's tracked wait and release, then completes reconciliation and stops each possible voter. Async membership serialization and watches are untracked."
+examples = 3
+feature = "tests/features/cluster/membership_recovery.feature"
+id = "stress.joint-membership-recovery"
+invariant = "An interrupted joint transition becomes the committed uniform target without a deadlock, and any two of its three voters can continue committing."
+invocation = "stress-scenarios"
+scenario = "A refused uniform step is reconciled before any one of three voters stops"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Kafka records through the real broker and the source host's tracked ingestion and ACK state, with every new metadata field read in NO ACK, ACK SEQUENTIAL and ACK PARALLEL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
 examples = 6
 feature = "tests/features/runtime/kafka_metadata.feature"
@@ -450,7 +470,9 @@ kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@joint_membership_recovery",
   "@client_restore_codec_native",
+  "@client_restore_uncertainty_native",
   "@ingestor_instance_lifecycle",
   "@kafka_record_metadata",
   "@mqtt_metadata",
@@ -633,7 +655,7 @@ target = "test:scenarios"
 # Check 41311131846 ran 78 of 80 examples within the former 3840s suite budget after the two
 # NATS STREAM lost-PubAck examples joined this serial selection. Both passed in 30.6s total;
 # the last window example finished its body at 3835s and another remained queued. The current
-# 84-example inventory has a 3960s suite budget and a 360s teardown reserve in this bound.
+# 94-example inventory has a 3960s suite budget and a 360s teardown reserve in this bound.
 [[invocation]]
 bound_seconds = 4320
 concurrency = 1
@@ -3629,6 +3651,9 @@ workloads = [
 [[owner]]
 path = "crates/client-core/src/client.rs"
 workloads = [
+  "scenario.restore-attempt-history",
+  "stress.restore-attempt-history",
+  "stress.restore-attempt-history-restore",
   "scenario.client-restore-reply-validation",
   "stress.client-restore-reply-validation",
   "stress.client-restore-reply-validation-restore",
@@ -3684,6 +3709,9 @@ workloads = [
 gap = "The listed workloads reach the pending-replies lock through every request's registration, the replies its reader routes and the close of an exchange. None cancels a command through the Rust client: its only caller, nervix-cli, has no diagnostic form, and the lane starts an ordinary CLI binary, so ExchangeRequests::cancel, which registers a CancelRequest under the same single unnested acquisition every request takes and closes the registry when the frame cannot be sent, is exercised only by the client-core unit tests and the CLI scenarios, outside the lane."
 path = "crates/client-core/src/exchange.rs"
 workloads = [
+  "scenario.restore-attempt-history",
+  "stress.restore-attempt-history",
+  "stress.restore-attempt-history-restore",
   "scenario.client-subscription-timeout",
   "stress.client-subscription-timeout",
   "scenario.client-restore-reply-validation",
@@ -3807,9 +3835,14 @@ workloads = [
 ]
 
 [[owner]]
-gap = "The listed node workloads reach the armed-fault mutex and sync-delay RwLock during durable writes. They do not arm StoragePause's blocking condition-variable wait and release or inject a nonzero sync delay; those fault effects are outside the registered lane workloads."
+gap = "The listed node workloads reach the armed-fault mutex and sync-delay RwLock during durable writes. The joint-membership workloads also reach StoragePause's blocking condition-variable wait and release. They do not inject a nonzero sync delay; that fault effect is outside the registered lane workloads."
 path = "crates/consensus/src/storage_fault.rs"
-workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "stress.diagnostic-nodes",
+  "scenario.joint-membership-recovery",
+  "stress.joint-membership-recovery",
+]
 
 [[owner]]
 path = "crates/interconnect/src/connection.rs"
@@ -5863,6 +5896,36 @@ id = "stress.restore-codec-rejection-restore"
 invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
 invocation = "stress-restore-scenarios"
 scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Native restores through a real one- or three-node cluster and a bounded peer that loses a completed answer and removes the local archive. Session recovery and exact-reference recovery reach the existing tracked pending registry. Async upload, file reads and the ordinary CLI process are outside detector evidence."
+examples = 2
+feature = "tests/features/tools/client_restore_uncertainty.feature"
+id = "scenario.restore-attempt-history"
+invariant = "A later local archive failure cannot settle an earlier completed restore whose answer was lost; its original execution remains recoverable."
+invocation = "scenarios"
+scenario = "A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the two native later-read failures exercise reconnect and exact-reference recovery through the existing tracked client registry. Async transport and file reads, and the separate ordinary CLI process, remain untracked."
+examples = 2
+feature = "tests/features/tools/client_restore_uncertainty.feature"
+id = "stress.restore-attempt-history"
+invariant = "A later local archive failure cannot settle an earlier completed restore whose answer was lost; its original execution remains recoverable."
+invocation = "stress-scenarios"
+scenario = "A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the same two native archive failures and exact-reference recoveries reach client lifecycle locks while the real cluster restores state. Async transport, file reads and the separate ordinary CLI process remain outside detector evidence."
+examples = 2
+feature = "tests/features/tools/client_restore_uncertainty.feature"
+id = "stress.restore-attempt-history-restore"
+invariant = "A later local archive failure cannot settle an earlier completed restore whose answer was lost; its original execution remains recoverable."
+invocation = "stress-restore-scenarios"
+scenario = "A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

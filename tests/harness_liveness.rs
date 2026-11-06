@@ -13,7 +13,8 @@
 //!   It also owns registration of generator cadence, paced-interconnect cadence, bounded
 //!   subscription payload observations, declared scenario weights, admission fairness and the
 //!   per-node execution readings of timed probes.
-//!   It also registers causal reply/pause ordering checks for command recovery probes.
+//!   It also registers causal reply/pause ordering checks for command recovery probes and
+//!   the in-process status reader's committed-uniform readiness cases.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, snapshot receive memory, gRPC-receiver,
@@ -46,6 +47,9 @@ mod command_probe_tests;
 mod snapshot_receive_memory;
 #[path = "common/snapshot_receive_memory_tests.rs"]
 mod snapshot_receive_memory_tests;
+
+#[path = "common/cluster/status.rs"]
+mod cluster_status;
 
 #[path = "common/cluster/byte_pace.rs"]
 mod byte_pace;
@@ -1452,6 +1456,8 @@ mod tests {
             "raft.cordoned_nodes: (none)".to_string(),
             "raft.last_log_index: 40".to_string(),
             "raft.last_applied: 40".to_string(),
+            "raft.membership_joint: false".to_string(),
+            "raft.membership_committed: true".to_string(),
             "raft.membership:".to_string(),
             "- node-1 [voter] 127.0.0.1:41001".to_string(),
             "- node-2 [voter] 127.0.0.1:41002".to_string(),
@@ -2647,7 +2653,8 @@ mod tests {
     async fn a_one_member_cluster_converges_without_peers() {
         let alone = StandInNode::serve(StandInBehavior::Answer(command_result(
             completed(),
-            "raft.current_leader: node-1\nraft.membership:\n- node-1 [voter] \
+            "raft.current_leader: node-1\nraft.membership_joint: \
+             false\nraft.membership_committed: true\nraft.membership:\n- node-1 [voter] \
              127.0.0.1:41001\n\n[interconnect]\n- (none)",
         )))
         .await;
@@ -2708,6 +2715,8 @@ mod tests {
             let garbled = status.garbled;
             let text = [
                 "raft.current_leader: node-1",
+                "raft.membership_joint: false",
+                "raft.membership_committed: true",
                 "raft.membership:",
                 status.voter,
                 "",
