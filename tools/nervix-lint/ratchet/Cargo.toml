@@ -1,0 +1,27 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "nervix-ratchet"
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+aws-lc-rs = "=1.18.2"
+clap = { version = "4.6", features = ["derive", "env"] }
+error-stack.workspace = true
+libc = "0.2"
+meticulous.workspace = true
+nervix-approx-into = { path = "../../../crates/approx-into" }
+nervix-lint-report = { path = "../report" }
+nervix-primitives.workspace = true
+nix = { version = "=0.30.1", features = ["signal", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml = "1.1"
+uuid = { version = "1.29", features = ["v4"] }
+walkdir = "=2.5.0"
+
+[dev-dependencies]
+bolero.workspace = true
+tempfile = "3.27"

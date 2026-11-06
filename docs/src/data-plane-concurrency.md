@@ -372,6 +372,7 @@ writer.
 | Backup state snapshot | Branch lifecycle publications, Kafka offset commits and WASM checkpoints register on a per-domain atomic generation before changing their published state. After the domain is paused and drained, the owner closes that generation with a Release RMW and waits with Acquire loads for registered publishers to leave. It then serializes Kafka positions and branch lifecycle into the runtime state store and opens one database snapshot for those records and durable WASM saves. The closing RMW is in the release sequence that a publisher entering the next generation acquires. | A publisher that entered before the cut completes into the captured view; a publisher that enters after it waits for the next generation. An older periodic storage write cannot replace a newer forced publication. The backup reads the database snapshot off the record path and stages owned section bytes. A live backup does not close the generation and reports its weaker cut explicitly. The server's Shuttle and Loom checks drive this production fence. |
 | Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces and unreferenced active chunk sets. Publication runs on stopped-domain lifecycle paths. The admitted maintenance loop also follows running checkpoint replacement and purge under the installation barrier; record delivery adds no lock. |
 | Metric series handles | Each relay, node, ingestor, emitter, or concrete branch resolves its label set, internal series, and Prometheus child when its owning task or branch is created. | Recording uses the retained series directly. Counters update atomically; a histogram records through its already-resolved per-series accumulator without a registry lookup, key construction, or map guard. A node input folds a whole batch's delivery latencies in one kernel pass over the batch's high-watermark column before recording, so each latency series locks its accumulator and reads the wall clock once per batch rather than once per row, and its Prometheus child takes the batch in one flush. Whether a series was ever observed is an atomic flag set under that lock and read without it. Registration and removal stay on lifecycle paths. |
+| Connector interaction handles | An emitter resolves `EmitterInteractionMetrics` beside its output metrics at installation, registering every operation/outcome child at zero. A source host resolves its existing native children together in `IngestorInteractionMetrics`, keeping them by value; its decode-rejection policy owner takes its child separately by value. | Emitter recording borrows retained Prometheus children and atomic `CounterSeries` owners. A scope guard records one typed outcome and duration per publish or due staged commit, including a transient outcome on cancellation. The registry is reached only during registration and inspection; inspection clones one target's handles and releases the guard before formatting. History remains until the process ends. Source recording retains its existing increments, labels and ownership. There is no new coordination protocol or tracked lock on recording, so Deloxide does not apply to these handles. |
 | MQTT broker packet limit | Each MQTT emitter's event-loop task stores the Maximum Packet Size of every `CONNACK` its client receives, or the broker's silence about one, as one atomic scalar. A reconnect replaces it. | A publish loads the scalar once per record to reject a packet the broker would refuse before handing it to the client. The value stands alone, so relaxed ordering is its whole contract, and a record published before the first `CONNACK` is measured only against the protocol's largest packet. |
 
 The Syslog stream source gives each accepted connection its own decoder and one bounded intake
@@ -1731,6 +1732,31 @@ consumers that it delivers through. A consumer that registers meanwhile receives
 only, so the acknowledgement shares a publication reserves for its attached consumers always match
 its deliveries, and a routed delivery, which holds no dispatch permit, cannot resolve a share it
 never reserved.
+
+## Failed Authentication Pacing
+
+The control plane's authentication owner keeps one access-ordered `ExpiryMap` of failed names
+behind an async mutex. A bucket holds governor's theoretical arrival mark. Its decision is made from
+one selected monotonic instant through governor's synchronous state-store interface; waits use the
+primitive boundary's timers. Credential verification and quota sleeps hold no map guard. A name
+with an outstanding quota therefore delays only its own attempts.
+
+Each admission operation may reclaim one oldest bucket whose quota has fully replenished. An
+operation adds at most one bucket, after a judged refusal. If the oldest bucket still holds debt,
+its last access was within a complete burst-recovery horizon, and access order places every other
+retained name within that horizon too. Reclaiming one full bucket before an insertion keeps the
+stored count from growing while stale entries remain; growth is limited to the largest recovery
+working set and live attempts. An active bucket is never displaced by a spray of other names.
+Success removes only that name. An admitted attempt shares the bucket's immutable key allocation
+as its receipt. A refusal skips a second charge only when pointer identity names that same active
+bucket; success or full recovery gives a fresh bucket a distinct allocation. No reference-count
+ordering is involved. Node teardown drops the owner and its volatile state.
+
+These are call-admission accesses. The async mutex and timers are outside Deloxide's tracked
+thread-blocking locks. Owner tests and public one- and three-node authentication scenarios verify
+the policy and its waits. The bounded `authentication-quota-clock` property compares every quota
+decision, exact wait and complete arrival mark with a persistent governor limiter. The expiry map's
+operation-sequence oracle and Miri qualify its relinking and allocation lifetimes.
 
 ## Ratchet And Review
 
