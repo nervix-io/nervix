@@ -45,7 +45,7 @@ and package-wide discovery still qualify the full selection in CI.
 
 `just test-client-recovery-diagnostic <selection>` uses the canonical Deloxide runner for each of
 `deloxide`, `deloxide-order`, `deloxide-stress` and `deloxide-stress-restore`. It validates the full
-register first, then retains all registered workloads in the four feature files reached by the
+register first, then retains all registered workloads in every feature file reached by the
 client request and exchange owners. Their existing tags, invocations, bounds, supervision and
 accounting remain in force. Each record declares its selected owners and features and sets
 `whole_workspace` to false; this scope cannot enter a whole-workspace coverage collection.
@@ -211,6 +211,13 @@ only the restore reply rejection feature with the ordinary scenario runner. It f
 arguments by the same quoting rule. The bounded peer forwards the original upload to a real node,
 waits for its completed restore outcome and replaces only the reply; native and CLI cases then
 recover that outcome under the original execution reference on one- and three-node clusters.
+
+`just test-restore-attempt-history` uses the same prerequisites and quoting rule and requires all
+four native/CLI one-/three-node examples in `client_restore_uncertainty.feature`. Its peer waits
+for a real completed restore, removes the local archive and loses the answer with a retryable
+transport failure. The original restore call must remain uncertain when its next attempt cannot
+open the archive. The fixture restores the exact bytes only after that call ends, then recovers
+the completed outcome under the original statement and reference. No product fault hook is used.
 
 ## What Runs Where
 

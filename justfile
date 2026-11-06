@@ -383,6 +383,25 @@ test-restore-codec-replies *args: build-deps build-test-cli build-deadlock-repor
         raise SystemExit(f"restore reply witnesses must execute eight scenarios; reported counts: {counts}")
     PY
 
+# Exercise later archive failures after a completed restore lost its answer, using only the
+# tools these native/CLI cases start and requiring all four topology/client examples.
+test-restore-attempt-history *args: build-deps build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    mkdir -p {{ quote(cargo_target_dir + "/restore-attempt-history") }}
+    restore_history_log="$(mktemp {{ quote(cargo_target_dir + "/restore-attempt-history/run.XXXXXX.log") }})"
+    cargo test --package nervix-scenarios --test scenarios -- --tags @client_restore_uncertainty {{ quote(args) }} 2>&1 | tee "$restore_history_log"
+    python3 - "$restore_history_log" <<'PY'
+    import re
+    import sys
+    from pathlib import Path
+    output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
+    counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
+    if counts != ["4"]:
+        raise SystemExit(f"restore attempt witnesses must execute four scenarios; reported counts: {counts}")
+    PY
+
 # Exercise restore reply validation through the native client and CLI on one and three nodes.
 # These cases start no paced driver or diagnostic report subprocess.
 test-client-restore-reply: build-web-console download-onnxruntime build-test-cli
@@ -639,6 +658,13 @@ test-command-recovery-scenarios: build-web-console wasm-processor-guests downloa
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/client_wire_failures.feature \
         --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
+        --concurrency 1 --retry 0
+
+# Exercise explicit COMMIT outcome recovery and a recorded failed prefix through in-process nodes.
+test-explicit-commit-recovery: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/{explicit_commit_recovery,plexus_transactions}.feature") }} \
+        --tags '@explicit_commit_recovery or @transaction_failed_resume' \
         --concurrency 1 --retry 0
 
 # Exercise multi-span cluster durations with only the in-process server's prerequisites.

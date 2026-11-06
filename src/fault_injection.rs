@@ -61,6 +61,7 @@ mod entity_drain;
 #[cfg(test)]
 mod entity_drain_tests;
 mod execution;
+mod explicit_commit;
 mod handoff_gate_link;
 mod interest_visibility;
 mod listener_accept;

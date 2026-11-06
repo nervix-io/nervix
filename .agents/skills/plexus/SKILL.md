@@ -209,6 +209,10 @@ lifecycle, deduplicator keys and windows. `RESUME` precedes the user policy and 
 run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
 
+Keep an uncertain restore's original execution reference, statement and archive across attempts;
+a later local read failure or stream refusal does not settle it. Follow the native-client recovery
+contract in [Restoring](https://docs.nervix.io/client-library.html#restoring).
+
 `BACKUP ... TIMEOUT` bounds each running domain's cut independently. For a cut timeout, inspect its
 active phase and completed phase durations before choosing a new budget; the backup architecture's
 Observability section explains owner-side attribution. Native clients use a separate
@@ -255,6 +259,10 @@ those phases.
 A committed cluster parameter revision invalidates an identified transaction preview even when
 the queued Models still fit its caps or the parameter values later return to their earlier values.
 Inspect the transaction again before committing; a parameter notice does not review a new preview.
+If a `COMMIT` attempt ends while the transaction still commits, keep its execution reference and
+repeat it to recover the outcome. `SHOW TRANSACTIONS` and an attached transaction's status explain
+progress but do not replace the result under that reference. See
+[Client Session Protocol → Transactions Over The Protocol](../../../docs/src/client-session-protocol.md#transactions-over-the-protocol).
 
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
 lookup creation, `START`, `STOP`, placement changes, or `COMMIT` returns `OK`, issue the dependent

@@ -5,6 +5,8 @@
 //! - **Depends on.** Public clients, tonic transport, the current wire contract and backup steps.
 //! - **Must not know.** Server restore execution, persisted command records or session internals.
 
+mod restore_uncertainty;
+
 use std::{
     convert::Infallible,
     marker::PhantomData,
@@ -69,6 +71,34 @@ impl Corruption {
     }
 }
 
+#[derive(Debug, Clone)]
+enum ReplyEffect {
+    Corrupt(Corruption),
+    RemoveArchive(PathBuf),
+}
+
+impl ReplyEffect {
+    fn parse(name: &str, archive: &str) -> Self {
+        if name == "missing archive after completion" {
+            Self::RemoveArchive(PathBuf::from(archive))
+        } else {
+            Self::Corrupt(Corruption::parse(name))
+        }
+    }
+
+    async fn answer(self) -> Option<Response<Bytes>> {
+        match self {
+            Self::Corrupt(corruption) => Some(Response::new(corruption.bytes())),
+            Self::RemoveArchive(archive) => {
+                tokio::fs::remove_file(archive)
+                    .await
+                    .assured("the completed restore's archive exists until its answer is lost");
+                None
+            }
+        }
+    }
+}
+
 enum ClientResult {
     Native(error_stack::Result<Box<CommandOutcome>, ClientError>),
     Cli(Output),
@@ -121,7 +151,7 @@ impl<Inbound: FrameRoot> Codec for RawCodec<Inbound> {
 #[derive(Clone)]
 struct ProxyService {
     upstream: Channel,
-    corruption: Corruption,
+    effect: ReplyEffect,
     observed: mpsc::Sender<RestoreStart>,
 }
 
@@ -224,7 +254,11 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for ProxyService {
                 .send(start)
                 .await
                 .assured("the scenario retains the peer's observation");
-            Ok(Response::new(service.corruption.bytes()))
+            service
+                .effect
+                .answer()
+                .await
+                .ok_or_else(|| Status::unavailable("the completed restore answer was lost"))
         })
     }
 }
@@ -243,7 +277,7 @@ impl Drop for Proxy {
 }
 
 impl Proxy {
-    async fn start(upstream: &str, corruption: Corruption) -> Self {
+    async fn start(upstream: &str, effect: ReplyEffect) -> Self {
         let uri = url::Url::parse(upstream).assured("the cluster exposes a valid URI");
         assert!(
             matches!(uri.host(), Some(url::Host::Ipv4(_) | url::Host::Ipv6(_))),
@@ -266,7 +300,7 @@ impl Proxy {
             Server::builder()
                 .add_service(ProxyService {
                     upstream,
-                    corruption,
+                    effect,
                     observed,
                 })
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
@@ -333,7 +367,8 @@ async fn when_restore_reply_is_unreadable(
     };
     let reference = CommandExecutionReference::parse(fresh_execution_reference())
         .assured("a fresh UUID is a valid execution reference");
-    let mut proxy = Proxy::start(&upstream, Corruption::parse(&corruption)).await;
+    let effect = ReplyEffect::parse(&corruption, &restore.source);
+    let mut proxy = Proxy::start(&upstream, effect).await;
     let result = match kind.as_str() {
         "native" => {
             let options = client_connect_options(&proxy.uri)

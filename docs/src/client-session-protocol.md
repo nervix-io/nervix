@@ -1000,7 +1000,12 @@ to, because such a request has already moved the transaction past what the clien
 that is admitted runs its frozen plan step by step; each step is atomic, and a failed step leaves
 the applied prefix in place rather than rolling back the transaction. A commit's outcome arrives
 only when the final step is usable on every live node, and a client waits through `COMMITTING` for
-the outcome recorded under the commit's own reference.
+the outcome recorded under the commit's own reference. If one commit execution attempt fails, the
+server reads the transaction again before answering: a finished transaction supplies its recorded
+outcome and diagnostics, including a recorded failure; a transaction still `COMMITTING` leaves the
+command applying and answers `OutcomeUnknown(StillApplying)`. A leadership loss still follows the
+leader recovery route while the outcome is unresolved. An attempt's error cannot replace a
+terminal transaction outcome another coordinator recorded before the reply.
 
 The planning basis includes the complete committed cluster-parameter record and its revision.
 A publication through `ALTER CLUSTER SET` invalidates an earlier identified preview, including
@@ -2081,6 +2086,12 @@ uncertain. Repeating the same statement and archive under that reference recover
 If no earlier attempt could have been admitted, authentication or other server refusals received
 before a response, a declared `RestoreUploadFailed`, and local archive refusals keep their
 definitive meaning. An unreadable reply is no evidence of refusal.
+
+A restore's uncertainty belongs to its execution reference across attempts. If an earlier attempt
+handed over the whole archive without learning its outcome, or received `OutcomeUnknown`, a
+later local read error, stream refusal, or `ExecutionReferenceExpired` does not settle it. The
+Rust client preserves the original reference as uncertain with the later typed cause beneath it;
+only an outcome that establishes the restore's result settles the execution.
 
 Only the leader the archive was streamed to holds it, until the restore finishes or the retry
 validity of its reference ends. If leadership moves, or that leader restarts, while the restore
