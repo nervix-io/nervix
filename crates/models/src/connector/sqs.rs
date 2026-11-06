@@ -614,7 +614,7 @@ impl EmitterEntityBody for SqsQueueEmitter {
 pub enum SqsQueueEmitterChange {
     /// `SET QUEUE '<queue>'`.
     Queue(SqsQueueName),
-    /// `SET FIFO GROUP <expression> | FROM BRANCH`.
+    /// `SET FIFO GROUP <expression>`.
     FifoGroup(Expression),
     /// `DROP FIFO GROUP`: the emitter sends no message group.
     DropFifoGroup,

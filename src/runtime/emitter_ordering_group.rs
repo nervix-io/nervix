@@ -29,9 +29,21 @@ const ORDERING_GROUP_FIELD: &str = "ordering_group";
 #[derive(Debug, Clone)]
 pub(super) enum CompiledOrderingGroup {
     /// Branch-dependent expressions are compiled against each source's resolved schema.
-    Sources(Box<BTreeMap<RelayName, CompiledProgramWithMaterializedInterest>>),
+    Sources(Box<OrderingGroupSources>),
     /// Every record is published under the `STRING` this program produces for its source row.
     Expression(CompiledProgramWithMaterializedInterest),
+}
+
+/// One boxed owner keeps source-specific programs out of the common program's inline storage.
+#[derive(Clone)]
+pub(super) struct OrderingGroupSources {
+    by_relay: BTreeMap<RelayName, CompiledProgramWithMaterializedInterest>,
+}
+
+impl std::fmt::Debug for OrderingGroupSources {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.by_relay, formatter)
+    }
 }
 
 impl CompiledOrderingGroup {
@@ -63,7 +75,9 @@ impl CompiledOrderingGroup {
                 )?;
                 programs.insert(relay.clone(), program);
             }
-            return Ok(Self::Sources(Box::new(programs)));
+            return Ok(Self::Sources(Box::new(OrderingGroupSources {
+                by_relay: programs,
+            })));
         }
         Self::compile_program(expression, &node, input, context, None).map(Self::Expression)
     }
@@ -86,7 +100,7 @@ impl CompiledOrderingGroup {
                     node: node.clone(),
                 })?;
         let program = compile_emitter_filter_map_part(
-            &node,
+            node,
             expression.clone(),
             RuntimeVmSchemaPair {
                 input: input.schema,
@@ -119,6 +133,7 @@ impl CompiledOrderingGroup {
     ) -> Result<OrderingGroups, PlannedGeneralFailure> {
         let program = match self {
             Self::Sources(programs) => programs
+                .by_relay
                 .get(source_relay)
                 .verified("every admitted source has its compiled ordering group"),
             Self::Expression(program) => program,

@@ -266,11 +266,17 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             unlocated(ConnectorKind::Http, &[("METHOD", true), ("PATH", true)])
         }
         EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => EmitterSurface {
-            envelope: &[EnvelopeClauseKind::Timestamp],
+            envelope: &[
+                EnvelopeClauseKind::Key,
+                EnvelopeClauseKind::PartitionFromBranch,
+                EnvelopeClauseKind::Timestamp,
+            ],
             ..located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
         },
         EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => EmitterSurface {
             envelope: &[
+                EnvelopeClauseKind::Key,
+                EnvelopeClauseKind::PartitionFromBranch,
                 EnvelopeClauseKind::Timestamp,
                 EnvelopeClauseKind::DeliverAfter,
             ],

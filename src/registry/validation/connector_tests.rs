@@ -889,7 +889,7 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     else {
         unreachable!("emitter helper must build an emitter model")
     };
-    valid.connector = Box::new(EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+    *valid.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
         mode: nervix_models::SqsQueuePublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -902,7 +902,7 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
         fifo_group: Some(
             nervix_plexus::parse_expression("input.value").expect("valid FIFO group expression"),
         ),
-    })));
+    }));
 
     registry
         .apply_batch(&domain, vec![Model::Emitter(valid.clone())])

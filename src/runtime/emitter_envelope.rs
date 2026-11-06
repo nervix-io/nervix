@@ -143,7 +143,12 @@ struct CompiledEnvelopeValues {
 /// Boxed slices retain the exact-capacity target allocation while leaving room for this dispatch.
 enum EnvelopePrograms {
     Common(CompiledEnvelopeValues),
-    Sources(Box<BTreeMap<RelayName, SourceEnvelope>>),
+    Sources(Box<EnvelopeSources>),
+}
+
+/// The source-specific programs share one boxed owner, keeping the common program inline.
+struct EnvelopeSources {
+    by_relay: BTreeMap<RelayName, SourceEnvelope>,
 }
 
 struct SourceEnvelope {
@@ -214,7 +219,9 @@ impl CompiledEnvelope {
         }
         Ok(Some(Self {
             fixed: Arc::new(plan.fixed.clone()),
-            computed: Some(EnvelopePrograms::Sources(Box::new(sources))),
+            computed: Some(EnvelopePrograms::Sources(Box::new(EnvelopeSources {
+                by_relay: sources,
+            }))),
         }))
     }
 
@@ -414,7 +421,7 @@ impl CompiledEnvelope {
             None => (None, None),
             Some(EnvelopePrograms::Common(computed)) => (Some(computed), None),
             Some(EnvelopePrograms::Sources(sources)) => {
-                let Some(source) = sources.get(source_relay) else {
+                let Some(source) = sources.by_relay.get(source_relay) else {
                     let error = Report::new(EmitterEnvelopeError::MissingSource {
                         relay: source_relay.clone(),
                     })

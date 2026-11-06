@@ -1658,7 +1658,7 @@ mod tests {
                 message_group: None,
                 clauses: None,
             },
-            5 | 6 | 7 => BatchEnvelope {
+            5..=7 => BatchEnvelope {
                 destination: Some(Arc::new(nervix_connector::RecordDestination {
                     key: match variant % 9 {
                         5 => Some(nervix_connector::RecordKey::Bytes(vec![0, 255, variant])),
