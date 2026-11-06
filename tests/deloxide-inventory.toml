@@ -422,6 +422,7 @@ package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@client_restore_codec_native",
+  "@client_restore_uncertainty_native",
   "@kafka_record_metadata",
   "@mqtt_metadata",
   "@nats_authentication",
@@ -3598,6 +3599,9 @@ workloads = [
 [[owner]]
 path = "crates/client-core/src/client.rs"
 workloads = [
+  "scenario.restore-attempt-history",
+  "stress.restore-attempt-history",
+  "stress.restore-attempt-history-restore",
   "scenario.client-restore-reply-validation",
   "stress.client-restore-reply-validation",
   "stress.client-restore-reply-validation-restore",
@@ -3651,6 +3655,9 @@ workloads = [
 gap = "The listed workloads reach the pending-replies lock through every request's registration, the replies its reader routes and the close of an exchange. None cancels a command through the Rust client: its only caller, nervix-cli, has no diagnostic form, and the lane starts an ordinary CLI binary, so ExchangeRequests::cancel, which registers a CancelRequest under the same single unnested acquisition every request takes and closes the registry when the frame cannot be sent, is exercised only by the client-core unit tests and the CLI scenarios, outside the lane."
 path = "crates/client-core/src/exchange.rs"
 workloads = [
+  "scenario.restore-attempt-history",
+  "stress.restore-attempt-history",
+  "stress.restore-attempt-history-restore",
   "scenario.client-subscription-timeout",
   "stress.client-subscription-timeout",
   "scenario.client-restore-reply-validation",
@@ -5254,6 +5261,36 @@ id = "stress.restore-codec-rejection-restore"
 invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
 invocation = "stress-restore-scenarios"
 scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Native restores through a real one- or three-node cluster and a bounded peer that loses a completed answer and removes the local archive. Session recovery and exact-reference recovery reach the existing tracked pending registry. Async upload, file reads and the ordinary CLI process are outside detector evidence."
+examples = 2
+feature = "tests/features/tools/client_restore_uncertainty.feature"
+id = "scenario.restore-attempt-history"
+invariant = "A later local archive failure cannot settle an earlier completed restore whose answer was lost; its original execution remains recoverable."
+invocation = "scenarios"
+scenario = "A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the two native later-read failures exercise reconnect and exact-reference recovery through the existing tracked client registry. Async transport and file reads, and the separate ordinary CLI process, remain untracked."
+examples = 2
+feature = "tests/features/tools/client_restore_uncertainty.feature"
+id = "stress.restore-attempt-history"
+invariant = "A later local archive failure cannot settle an earlier completed restore whose answer was lost; its original execution remains recoverable."
+invocation = "stress-scenarios"
+scenario = "A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the same two native archive failures and exact-reference recoveries reach client lifecycle locks while the real cluster restores state. Async transport, file reads and the separate ordinary CLI process remain outside detector evidence."
+examples = 2
+feature = "tests/features/tools/client_restore_uncertainty.feature"
+id = "stress.restore-attempt-history-restore"
+invariant = "A later local archive failure cannot settle an earlier completed restore whose answer was lost; its original execution remains recoverable."
+invocation = "stress-restore-scenarios"
+scenario = "A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

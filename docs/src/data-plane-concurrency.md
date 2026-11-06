@@ -2673,6 +2673,24 @@ The detector observes pending-registry locking and generation cleanup, while the
 phase, async reconnect mutexes and transport buffering remain untracked. The ordinary CLI
 examples separately verify status 3 and original-reference recovery.
 
+The restore attempt-history workload reaches those same client lifecycle locks while recovering
+from a lost completed answer, then observes a later local archive failure. Its two native
+one-/three-node examples register active, order, stress and restore-stress selections through the
+existing client and exchange owners. The client retains the original uncertainty and typed local
+cause; restoring the exact archive allows recovery under that reference. File reads, asynchronous
+transport and the ordinary CLI examples remain outside the detector's observation.
+
+The native restore's final-frame handover races the ending of its attempt. The private
+`RestoreHandover` owner uses one selected atomic: either the final frame obtains permission and
+the ending retains uncertainty, or ending denies that frame permanently. The outgoing stream's
+fused predicate prevents later bytes from completing an archive after an ending reported no
+handover. This adds no wait or queue and retains the parallel feeder, eight-frame capacity and
+256 KiB chunks. It publishes no payload and supplies no wakeup. The registered Shuttle check
+`restore::shuttle_tests::shuttle_finishing_a_restore_attempt_fences_its_last_frame` drives the
+production queued-frame predicate and fence with a 64-schedule DFS budget; ordinary real-gRPC
+owner tests and native/CLI scenarios cover its integration. The check models no network and makes
+no reference-count or cross-location memory-ordering claim.
+
 The lane's state-store owner test starts its detector in a fresh process before constructing store
 or executor locks and runs the current generation regressions: cancellation before and after pointer publication, snapshot
 readers, queued checkpoint writers, corrupt and incomplete chunks, exact retry after reopen,

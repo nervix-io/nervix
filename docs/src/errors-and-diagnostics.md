@@ -3056,7 +3056,15 @@ no classification reads a status message. After ending only the session selected
 the client reports `UncertainCommand` under the original execution reference above
 `InvalidRestoreReply` and the receive failure. The shared binding exposes `NX_ERROR_UNCERTAIN`
 with that reference, and the CLI reports status 3. A replacement session and definitive local,
-authentication and declared stream refusals retain their meanings.
+authentication and declared stream refusals retain their meanings before an earlier attempt left
+the execution uncertain.
+
+The Rust client carries restore uncertainty across attempts. A later archive-open/read failure
+retains `ReadRestoreArchive` beneath `UncertainCommand`, rather than reporting the restore as
+refused locally. `RestoreStreamRefused` retains the later declared stream refusal, and
+`LastUnresolvedAnswer` the typed expired reference or unrecorded refusal, beneath that uncertainty.
+These outcomes preserve the original execution reference,
+`NX_ERROR_UNCERTAIN`, and CLI status 3 after an earlier complete upload or `OutcomeUnknown`.
 
 ## Sensitive Data And Observability
 

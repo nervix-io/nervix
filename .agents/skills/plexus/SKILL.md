@@ -197,6 +197,10 @@ lifecycle, deduplicator keys and windows. `RESUME` precedes the user policy and 
 run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
 
+Keep an uncertain restore's original execution reference, statement and archive across attempts;
+a later local read failure or stream refusal does not settle it. Follow the native-client recovery
+contract in [Restoring](https://docs.nervix.io/client-library.html#restoring).
+
 `BACKUP ... TIMEOUT` bounds each running domain's cut independently. For a cut timeout, inspect its
 active phase and completed phase durations before choosing a new budget; the backup architecture's
 Observability section explains owner-side attribution. Native clients use a separate
