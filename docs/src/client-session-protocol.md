@@ -336,15 +336,28 @@ working memory the stored hash's parameters make Argon2 allocate. That class ser
 work, so saturated data, extension or bulk work never delays a login, and concurrent attempts wait
 for it in turn. A node whose credentials class cannot take the verification now answers
 `UNAVAILABLE`, or `503` without an upgrade on the console: the
-credentials were not judged, so the attempt neither counts as a failure nor paces the user, and the
-same credentials may be presented again. After a failed attempt for a user, that user's later
-attempts are paced to ten per second until one succeeds.
+credentials were not judged, so the attempt neither establishes failure pacing nor clears an
+existing quota, and the same credentials may be presented again.
+
+Every presented name shares one failure quota on its node across the client transports, whether
+the name identifies a user or is unknown or invalid. Valid names use their canonical lower-case
+identity; invalid spellings are compared without ASCII case distinctions as well. A judged
+refusal establishes a ten-attempt bucket and consumes one slot. Slots replenish at ten per second.
+Later attempts take a slot before credentials work; overlapping attempts that began before the
+first refusal take their slot after their failed verification. A successful authentication clears
+that name's pacing. A slot receipt belongs to the bucket it paid; if success or full recovery
+replaces that bucket before verification finishes, a refused attempt pays the fresh quota.
+One name's traffic never evicts another name's outstanding quota.
 
 Every name costs the node the same work. Credentials whose name names no user, or cannot name one,
 have their password hashed on the credentials worker exactly as creating a user hashes one, under
 the same charge, before they are refused. Neither the answer nor when it arrives tells an unknown
 user from a wrong password, and a node whose credentials class cannot take that hash now answers
-`UNAVAILABLE` or `503` for an unknown user as it does for a known one.
+`UNAVAILABLE` or `503` for an unknown user as it does for a known one. Repeated refusals use the
+same quota and ordering for both. Failure state retains one bucket per name, creates a bucket only
+after a judged refusal, and reclaims fully replenished buckets as later attempts arrive. Its size
+follows the largest burst-recovery working set and live attempts rather than all names ever
+presented to the node.
 
 Credentials a listener judged and refused are logged at `warn` as `client authentication failed`,
 with the listener as `transport` and the address the call came from as `peer`. The record never
