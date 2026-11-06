@@ -694,6 +694,9 @@ pub(crate) enum PendingReplies {
         /// identity. Identities start at 1 and are never reused on the exchange.
         next_request_id: Option<RequestId>,
         waiters: HashMap<RequestId, PendingReply>,
+        /// The open state alone keeps the frame reader waiting. Dropping it ends that wait even
+        /// when the transport never sends another frame.
+        reader_ending: watch::Sender<()>,
     },
     /// The exchange ended. Its waiters were dropped, so each observed the closed session once,
     /// and a request registered now would never be answered.
@@ -731,6 +734,15 @@ impl PendingReplies {
         Self::Open {
             next_request_id: Some(RequestId::new(NonZeroU64::MIN)),
             waiters: HashMap::default(),
+            reader_ending: watch::channel(()).0,
+        }
+    }
+
+    /// Registers before the reader waits for frames. An already closed registry needs no wait.
+    fn observe_end(&self) -> Option<watch::Receiver<()>> {
+        match self {
+            Self::Open { reader_ending, .. } => Some(reader_ending.subscribe()),
+            Self::Closed(_) => None,
         }
     }
 
@@ -750,6 +762,7 @@ impl PendingReplies {
         let Self::Open {
             next_request_id,
             waiters,
+            ..
         } = self
         else {
             return None;
@@ -875,26 +888,41 @@ impl ExchangeReader {
         }
     }
 
-    /// Routes the exchange's frames until it ends, then closes its requests.
+    /// Routes frames until the transport or the request registry ends, then interrupts this
+    /// generation after routing has stopped.
     pub(crate) async fn run<S>(mut self, mut frames: S)
     where
         S: Stream<Item = Result<VerifiedFrame<ServerFrame>, Status>> + Unpin,
     {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let received = frames.next().await;
-            let frame = match received {
-                Some(Ok(frame)) => frame,
-                Some(Err(status)) => {
-                    Result::<(), _>::Err(status.clone()).reported("reading the session exchange");
-                    self.failure = Some(status);
+        let ending = self.pending.lock().observe_end();
+        if let Some(mut ending) = ending {
+            // One registration remains live across frames. The open registry never sends a value,
+            // so this wait ends with its sender.
+            let mut ended = std::pin::pin!(ending.changed());
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let received = nervix_primitives::select! {
+                    biased;
+                    closed = &mut ended => {
+                        closed.discarded("dropping the open registry's only sender ends its frame reader");
+                        break;
+                    }
+                    received = frames.next() => received,
+                };
+                let frame = match received {
+                    Some(Ok(frame)) => frame,
+                    Some(Err(status)) => {
+                        Result::<(), _>::Err(status.clone())
+                            .reported("reading the session exchange");
+                        self.failure = Some(status);
+                        break;
+                    }
+                    // The server ended the exchange.
+                    None => break,
+                };
+                if let ReaderFlow::End = self.route(frame).await {
                     break;
                 }
-                // The server ended the exchange.
-                None => break,
-            };
-            if let ReaderFlow::End = self.route(frame).await {
-                break;
             }
         }
     }

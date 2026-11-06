@@ -94,6 +94,7 @@ mod runtime_installation;
 mod session_backpressure;
 mod shutdown_handoff;
 mod standalone_transaction;
+mod subscription_response;
 #[cfg(test)]
 mod syslog_tests;
 mod transaction_cleanup;
@@ -1446,21 +1447,6 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::RelocationPublication(domain.clone()));
     }
 
-    /// Holds the next completed command after its result exists but before either public session
-    /// transport can deliver it.
-    pub fn pause_command_response_delivery_on(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::ResponseDelivery(node_id));
-    }
-
-    pub async fn wait_for_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()))
-            .await;
-    }
-
-    pub fn release_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
-        self.release_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()));
-    }
-
     pub fn release_all_command_pauses(&self) {
         for pause in &self.inner.command_pauses {
             pause.release();
@@ -2237,11 +2223,6 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::ReferenceLookup(node_id.clone()))
-            .await;
-    }
-
-    pub(crate) async fn pause_command_response_delivery_if_armed(&self, node_id: &ClusterNodeName) {
-        self.pause_command_if_armed(CommandPausePoint::ResponseDelivery(node_id.clone()))
             .await;
     }
 

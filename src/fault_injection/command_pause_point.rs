@@ -50,6 +50,7 @@ pub(super) enum CommandPausePoint {
     Finalization(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
+    SubscriptionResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
     ResourceSourceDiscovery(ClusterNodeName),
     RestoreStep {

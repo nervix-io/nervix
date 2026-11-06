@@ -33,6 +33,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | HTTP polling requests and client secrets, responses, failed polls, the response bound, and the `HTTP CLIENT` keys, redirects and proxy both directions share | `Ingestors` → `HTTP REQUEST`, then `Emitters` → `HTTP client transport` |
 | Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
+| Pulsar topic names, subscription ownership/TYPE/start position, received metadata, shared client authentication/TLS, receipt deadlines and delayed delivery | `Ingestors` → `Pulsar`, `Emitters` → `Pulsar`, then the `PULSAR TOPIC` mirror in `Connector Capabilities` |
 | Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
 | MQTT shared-subscription support, session/QoS/mode pairings, client identities, keep-alive and recovery | `Ingestors` → `MQTT`, `Emitters` → `MQTT`, then `Connector Capabilities` → `MQTT TOPIC` |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
@@ -68,6 +69,10 @@ is outside the curated Plexus index.
 For the CLI's `subscribe` and `domain-clock` shell streams and their line formats, read
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
+
+For native subscription and clock recovery, read [Rust Client Library](https://docs.nervix.io/client-library.html)
+and [Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html), especially
+S-7 and K-5. Keep an unanswered reopening distinct from a refusal, and account for the live-edge gap.
 
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
 the open session, a reply that names another execution, and reconnect behavior, read
@@ -543,36 +548,18 @@ current connection, retry and deadline limits.
   a subject the named stream does not capture is rejected per record. `MESSAGE ID <expression>`
   writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream. Read
   `Emitters` → `NATS` for the full declaration and guarantee boundary.
-- A `PULSAR TOPIC` emitter's `TIMESTAMP <expression>` is each message's event time: an exact,
-  non-null, non-sensitive `DATETIME`, written as the millisecond that contains it, and a time before
-  `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Its `DELIVER AFTER
-  <duration>` delays each message from its batch's execution time, not from the send, for shared
-  subscriptions only, and the broker may deliver up to its tick, one second by default, early. Read
-  `Emitters` → `Pulsar`.
-- Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
-  `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
-  domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
-  the operator must create before the ingestor reads. The owner is followed by a required
-  `TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE`; `FAILOVER` and `EXCLUSIVE` read through one consumer,
-  so they refuse more than one instance. Consumers register as
-  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for what each type delivers, missing
-  and held subscriptions, removal failures and which subscription `ALTER` retains or removes.
-  Changing only consumer policy, including `SET TYPE`, or
-  handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
-  topic or subscription name retires the preceding owned subscription best-effort.
-- A `PULSAR TOPIC` ingestor exposes `metadata.topic`, `message_id`, `key` and `producer_name` as
-  `STRING`, `publish_time` and `event_time` as `DATETIME`, `ordering_key` as `BYTES`, and
-  `sequence_id` and `redelivery_count` as `I64`. These fields are nullable and non-sensitive;
-  missing keys and event times stay null, and empty keys and epoch times remain present. A batch
-  member's present sequence ID or event time overrides its envelope, including zero; an omitted
-  member field inherits it. Use `TIMESTAMP AT metadata.event_time` for producer time or
-  `TIMESTAMP AT metadata.publish_time` for broker publication time. An absent event time follows
-  the route's timestamp-admission error policy. Message properties remain ordered, case-sensitive
-  transport headers. Read `Ingestors` → `Pulsar` for identity formatting and conversion bounds.
-- A `PULSAR CLIENT`'s `namespace` is exactly `'tenant/namespace'` (default `public/default`), and
-  its TLS keys require a `pulsar+ssl://` `addr`; check both against `Ingestors` → `Pulsar` before
-  generating a client. A client authenticates with a confidential `auth_token`, a paired
-  `tls_cert_file` and `tls_key_file`, or both, the same way in both directions.
+- For `PULSAR TOPIC`, read [Ingestors → Pulsar](../../../../docs/src/ingestors.md#pulsar)
+  before selecting subscription ownership, creation position, TYPE, instances or a metadata time.
+  Keep an existing cursor distinct from its creation policy, and preserve null metadata and
+  explicitly present zero values. The manual owns the exact fields, consumer rules and recovery semantics.
+  Read [When The Codec Refuses A Payload](../../../../docs/src/ingestors.md#when-the-codec-refuses-a-payload)
+  before promising redelivery.
+- Read [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) before choosing event time,
+  delayed delivery or a receipt deadline. Check the subscription type and the broker's timing
+  policy before promising a delay.
+- Both directions use the [Pulsar client reference](../../../../docs/src/ingestors.md#pulsar-client).
+  Verify the topic's qualification, namespace, TLS scheme, credential pairing and secret redaction
+  there. Check the generated capability mirror for options that belong to only one direction.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The

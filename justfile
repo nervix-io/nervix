@@ -350,6 +350,16 @@ test-client-foreign-execution: build-web-console download-onnxruntime build-test
     PY
     exit "$result"
 
+# Exercise restore reply validation through the native client and CLI on one and three nodes.
+# These cases start no paced driver or diagnostic report subprocess.
+test-client-restore-reply: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/client_restore_reply_validation.feature \
+        --concurrency 2 --retry 0
+
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
 test-backup-cut-cleanup: build-deps build-test-cli
@@ -619,25 +629,6 @@ test-scenarios-reuse *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TESTCONTAINERS_MODE=reusable
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
-
-# Measure the public client protocol against a release nervix-server process.
-# The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.
-client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" output="target/client-wire-baseline": build-web-console download-onnxruntime
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo build --release --package nervix-server --bin nervix-server
-    export NERVIX_CLIENT_WIRE_BASELINE_SERVER={{ quote(cargo_target_dir + "/release/nervix-server") }}
-    export NERVIX_CLIENT_WIRE_BASELINE_SERVER_PROFILE=release
-    export NERVIX_CLIENT_WIRE_BASELINE_SAMPLES={{ quote(samples) }}
-    export NERVIX_CLIENT_WIRE_BASELINE_UPLOAD_SAMPLES={{ quote(upload_samples) }}
-    export NERVIX_CLIENT_WIRE_BASELINE_PAYLOAD_BYTES={{ quote(payload_bytes) }}
-    export NERVIX_CLIENT_WIRE_BASELINE_OUTPUT={{ quote(output) }}
-    cargo test --package nervix-scenarios --test scenarios -- \
-        --input tests/features/runtime/client_wire_baseline.feature \
-        --tags @client_wire_baseline \
-        --concurrency 1 \
-        --retry 0
 
 # Capture the web console images the book publishes. The capture tool starts a real nervix-server,
 # seeds it with nervix-cli, and drives the console in a browser, so the images are build output
@@ -2343,8 +2334,13 @@ test-turmoil-coverage-runner:
 
 # Exercise the Deloxide lane runner: its inventory, discovery, supervision of real processes,
 # accounting, record, replay, qualification classes, applicability check and CI contract.
-test-deloxide-lane-runner:
-    python3 -m unittest --quiet scripts.tests.test_deloxide_lane
+# A unittest target selects a focused class or method; the default keeps the complete module.
+test-deloxide-lane-runner target="scripts.tests.test_deloxide_lane":
+    python3 -m unittest --quiet {{ quote(target) }}
+
+# Verify interruption, timeout and process-group cleanup through real child processes.
+test-deloxide-supervision:
+    python3 -m unittest scripts.tests.test_deloxide_lane.SupervisionTests
 
 # Line coverage of collection and canonical runner changes, with actual command/artifact fixtures,
 # including Turmoil's CI contract and the Deloxide lane's supervision of real processes.
@@ -2613,6 +2609,10 @@ benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
 
 cargo-fmt:
     cargo +nightly fmt
+
+# Format selected Rust files without revisiting their child modules.
+fmt-rust-files +files:
+    rustup run nightly rustfmt --config skip_children=true {{ quote(files) }}
 
 # Format one package during a focused implementation cycle.
 cargo-fmt-package package:
@@ -3484,6 +3484,10 @@ coverage-connector-matrix: connector-declarations
 # job's daemon, and the bounded publication of what the job built.
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci scripts.tests.test_runner_diagnostics scripts.tests.test_record_runner_load
+
+# Exercise bounded runner report publication without the remote-cache fixtures.
+test-runner-diagnostics:
+    uv run --locked python -m unittest scripts.tests.test_runner_diagnostics
 
 # Retain the kache remote contract's own measured line coverage beside the other Python tooling.
 coverage-kache-ci:
