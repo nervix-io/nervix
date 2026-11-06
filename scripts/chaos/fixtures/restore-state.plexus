@@ -21,8 +21,9 @@ CREATE KAFKA TOPIC INGESTOR chaos_padded_ingestor
 
 CREATE RELAY chaos_padded_out SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY 1;
 
-CREATE DETACHED WASM PROCESSOR chaos_padded
+CREATE WASM PROCESSOR chaos_padded
   FROM chaos_padded_records
+  DETACHED
   USING RESOURCE chaos_padded_guest VERSION 1
   FILE 'processors/padded-state.wat'
   MAX FUEL 1000000000

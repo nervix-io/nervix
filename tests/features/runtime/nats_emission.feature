@@ -387,8 +387,9 @@ Feature: NATS emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE ATTACHED NATS SUBJECT EMITTER columnar_events_out
+      CREATE NATS SUBJECT EMITTER columnar_events_out
         FROM columnar_events
+        ATTACHED
         TO nats_main SUBJECT 'columnar_out_{{test_id}}'
           MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING columnar_event_codec
@@ -571,9 +572,10 @@ Feature: NATS emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE ATTACHED NATS SUBJECT EMITTER narrow_events_out
+      CREATE NATS SUBJECT EMITTER narrow_events_out
         FROM narrow_events
         COLLECT FOR 1ms MAX BATCH SIZE 64MiB
+        ATTACHED
         TO nats_main SUBJECT 'narrow_out_{{test_id}}'
           MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING narrow_event_codec

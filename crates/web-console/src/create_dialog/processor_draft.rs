@@ -639,6 +639,44 @@ mod tests {
     }
 
     #[test]
+    fn processor_previews_render_input_acknowledgement_after_collection() {
+        for family in [ProcessorFamily::Junction, ProcessorFamily::Reingestor] {
+            for mode in [AckMode::Attached, AckMode::Detached] {
+                for collect in [false, true] {
+                    let mut draft = complete(family);
+                    draft.mode = mode;
+                    let collection = if collect {
+                        draft.collect = Some(InputCollectPolicy {
+                            collect_for: "25ms".into(),
+                            max_batch_size: Some("1MiB".into()),
+                        });
+                        " COLLECT FOR 25ms MAX BATCH SIZE 1MiB"
+                    } else {
+                        ""
+                    };
+                    let model: Model<RequestedResourceVersion> = match family {
+                        ProcessorFamily::Junction => {
+                            Model::Junction(draft.build_junction().assured("the draft is complete"))
+                        }
+                        ProcessorFamily::Reingestor => Model::Reingestor(
+                            draft.build_reingestor().assured("the draft is complete"),
+                        ),
+                    };
+                    let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
+                    let canonical = statement.to_canonical_plexus().assured("the draft renders");
+                    let input_contract =
+                        format!("\n  FROM incoming{collection}\n  {}\n", mode.as_ref());
+                    assert!(canonical.contains(&input_contract), "{canonical}");
+                    assert_eq!(
+                        parse_statement(&canonical).assured("the preview is executable Plexus"),
+                        statement
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn junction_keeps_input_predicate_state_route_and_assignment_order() {
         let mut draft = complete(ProcessorFamily::Junction);
         draft.inputs[0].where_clause = "input.message != ''".into();

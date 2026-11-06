@@ -73,8 +73,9 @@ CREATE CODEC chaos_paced_window_json
 
 CREATE RELAY chaos_paced_windows SCHEMA chaos_paced_window BRANCHED BY chaos_paced_branch CAPACITY 1;
 
-CREATE DETACHED WINDOW PROCESSOR chaos_paced_window_processor
+CREATE WINDOW PROCESSOR chaos_paced_window_processor
   FROM chaos_paced_records
+  DETACHED
   WIDTH 8s DURATION
   STEP 8s DURATION
   BRANCHED BY chaos_paced_branch
@@ -87,8 +88,9 @@ CREATE DETACHED WINDOW PROCESSOR chaos_paced_window_processor
         closed_at = now()
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED KAFKA TOPIC EMITTER chaos_paced_emitter
+CREATE KAFKA TOPIC EMITTER chaos_paced_emitter
   FROM chaos_paced_windows
+  ATTACHED
   TO chaos_paced_kafka TOPIC 'chaos_paced_output'
     MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
     ENCODE USING chaos_paced_window_json

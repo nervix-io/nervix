@@ -77,8 +77,9 @@ CREATE HTTP CLIENT api CONFIG {
   'timeout_ms' = 5000
 };
 
-CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
+CREATE HTTP REQUEST EMITTER deliver_event
   FROM outgoing
+  ATTACHED
   TO api
     METHOD input.request_method
     PATH input.request_path

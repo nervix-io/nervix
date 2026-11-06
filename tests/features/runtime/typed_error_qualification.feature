@@ -160,8 +160,9 @@ Feature: Typed error qualification through public streams
       """
     Then the last command output contains
       """
-      CREATE ATTACHED JUNCTION route_orders
+      CREATE JUNCTION route_orders
         FROM orders
+        ATTACHED
         UNBRANCHED
         TO accepted_orders
           INHERIT ALL

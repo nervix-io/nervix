@@ -670,6 +670,16 @@ test-wire-schema-lists *args: build-web-console wasm-processor-guests download-o
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/wire_schema_lists.feature "$@"
 
+# Verify every processor/emitter acknowledgement clause through public CREATE and SHOW CREATE.
+[positional-arguments]
+test-acknowledgement-clauses *args: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/acknowledgement_clause.feature \
+        --tags @acknowledgement_clause --concurrency 4 --retry 0 "$@"
+
 # Exercise explicit COMMIT outcome recovery and a recorded failed prefix through in-process nodes.
 test-explicit-commit-recovery: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \

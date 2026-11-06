@@ -363,7 +363,8 @@ Feature: Reingestor repartitioning
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED REINGESTOR tenant_partition FROM notifications
+        CREATE REINGESTOR tenant_partition FROM notifications
+        DETACHED
         TO tenant_notifications
         INHERIT ALL
         BRANCHED BY by_tenant_partition

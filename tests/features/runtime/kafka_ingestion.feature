@@ -97,8 +97,9 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_forward
+      CREATE KAFKA TOPIC EMITTER kafka_forward
         FROM forwarding_events
+        ATTACHED
         TO kafka_main TOPIC 'forwarding_output_{{test_id}}'
         MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING forwarding_event_codec
@@ -1205,7 +1206,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications DETACHED TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1327,7 +1328,8 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED DEDUPLICATOR passthrough FROM notifications
+        CREATE DEDUPLICATOR passthrough FROM notifications
+        DETACHED
         DEDUPLICATE ON input.user_id
         MAX TIME 10m
         BRANCHED BY by_kafka_notifications

@@ -365,7 +365,9 @@ owns it for the length of the checkpoint. The input succeeds once every delivery
 for it succeeded and that share is released. `nacked` inputs are negatively acknowledged at once.
 See [Checkpoints And Acknowledgements](./wasm-processor-guests.md#checkpoints-and-acknowledgements).
 
-The holds gate the source only on an `ATTACHED` processor, which is the default. A `DETACHED`
+The processor's optional `ATTACHED | DETACHED` body clause follows its complete relay inputs and
+collection policy, before its resource binding. The holds gate the source only on an `ATTACHED`
+processor, which is the default. A `DETACHED`
 processor receives its input after relay fan-out has already acknowledged it upstream, so no source
 acknowledgement waits for its checkpoints, although its guest state is checkpointed the same way.
 

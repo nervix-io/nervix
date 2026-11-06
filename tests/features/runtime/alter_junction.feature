@@ -29,8 +29,9 @@ Feature: Altering junctions
       """
     Then the last command output contains
       """
-      CREATE DETACHED JUNCTION route_events
+      CREATE JUNCTION route_events
         FROM incoming_a, incoming_b COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        DETACHED
         FILTER WHERE input.seq > 0
         UNBRANCHED
         TO outgoing

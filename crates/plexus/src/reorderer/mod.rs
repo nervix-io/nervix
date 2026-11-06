@@ -1,8 +1,18 @@
+//! Plexus reorderer statements.
+//!
+//! Layer: language.
+//! - **Owns.** The reorderer grammar, lowering into Models and grammar-derived completion.
+//! - **Depends on.** Shared parser clauses, tokens and the vocabulary.
+//! - **Must not know.** Registry validation, execution planning or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{
-    AckMode, AlterReorderer, AlterReordererOperation, CreateReorderer, CreateStatement,
-};
+use nervix_models::{AlterReorderer, AlterReordererOperation, CreateReorderer, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
@@ -30,11 +40,11 @@ pub fn create_reorderer_parser<'src>()
 + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Identifier::Reorderer))
         .then(reorderer_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(ack_mode().or_not())
         .then(filter_where_clause().or_not())
         .then(by_exprs())
         .then_ignore(kw(Identifier::Max))
@@ -49,7 +59,7 @@ pub fn create_reorderer_parser<'src>()
                 (
                     (
                         (
-                            (((((if_not_exists, mode), name), from_input), filter_where), order_by),
+                            (((((if_not_exists, name), from_input), mode), filter_where), order_by),
                             max_time,
                         ),
                         branched_by,
@@ -66,7 +76,7 @@ pub fn create_reorderer_parser<'src>()
                         branched_by,
                         order_by,
                         max_time,
-                        mode: mode.unwrap_or(AckMode::Attached),
+                        mode: mode.unwrap_or_default(),
                         filter_where,
                         materialized_state,
                     },
@@ -185,6 +195,19 @@ mod tests {
 
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn input_acknowledgement_clause() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE REORDERER tested FROM incoming",
+            "BY input.value MAX TIME 1m UNBRANCHED TO outgoing INHERIT ALL FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG",
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE REORDERER tested FROM incoming DETACHED ",
+            &["FILTER WHERE", "BY"],
+        );
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)

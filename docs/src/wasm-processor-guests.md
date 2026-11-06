@@ -614,6 +614,8 @@ callback at a time, in this order:
    callback made for it has succeeded as well.
 8. Only then does the branch run its next callback.
 
+Declare the optional input mode after `FROM` and its optional `COLLECT FOR`, before
+`USING RESOURCE`; see [Shared Input And Branch Contracts](processors.md#shared-input-and-branch-contracts).
 Only an `ATTACHED` processor, the default, holds its source's acknowledgements this way. A
 `DETACHED` processor receives its input after relay fan-out has acknowledged it upstream, so no
 source acknowledgement waits for its checkpoints, although its guest state is checkpointed the same

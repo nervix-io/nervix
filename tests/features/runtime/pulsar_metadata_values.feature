@@ -153,7 +153,8 @@ Feature: Pulsar transport metadata values
         TO events INHERIT ALL
           SET message_id = metadata.message_id, redelivery_count = metadata.redelivery_count
           UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ATTACHED PULSAR TOPIC EMITTER forwarded FROM events
+      CREATE PULSAR TOPIC EMITTER forwarded FROM events
+        ATTACHED
         TO source TOPIC 'out_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING event_codec INHERIT seq

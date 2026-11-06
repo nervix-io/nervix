@@ -22,6 +22,20 @@ use super::*;
 use crate::lexer::lex;
 
 #[test]
+fn input_acknowledgement_clause() {
+    crate::conformance_support::assert_input_acknowledgement_clause(
+        "CREATE CLIENT CONSUMER EMITTER tested FROM incoming",
+        "TO SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s \
+         INHERIT ALL BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+         GENERAL ERROR LOG",
+    );
+    crate::conformance_support::assert_offers_exactly(
+        "CREATE CLIENT CONSUMER EMITTER tested FROM incoming DETACHED ",
+        &["USING MATERIALIZED STATE", "TO"],
+    );
+}
+
+#[test]
 fn http_emitter_body_modes_roundtrip_with_qualified_request_fields() {
     for body in [
         "ENCODE USING body_codec INHERIT ALL",
@@ -1186,8 +1200,9 @@ fn clickhouse_completion_after_values_holding_an_array_offers_the_mode() {
 #[test]
 fn parses_create_emitter_iceberg() {
     let input = r#"
-        CREATE DETACHED ICEBERG TABLE EMITTER to_iceberg
+        CREATE ICEBERG TABLE EMITTER to_iceberg
             FROM notifications
+            DETACHED
             TO s3_client TABLE 'notifications' NAMESPACE 'Analytics.Events'
             LOCATION 's3://nervix-iceberg/tables/notifications'
             CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
@@ -2158,8 +2173,9 @@ fn parses_create_emitter_pulsar() {
 #[test]
 fn parses_create_emitter_detached() {
     let input = r#"
-        CREATE DETACHED KAFKA TOPIC EMITTER emit
+        CREATE KAFKA TOPIC EMITTER emit
             FROM p99
+            DETACHED
             TO broker1 TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2173,14 +2189,14 @@ fn parses_create_emitter_detached() {
 #[test]
 fn fails_without_to_clause() {
     let tokens =
-        to_tokens("CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 ENCODE USING my_codec;");
+        to_tokens("CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED ENCODE USING my_codec;");
     let errs = parse_create_emitter_tokens(&tokens).expect_err("must fail");
     assert!(!errs.is_empty());
 }
 
 #[test]
 fn rejects_pulsar_emitter_without_topic() {
-    let tokens = to_tokens("CREATE ATTACHED PULSAR TOPIC EMITTER emit FROM p99 TO pulsar1;");
+    let tokens = to_tokens("CREATE PULSAR TOPIC EMITTER emit FROM p99 ATTACHED TO pulsar1;");
     let errs = parse_create_emitter_tokens(&tokens).expect_err("must fail");
     assert!(!errs.is_empty());
 }
@@ -2205,30 +2221,21 @@ fn rejects_encoded_emitter_without_codec() {
 }
 
 #[test]
-fn suggests_mode_after_create() {
-    let input = "CREATE ";
-    let suggestions = suggest_create_emitter(input, input.len());
-    assert!(suggestions.contains(&"ATTACHED".to_string()));
-    assert!(suggestions.contains(&"DETACHED".to_string()));
-    assert!(!suggestions.contains(&"FROM".to_string()));
-}
-
-#[test]
 fn suggests_encode_using_as_compound_keyword() {
     // The codec follows the emitter it encodes for, so it is offered once the emitter is named.
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"ENCODE USING".to_string()));
 
-    let before_emitter = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 ";
+    let before_emitter = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED ";
     let suggestions = suggest_create_emitter(before_emitter, before_emitter.len());
     assert!(!suggestions.contains(&"ENCODE USING".to_string()));
 }
 
 #[test]
 fn a_kinded_emitter_completes_its_client_reference() {
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM events TO ";
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM events ATTACHED TO ";
     assert_eq!(
         suggest_create_emitter(input, input.len()),
         vec!["ref:client"]
@@ -2255,7 +2262,7 @@ fn sentry_emitter_completion_context_does_not_leak_transport_qualifiers() {
 
 #[test]
 fn suggests_flush_after_emitter_error_policies() {
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ON MESSAGE ERROR \
                  LOG ON GENERAL ERROR LOG ";
     let suggestions = suggest_create_emitter(input, input.len());
@@ -2268,8 +2275,9 @@ fn suggests_flush_after_emitter_error_policies() {
 #[test]
 fn parses_create_emitter_mqtt() {
     let input = r#"
-        CREATE ATTACHED MQTT TOPIC EMITTER emit
+        CREATE MQTT TOPIC EMITTER emit
             FROM p99
+            ATTACHED
             TO broker1 TOPIC 'topic' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2294,8 +2302,9 @@ fn parses_create_emitter_mqtt() {
 #[test]
 fn parses_create_emitter_nats() {
     let input = r#"
-        CREATE ATTACHED NATS SUBJECT EMITTER emit
+        CREATE NATS SUBJECT EMITTER emit
             FROM p99
+            ATTACHED
             TO nats_main SUBJECT 'notifications' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2320,8 +2329,9 @@ fn parses_create_emitter_nats() {
 #[test]
 fn parses_create_emitter_rabbitmq() {
     let input = r#"
-        CREATE ATTACHED RABBITMQ QUEUE EMITTER emit
+        CREATE RABBITMQ QUEUE EMITTER emit
             FROM p99
+            ATTACHED
             TO broker1 QUEUE 'queue1' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2346,8 +2356,9 @@ fn parses_create_emitter_rabbitmq() {
 #[test]
 fn parses_create_emitter_redis() {
     let input = r#"
-        CREATE ATTACHED REDIS PUBSUB EMITTER emit
+        CREATE REDIS PUBSUB EMITTER emit
             FROM p99
+            ATTACHED
             TO broker1 CHANNEL 'out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2371,8 +2382,9 @@ fn parses_create_emitter_redis() {
 #[test]
 fn parses_create_emitter_zeromq() {
     let input = r#"
-        CREATE ATTACHED ZEROMQ PUSH EMITTER emit
+        CREATE ZEROMQ PUSH EMITTER emit
             FROM p99
+            ATTACHED
             TO zmq_out MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2448,8 +2460,9 @@ fn syslog_completion_stays_on_no_ack_mode() {
 #[test]
 fn parses_create_emitter_sqs() {
     let input = r#"
-        CREATE ATTACHED SQS QUEUE EMITTER emit
+        CREATE SQS QUEUE EMITTER emit
             FROM p99
+            ATTACHED
             TO sqs_main QUEUE 'queue1' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2529,7 +2542,7 @@ fn rejects_invalid_emitter_route_construction() {
 
 #[test]
 fn does_not_leak_emitter_suggestions_inside_filter_map_program() {
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec WHERE ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(!suggestions.contains(&"MQTT".to_string()));
@@ -2538,7 +2551,7 @@ fn does_not_leak_emitter_suggestions_inside_filter_map_program() {
 
 #[test]
 fn emitter_filter_map_context_suggests_invoke_without_emitter_leakage() {
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ";
     let suggestions = suggest_create_emitter(input, input.len());
 
@@ -2549,7 +2562,7 @@ fn emitter_filter_map_context_suggests_invoke_without_emitter_leakage() {
 
 #[test]
 fn pulsar_emitter_context_does_not_offer_other_transport_keywords() {
-    let input = "CREATE ATTACHED PULSAR TOPIC EMITTER emit FROM p99 TO pulsar1 ";
+    let input = "CREATE PULSAR TOPIC EMITTER emit FROM p99 ATTACHED TO pulsar1 ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"TOPIC".to_string()));
     assert!(!suggestions.contains(&"QUEUE".to_string()));
