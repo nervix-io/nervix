@@ -2771,7 +2771,7 @@ clippy_language_packages_1 := ["nervix-plexus", "nervix-plexus-format", "nervix-
 
 clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-jvm", "nervix-client-python"]
 
-clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
+clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-crypto", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
 
 clippy_foundation_packages_2 := [
     "nervix-arbitrary",

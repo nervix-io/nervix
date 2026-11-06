@@ -15,8 +15,9 @@ a change that raises the count fails `just ratchet`.
 ## The Boundary
 
 `nervix-crypto` is the single source of Nervix-authored cryptography. It is an engine-layer crate
-built only on `aws-lc-rs` and `rustls`, and it knows no Nervix model, graph or connector. It
-owns the scope of:
+using `aws-lc-rs` and `rustls` for cryptography, the primitive boundary for shared ownership and
+initialization, and shared error-reporting contracts. It knows no Nervix model, graph or connector.
+It owns the scope of:
 
 - the rustls `CryptoProvider`, built in one place and installed as the process default once, by
   purpose: the interconnect's fixed set of approved algorithms, and the provider of outward-facing
@@ -199,9 +200,10 @@ driver's `nkeys` feature. The independent `nkeys` signer is a test-only interope
 and scenario fixture, outside the release product graph. Adding the callback therefore adds no
 non-AWS-LC cryptography edge and leaves the count unchanged.
 
-The signing operation currently lives in `crates/connectors/nats/src/client/authentication.rs`
-while `nervix-crypto` is still a target. FIPS Prep 02 moves it into the boundary; wire decoding
-continues to belong to the connector. This is preparation, with no FIPS-validation claim. The
+The signing operation lives in `nervix_crypto::ed25519`.
+`crates/connectors/nats/src/client/authentication.rs` owns wire decoding and maps the boundary's
+typed errors into the driver's authentication callback. This is preparation, with no
+FIPS-validation claim. The
 pinned [aws-lc-rs Ed25519 implementation](https://github.com/aws/aws-lc-rs/blob/v1.18.2/aws-lc-rs/src/ed25519.rs)
 marks signing as unsuitable for FIPS use, so the future FIPS mode must refuse these NATS methods
 until its boundary has a validated signing service for the protocol. Token authentication has no
