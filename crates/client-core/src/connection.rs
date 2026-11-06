@@ -1,5 +1,7 @@
 //! Reaching a server: TLS selection, credentials, and the servers a client has learned about.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** The connect options, the channel a server is reached over, the `authorization`
 //!   metadata every call carries, and the directory of servers a lost session reconnects to.
 //! - **Depends on.** tonic's transport, rustls, and the native DNS resolver.
@@ -94,6 +96,9 @@ pub enum ConnectDns {
 }
 
 impl ConnectOptions {
+    /// The most additional endpoints a caller may configure for connection and recovery.
+    pub const MAX_SEED_SERVERS: usize = 32;
+
     pub fn with_basic_auth(
         mut self,
         username: impl Into<String>,

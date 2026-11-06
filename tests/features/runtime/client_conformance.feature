@@ -199,6 +199,91 @@ Feature: Cross-language client conformance
       | bun     | 1            |
       | bun     | 3            |
 
+  Scenario Outline: A <runtime> C binding connects through two failed HTTPS endpoints and a live seed, and distinguishes session-local repeats from durable recovery
+    Given client grpc transport is configured with mode "https"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event_row (id U32);
+      CREATE RELAY events SCHEMA event_row;
+      START;
+      """
+    When the "<runtime>" client probe connects through a seed after its first gRPC address is unavailable
+    Then within "120s" the client probe reports
+      """
+      CONNECTED seed
+      EVENT wait=deadline
+      ATTACH first=completed replay=failed
+      SUBSCRIBE first=completed replay=failed
+      DELETE first=completed replay=completed
+      CHECKS ok
+      PASS
+      """
+
+    Examples: the C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C over the shared Rust binding
+      | runtime | cluster_size |
+      | c       | 1            |
+      | c       | 3            |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++ over the shared Rust binding
+      | runtime | cluster_size |
+      | c++     | 1            |
+      | c++     | 3            |
+
+  Scenario Outline: A <runtime> C binding exposes a refused subscription restoration's message and retry wait
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA watched_row (value STRING);
+      CREATE RELAY watched SCHEMA watched_row UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    When the "<runtime>" client probe subscribes for restoration through the forwarded gRPC endpoint of node "{{leader}}"
+    Then within "30s" the client probe prints "SUBSCRIBED"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" the client probe prints "INTERRUPTED"
+    When these Plexus commands are executed on the leader node
+      """
+      DROP RELAY watched;
+      """
+    And the TCP forwarder at "127.0.0.1" restarts
+    Then within "120s" the client probe reports
+      """
+      SUBSCRIBED
+      INTERRUPTED
+      RESTORATION message=stream 'watched' does not exist in domain '{{domain}}' wait=positive
+      CHECKS ok
+      PASS
+      """
+
+    Examples: the C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C over the shared Rust binding
+      | runtime | cluster_size |
+      | c       | 1            |
+      | c       | 3            |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++ over the shared Rust binding
+      | runtime | cluster_size |
+      | c++     | 1            |
+      | c++     | 3            |
+
   Scenario Outline: A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart
     # Holding the clock authority's first progress proves which node owns it, and that every live
     # node has installed the started generation, because the authority emits only after that. The
