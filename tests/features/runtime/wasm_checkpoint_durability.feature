@@ -110,13 +110,15 @@ Feature: WASM guest-state checkpoint durability
       | 3            | 0             |
       | 3            | 1             |
 
-  # The store's owner test checks the revision index directly. This public path verifies that
-  # replacing the same placement's checkpoint repeatedly still restores its last guest state.
+  # Each acknowledged input is one guest callback whose checkpoint replaced its branch's previous
+  # checkpoint. The nodes' runtime state stores are counted after every node stopped and before any
+  # starts again, so the count shows whether a stored checkpoint kept only the revision-index
+  # entry its current revision needs; the continuation then shows each branch restored from it.
   @long_running
-  Scenario: Repeated guest checkpoints restore the last state after a node restart
+  Scenario Outline: Repeated guest checkpoints keep one revision-index entry for each stored checkpoint on <cluster_size> nodes
     Given Kafka is running
-    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And a 1 node nervix cluster is started
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
     And the leader node is configured with these Plexus commands
       """
@@ -142,7 +144,7 @@ Feature: WASM guest-state checkpoint durability
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_checkpoint_replacement_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_checkpoint_replacement_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -173,39 +175,37 @@ Feature: WASM guest-state checkpoint durability
       """
       {"value":1,"tenant":"alpha"}
       """
-    Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 1"
-    When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
       """
-      {"value":2,"tenant":"alpha"}
+      {"value":11,"tenant":"beta"}
       """
     Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 2"
     When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
       """
-      {"value":3,"tenant":"alpha"}
+      {"value":2,"tenant":"alpha"}
       """
-    Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 3"
-    When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
       """
-      {"value":4,"tenant":"alpha"}
+      {"value":12,"tenant":"beta"}
       """
     Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 4"
     When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
       """
-      {"value":5,"tenant":"alpha"}
+      {"value":3,"tenant":"alpha"}
       """
-    Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 5"
-    When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
       """
-      {"value":6,"tenant":"alpha"}
+      {"value":13,"tenant":"beta"}
       """
     Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 6"
     And within "10s" the relay subscription receives payloads containing all fragments
       """
-      key={"tenant":"alpha"} | "tenant":"alpha" | "value":6
+      key={"tenant":"alpha"} | "tenant":"alpha" | "value":2
+      key={"tenant":"beta"} | "tenant":"beta" | "value":12
       """
-    When the cluster is restarted
-    Then node "node-1" eventually observes a stable leader
-    And within "90s" node "node-1" eventually reports status containing "node=node-1 state-snapshot-interval running=100ms revision=1"
+    When the cluster is restarted after counting the runtime state each node stored for domain "{{domain}}"
+    Then the stopped nodes stored at least <stored_checkpoints> runtime state checkpoints, each with one revision-index entry
+    And node "node-1" eventually observes a stable leader
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
@@ -213,18 +213,24 @@ Feature: WASM guest-state checkpoint durability
     Then Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" eventually has 1 consumers
     When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
       """
-      {"value":7,"tenant":"alpha"}
+      {"value":4,"tenant":"alpha"}
       """
-    Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 7"
-    When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
       """
-      {"value":8,"tenant":"alpha"}
+      {"value":14,"tenant":"beta"}
       """
     Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 8"
     And within "10s" the relay subscription receives payloads containing all fragments
       """
-      key={"tenant":"alpha"} | "tenant":"alpha" | "value":8
+      key={"tenant":"alpha"} | "tenant":"alpha" | "value":4
+      key={"tenant":"beta"} | "tenant":"beta" | "value":14
       """
+
+    Examples:
+      | cluster_size | replica_count | stored_checkpoints |
+      | 1            | 0             | 2                  |
+      | 3            | 0             | 2                  |
+      | 3            | 1             | 4                  |
 
   # The checkpoint is held for longer than the source's ACK TIMEOUT, so the source sends the held
   # input again unless the branch reports it alive, and well inside the checkpoint's own ninety

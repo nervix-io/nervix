@@ -327,12 +327,12 @@ runs share the next one, instead of queuing one each. No lock is held across the
 [Bounded Synchronization Outside The Open
 Path](./data-plane-concurrency.md#bounded-synchronization-outside-the-open-path).
 
-The state store commits the inline guest checkpoint and its current revision-index entry in one
-batch, removing the superseded entry in that batch. Repeated guest callbacks therefore leave one
-index entry for this placement regardless of callback count. A replica that installs the latest
-guest checkpoint uses the same write; a segmented checkpoint replaces its prior index only when
-its chunks are durable. The storage format marker refuses a directory written before this index
-invariant rather than loading accumulated entries into the current shape.
+Each guest checkpoint replaces the branch's previous one: the state store writes it inline, removes
+the revision-index entry of the checkpoint it supersedes and adds its own in the same batch, so a
+branch's stored state stays one checkpoint and one index entry however many callbacks it has
+checkpointed. A replica installs the checkpoints it receives through the same write. [Generation
+Storage](./backup-and-restore-architecture.md#generation-storage) describes the index the store
+keeps.
 
 A failed synchronization is not retried. The operating system may have dropped the writes it failed
 to flush, and the database refuses every later synchronization, so from then on no write on that

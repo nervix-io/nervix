@@ -102,6 +102,7 @@ use nervix_server::{
         AppError, InternalTransportMode, SettingOverride, ShutdownPhaseOutcome, run_server_process,
     },
     memory_pressure::MemoryPressureConfig,
+    runtime::revision_index_inspection::{StoredRevisionIndex, read_stored_revision_index},
 };
 use nervix_test_environment::{TestParallelism, TestParallelismArgs, workspace_root};
 use nervix_wasm::{
@@ -671,6 +672,9 @@ struct ScenarioWorld {
     /// Contents each Plexus file was given, so "is unchanged" has something to compare against.
     formatter_original_files: BTreeMap<String, String>,
     last_cluster_operation_elapsed: Option<Duration>,
+    /// What each node's runtime state store held for the counted domain when the cluster last
+    /// stopped for a counted restart.
+    stopped_revision_indexes: BTreeMap<String, StoredRevisionIndex>,
     /// The last node start a scenario attempted without requiring it to succeed.
     node_start_attempt: Option<NodeStartAttempt>,
     browser_page: Option<playwright_rs::Page>,
@@ -792,6 +796,7 @@ impl fmt::Debug for ScenarioWorld {
                 "last_cluster_operation_elapsed",
                 &self.last_cluster_operation_elapsed,
             )
+            .field("stopped_revision_indexes", &self.stopped_revision_indexes)
             .field("node_start_attempt", &self.node_start_attempt)
             .field("clickhouse_table", &self.clickhouse_table)
             .field("clickhouse_tls", &self.clickhouse_tls)
@@ -15589,6 +15594,73 @@ async fn when_the_cluster_restarts_from_on_disk_tables(world: &mut ScenarioWorld
             "node '{node}' stopped without moving its node database into on-disk tables"
         );
     }
+}
+
+/// Every node stops, the runtime state store of each stopped node is counted for `domain` before
+/// any node starts again, and the cluster then restarts as "the cluster is restarted" does.
+#[when(
+    expr = "the cluster is restarted after counting the runtime state each node stored for domain \
+            {string}"
+)]
+async fn when_the_cluster_restarts_counting_stored_runtime_state(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = nervix_models::DomainName::parse(&expand_placeholders(world, &domain))
+        .expect("the counted domain is a valid domain name");
+    world.forget_session_observations();
+    let counted = world
+        .cluster_mut()
+        .restart_inspecting_stopped_databases(move |databases| {
+            let mut counted = BTreeMap::new();
+            for database in databases {
+                let index = match read_stored_revision_index(&database.path, &domain) {
+                    Ok(index) => index,
+                    Err(error) => panic!(
+                        "the stopped runtime state store of node '{}' could not be counted: \
+                         {error:#}",
+                        database.node
+                    ),
+                };
+                counted.insert(database.node, index);
+            }
+            counted
+        })
+        .await
+        .expect("failed to restart cluster");
+    world.stopped_revision_indexes = counted;
+}
+
+/// Reads the counts of the last counted restart: every node kept exactly one revision-index entry
+/// for each runtime state checkpoint it stored, and together the nodes stored at least `minimum`.
+#[then(
+    expr = "the stopped nodes stored at least {int} runtime state checkpoints, each with one \
+            revision-index entry"
+)]
+async fn then_stopped_nodes_kept_one_index_entry_per_checkpoint(
+    world: &mut ScenarioWorld,
+    minimum: usize,
+) {
+    assert!(
+        !world.stopped_revision_indexes.is_empty(),
+        "no counted restart recorded what the stopped nodes stored"
+    );
+    let mut stored = 0_usize;
+    for (node, index) in &world.stopped_revision_indexes {
+        assert_eq!(
+            index.index_entries, index.checkpoints,
+            "node '{node}' stopped with {} revision-index entries beside {} runtime state \
+             checkpoints",
+            index.index_entries, index.checkpoints
+        );
+        stored = stored
+            .checked_add(index.checkpoints)
+            .assured("a test cluster stores fewer checkpoints than a usize counts");
+    }
+    assert!(
+        stored >= minimum,
+        "the stopped nodes stored {stored} runtime state checkpoints, fewer than {minimum}"
+    );
 }
 
 #[then(expr = "the last cluster operation completes within {string}")]

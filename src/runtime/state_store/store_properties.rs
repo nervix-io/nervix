@@ -405,6 +405,43 @@ fn assert_listed(listed: &ListedCheckpoint, expected: &GeneratedCheckpoint) {
     assert_eq!(read, expected.payload);
 }
 
+/// The revision-index keys `store` holds for the placement stored under `placement_key`.
+fn stored_revision_index(store: &RuntimeStateStore, placement_key: &[u8]) -> Vec<Vec<u8>> {
+    let mut prefix = placement_key.to_vec();
+    prefix.push(0);
+    store
+        .lsm_index
+        .prefix(&prefix)
+        .map(|entry| entry.key().assured("the revision key reads").to_vec())
+        .collect()
+}
+
+/// `store` selects `payload` at `revision` for `placement` and keeps that revision's index entry
+/// and no other.
+fn assert_current_checkpoint(
+    store: &RuntimeStateStore,
+    placement: &RuntimeStatePlacement,
+    revision: u64,
+    payload: &[u8],
+) {
+    let placement_key = StateNamespace::Initial
+        .key(placement)
+        .assured("the placement key is bounded");
+    assert_eq!(
+        stored_revision_index(store, &placement_key),
+        vec![index_key(&placement_key, revision)]
+    );
+    let latest = store
+        .latest_snapshot(placement)
+        .assured("the current checkpoint reads")
+        .assured("the checkpoint exists");
+    assert_eq!(latest.lsm, revision);
+    assert_eq!(latest.payload, payload);
+}
+
+/// Inline and segmented checkpoints that replace one another, a checkpoint written again at the
+/// current revision and a replica install each leave the placement exactly the index entry of its
+/// selected revision, also after the database reopens.
 #[test]
 fn replacing_checkpoints_keeps_only_the_current_revision_index() {
     let directory = tempfile::tempdir().assured("the state directory opens");
@@ -416,14 +453,9 @@ fn replacing_checkpoints_keeps_only_the_current_revision_index() {
         },
         kind: ModelKind::WasmProcessor,
         identifier: ModelName::parse("filter").assured("processor name parses"),
-        unit: Unit::Single,
+        unit: Unit::SINGLE,
         branch_key: None,
     };
-    let placement_key = StateNamespace::Initial
-        .key(&placement)
-        .assured("the placement key is bounded");
-    let mut index_prefix = placement_key.clone();
-    index_prefix.push(0);
 
     let store = open_store(directory.path());
     for revision in 1..=6 {
@@ -447,36 +479,48 @@ fn replacing_checkpoints_keeps_only_the_current_revision_index() {
                 .publish_sealed_snapshot(&placement, revision, &payload)
                 .assured("an inline checkpoint publishes");
         }
-        let index = store
-            .lsm_index
-            .prefix(&index_prefix)
-            .map(|entry| entry.key().assured("the revision key reads").to_vec())
-            .collect::<Vec<_>>();
-        assert_eq!(index, vec![index_key(&placement_key, revision)]);
-        let latest = store
-            .latest_snapshot(&placement)
-            .assured("the current checkpoint reads")
-            .assured("the checkpoint exists");
-        assert_eq!(latest.lsm, revision);
-        assert_eq!(latest.payload, payload);
+        assert_current_checkpoint(&store, &placement, revision, &payload);
     }
 
+    store
+        .persist_latest_snapshot(&placement, 6, b"rewritten-6")
+        .assured("a checkpoint at the current revision replaces the current one");
+    assert_current_checkpoint(&store, &placement, 6, b"rewritten-6");
+
+    let writer = store.latest_snapshot_writer();
+    let installed = writer
+        .install_replica_if_newer(
+            &placement,
+            PersistedRuntimeStateEntry {
+                lsm: 7,
+                payload: b"replica-7".to_vec(),
+            },
+        )
+        .assured("a newer replica checkpoint installs");
+    assert!(
+        installed.is_some(),
+        "the newer replica checkpoint installed"
+    );
+    assert_current_checkpoint(&store, &placement, 7, b"replica-7");
+    let repeated = writer
+        .install_replica_if_newer(
+            &placement,
+            PersistedRuntimeStateEntry {
+                lsm: 7,
+                payload: b"replica-7-again".to_vec(),
+            },
+        )
+        .assured("a replica checkpoint that is not newer is compared");
+    assert!(
+        repeated.is_none(),
+        "a replica checkpoint that is not newer installs nothing"
+    );
+    assert_current_checkpoint(&store, &placement, 7, b"replica-7");
+
+    drop(writer);
     drop(store);
     let reopened = open_store(directory.path());
-    let index = reopened
-        .lsm_index
-        .prefix(&index_prefix)
-        .map(|entry| entry.key().assured("the revision key reads").to_vec())
-        .collect::<Vec<_>>();
-    assert_eq!(index, vec![index_key(&placement_key, 6)]);
-    assert_eq!(
-        reopened
-            .latest_snapshot(&placement)
-            .assured("the checkpoint reads after reopen")
-            .assured("the checkpoint exists")
-            .payload,
-        b"checkpoint-6"
-    );
+    assert_current_checkpoint(&reopened, &placement, 7, b"replica-7");
 }
 
 /// Checkpoints of up to three placements of one domain, stored inline, as chunked streams or in a
