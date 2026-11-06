@@ -1463,8 +1463,10 @@ impl Client {
     /// The stream outlives the session. When the session ends, it reports
     /// [`SubscriptionEvent::Interrupted`] for every subscription the session held that the server
     /// had not ended, opens a new session, and opens each of them again as a new generation. An
-    /// opening that session refuses or leaves unanswered is reported as
-    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. A subscription
+    /// opening that fails while the session stays open is reported as
+    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. An opening
+    /// left unanswered past the request timeout ends
+    /// that session and wakes the reader to open another. A subscription
     /// the server ended is never opened again, and its [`SubscriptionEvent::Ended`] is reported
     /// once, after the events before it, even when its session ended before it was read. With
     /// nothing to restore it waits for the next session the client opens, and delivers the events

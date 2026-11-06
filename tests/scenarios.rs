@@ -255,9 +255,11 @@ mod restarted_voter;
 mod session_protocol;
 mod session_tls;
 mod standalone_transaction;
+mod subscription_restoration;
 mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
+mod web_console_restore_faults;
 mod websocket_lifecycle;
 mod wide_row_intake;
 
@@ -36556,6 +36558,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                         });
                 }
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
+                if let ScenarioBodyResult::StepFailed(_) | ScenarioBodyResult::BeforeHookFailed =
+                    &body
+                {
+                    web_console_connections::record_browser_state(world).await;
+                }
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
                 world.stop_consensus_load();

@@ -1566,6 +1566,35 @@ The harness keeps these boundaries explicit.
   its entity gate pause, holds the new leader's run of the same transaction until the first run
   has refused and released its hold, and requires the alteration to end refused with every frame
   delivered once.
+- **Subscription reopening replies.** The native restoration outline opens an acknowledged
+  subscription through the existing TCP forwarder, ends that connection, and holds one successful
+  reopening reply on the serving node while its transport stays live. Its explicitly configured
+  request timeout ends that attempt. A reader already waiting must open another session, reach an
+  active subscription, and receive exactly one row from one subsequent HTTP post within the
+  existing thirty-second observation bound. Initial connection retains its ordinary connection
+  budget. The one-shot pause uses the command-pause owner and teardown releases it even after a
+  failed assertion. The same one- and three-node examples run in the Deloxide active, order and
+  stressed lifecycle selections: the request registry and event queues use tracked blocking
+  locks, while the watch and transport waits remain untracked and have their Shuttle check.
+- **Console restoration observations.** The browser's bounded frame gate can hold the next session
+  as well as the initial one: at most 64 frames and 1 MiB, released in receive order. It records
+  overflow or a held connection ending as a fixture failure. A reconnect that must preserve an
+  idle transaction uses the existing resettable TCP proxy: a clean WebSocket close with no request
+  in flight deliberately reverts it. The proxy resets its current sockets and keeps listening for
+  the replacement session, without changing the node or its leadership. A retained transaction
+  prompt alone does not establish that the replacement session's domain list has enabled its
+  input. Controlled restoration scenes release that gate, observe the restored subscription tab,
+  select Plexus REPL again, and require visible enabled input before arming a command reply pause.
+  A scene with multiple losses observes the intended replacement leader before using its tab;
+  an interruption notice from an earlier loss does not establish that phase. Clock notifications
+  are matched to the successful attach replies of distinct recorded
+  session connections; repeated acknowledgements on one connection fail, and the terminal must
+  render each acknowledgement exactly once. The recorder counts the browser's received frames,
+  excluding the gate's synthetic redelivery of a frame it already recorded. Extra real connections
+  do not imply extra domain-clock generations. Failed browser scenes retain their connection
+  frames, terminal, held-frame count and prompt visibility and disabled state before cleanup
+  releases the pauses. Reading this evidence has the existing console assertion bound and reports
+  an unreadable page without preventing pause cleanup.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup
