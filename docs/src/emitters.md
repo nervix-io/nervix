@@ -118,11 +118,29 @@ A node-wide materialized-state dependency and an `ON MESSAGE ERROR SEND TO` rout
 exact-branch compatible with every source. Consequently, an emitter whose inputs use differently
 named branches cannot configure one branch-bound dependency or error relay across those inputs.
 
+Nervix applies each source's declared branch TTL and `MAX INSTANCES ... EVICT LRU` to the work
+this emitter still holds for that source, with the instance limit applied per source partition.
+Equal keys from different source relays remain separate, and an unbranched source has no branch
+instances to expire. An upstream relay and another emitter keep their own branch lifetimes; see
+[TTL](relay.md#ttl).
+
+Expiry or LRU eviction discards the affected source branch's unresolved host-buffered rows,
+prepared output and pending materialized-state wait. Discarded members are left unacknowledged.
+Rows already transferred to a staging connector keep its commit and acknowledgement lifecycle.
+State becoming ready later cannot revive the discarded input, and a later input with the same key
+starts fresh work. Surviving branches keep their prepared bytes, member mappings and accepted
+execution snapshots. This retention rule applies with and without `BATCH`, and retains no history
+of completed work.
+
 All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`, and
 `DESCRIBE EMITTER` reports the declared policy on its `flush:` line. `FLUSH`
 means Nervix collects an in-memory Arrow batch before handing it to the external emitter. `FLUSH EACH`
 is a domain-logical duration, so a paced domain's `TIME RATE` accelerates or slows it; retry
 backoff, acknowledgement keepalive, and emitter acknowledgement timeouts stay on the physical clock.
+While a partial buffer or staging connector holds acknowledged work, the host keeps its source
+alive every 100 physical milliseconds, including while another input waits for materialized state.
+New input does not postpone this beat. The beat acknowledges no records and stops when no work
+remains; an active retry supplies its own keepalive instead.
 See [Domains And Time](domains-and-time.md) for the full clock split. The
 [Plexus Overview](plexus-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg

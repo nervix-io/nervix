@@ -120,7 +120,7 @@ connector crate.
 | Decision and composition | Convert a validated Model into a typed source or emitter start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define ingestor and emitter operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the ingestor contract, the emitter contract, or both. |
-| Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse Plexus or read a Model during data-plane execution. |
+| Host data plane | Own tasks, intake and Arrow decoding, branch routing and retention of held emitter work, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse Plexus or read a Model during data-plane execution. |
 
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service

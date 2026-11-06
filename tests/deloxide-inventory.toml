@@ -32,6 +32,35 @@ selections = [
 ]
 target = "lib"
 
+[[invocation]]
+bound_seconds = 120
+evidence = true
+features = ["testing"]
+id = "emitter-branch-retirement"
+kind = "libtest-each"
+marker = "runtime::emitter_buffer::tests::retiring_one_source_branch_settles_only_its_unresolved_host_rows"
+package = "nervix-server"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+target = "lib"
+
+[[workload]]
+coverage = "Production buffer retirement settles real ACK roots through the tracked completion-sender mutex, preserves connector-staged ownership and counts delivered rows once. The exclusively owned branch collections, async timer and parked-wait orchestration are outside detector evidence."
+id = "owner.emitter-branch-retirement"
+invariant = "Retiring a source branch NoACKs only its unresolved host rows and leaves independent source/key rows and connector-owned acknowledgements intact."
+invocation = "emitter-branch-retirement"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "runtime::emitter_buffer::tests::retiring_one_source_branch_settles_only_its_unresolved_host_rows"
+
 [[workload]]
 coverage = "The engine's selected blocking shard locks, concurrent key leases, exact rollback, global eviction, TTL removal and fresh keyed-store restoration; governor internals and atomic memory ordering are outside detector evidence."
 id = "owner.rate-limit-keyed-transactions"
@@ -4303,6 +4332,7 @@ workloads = [
 [[owner]]
 path = "src/runtime_ack.rs"
 workloads = [
+  "owner.emitter-branch-retirement",
   "scenario.sqs-parallel-batch",
   "stress.sqs-parallel-batch",
   "scenario.client-alter-drain",

@@ -20,11 +20,11 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::RecordEnvelope;
 use nervix_models::{
-    AckMode, Assignment, AssignmentTarget, CodecName, CreateEmitter, CreateSchema, EmitterName,
-    EnvelopeClauseForm, EnvelopeClauseKind, ErrorPolicies, Expression, FieldName, FlushPolicy,
-    HeaderValues, InputCollectPolicy, MaterializedStateDependency, Model, ModelKind, ModelName,
-    NodeRef, PropertyDeclaration, RelayName, RouteConstruction, ScheduledNodes, SchemaField,
-    SchemaName, SqsFifoGroup, parse_duration_text,
+    AckMode, Assignment, AssignmentTarget, BranchPartitions, CodecName, CreateEmitter,
+    CreateSchema, EmitterName, EnvelopeClauseForm, EnvelopeClauseKind, ErrorPolicies, Expression,
+    FieldName, FlushPolicy, HeaderValues, InputCollectPolicy, MaterializedStateDependency, Model,
+    ModelKind, ModelName, NodeRef, PropertyDeclaration, RelayName, RouteConstruction,
+    ScheduledNodes, SchemaField, SchemaName, SqsFifoGroup, parse_duration_text,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
@@ -35,7 +35,7 @@ use thiserror::Error;
 
 use crate::{
     emitter_start_plan::{DeclaredClientConfig, EmitterClientModels, EmitterStartPlan},
-    registry::{DomainActivationPlan, LoweredFilter},
+    registry::{DomainActivationPlan, LoweredFilter, PlannedRelayRetention},
     runtime_schema::CompiledSchema,
 };
 
@@ -90,11 +90,13 @@ pub(crate) enum EmitterExecutionPlanError {
     Envelope { emitter: EmitterName },
 }
 
-/// One source edge, in declared input order, with its already lowered predicate.
+/// One source edge, in declared input order, with its lowered predicate and branch limits.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EmitterInputPlan {
     pub(crate) relay: RelayName,
     pub(crate) from_where: Option<LoweredFilter>,
+    pub(crate) retention: PlannedRelayRetention,
+    pub(crate) partitions: Option<BranchPartitions>,
 }
 
 /// The route's frontend program and the boundary between inherited and declared SET operations.
@@ -226,6 +228,8 @@ impl EmitterExecutionPlan {
             inputs.push(EmitterInputPlan {
                 relay: relay.clone(),
                 from_where,
+                retention: planned.retention,
+                partitions: planned.branching.partitions(),
             });
         }
         let input_schema = input_schema.ok_or_else(|| {
