@@ -41,7 +41,10 @@ use super::{
     },
     IngestorConnectorStartError, IngestorStartError,
 };
-use crate::runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryEnd};
+use crate::{
+    metrics::IngestorInteractionMetrics,
+    runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryEnd},
+};
 
 #[path = "connector_acknowledgement.rs"]
 mod acknowledgement;
@@ -557,17 +560,8 @@ pub(super) struct RuntimeIngestorHost {
     buffered_intake: bool,
     flush_each_intake: bool,
     unacknowledged_admission: QueueAdmission,
-    /// Counts the unacknowledged payloads this host did not deliver because the node's extension
-    /// workers had no room to unfold them.
-    unfolding_refused: prometheus::IntCounter,
-    /// Counts the positions this host discarded after a reconnect because the broker redelivers
-    /// them.
-    transport_redeliveries: prometheus::IntCounter,
-    /// Counts the payloads this host's ingestor dropped because they exceed its client's size bound.
-    oversized_payloads: prometheus::IntCounter,
-    /// Counts header values the connector skipped because their bytes are not valid UTF-8, for
-    /// this host's polls and the endpoint bindings it hands out.
-    header_values_dropped: prometheus::IntCounter,
+    /// Retained source host counters, also handed to endpoint bindings where needed.
+    interactions: IngestorInteractionMetrics,
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
     /// it hands out.
     decode_rejections: DecodeRejections,
@@ -597,38 +591,16 @@ impl RuntimeIngestorHost {
         );
         let quiesce_observation = spec.quiesce.observation();
         let dispatcher = spec.runtime.inner.remote_dispatcher.load();
-        let unfolding_refused = spec.runtime.inner.metrics.ingestor_unfolding_refused(
-            &spec.domain,
-            &spec.ingestor,
-            spec.unit,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let transport_redeliveries = spec.runtime.inner.metrics.ingestor_transport_redeliveries(
-            &spec.domain,
-            &spec.ingestor,
-            spec.unit,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let oversized_payloads = spec.runtime.inner.metrics.ingestor_oversized_payloads(
-            &spec.domain,
-            &spec.ingestor,
-            spec.unit,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let header_values_dropped = spec.runtime.inner.metrics.ingestor_header_values_dropped(
-            &spec.domain,
-            &spec.ingestor,
-            spec.unit,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let decode_rejections = DecodeRejections::new(
-            spec.general_error_policy,
-            spec.runtime.inner.metrics.ingestor_decode_rejections(
+        let (interactions, decode_rejections_counter) =
+            spec.runtime.inner.metrics.register_ingestor_interactions(
                 &spec.domain,
                 &spec.ingestor,
                 spec.unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-            ),
+            );
+        let decode_rejections = DecodeRejections::new(
+            spec.general_error_policy,
+            decode_rejections_counter,
             status.clone(),
         );
         let delivery_stop = spec.shutdown.clone();
@@ -666,10 +638,7 @@ impl RuntimeIngestorHost {
             buffered_intake: spec.buffered_intake,
             flush_each_intake: spec.flush_each_intake,
             unacknowledged_admission: spec.unacknowledged_admission,
-            unfolding_refused,
-            transport_redeliveries,
-            oversized_payloads,
-            header_values_dropped,
+            interactions,
             decode_rejections,
             confirmation_delay,
         }
@@ -694,7 +663,7 @@ impl RuntimeIngestorHost {
             metrics: self.metrics.clone(),
             branched_senders: self.branched_senders.clone(),
             decode_rejections: self.decode_rejections.clone(),
-            header_values_dropped: self.header_values_dropped.clone(),
+            header_values_dropped: self.interactions.header_values_dropped.clone(),
         }
     }
 
@@ -1084,7 +1053,9 @@ impl RuntimeIngestorHost {
     /// Counts `payloads` an unacknowledged intake did not deliver because the node's extension
     /// workers had no room to unfold them.
     fn count_refused(&self, payloads: usize) {
-        self.unfolding_refused.inc_by(payloads.arch_into());
+        self.interactions
+            .unfolding_refused
+            .inc_by(payloads.arch_into());
     }
 
     /// Consumes every payload of an unacknowledged or retained batch its codec refused, as the
@@ -1257,11 +1228,15 @@ impl IngestorHostServices for RuntimeIngestorHost {
             positions,
             "discarded positions of a lost connection that the broker redelivers"
         );
-        self.transport_redeliveries.inc_by(positions.arch_into());
+        self.interactions
+            .transport_redeliveries
+            .inc_by(positions.arch_into());
     }
 
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
-        self.oversized_payloads.inc_by(payloads.get().arch_into());
+        self.interactions
+            .oversized_payloads
+            .inc_by(payloads.get().arch_into());
     }
 
     fn record_unconfirmed_stop(&self, positions: usize) {

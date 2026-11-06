@@ -49,6 +49,8 @@ pub(in crate::runtime) struct EmitterConnectorContext {
     pub(super) status: Arc<task_status::TaskStatus<EmitterRetryStatus>>,
     /// Drain observers retain the registered counter independently of this context.
     pub(super) confirmation_waits: Arc<AtomicUsize>,
+    /// The process-local metric store independently retains these children for inspection.
+    pub(super) interactions: EmitterInteractionMetrics,
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) emitter: EmitterName,
@@ -816,6 +818,12 @@ impl EmitterTask {
         };
         let dispatcher = runtime.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
+        let task_interactions = runtime.inner.metrics.register_emitter_interactions(
+            domain,
+            &task_emitter,
+            physical_node_id,
+            plan.connector.kind(),
+        );
         let task_input_metrics = inputs
             .iter()
             .map(|(relay, _)| {
@@ -973,6 +981,7 @@ impl EmitterTask {
                 ),
                 status,
                 confirmation_waits,
+                interactions: task_interactions,
                 runtime: runtime.clone(),
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),

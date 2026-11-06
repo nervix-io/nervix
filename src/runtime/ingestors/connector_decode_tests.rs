@@ -170,7 +170,7 @@ async fn an_unacknowledged_batch_drops_a_payload_its_codec_refuses_and_delivers_
     );
     assert_rejected(&fixture, &report, 1);
     assert_eq!(
-        host.unfolding_refused.get(),
+        host.interactions.unfolding_refused.get(),
         0,
         "a codec refusal is not a refusal for room"
     );

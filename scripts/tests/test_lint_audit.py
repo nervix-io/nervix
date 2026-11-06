@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from typing import Any
@@ -400,14 +401,35 @@ class RepositoryTests(unittest.TestCase):
                 "configurations": [{"name": "ordinary"}], "findings": [],
                 "evidence": [evidence("ordinary", raw)]}
 
-        def analysis(arguments: list[str]) -> int:
-            destination = pathlib.Path(arguments[arguments.index("--output") + 1])
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(json.dumps(gate))
-            return 0
+        actual_run = subprocess.run
 
-        with mock.patch.object(lint_audit.typed_ratchet, "main", side_effect=analysis):
-            self.assertEqual(lint_audit.main(["--root", str(self.root), "--target-dir", str(target)]), 0)
+        for native_coverage in (False, True):
+            with self.subTest(native_coverage=native_coverage), mock.patch.dict(os.environ):
+                if native_coverage:
+                    os.environ["NERVIX_NATIVE_COVERAGE_ATTEMPT"] = "unit-attempt"
+                else:
+                    os.environ.pop("NERVIX_NATIVE_COVERAGE_ATTEMPT", None)
+                expected = [str(target / "typed-ratchet/source/debug/nervix-ratchet"), "analyze",
+                            "--root", str(self.root), "--target-dir", str(target),
+                            "--output", str(target / "typed-ratchet/gate.json")]
+                if native_coverage:
+                    expected = [sys.executable, str(self.root / "scripts/native_coverage.py"),
+                                "exec", *expected]
+                observed = []
+
+                def analysis(arguments: list[str], **kwargs) -> subprocess.CompletedProcess:
+                    if arguments[0] == "git":
+                        return actual_run(arguments, **kwargs)
+                    self.assertEqual(arguments, expected)
+                    observed.append(arguments)
+                    destination = pathlib.Path(arguments[arguments.index("--output") + 1])
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_text(json.dumps(gate))
+                    return subprocess.CompletedProcess(arguments, 0)
+
+                with mock.patch.object(lint_audit.subprocess, "run", side_effect=analysis):
+                    self.assertEqual(lint_audit.main(["--root", str(self.root), "--target-dir", str(target)]), 0)
+                self.assertEqual(observed, [expected])
         directory = target / "lint-audit/0123456789abcdef"
         report = json.loads((directory / "audit.json").read_text())
         self.assertTrue(report["complete"])
@@ -418,7 +440,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("data_plane_lock_acquisitions: lowered 3->2, hunk removed spelling, written while counted", text)
 
     def test_an_incomplete_analysis_fails(self) -> None:
-        with mock.patch.object(lint_audit.typed_ratchet, "main", return_value=1):
+        with mock.patch.object(lint_audit, "analysis", side_effect=lint_audit.AuditError("incomplete analysis")):
             self.assertEqual(lint_audit.main(["--root", str(self.root), "--target-dir", str(self.root / "target")]), 1)
 
 

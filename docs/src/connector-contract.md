@@ -3380,6 +3380,18 @@ sequenceDiagram
 
 ## Failure and observation
 
+The source host resolves its interaction counter children once at startup for its exact execution
+unit. The retained group preserves each instance's counters, including decode rejections, without
+resolving labels or looking up a shared registry while recording a payload outcome.
+
+The emitter host observes one publish or due staged-commit attempt through retained metric
+children. Its existing typed result selects `succeeded`, `transient`, `misconfigured` or
+`violation`; cancellation before a definitive answer is transient. A settled record rejection
+does not itself fail the attempt. Unknown or repeated record answers remain contract violations.
+The observation keeps the original report, retry decision, pending acknowledgements and error
+policy intact. [Connector Interactions](metrics-and-observability.md#connector-interactions) owns
+the families, labels, duration buckets and owner-routed `destination:` inspection section.
+
 The compiler failure-contract gate reads exact source-owned outcome classifications at the
 contract's payload preparation and Sentry's override of it, Kafka's `ACK TIMEOUT` conversion,
 Postgres's mapped-column refusal, and MongoDB's value and document refusals. A value BSON cannot

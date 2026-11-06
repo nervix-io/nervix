@@ -164,7 +164,8 @@ use crate::{
     emitter_execution_plan::{EmitterExecutionPlan, EmitterOrderingGroupPlan, EmitterRoutePlan},
     emitter_start_plan::*,
     metrics::{
-        BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries, IngestorQuiesceMetrics,
+        BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries, EmitterAttemptOperation,
+        EmitterAttemptOutcome, EmitterInteractionMetrics, IngestorQuiesceMetrics,
         MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
         RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
     },
