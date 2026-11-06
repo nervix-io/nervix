@@ -3,9 +3,9 @@
 //! Outside the layer order: a benchmark harness. Product code must not name it.
 //!
 //! - **Owns.** The fixed client-wire workload, the exact frame bytes it exchanges over gRPC and the
-//!   console WebSocket, process counters, Prometheus scrape, and reproducible JSON artifact.
+//!   console WebSocket, Prometheus scrape, and reproducible JSON artifact.
 //! - **Depends on.** Public gRPC, HTTP, WebSocket, metrics, and process interfaces plus the shared
-//!   real-process fixture.
+//!   real-process fixture and the TLS-cost instrument's process counters.
 //! - **Must not know.** Registry, consensus, runtime, or connector implementation internals.
 
 use std::{collections::BTreeMap, fs, path::PathBuf, process::Command, time::Duration};
@@ -35,6 +35,7 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 
 use super::{
+    client_wire_tls_cost::{ProcessCounters, read_process_counters, status_kib},
     cluster::{client_connect_options, client_domain, test_basic_authorization},
     raw_session::outcome_succeeded,
     server_process::ServerProcess,
@@ -314,14 +315,6 @@ impl OperationSamples {
             response_encoded_bytes: self.response_bytes.finish(),
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct ProcessCounters {
-    pub(crate) user_cpu_ticks: u64,
-    pub(crate) system_cpu_ticks: u64,
-    resident_bytes: u64,
-    peak_resident_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1220,58 +1213,6 @@ fn prometheus_samples(metrics: &str, prefix: &str) -> Result<Vec<PrometheusSampl
         });
     }
     Ok(samples)
-}
-
-pub(crate) fn read_process_counters(pid: u32) -> Result<ProcessCounters> {
-    let stat_path = format!("/proc/{pid}/stat");
-    let stat =
-        fs::read_to_string(&stat_path).with_context(|| format!("failed to read {stat_path}"))?;
-    let command_end = stat
-        .rfind(')')
-        .ok_or_else(|| anyhow!("{stat_path} has no command terminator"))?;
-    let after_command = stat
-        .get(command_end..)
-        .ok_or_else(|| anyhow!("{stat_path} command terminator is outside the record"))?;
-    let fields = after_command
-        .strip_prefix(')')
-        .ok_or_else(|| anyhow!("{stat_path} command terminator is malformed"))?
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    let user_cpu_ticks = parse_process_stat_field(&fields, 11, "user CPU")?;
-    let system_cpu_ticks = parse_process_stat_field(&fields, 12, "system CPU")?;
-    let status_path = format!("/proc/{pid}/status");
-    let status = fs::read_to_string(&status_path)
-        .with_context(|| format!("failed to read {status_path}"))?;
-    Ok(ProcessCounters {
-        user_cpu_ticks,
-        system_cpu_ticks,
-        resident_bytes: status_kib(&status, "VmRSS")?,
-        peak_resident_bytes: status_kib(&status, "VmHWM")?,
-    })
-}
-
-fn parse_process_stat_field(fields: &[&str], index: usize, name: &str) -> Result<u64> {
-    fields
-        .get(index)
-        .ok_or_else(|| anyhow!("process stat omitted {name}"))?
-        .parse::<u64>()
-        .with_context(|| format!("process stat has invalid {name}"))
-}
-
-fn status_kib(status: &str, name: &str) -> Result<u64> {
-    let prefix = format!("{name}:");
-    let line = status
-        .lines()
-        .find(|line| line.starts_with(&prefix))
-        .ok_or_else(|| anyhow!("process status omitted {name}"))?;
-    let kib = line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| anyhow!("process status {name} has no value"))?
-        .parse::<u64>()
-        .with_context(|| format!("process status {name} has an invalid value"))?;
-    kib.checked_mul(1024)
-        .ok_or_else(|| anyhow!("process status {name} byte count overflowed"))
 }
 
 fn capture_environment() -> Result<Environment> {
