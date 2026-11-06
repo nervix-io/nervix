@@ -81,6 +81,11 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+The native client's open request-registry variant owns the sender that keeps its exchange reader
+waiting for frames. Closing the registry drops that sender and its pending reply senders together.
+The closed variant owns neither: reader termination follows the typed state's lifetime, without a
+second boolean that can disagree with whether requests are admitted.
+
 The resolved node identity distinguishes a plaintext gRPC transport from an HTTPS transport that
 carries its listen and advertised addresses and both provisioned TLS paths. The CLI edge refuses
 incomplete pairs and TLS material in HTTP mode before constructing that identity. File availability,

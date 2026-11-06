@@ -5546,6 +5546,42 @@ pub(crate) struct AcknowledgedHttpPublisher {
 }
 
 impl AcknowledgedHttpPublisher {
+    /// Posts once and requires a completed graph acknowledgement. A refusal stays a failure;
+    /// there is no replay that could introduce another row into a cardinality assertion.
+    pub(crate) async fn publish_once(&self, payload: &str) -> io::Result<()> {
+        nervix_primitives::time::timeout(self.wait, async {
+            let response = self
+                .client
+                .post(&self.uri)
+                .header("Host", &self.host)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload.to_owned())
+                .send()
+                .await
+                .map_err(io::Error::other)?;
+            let status = response.status();
+            let body = response.bytes().await.map_err(io::Error::other)?;
+            if status != reqwest::StatusCode::OK {
+                return Err(io::Error::other(format!(
+                    "the single post received {status} {} instead of its completed graph \
+                     acknowledgement",
+                    String::from_utf8_lossy(&body)
+                )));
+            }
+            let outcome: serde_json::Value =
+                serde_json::from_slice(&body).map_err(io::Error::other)?;
+            if outcome != serde_json::json!({ "outcome": "completed", "cause": "none" }) {
+                return Err(io::Error::other(format!(
+                    "the single post received {status} {outcome} instead of its completed graph \
+                     acknowledgement"
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
+    }
+
     /// Bounds the complete request and its explicit refusal retries, including a stalled request
     /// or response body. Run this on an owned runtime task when the scenario runner can stall.
     pub(crate) async fn publish_bounded(&self, payload: &str) -> io::Result<()> {
