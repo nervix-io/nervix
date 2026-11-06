@@ -1128,6 +1128,14 @@ session starts again from one second. An attach answered `DomainClockAlreadyAtta
 session already holds the attachment, so the client follows the clock on that session and reads its
 frames from then on.
 
+Closing the native client's request registry also wakes its exchange reader, even while the
+transport remains live and silent. The reader stops routing frames before it interrupts that
+generation's attachments and event queues. A subscription or clock reader already waiting there
+can therefore open the next session; it does not need another command, a later back-off timer, or
+a transport failure to make progress. An unanswered reopening ends its session; the
+`RestorationFailed` event reports attempts that failed while the session stays open, including
+server refusals and local encoding failures.
+
 The client's event streams outlive the session. A caller reading subscription events, clock events,
 or notices keeps reading across the replacement: the interruptions mark the gap, and events of the
 new session follow them. Reading subscription or clock events opens a new session
@@ -2266,6 +2274,10 @@ reproduction commands, tested revisions and regression alarms, and
 [Client Wire 18](https://app.clickup.com/t/86bc8cx3h) the command preparation and transport report
 with its paired samples. Measurements qualify their recorded workload, build profile and host; they
 do not establish throughput guarantees for another revision.
+
+The broad baseline instrument used by those reports is retired. Its archived commands reproduce
+only the recorded revisions; current measurements use the focused instruments below. The original
+measurements, budgets and conclusions remain on their ClickUp tasks.
 
 Before it sends a command, a native client classifies the statements by parsing them with the
 client statement grammar. Building that grammar constructs the parser of every Plexus statement
