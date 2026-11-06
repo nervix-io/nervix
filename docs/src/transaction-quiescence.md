@@ -137,6 +137,12 @@ scope. A complete Plexus `SET TO` can change its payload selection, envelope and
 construction as part of the same atomic alteration; its head and replacement must retain the stored
 connector/entity kind.
 
+Adding, changing or removing an emitter's batching limits contributes `EMITTER_BATCH_POLICY` to
+the same impact report and requires entity pause. The old task drains its partial buffers and
+unanswered prepared output under the policy that admitted them before the replacement starts.
+A failed pre-commit drain keeps the previous policy and its owning task. A flush-only alteration
+continues to change the running task's cadence dynamically.
+
 A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
 emitter work. Force flush releases rows into that same wait; a read or network delivery does not
 finish the drain. A consumer settlement runs beside the session's ordered command lane, so an

@@ -731,7 +731,7 @@ rows. It clones the Arc-backed Arrow batch once per carrier passed to the packer
 acquires a lock or increments an Arc reference count for source identity. The open candidate holds
 at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or source changes, a failed
 member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
-`MAX SIZE`. The emitter retains original batch and row positions for acknowledgements and errors.
+`MAX SIZE`. The emitter retains original batch and row membership for acknowledgements and errors.
 
 A record emitter prepares its external bytes once before retention, including when a payload carries
 one row without `BATCH`. A Sentry envelope therefore keeps its event identity and complete bytes
@@ -747,6 +747,23 @@ buffer, and resolving a member is one operation on the lock-free ACK tree. A con
 in the same step that releases the payload, while a rejected payload's members return to pending
 until their message errors are delivered, so an attempt its stop deadline cuts short leaves every
 member either resolved or still owned by the buffer.
+
+The same task owns retention of the branches whose work it holds, with each source relay's typed
+TTL and LRU limits. Retirement removes only that source's matching branch work. Any compaction
+of private storage positions remaps every surviving prepared store together: codec payloads,
+native client payloads, HTTP requests and row requests retain their contents and logical members.
+Rows already delivered remain counted once; unanswered discarded rows are not acknowledged, and
+rows transferred to a staging connector keep that connector's commit and acknowledgement owner.
+A pending materialized-state wait is part of this ownership and cannot resume after its branch
+expires. Retry keepalive retains only surviving host and connector obligations, without moving
+its physical retry deadline. Retention records exist only for held work and are volatile with
+the buffer.
+
+The task also owns one physical keepalive beat for buffered or connector-staged acknowledged
+work. It retains no additional ACK roots, includes new input without copying the growing buffer's
+obligations, and reads the current obligations only on a due beat or branch retirement. Hot input
+does not move the deadline, and a pending materialized-state future stays pinned across beats.
+An active retry uses its existing keepalive owner; an empty host and connector disarm the beat.
 
 Terminal teardown races the whole emitter task against its domain shutdown signal. It can cancel
 an in-flight connector await after the graph drain budget expires, dropping the task's volatile
@@ -1855,6 +1872,9 @@ imports. During recurring execution, unresolved generic, dynamic trait and funct
 application calls require a callable/trait contract or `nervix::dispatch(reason = "...")` on their
 owning callable; a cold module default is insufficient. A dispatch contract states the external
 driver or callback boundary; it does not exempt compiler-visible local callback bodies or acquisitions.
+
+Emitter branch retirement carries this contract for its synchronous sent-count observer. The buffer
+reports only rows already delivered, and the compiler still analyzes the task's local observer body.
 
 The NATS stream metadata visitor carries this contract on its field helper: a synchronous callback
 projects the borrowed delivery metadata into the requested scalar sink. Its per-visit `OnceCell`

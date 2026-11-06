@@ -127,6 +127,15 @@ flow. Expanding an error projection into an explicit Result branch preserves its
 context and recovery disposition. The source parser reports malformed authored Rust through a
 typed path/location context over the original parse cause; rendering includes that cause once.
 
+Emitter branch TTL/LRU retirement is a normal lifetime outcome. It NoACKs only unresolved
+host-owned rows, releases their prepared content and parked materialized-state wait, and
+preserves acknowledgements transferred to a connector. `EmitterBranchRetentionError` retains
+typed domain-clock and physical-deadline causes; a branched input without its concrete key has
+a distinct failure. An unavailable clock postpones a maintenance scan and records a transient
+failure; it never turns held rows into decode rejections or blocks a physical retry or stop
+deadline. New input whose retention activity cannot be established follows the emitter's
+general error policy.
+
 Nervix gives a failure its meaning at the boundary that can decide what went wrong. That meaning
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
 diagnostic only after it has made the decision the error permits. Ordinary control outcomes, such

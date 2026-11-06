@@ -96,7 +96,7 @@ completed is not stopped.
 The client classifies a command's statements before it sends them, with the Plexus statement
 grammar. It builds the grammar once on each thread that prepares a command and keeps it for the
 life of that thread: the first command a thread prepares pays for building it, and each such thread
-holds about a megabyte and a half for it.
+holds about 1.7 MB for it.
 
 Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection attempt (10
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the

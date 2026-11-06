@@ -469,13 +469,17 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(order_only), 9)
         self.assertEqual(
             list(inventory.invocations),
-            ["rate-limit-store", "probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
+            ["rate-limit-store", "emitter-branch-retirement", "probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
              "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios", "cluster-parameters"],
         )
         for name in ("scenarios", "paced-simulation"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order"})
         for name in ("primitive-conformance", "owner-tests"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order", "deloxide-stress"})
+        self.assertEqual(
+            inventory.invocations["emitter-branch-retirement"].selections,
+            {"deloxide", "deloxide-order", "deloxide-stress", "deloxide-stress-restore"},
+        )
         for name in ("stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide-stress"})
         self.assertEqual(inventory.invocations["stress-restore-scenarios"].selections, {"deloxide-stress-restore"})
