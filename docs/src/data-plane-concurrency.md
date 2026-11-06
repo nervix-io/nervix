@@ -2479,6 +2479,14 @@ removes the one-shot point after release. Both this DashMap and the watch wait a
 Deloxide. The owner test and
 public examples assert the original response and exact replay without changing commit ordering.
 
+The `@explicit_commit_recovery` one- and three-node examples hold an explicit `COMMIT` after a
+failed execution releases its transaction lock, until another coordinator records the outcome.
+Its testing hook reads the exact node/transaction point once per failed attempt and uses the same
+watch-backed pause owner, ending the map guard before waiting and removing the one-shot point
+after release. That map and async wait are outside Deloxide's observation. Owner tests assert
+recorded success and failure, including diagnostics, and `OutcomeUnknown(StillApplying)` for an
+unfinished commit; the public examples inspect the original transaction identity and applied operation.
+
 The registered `@pulsar_message_metadata` workloads cover source metadata in all three delivery
 modes, branch-local event-time windows, broker redelivery and independent broker-stored batches.
 The batch oracle checks member sequence and event-time precedence, envelope inheritance and exact
