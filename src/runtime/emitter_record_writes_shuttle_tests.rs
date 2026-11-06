@@ -90,7 +90,7 @@ fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
         occurred_at: Timestamp::from_unix_nanos(1),
         content: EncodedPayload {
             envelope: BatchEnvelope {
-                key: None,
+                destination: None,
                 headers: EmitterHeaders::Text(Vec::new()),
                 message_group: None,
                 clauses: Some(Arc::new(modeled_envelope())),

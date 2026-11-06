@@ -762,7 +762,10 @@ mod tests {
         assert_eq!(written(&write), vec![(0, b"[2,3,5]".to_vec())]);
         let record = &write.records[0];
         assert_eq!(record.occurred_at, Timestamp::from_unix_nanos(1));
-        assert_eq!(record.key.as_deref(), Some("key"));
+        assert_eq!(
+            record.key().map(nervix_connector::RecordKey::as_bytes),
+            Some(b"key".as_slice())
+        );
         assert_eq!(record.message_group.as_deref(), Some("group"));
         assert_eq!(
             record.headers,
