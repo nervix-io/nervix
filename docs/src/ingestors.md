@@ -1813,6 +1813,11 @@ provisions it again.
 
 ### RabbitMQ
 
+`RABBITMQ QUEUE` consumes an externally provisioned queue. To receive messages from an exchange,
+provision a queue and its exchange bindings first, then consume that queue; an exchange is not an
+ingestor entity. [RabbitMQ emitters](emitters.md#rabbitmq) publish either through the default
+exchange to a queue or through a named exchange and a computed routing key.
+
 <!-- connector-matrix:ingest-rabbitmq-queue:start -->
 ```plexus,ignore
 CREATE RABBITMQ QUEUE INGESTOR <name>
@@ -1848,6 +1853,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-ingest).
 <!-- connector-matrix:ingest-rabbitmq-queue:end -->
 
+#### Queue names, metadata and headers
+
 `QUEUE` names an existing queue and preserves its spelling, including letter case and Unicode.
 Its string literal must contain 1 to 255 UTF-8 bytes, the AMQP short-string limit; a multibyte
 character contributes every byte to that limit. `SHOW CREATE INGESTOR` retains the exact queue
@@ -1869,10 +1876,28 @@ timestamp, a count of whole seconds since the Unix epoch, as that exact `DATETIM
 its message wherever the ingestor's route programs or its `TIMESTAMP AT` read `metadata.timestamp`,
 with code `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
 
+`read_header` and `read_headers` read the AMQP header table, separately from these basic properties.
+The declared model is `sorted_by_name` with exact names: one value per name, visited in ascending
+byte order, with case-sensitive lookup. It does not preserve publisher insertion order or repeated
+entries of the same name. Copy a header or metadata value into a schema field when downstream
+processing needs it; neither is carried through a relay automatically.
+
+#### Consumption and settlement
 
 Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY …`.
 `DESCRIBE INGESTOR` prints the complete selected mode.
+
+| Mode | Consumer prefetch per instance | What completes a transport delivery |
+| --- | --- | --- |
+| `NO ACK` | No prefetch request | The broker sends it; no downstream result can requeue it. |
+| `ACK SEQUENTIAL` | 1 | Its graph outcome decides an individual acknowledgement or requeue. |
+| `ACK PARALLEL MAX n` | `n`, from 1 through 65,535 | Each delivery's graph outcome settles it independently of its siblings. |
+
+`ACK TIMEOUT` bounds the absence of graph acknowledgement progress, not total processing time;
+see [Delivery Modes](#delivery-modes). `BATCH TIMEOUT` bounds gathering after the first delivery of
+a parallel read. Neither replaces consumer prefetch. These are consumer controls; an emitter's
+`ACK` waits for publisher confirms and does not acknowledge queue consumption.
 
 `NO ACK` registers an automatically acknowledging consumer, sends no prefetch request and sends
 no delivery acknowledgements or rejections. RabbitMQ considers a delivery complete when it sends
@@ -1895,6 +1920,8 @@ cannot overtake downstream work from that connection.
 A payload its codec refuses is consumed and acknowledged, and its decode rejection follows
 `ON GENERAL ERROR`; see [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
+#### Suspension and reconnects
+
 Suspension cancels the consumer and RabbitMQ requeues unacknowledged in-flight deliveries. Other
 consumers on the same queue continue. Queue length, message TTL, overflow, and auto-expiry policies
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
@@ -1910,6 +1937,19 @@ again. RabbitMQ then delivers the message again: a delivery that failed in the g
 and one the graph had already acknowledged is ingested a second time, so delivery across a
 reconnect is at least once.
 
+The acknowledgement confirmation is `written`: Nervix waits for its ACK or requeue frame to be
+written, but AMQP sends no acknowledgement of that consumer settlement. A connection lost at that
+boundary can therefore redeliver a message whose graph work completed. Delivery tags are scoped to
+the channel and cannot be used to settle a replay on a replacement channel.
+
+#### RabbitMQ client
+
+One `RABBITMQ CLIENT` configuration serves queue ingestion and both emitter entities. The
+[generated client key reference](connector-capabilities.md#rabbitmq-client) lists every supported
+key, its value constraints, owner, confidentiality and TLS file role. It is an unpooled client:
+consumer instances and emitters open their own connections. Queue names, exchange names, routing,
+persistence and message properties belong to their entity statements, not to client `CONFIG`.
+
 Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
 every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
 addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
@@ -1918,7 +1958,8 @@ handshake, opening the channel, setting the prefetch window and starting the con
 client's `connect_timeout_ms`, 30 seconds when it is left out; the broker certificate must name the
 host `addr` names. A connection that fails or runs out of that deadline, including a name that does
 not resolve, is a source error that `DESCRIBE INGESTOR` shows as the transient error, and the
-instance tries again on its `RETRY POLICY` cadence without acknowledging anything.
+instance tries again on its `RETRY POLICY` cadence, or the host's reconnect policy under
+`MODE NO ACK`, without acknowledging anything.
 
 The client's `addr` is an AMQP URI whose scheme is `amqp` or `amqps`, which names a host, and whose
 port, when it names one, is not 0. Lapin would take `localhost` for an address that names no host,
@@ -1936,7 +1977,8 @@ PKCS #1 or SEC1, to a broker that asks for a client certificate. A file that can
 holds no PEM certificate or no private key, fails the connection as a configuration error. A broker
 that requires a client certificate and receives none, or one it does not accept, ends the TLS
 session with an alert: `DESCRIBE INGESTOR` shows that the broker refused the TLS session, naming the
-alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence.
+alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence, or the
+host's reconnect policy under `MODE NO ACK`.
 `tls_ca_file`, `tls_cert_file` and `tls_key_file` require an `amqps` address, and certificate and
 key must be supplied together. A client that violates either rule is refused before commit,
 naming the key and its required constraint without repeating the address or file path.
