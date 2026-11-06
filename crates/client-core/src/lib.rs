@@ -61,7 +61,7 @@ pub use nervix_client_wire::{
     DomainClockAttachOutcome, DomainClockAttachRefusal, DomainClockAttachmentEndReason,
     DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
     DomainClockObserved, DomainClockTicked, DomainInfo, DomainPaceChoice, EmitterSettlement,
-    ExecutionReferenceConflict, LeaderRedirect, Leadership, NodeEndpoints, NoticeLevel,
+    ExecutionReferenceConflict, LeaderRedirect, Leadership, NodeEndpoints, NoticeKind, NoticeLevel,
     OutcomeOrigin, ProducerId, RestoreUploadFailure, RowConformanceError, RowSchema, SourceSpan,
     StatementDisposition, StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded,
     SubscriptionHandle, SubscriptionOpened, SubscriptionRefusal, SubscriptionRows,

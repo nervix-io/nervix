@@ -332,15 +332,28 @@ working memory the stored hash's parameters make Argon2 allocate. That class ser
 work, so saturated data, extension or bulk work never delays a login, and concurrent attempts wait
 for it in turn. A node whose credentials class cannot take the verification now answers
 `UNAVAILABLE`, or `503` without an upgrade on the console: the
-credentials were not judged, so the attempt neither counts as a failure nor paces the user, and the
-same credentials may be presented again. After a failed attempt for a user, that user's later
-attempts are paced to ten per second until one succeeds.
+credentials were not judged, so the attempt neither establishes failure pacing nor clears an
+existing quota, and the same credentials may be presented again.
+
+Every presented name shares one failure quota on its node across the client transports, whether
+the name identifies a user or is unknown or invalid. Valid names use their canonical lower-case
+identity; invalid spellings are compared without ASCII case distinctions as well. A judged
+refusal establishes a ten-attempt bucket and consumes one slot. Slots replenish at ten per second.
+Later attempts take a slot before credentials work; overlapping attempts that began before the
+first refusal take their slot after their failed verification. A successful authentication clears
+that name's pacing. A slot receipt belongs to the bucket it paid; if success or full recovery
+replaces that bucket before verification finishes, a refused attempt pays the fresh quota.
+One name's traffic never evicts another name's outstanding quota.
 
 Every name costs the node the same work. Credentials whose name names no user, or cannot name one,
 have their password hashed on the credentials worker exactly as creating a user hashes one, under
 the same charge, before they are refused. Neither the answer nor when it arrives tells an unknown
 user from a wrong password, and a node whose credentials class cannot take that hash now answers
-`UNAVAILABLE` or `503` for an unknown user as it does for a known one.
+`UNAVAILABLE` or `503` for an unknown user as it does for a known one. Repeated refusals use the
+same quota and ordering for both. Failure state retains one bucket per name, creates a bucket only
+after a judged refusal, and reclaims fully replenished buckets as later attempts arrive. Its size
+follows the largest burst-recovery working set and live attempts rather than all names ever
+presented to the node.
 
 Credentials a listener judged and refused are logged at `warn` as `client authentication failed`,
 with the listener as `transport` and the address the call came from as `peer`. The record never
@@ -580,6 +593,14 @@ session is bound to while the command was served, the operation admission when t
 one operation into the transaction, the typed inspection, WASM state, or resource description a
 describing statement produced, and the summary of a backup's archive or the report of a restore.
 
+Before interpreting any outcome, the client checks that its execution reference equals the
+request's. A matching transport request identity alone does not establish that the outcome belongs
+to the command. A mismatch is a protocol violation: the client stops reading that session,
+interrupts every request still waiting on it, and keeps each command uncertain under its own
+reference. The Rust client uses its ordinary lost-session recovery to repeat the whole command on
+a restored session, or reports `UncertainCommand` with that reference if recovery cannot finish.
+No disposition, redirect or transaction carried by the foreign outcome is adopted.
+
 The disposition is the one field a client decides from; the message is for a person. Each
 disposition belongs to one phase of the command and makes one statement about its effect:
 
@@ -724,6 +745,14 @@ An execution whose attempt returns `OutcomeUnknown`, a leader redirect, or `Tran
 stays applying. The finalization boundary returns that disposition unchanged and leaves recovery
 under the original reference to determine the terminal outcome. Reconciliation follows the same
 rule when an attempt is interrupted after admission.
+
+An ordinary model command applies through its own durable transaction. A failed commit attempt
+does not decide the command's result when another coordinator has already finished that
+transaction: the serving coordinator recovers its recorded outcome, including the command's
+message, diagnostics and admission. A committed transaction answers success; a recorded terminal
+failure keeps that failure. A transaction still committing answers `OutcomeUnknown` with cause
+`StillApplying`, and a typed leadership loss retains the leader-recovery response. The original
+execution reference and completion barrier govern all of these paths.
 
 A transaction's configured tombstone age cannot shorten an applying execution's recovery lifetime.
 An applying transaction request retains its finished target; an applying ordinary command retains
@@ -888,19 +917,25 @@ configuration until the commit.
 is soft state in the leader's memory: it routes commands, and it is gone after a leader change or
 when the session ends. An open transaction that expires takes its binding with it. A transaction
 that finishes otherwise, such as a commit that another request admitted before this session attached,
-keeps the binding of the session that holds it: that session's next request for the transaction is
-answered from the transaction's recorded outcome, and that answer ends the binding. A session binds
-an existing transaction with `AttachTransactionRequest`,
-which the leader grants only to the transaction's owner; the reply is `TransactionAttached` with the
-current status, `TransactionAlreadyFinished` with the final status and aggregate outcome while its
-tombstone is retained, or a failure for an identity that is unknown or retained no longer. A leader
-that holds no binding for the session's transaction answers the session's next transaction request
-with `TransactionDetached`, and the client attaches again and repeats the request under the same
+keeps the binding of the session that holds it. While the tombstone remains, that session's next
+request for the transaction is answered from its recorded outcome and ends the binding. Once the
+tombstone has been removed, a COMMIT or REVERT from that session reports the transaction unknown,
+ends the binding, and lets the session begin another transaction. A session binds an existing
+transaction with `AttachTransactionRequest`, which the leader grants only to the transaction's
+owner; the reply is `TransactionAttached` with the current status, `TransactionAlreadyFinished`
+with the final status and aggregate outcome while its
+tombstone is retained, or a failure for an identity that is unknown or retained no longer. An attach
+that reports an identity unknown also ends any binding that this same session still holds for that
+identity. A leader that holds no binding for the session's transaction answers the session's next
+transaction request with `TransactionDetached`, and the client attaches again and repeats the request under the same
 reference. An attach that reports the transaction already finished binds nothing, and a session that
 still named that transaction no longer holds it. A finished or failed attach does not resolve
 commands whose replies were lost: the client repeats each under its own execution reference and
-expected position. The leader returns a
-recorded outcome before planning a new request; a command it never admitted receives a failure.
+expected position. The leader returns a recorded outcome before planning a new request; a command
+it never admitted receives a failure.
+The unknown-transaction failure of a new request does not establish the outcome of an earlier
+request whose reply was lost. Its execution reference still determines whether that earlier
+outcome can be recovered; after the reference expires, its outcome remains unknown.
 Attaching from a second session takes the binding over, and the displaced session's next
 transaction request receives `TransactionTakenOver` before anything is admitted. While a session
 holds a transaction, the server refuses the requests that belong to the session rather than the
@@ -970,8 +1005,20 @@ has established, or no leader is known. Selecting a domain with `SelectDomainReq
 session into that domain's observations as well: a `ClusterObserved` summary and a
 `DomainSnapshotObserved` carrying the domain's live graph as a JSON document and its declared
 entities, at once and then every 500 milliseconds. A session that selects no domain receives
-neither. Server notices report runtime and control-plane errors and cluster events as text for
-display. A session that falls behind the node's notice bus skips the notices it missed; the node
+neither. A server notice is text for display with a level and a kind. The kind says what the notice
+reports, so a client routes notices by kind and never by their text:
+
+| Kind | What it reports | Level |
+| --- | --- | --- |
+| `Membership` | A change of the serving node's live set: a node joined, a node left, or a node restarted as a new incarnation; a join and a restart name the incarnation now live | `Info` |
+| `Leadership` | The serving node's consensus: a Raft transition of that node, or a membership operation it proposes as leader | `Info` |
+| `ClusterParameters` | A committed cluster-parameter revision the serving node installed | `Info` |
+| `Runtime` | A failure the runtime of the serving node, or of another node, recovered from | `Error` |
+| `ControlPlane` | A control-plane failure the serving node recovered from | `Error` |
+
+A membership notice reports only a change of the live set. Model changes, subscriptions opening or
+closing and domain starts change what members publish through gossip, not which members are live,
+so none of them produces one. A session that falls behind the node's notice bus skips the notices it missed; the node
 logs how many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
 notice that does not fit drops the ones held, and the caller's next read reports that gap before
 the notices that follow it. Notices end with the session that delivered them, and the client's
@@ -1951,6 +1998,20 @@ hold it, or a `RestoreUploadFailed` that refuses the stream itself and leaves no
 | `QuotaExceeded` | The archive is larger than one staged artifact may be, or the leader's staging area cannot hold it now. |
 | `StagingFailed` | The leader could not write the archive to its staging area. |
 
+A command outcome that names another execution reference is a protocol violation, even when the
+reply has the correct request identity. It cannot establish that the restore was refused or
+completed. The Rust client ends the session used for that attempt and reports `UncertainCommand`
+under the restore's own reference, with the typed reference mismatch beneath it. Recovering the
+restore streams the same statement and archive again under that reference.
+
+A reply must decode, and its request identity, when present, must equal the start's. A verified
+frame that fails semantic decoding or names another request is a protocol violation, not evidence
+that the restore was refused: the node may already have applied it. The Rust client ends the exact
+session used by that attempt, interrupts its pending requests, and returns `UncertainCommand`
+under the restore's own execution reference with the typed validation cause beneath it. A session
+installed while the restore was in flight remains usable. Keep the statement, archive bytes and
+reference unchanged when repeating the restore to recover its outcome.
+
 A refusal of the stream is not recorded; sending the stream again stages the archive again. Every
 other answer is a `CommandOutcome` under the start's execution reference:
 
@@ -2400,7 +2461,7 @@ These internal ownership rules change neither session framing nor client recover
 ## Committed Cluster Policy
 
 `ALTER CLUSTER SET` is an administrative command on the ordinary command and execution-reference
-path. Existing informational notices announce a committed parameter revision after local
+path. A `ClusterParameters` notice announces a committed parameter revision after local
 installation; notices retain their ordinary best-effort delivery contract. No frame or correlation
 shape changes. Cluster inspection reports committed and per-node installed values.
 

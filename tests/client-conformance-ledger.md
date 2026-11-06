@@ -211,7 +211,9 @@ serving node logical reading through the Rust, Go, and TypeScript readers. Produ
 the open, submit, and close requests with a batch carried as opaque bytes, an opened producer with
 its description under a parallel window, a refused open, a closed producer, a submission of
 each of the four outcome classes with a typed cause, and the admission-change and end frames of a
-producer.
+producer. Server notices are covered by one frame of each kind (membership, leadership, cluster
+parameters, runtime and control plane) across the three levels, whose reports print the level and
+the kind beside the text.
 
 `A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote` holds the Go
 reader and the TypeScript reader on Node.js and Bun to the same report. Together with the live
@@ -270,6 +272,10 @@ for the outstanding-outcome deadline or a producer close that cannot drain that 
   `nx_event_restoration_cause` or `nx_clock_event_restoration_cause` reads.
 - The Go and TypeScript clients read the attach reply and the clock frames only from the corpus;
   no live probe of theirs follows a domain clock.
+- The Go and TypeScript clients decode server notices, with their level and kind, only from the
+  corpus: a live probe skips the notices its session receives, which arrive whenever its node sees
+  a cluster event rather than at a point the report could fix. Binding hosts receive no notices,
+  because the shared binding does not expose them.
 
 
 Historical run results and audit findings are retained on [Client Wire 14](https://app.clickup.com/t/86bc1ahyr).

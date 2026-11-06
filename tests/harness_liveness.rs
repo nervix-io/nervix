@@ -100,6 +100,10 @@ mod node_liveness;
 mod node_startup;
 #[path = "common/node_stop.rs"]
 mod node_stop;
+#[path = "common/paced_publication.rs"]
+mod paced_publication;
+#[path = "common/paced_publication_tests.rs"]
+mod paced_publication_tests;
 #[path = "common/phase_deadline.rs"]
 mod phase_deadline;
 #[path = "common/port_pool.rs"]
@@ -204,8 +208,8 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_client_wire::{
         ClientFrame, ClientMessage, CommandDisposition, CommandOutcome, Diagnostic, EncodedFrame,
-        NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, ServerFrame, ServerNotice,
-        SessionLimits, VerifiedFrame,
+        NoticeKind, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, ServerFrame,
+        ServerNotice, SessionLimits, VerifiedFrame,
         grpc::{EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec},
     };
     use nervix_models::{ClusterNodeName, CommandExecutionReference};
@@ -1533,6 +1537,7 @@ mod tests {
                     nervix_primitives::task::consume_budget().await;
                     let notice = ServerNotice {
                         level: NoticeLevel::Info,
+                        kind: NoticeKind::Leadership,
                         message: "an event unrelated to the status request".to_string(),
                     }
                     .encode(&SessionLimits::DEFAULT)

@@ -3107,6 +3107,24 @@ impl Cluster {
         publish_nats(&self.dependencies, subject, payload).await
     }
 
+    pub(crate) async fn publish_nats_with_reply(
+        &self,
+        subject: &str,
+        reply: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        let client = nats_client(&self.dependencies).await?;
+        client
+            .publish_with_reply(
+                subject.to_string(),
+                reply.to_string(),
+                payload.as_bytes().to_vec().into(),
+            )
+            .await
+            .map_err(io::Error::other)?;
+        client.flush().await.map_err(io::Error::other)
+    }
+
     pub(crate) async fn provision_nats_stream(
         &self,
         stream: &str,
@@ -3137,6 +3155,51 @@ impl Cluster {
         field: &str,
     ) -> io::Result<Vec<i64>> {
         nats_stream_field_values(&self.dependencies, stream, field).await
+    }
+
+    /// Provisions the durable pull consumer `consumer` on JetStream `stream`, as an operator does.
+    pub(crate) async fn provision_nats_pull_consumer(
+        &self,
+        stream: &str,
+        consumer: &str,
+    ) -> io::Result<()> {
+        provision_nats_pull_consumer(&self.dependencies, stream, consumer).await
+    }
+
+    /// Publishes `payload` to `subject` once, through JetStream, and returns once the stream that
+    /// captures the subject stored it.
+    pub(crate) async fn publish_nats_jetstream(
+        &self,
+        subject: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        publish_nats_jetstream(&self.dependencies, subject, payload).await
+    }
+
+    /// Waits up to `duration` for JetStream consumer `consumer` of `stream` to stand at `expected`.
+    pub(crate) async fn wait_for_nats_consumer_position(
+        &self,
+        stream: &str,
+        consumer: &str,
+        expected: NatsConsumerPosition,
+        duration: Duration,
+    ) -> io::Result<()> {
+        wait_for_nats_consumer_position(&self.dependencies, stream, consumer, expected, duration)
+            .await
+    }
+
+    /// Whether the NATS server holds JetStream stream `stream`.
+    pub(crate) async fn nats_stream_exists(&self, stream: &str) -> io::Result<bool> {
+        nats_stream_exists(&self.dependencies, stream).await
+    }
+
+    /// Whether JetStream `stream` holds consumer `consumer`.
+    pub(crate) async fn nats_consumer_exists(
+        &self,
+        stream: &str,
+        consumer: &str,
+    ) -> io::Result<bool> {
+        nats_consumer_exists(&self.dependencies, stream, consumer).await
     }
 
     pub(crate) async fn publish_nats_payloads(
@@ -4050,6 +4113,19 @@ impl Cluster {
                 io::Error::other(format!("node '{node_id}' status request failed: {error:#}"))
             })?;
         Ok(status.current_leader)
+    }
+
+    pub(crate) async fn current_leadership(&self, node_id: &str) -> io::Result<(String, u64)> {
+        let status = self
+            .cluster_status(node_id, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+            .await
+            .map_err(|error| {
+                io::Error::other(format!("node '{node_id}' status request failed: {error:#}"))
+            })?;
+        status
+            .leadership()
+            .map(|leadership| (leadership.leader, leadership.term))
+            .ok_or_else(|| io::Error::other(format!("node '{node_id}' has no reported leadership")))
     }
 
     /// The leader every reachable node agrees on, ignoring nodes a scenario has stopped.
@@ -7342,10 +7418,12 @@ async fn publish_nats_with_headers(
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
     let client = nats_client(dependencies).await?;
-    let mut header_map = async_nats::HeaderMap::new();
-    for (name, value) in headers {
-        header_map.append(*name, *value);
-    }
+    let header_map = async_nats::HeaderMap::from_ordered(
+        headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+    );
     client
         .publish_with_headers(
             subject.to_string(),
@@ -7997,7 +8075,9 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
 }
 
 async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
-    async_nats::connect(dependencies.get(NATS_ADDR)?)
+    async_nats::ConnectOptions::new()
+        .ordered_headers()
+        .connect(dependencies.get(NATS_ADDR)?)
         .await
         .map_err(io::Error::other)
 }
@@ -8123,9 +8203,135 @@ async fn nats_stream_field_values(
     Ok(values)
 }
 
+/// Where a JetStream consumer stands: the messages it still holds for delivery, the deliveries it
+/// awaits an acknowledgement for, and the stream sequence through which every message is
+/// acknowledged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NatsConsumerPosition {
+    pub(crate) pending: u64,
+    pub(crate) awaiting_acknowledgement: usize,
+    pub(crate) acknowledged_through: u64,
+}
+
+async fn provision_nats_pull_consumer(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    consumer: &str,
+) -> io::Result<()> {
+    let client = nats_client(dependencies).await?;
+    let stream_handle = async_nats::jetstream::new(client)
+        .get_stream(stream)
+        .await
+        .map_err(io::Error::other)?;
+    stream_handle
+        .create_consumer(async_nats::jetstream::consumer::pull::Config {
+            durable_name: Some(consumer.to_string()),
+            ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+            ..Default::default()
+        })
+        .await
+        .map_err(io::Error::other)?;
+    Ok(())
+}
+
+async fn publish_nats_jetstream(
+    dependencies: &DependencyEndpoints,
+    subject: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let client = nats_client(dependencies).await?;
+    // The context holds the step's only client, whose connection carries the stream's answer, so
+    // it lives until that answer arrives.
+    let context = async_nats::jetstream::new(client);
+    let stored = context
+        .publish(subject.to_string(), payload.as_bytes().to_vec().into())
+        .await
+        .map_err(io::Error::other)?;
+    stored.await.map_err(io::Error::other)?;
+    Ok(())
+}
+
+async fn nats_consumer_position(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    consumer: &str,
+) -> io::Result<NatsConsumerPosition> {
+    let client = nats_client(dependencies).await?;
+    let info = async_nats::jetstream::new(client)
+        .get_stream_no_info(stream)
+        .await
+        .map_err(io::Error::other)?
+        .consumer_info(consumer)
+        .await
+        .map_err(io::Error::other)?;
+    Ok(NatsConsumerPosition {
+        pending: info.num_pending,
+        awaiting_acknowledgement: info.num_ack_pending,
+        acknowledged_through: info.ack_floor.stream_sequence,
+    })
+}
+
+async fn wait_for_nats_consumer_position(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    consumer: &str,
+    expected: NatsConsumerPosition,
+    duration: Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let last_observation = match nats_consumer_position(dependencies, stream, consumer).await {
+            Ok(position) if position == expected => return Ok(()),
+            Ok(position) => format!("{position:?}"),
+            Err(error) => format!("error {error}"),
+        };
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "timed out waiting for NATS JetStream consumer '{consumer}' of stream '{stream}' \
+                 to stand at {expected:?}; last observation: {last_observation}"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn nats_stream_exists(dependencies: &DependencyEndpoints, stream: &str) -> io::Result<bool> {
+    let client = nats_client(dependencies).await?;
+    let mut names = async_nats::jetstream::new(client).stream_names();
+    while let Some(name) = names.next().await {
+        nervix_primitives::task::consume_budget().await;
+        if name.map_err(io::Error::other)? == stream {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn nats_consumer_exists(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    consumer: &str,
+) -> io::Result<bool> {
+    let client = nats_client(dependencies).await?;
+    let stream_handle = async_nats::jetstream::new(client)
+        .get_stream_no_info(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let mut names = stream_handle.consumer_names();
+    while let Some(name) = names.next().await {
+        nervix_primitives::task::consume_budget().await;
+        if name.map_err(io::Error::other)? == consumer {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
     let ca_path = dependencies.tls_ca_path()?;
     async_nats::ConnectOptions::new()
+        .ordered_headers()
         .add_root_certificates(ca_path.to_path_buf())
         .require_tls(true)
         .connect(dependencies.get(NATS_TLS_ADDR)?)

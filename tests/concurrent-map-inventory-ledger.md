@@ -27,6 +27,23 @@ handler remains recurring debt. Source hosts retain an exact instance readiness 
 the readiness registry. Relay channels, transport selection and domain publications use the
 immutable tables and retained lifetimes described below.
 
+## Unit allowance keyed stores
+
+`crates/rate-limit/src/keyed.rs::KeyedStore` owns a configured number of blocking-mutex shards,
+each holding `ExpiryMap<KeyFingerprint, Entry>`. One `Limiter` execution unit owns its clause's
+store, with exclusive admission spanning all clauses. Fingerprints are 128 bits; no original key
+value is retained or rendered. A lease on an established key holds one shard. First installation,
+global LRU eviction, statistics and snapshots lock shards in ascending order. An established-key
+lease takes no further lock. Keys are bounded globally by `MAX KEYS` and released at `TTL` from
+last accepted use. A refused payload restores cell debt and publishes no new key or eviction.
+Each synchronous operation is bounded by the declared shards and retained entries and awaits
+nothing. These accesses implement allowance accounting itself, rather than configuration or
+ownership discovery; they are the bounded protocol described in
+[Unit Allowance Transactions](../docs/src/data-plane-concurrency.md#unit-allowance-transactions).
+The store is dropped with its unit. Observer statistics expires keys before counting occupancy.
+The Shuttle check drives actual leases; the all-selection Deloxide owner record reaches actual
+tracked shard locks, including restoration. Neither claims coverage of governor internals.
+
 ## Diagnostic acquisition history
 
 `nervix-primitives::deadlock::OrderHistory::edges` is a diagnostic-only
@@ -310,6 +327,7 @@ it adds no map or lock and does not change relay-frame or ACK protocol maps.
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
 | `MetricSeries::counters`, `histograms` | `entry` when a task or branch resolves its series; relay teardown and snapshot replacement; observers | lifecycle, observer | recorders keep the resolved series | observer iteration holds shard read locks over summaries | retain: lifecycle registry |
+| `ConnectorInteractionMetrics::emitters` | one typed target entry at emitter installation; lookup of one target during owner-routed inspection | lifecycle, observer | tasks retain all operation/outcome counters and histograms; recording reaches no map | target histories remain for the process lifetime; inspection clones handles and releases the shard guard before rendering | retain: lifecycle registry |
 | `MetricSeries::branch_counters`, `branch_histograms` | `entry` per branch appearance; removed only with a relay | lifecycle, observer | branch recorders keep the series | processor branch series are never removed | retain: lifecycle registry (unbounded growth recorded under follow-up findings) |
 | `MetricSeries::branch_instance_references` | reference count per branch create, remove and detach | lifecycle | key rebuilt per event | removed at zero | retain: bounded protocol (per-key reference count) |
 | `HistogramSeries::rolling_histograms` mutex | one lock per recording through a retained handle | per batch | shared by every branch of a node | bounded accumulator, no await | retain: bounded protocol (documented accumulator fence) |
@@ -340,12 +358,14 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `ProducerLinks::links`, `SubscriptionInterests::leases` | producer and subscription open and close | retain: lifecycle registry |
 | session service maps, command execution locks, retained backups and restore archives | per command, control plane; 250 ms sweeps | retain: lifecycle registry |
 | consensus `incoming_snapshots` | per snapshot chunk, consensus bulk traffic | retain: bounded protocol (one transfer per peer) |
-| client-core `previews`, `servers`, `submissions`, exchange requests | client-side | retain: client-side |
+| client-core `previews`, `servers`, `submissions` | client-side | retain: client-side |
+| client-core `PendingReplies::Open::waiters` (`crates/client-core/src/exchange.rs`) | one registration before sending a request; one keyed removal for its reply or cancellation; ending the exchange drops all remaining entries | retain: client-side protocol registry, one entry per outstanding registered request. Command entries also retain their expected execution reference, with no second map or queue. A foreign outcome closes this registry under the same mutex that removes its waiter, retaining the first ending cause. An invalid restore reply also ends its originating generation through the same registry; a replacement generation is preserved. Reader-future finalization, including abortion, closes any remaining entries before ending its exact attachment generation. No guard crosses an await. |
 | `FaultInjectionState::executions` | registered once per testing-node startup; queried by explicit execution occupancy, saturation and release controls and harness cleanup. Restore inspection clones the registered executor once when filling its filesystem workers and queue, releasing the map guard before admission or await. The snapshot receive probe clones its registered executor once per placement and ends that guard before its bounded admission attempts; it owns its exact reservation directly, so release does not read the map. The bulk responsiveness fixture occupies every node, then cleanup reads each retained node once before diagnostics and node stop, including after a failed body; explicit release removes the node from that retained set | test-only; entries remain owned by the scenario's injector |
+| `FaultInjectionState::emitter_faults` | explicit scenario arming/release; existing fail/stall checks at flush and one check per nonempty record-answer boundary for an armed unknown-record answer. That one-shot entry is removed when delivered; fail/stall entries last until explicit release or the world's injector drop | test-only emitter mode control in `fault_injection/emitter_mode.rs`; ordinary builds use a no-op answer hook and hold no map |
 | `FaultInjectionState::startup_voter_gossip` | Armed after cluster stop; direct-link controls and digest heartbeat freezing read receiver-scoped entries; the observer clones its reconciliation gate once, and the fixture releases it once after establishing that node's leadership; the first scheduling barrier reads the entry, and release removes it after that pass completes | test-only startup fault observation |
 | `FaultInjectionState::guest_save_interruptions` | Armed by a guest-save backup scenario and consumed once as that entity's owner starts its selected section; never reached during ordinary product execution | test-only capture fault control |
 | `FaultInjectionState::domain_clock_authority_proposal_rejections` | Armed by a clock takeover scenario or unit test and consumed once as that node, as leader, proposes an authority reconciliation; never reached during ordinary product execution | test-only clock fault control |
-| `FaultInjectionState::command_pauses` | Client inspection in a testing build clones a domain first-poll observation once per storage job, releases its guard before polling, and publishes after the first unchanged poll. Scenario-controlled one-shot boundaries include standalone transaction lookup and preflight, and a domain resume proposal and its refusal on a selected node; the forced-recovery startup fixture also records a missing destination schedule and releases that node's held initial installation. Transaction reconciliation in a testing build checks a node/domain cleanup pause for each retained finished transaction before its removal sweep; arming every node preserves the public expiry observations across leadership transfer, and release permits ordinary cleanup. Application-revision handlers clone a node's response pause after sampling each reply; these repeatable controls remain until explicit release and cleanup, including when a request is cancelled. Resource reconciliation checks a node-scoped source-discovery control only after finding a usable replication source for an absent or unusable local copy; the control observes and hides that source view until explicit release removes it. Scenario cleanup releases and clears the retained observations | test-only command and startup fault control |
+| `FaultInjectionState::command_pauses` | Client inspection in a testing build clones a domain first-poll observation once per storage job, releases its guard before polling, and publishes after the first unchanged poll. Scenario-controlled one-shot boundaries include standalone transaction lookup, preflight and failed commit interpretation, and a domain resume proposal and its refusal on a selected node; the forced-recovery startup fixture also records a missing destination schedule and releases that node's held initial installation. Transaction reconciliation in a testing build checks a node/domain cleanup pause for each retained finished transaction before its removal sweep; arming every node preserves the public expiry observations across leadership transfer, and release permits ordinary cleanup. Command reconciliation in a testing build snapshots its node's deferred execution references once after reading each pass's applying executions, releasing every map guard before execution proceeds. An owned set skips only those references on that pass; other executions, caller retries and other nodes remain free to execute. Explicit release or cleanup removes holds for later passes. Application-revision handlers clone a node's response pause after sampling each reply; these repeatable controls remain until explicit release and cleanup, including when a request is cancelled. Resource reconciliation checks a node-scoped source-discovery control only after finding a usable replication source for an absent or unusable local copy; the control observes and hides that source view until explicit release removes it. A testing standalone commit failure reads its node/domain boundary once before classifying the attempt report; the shard guard ends after cloning the pause, before its watch wait, and the resumed coordinator removes the one-shot point after release. Scenario cleanup releases and clears the retained observations | test-only command and startup fault control |
 | `FaultInjectionState::backup_cut_gates` | Armed by a backup scenario before its cut; every backup cut of a domain reads its lease, committed-pause, drain or capture gate once as it reaches that boundary, and in a testing build every node's wait for the cluster to ready a runtime revision reads the pause-application gate of each domain that revision pauses once; each waits on the gate's own watch channel, and a step reads the gate to time, observe or release it. A gate stays for later cuts of a backup that runs again under its execution reference. The after hook releases every gate before clearing the map, including after a failed step; already borrowed gates observe release and later cuts find no hold. Final disposal is that world's injector drop; absent from product builds | test-only backup cut gate in `fault_injection/backup_cut.rs` |
 | `FaultInjectionState::refused_model_publications` | Armed by a pause recovery scenario or owner test; a testing build's coordinator looks its domain up before each transaction model step publication and each domain pause release, delivers the publication refusal and then the release refusal once each, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only model publication fault control |
 | `FaultInjectionState::refused_interest_visibility` | Armed by a subscription refusal scenario for one node; a testing build's subscription interest visibility handler looks that node up once before it answers each check, delivers the refusal once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only subscription interest fault control |
@@ -353,6 +373,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::handoff_engagement_transport_failures` | Armed by a drain scenario; a testing build's coordinator looks its domain up before each remote ownership-handoff gate engagement request and delivers the failure once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only handoff transport fault control |
 | `FaultInjectionState::lost_handoff_gate_engagements` | Armed by a drain scenario for one coordinator-to-node link; a testing build's coordinator looks that link up before each attempt to send it an ownership-handoff gate engagement request, loses and counts every such request, and the count stays for the scenario's assertion; absent from product builds | test-only handoff link fault control |
 | `FaultInjectionState::owner_relay_fanout_delays` | Armed by the slow busy relay scenario; a testing build's relay owner looks its domain up before every batch it fans out and waits the armed delay; absent from product builds | test-only relay delivery fault control |
+| `FaultInjectionState::owner_relay_partition_fanout_pauses` | Armed by the relay partition capacity scenario for one partition of one relay; a testing build's owner of a partition unit looks its domain, relay and partition up before every batch it fans out, claims the pause once and waits for the scenario's release outside the map guard; the entry stays for the scenario's observations until that world's injector is dropped; a whole relay's owner never reads it; absent from product builds | test-only relay partition delivery fault control |
 | `FaultInjectionState::delayed_materialized_dependency_reads` | Armed by the slow parked-wait backup scenario for one junction; a testing build's relay processor looks itself up before every read of its materialized dependencies, including each re-evaluation of a message it parked on `REQUIRED WAIT`, and waits the armed delay; it remains until that world's injector is dropped; absent from product builds | test-only materialized dependency read fault control |
 | `FaultInjectionState::materialized_snapshot_fetch_holds` | Armed by the relocated-generator bulk contention scenario for one node; a testing build's materialized snapshot fetch on that node looks the node up once per fetch, after its first chunk arrived and before it stages that chunk, and the first such fetch waits there; that node's restore checkpoint maintenance looks the node up once per sweep, after the sweep asked bulk memory for its working set, and releases a reached hold; the resumed hold remains until that world's injector is dropped; absent from product builds | test-only materialized snapshot fetch hold in `fault_injection/materialized_fetch_hold.rs` |
 | `FaultInjectionState::wasm_reset_publication_authority_losses` | Armed for one scenario domain; looked up once before a generation publication and by explicit harness observations; its bounded remaining/delivered counts remain until that world's injector is dropped; absent from product builds | test-only WASM publication fault control |
@@ -365,8 +386,8 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::refused_resource_publications` | Armed for one node before an upload; a testing build checks the entry before each installing upload's version publication and when reconciliation takes an applying upload up. The refusal's watch holds the original reply until recovery takes it up; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only resource publication refusal in `fault_injection/resource_publication.rs` |
 | `FaultInjectionState::lost_resource_upload_replies` | Armed for one node before an upload; a testing build's gRPC upload transport looks the node up once per upload call whose reply reports that it installed a version, after the installation completed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only installed upload reply loss in `fault_injection/resource_upload_reply.rs` |
 | `FaultInjectionState::refused_resource_upload_starts` | Armed for one node before an upload; a testing build looks the node up once per upload installation that reaches its upload start, before the start is proposed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only resource upload start refusal in `fault_injection/resource_upload_start.rs` |
-| `FaultInjectionState::command_reply_scripts` | Armed for one domain and exact query; testing session commands read that domain once after execution, substitute three bounded uncertainty causes and retain at most four execution references. Scenario observations read those references; the world's injector drop disposes the entry. Absent from ordinary builds | test-only command reply script in `fault_injection/command_reply.rs` |
-| Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations. A failed-append fixture clones its consensus probe once when arming and once per explicit failure observation, releasing the registry guard before awaiting; submissions retain their scoped control and reach no map | test-only |
+| `FaultInjectionState::command_reply_scripts` | Armed for one domain and exact query; testing session commands read that domain once after execution and either substitute three bounded uncertainty causes, retaining at most four execution references, or answer once with another execution's failure, retaining at most two. Scenario observations read those references; arming the domain again replaces its script, and the world's injector drop disposes the entry. Absent from ordinary builds | test-only command reply script in `fault_injection/command_reply.rs` |
+| Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | Test-only. The consensus probe counts each setup attempt and successful open for explicit harness observations. The delayed-heartbeat scenario reaches the existing `consensus_probes` map once to arm each follower and during its bounded condition poll to read each follower's atomic request count; no product heartbeat reads that map. A failed-append fixture clones its consensus probe once when arming and once per explicit failure observation, releasing the registry guard before awaiting; submissions retain their scoped control and reach no map. All such entries end with the scenario's fault injector. | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
 addition to the transaction-list snapshot. `StoreInner::state` releases its read guard after the
@@ -374,11 +395,13 @@ snapshot clone and before the pure eligibility decision. Replicated removal rech
 references when it applies. The pass reaches `transaction_bindings` only to remove the binding of
 a transaction it expires, a control-plane write. It no longer sweeps finished transactions: a
 finished transaction's binding stays with the session that holds it until that session's next
-request for the transaction is answered from the recorded outcome and releases it, that session
-attaches the transaction and finds it finished, the session closes, or leadership changes. An attach
+request for the transaction is answered from the recorded outcome and releases it, a COMMIT or
+REVERT finds its tombstone removed and releases it, that session attaches the transaction and finds
+it finished or unknown and releases it, the session closes, or leadership changes. An attach
 whose own touch finds the transaction finished, as when an overdue transaction expires at attach,
-removes the binding too. A session holds at most one binding, so the map stays bounded by live
-sessions. Retaining a tombstone does not retain a session binding.
+removes the binding too. Binding removal compares the bound session atomically with removal, so an
+earlier session cannot withdraw a later session's takeover. A session holds at most one binding,
+so the map stays bounded by live sessions. Retaining a tombstone does not retain a session binding.
 
 ### Rust client attachment recovery
 
@@ -399,6 +422,8 @@ The maps do not retain payloads, delivery attempts or server reservations. Wire 
 are limited by the server's granted attachments; desired entries have the lifetime of application
 handles. Per-handle lifecycle owners fence restoration against close and another exchange loss;
 see [Rust client attachment recovery](../docs/src/data-plane-concurrency.md#rust-client-attachment-recovery).
+Reader-future finalization ends its exact generation even when aborted. Its cleanup reaches these
+registries once and cannot remove the attachments of a replacement generation.
 
 ## Follow-up findings outside the hot paths
 
@@ -484,3 +509,19 @@ The command-pause fault map also gates one initial live-parameter discovery look
 launch, after public listeners start. The observer borrows that one testing control once;
 release permits the ordinary live-policy lookup to finish. This is a startup control, absent
 from product builds and never reached from record or acknowledgement execution.
+
+## Failed authentication names
+
+`AuthenticationPacing::names` owns an access-ordered `ExpiryMap` under an async mutex, scoped to
+one node's session service. Credential-call admission checks the selected name, a judged refusal
+records its quota, and a success removes that name. Each operation may reclaim one oldest full
+bucket; a new name enters only after a judged refusal. The largest burst-recovery working set and
+live attempts bound retained state, and active debt is never evicted for another name.
+
+All accesses are control-plane call admission. Guards end before password work and quota sleeps.
+The expiry map renews existing entries without replacing their key or value allocations, and
+indexed removal hashes its query once. An admitted attempt shares its bucket's immutable key;
+pointer identity distinguishes its receipt from a bucket recreated after success or full recovery.
+The receipt pins only that key allocation and relies on no reference-count ordering. Node teardown
+owns final disposal. No record, batch or
+acknowledgement path reaches this state; the async mutex is untracked by Deloxide.

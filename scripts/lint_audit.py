@@ -23,8 +23,6 @@ import sys
 import time
 from typing import Any
 
-from scripts import typed_ratchet
-
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASELINE = "debt-baseline.json"
 
@@ -882,14 +880,17 @@ def summarize(candidates: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
 
 def analysis(args: argparse.Namespace) -> dict[str, Any]:
     destination = args.target_dir / "typed-ratchet/gate.json"
-    arguments = ["--root", str(args.root), "--target-dir", str(args.target_dir)]
+    executable = args.target_dir / "typed-ratchet/source/debug/nervix-ratchet"
+    arguments = [str(executable), "analyze", "--root", str(args.root), "--target-dir", str(args.target_dir)]
     if args.inventory or args.configuration:
         destination = args.target_dir / "lint-audit/inventory.json"
         arguments.append("--inventory")
         for configuration in args.configuration or []:
             arguments.extend(["--configuration", configuration])
     arguments.extend(["--output", str(destination)])
-    if typed_ratchet.main(arguments):
+    if os.environ.get("NERVIX_NATIVE_COVERAGE_ATTEMPT"):
+        arguments = [sys.executable, str(args.root / "scripts/native_coverage.py"), "exec", *arguments]
+    if subprocess.run(arguments, cwd=args.root).returncode:
         raise AuditError("the compiler analysis did not complete; see its output above")
     report = json.loads(destination.read_text())
     if report.get("complete") is not True:
@@ -940,14 +941,18 @@ def main(argv: list[str] | None = None) -> int:
             "complete": True,
         }
         directory = args.output_dir or args.target_dir / "lint-audit" / report["source_identity"][:16]
-        typed_ratchet.atomic_json(directory / "audit.json", output)
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / "audit.json"
+        temporary = destination.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n")
+        temporary.replace(destination)
         (directory / "audit.md").write_text(markdown(output))
         for kind, counts in output["summary"].items():
             print(f"lint audit: {kind}: {counts['total']} candidates, {counts['recurring']} recurring, "
                   f"{counts['suspected']} suspected", flush=True)
         print(f"lint audit: {len(candidates)} candidates at {revision[:12]}; report: {directory / 'audit.md'}")
         return 0
-    except (AuditError, typed_ratchet.AnalysisError, OSError, ValueError, KeyError) as error:
+    except (AuditError, OSError, ValueError, KeyError) as error:
         print(f"lint audit: {error}", file=sys.stderr)
         return 1
 

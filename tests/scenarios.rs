@@ -210,6 +210,7 @@ mod backup;
 mod cli_outcomes;
 mod clickhouse_connections;
 mod client_consumers;
+mod client_foreign_execution;
 mod client_producers;
 mod client_traffic;
 mod common;
@@ -220,6 +221,7 @@ mod deadlock_reports;
 mod domain_clock_attachment;
 mod domain_resume;
 mod emitter_finish;
+mod emitter_metrics;
 mod endpoint_intake;
 mod generated_http_payloads;
 mod http_transport;
@@ -235,6 +237,7 @@ mod mqtt_subscription_refusal;
 mod mysql_isolation;
 mod nats_authentication;
 mod nats_delivery;
+mod nats_stream_consumers;
 mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
@@ -247,6 +250,7 @@ mod pulsar_subscription_types;
 mod pulsar_subscriptions;
 mod rabbitmq_envelope;
 mod rabbitmq_properties;
+mod relay_partitions;
 mod restarted_voter;
 mod session_protocol;
 mod session_tls;
@@ -255,6 +259,7 @@ mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
 mod websocket_lifecycle;
+mod wide_row_intake;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -501,6 +506,8 @@ struct ScenarioWorld {
     saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
     /// How the last restore stream a scenario shaped itself ended.
     last_restore_end: Option<crate::backup::restore::RestoreStreamEnd>,
+    /// A real restore whose test peer substituted its reply, and its exact-reference recovery.
+    restore_reply_validation: Option<Box<backup::restore_reply_validation::RestoreValidation>>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<crate::backup::restore::BackgroundRestore>,
     /// Real filesystem capacity held while an accepted restore tries its client inspection.
@@ -1431,6 +1438,34 @@ fn when_controlled_nats_endpoint_holds_after(world: &mut ScenarioWorld, publishe
     controlled_nats_endpoint(world).hold_after(publishes);
 }
 
+#[when("the controlled NATS endpoint drops replies after its next publish")]
+fn when_controlled_nats_endpoint_drops_replies_after_next_publish(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).drop_replies_after_next_publish();
+}
+
+#[then(expr = "within {string} the controlled NATS endpoint forwards at least {int} publishes")]
+async fn then_controlled_nats_endpoint_forwards_publishes(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: u64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    nervix_primitives::time::timeout(
+        duration,
+        controlled_nats_endpoint(world).forwarded_publishes_at_least(count),
+    )
+    .await
+    .expect("the controlled NATS endpoint did not forward enough publishes");
+}
+
+#[then(expr = "within {string} the controlled NATS endpoint discards a server reply")]
+async fn then_controlled_nats_endpoint_discards_reply(world: &mut ScenarioWorld, duration: String) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    nervix_primitives::time::timeout(duration, controlled_nats_endpoint(world).discarded_reply())
+        .await
+        .expect("the controlled NATS endpoint did not discard a server reply");
+}
+
 /// Stands a forwarder in front of the MQTT broker that can drop chosen PUBLISH packets, and names
 /// its address `{{mqtt_filtered_addr}}`.
 #[given("an MQTT endpoint that drops chosen publishes is configured")]
@@ -1888,6 +1923,18 @@ async fn given_nats_is_running(world: &mut ScenarioWorld) {
         .await
         .expect("NATS test container should start");
     refresh_dependency_configuration(world);
+}
+
+#[given("the plaintext NATS endpoint is addressed with the TLS scheme")]
+async fn given_plaintext_nats_has_tls_scheme(world: &mut ScenarioWorld) {
+    let address = expand_placeholders(world, "{{nats_addr}}");
+    let mut url = url::Url::parse(&address).expect("the NATS test endpoint is a URL");
+    url.set_scheme("tls")
+        .expect("a NATS URL accepts the TLS scheme");
+    world.placeholders.insert(
+        "nats_tls_scheme_addr".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
 }
 
 #[given("NATS TLS is running")]
@@ -5947,6 +5994,28 @@ async fn then_cli_repl_eventually_displays(world: &mut ScenarioWorld, expected: 
     }
 }
 
+/// Counts what the REPL displayed so far. A preceding step waits for a later line, so the count is
+/// taken after the events it bounds were printed rather than read from a quiet terminal.
+#[then(expr = "the CLI REPL displays {string} exactly {int} times")]
+async fn then_cli_repl_displays_exactly_times(
+    world: &mut ScenarioWorld,
+    expected: String,
+    expected_count: usize,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    let count = terminal.occurrences(&expected);
+    assert_eq!(
+        count,
+        expected_count,
+        "the CLI REPL displayed {expected:?} {count} times; it displayed:{}",
+        terminal.transcript()
+    );
+}
+
 /// Rows a relay publishes while the cluster is still converging after a node restart can be lost in
 /// transit, so the payload is posted again until the interactive CLI displays the row it expects.
 #[when(
@@ -7341,6 +7410,110 @@ fn given_consensus_commits_on_every_node_take(world: &mut ScenarioWorld, duratio
         );
         world.consensus_commit_delays.insert(node_id, duration);
     }
+}
+
+/// Hold only the follower's answer, after it has accepted the heartbeat. The followers therefore
+/// keep hearing the same leader while its acknowledgements arrive later than one heartbeat period.
+#[when(expr = "follower heartbeat answers take {string} while the leader idles for {string}")]
+async fn when_follower_heartbeat_answers_are_late(
+    world: &mut ScenarioWorld,
+    delay: String,
+    idle: String,
+) {
+    let delay = parse_duration_text(&delay).expect("heartbeat answer delay must be valid");
+    let idle = parse_duration_text(&idle).expect("heartbeat idle period must be valid");
+    let timings =
+        nervix_consensus::RaftTimings::resolve(Some(world.cluster_config.raft_heartbeat_interval))
+            .expect("the configured heartbeat interval must be valid");
+    assert!(
+        delay > world.cluster_config.raft_heartbeat_interval
+            && delay < timings.election_timeout_max(),
+        "the answer must be later than a heartbeat but inside the leader lease"
+    );
+    assert!(
+        idle > timings.election_timeout_max(),
+        "the idle observation must span one leader lease"
+    );
+
+    let leader = current_leader_node(world).await;
+    let before = world
+        .cluster()
+        .current_leadership(&leader)
+        .await
+        .expect("the leader must report its term before the delay");
+    let followers = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .filter(|node| node != &leader)
+        .collect::<Vec<_>>();
+    assert_eq!(followers.len(), 2, "this regression requires three voters");
+    let observed_after = Instant::now() + idle;
+    for follower in &followers {
+        world
+            .fault_injection
+            .set_consensus_heartbeat_response_delay(
+                &crate::common::cluster::node_name(follower),
+                delay,
+            );
+    }
+
+    nervix_primitives::time::timeout(idle + Duration::from_secs(5), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let both_received = followers.iter().all(|follower| {
+                world.fault_injection.delayed_consensus_heartbeat_requests(
+                    &crate::common::cluster::node_name(follower),
+                ) >= 2
+            });
+            if Instant::now() >= observed_after && both_received {
+                break;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both followers must receive delayed heartbeats across one leader lease");
+    let after = world
+        .cluster()
+        .current_leadership(&leader)
+        .await
+        .expect("the leader must report its term after the delay");
+    assert_eq!(after, before, "the same node must still lead in its term");
+    for follower in &followers {
+        let received = world
+            .fault_injection
+            .delayed_consensus_heartbeat_requests(&crate::common::cluster::node_name(follower));
+        assert!(
+            received >= 2,
+            "follower '{follower}' delayed only {received} heartbeats"
+        );
+    }
+    world.placeholders.insert("lease_leader".into(), leader);
+}
+
+#[then(expr = "the delayed-heartbeat leader creates domain {string} within {string}")]
+async fn then_delayed_heartbeat_leader_creates_domain(
+    world: &mut ScenarioWorld,
+    name: String,
+    budget: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let budget = parse_duration_text(&budget).expect("command budget must be valid");
+    let leader = world
+        .placeholders
+        .get("lease_leader")
+        .expect("the preceding step saved the delayed-heartbeat leader");
+    let command = format!("CREATE DOMAIN {name};");
+    nervix_primitives::time::timeout(
+        budget,
+        world.cluster().run_command(leader, &world.domain, &command),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the still-leading node '{leader}' did not commit '{name}': {error}")
+    })
+    .unwrap_or_else(|error| panic!("the still-leading node '{leader}' refused '{name}': {error}"));
 }
 
 #[given(expr = "{int} sessions keep creating domains named {string} through the leader node")]
@@ -13544,6 +13717,39 @@ async fn given_command_finalization_pause(world: &mut ScenarioWorld, node_id: St
     );
 }
 
+#[given(expr = "command reconciliation of execution reference {string} pauses on node {string}")]
+fn given_command_reconciliation_pause(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let reference = command_execution_reference(world, &execution_reference);
+    let reference = nervix_models::CommandExecutionReference::parse(reference)
+        .assured("scenario execution references are UUIDv7 values");
+    world
+        .fault_injection
+        .defer_command_reconciliation_on(crate::common::cluster::node_name(&node_id), reference);
+}
+
+#[when(
+    expr = "the command reconciliation pause for execution reference {string} on node {string} is \
+            released"
+)]
+fn when_command_reconciliation_pause_is_released(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let reference = command_execution_reference(world, &execution_reference);
+    let reference = nervix_models::CommandExecutionReference::parse(reference)
+        .assured("scenario execution references are UUIDv7 values");
+    world
+        .fault_injection
+        .resume_command_reconciliation_on(&crate::common::cluster::node_name(&node_id), &reference);
+}
+
 #[then(expr = "the command finalization pause on node {string} is reached")]
 async fn then_command_finalization_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -16469,7 +16675,10 @@ async fn background_command_outcome(
     ));
     let outcome = match &mut probe {
         Some(probe) => match probe
-            .observe(prepared.run(session.held_command_session(&query)))
+            .observe(
+                node.as_deref(),
+                prepared.run(session.held_command_session(&query)),
+            )
             .await?
         {
             ProbeReply::AfterBoundary(outcome) => {
@@ -19146,6 +19355,27 @@ async fn then_only_transaction_id_is_saved_as_placeholder(
     save_only_transaction_id(world, placeholder, None);
 }
 
+#[then(expr = "placeholder {string} equals placeholder {string}")]
+fn then_placeholder_equals(
+    world: &mut ScenarioWorld,
+    actual_placeholder: String,
+    expected_placeholder: String,
+) {
+    let actual = world
+        .placeholders
+        .get(&actual_placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{actual_placeholder}' is not defined"));
+    let expected = world
+        .placeholders
+        .get(&expected_placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{expected_placeholder}' is not defined"));
+    assert_eq!(
+        actual, expected,
+        "placeholders '{actual_placeholder}' and '{expected_placeholder}' must identify the same \
+         value"
+    );
+}
+
 #[then(expr = "the only open transaction id is saved as placeholder {string}")]
 async fn then_only_open_transaction_id_is_saved_as_placeholder(
     world: &mut ScenarioWorld,
@@ -21363,6 +21593,37 @@ async fn then_selector_contains_docstring(
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// The elements `selector` matches, one per docstring line, in whatever order they arrived: replies
+/// to requests a connection sends together are shown as they come. A preceding step waits for the
+/// outcome these lines must sit beside, so a line that should not be there has arrived by the time
+/// the elements are compared.
+#[then(regex = r#"^selector "([^"]+)" shows exactly these lines in any order$"#)]
+async fn then_selector_shows_exactly_these_lines_in_any_order(
+    world: &mut ScenarioWorld,
+    selector: String,
+    #[step] step: &Step,
+) {
+    let expected = expand_placeholders(world, docstring(step).trim());
+    let mut expected = expected.lines().map(str::trim).collect::<Vec<_>>();
+    expected.sort_unstable();
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let texts = page
+        .locator(&selector)
+        .all_inner_texts()
+        .await
+        .expect("selector text must be readable");
+    let mut shown = texts.iter().map(|text| text.trim()).collect::<Vec<_>>();
+    shown.sort_unstable();
+    assert_eq!(
+        shown, expected,
+        "expected selector '{selector}' to show exactly these lines in any order"
+    );
 }
 
 #[then(expr = "selector {string} contains {string} for {int} milliseconds")]
@@ -26995,6 +27256,27 @@ async fn given_nats_subject_is_observed(world: &mut ScenarioWorld, subject: Stri
     );
 }
 
+#[when(expr = "the observed NATS request to reply subject {string} is answered")]
+async fn when_observed_nats_request_is_answered(
+    world: &mut ScenarioWorld,
+    reply: String,
+    #[step] step: &Step,
+) {
+    let reply = expand_placeholders(world, &reply);
+    let payload = expand_placeholders(world, docstring(step));
+    let observer = world
+        .broker_observer
+        .as_mut()
+        .expect("the request subject is observed");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        observer.answer_nats_request(&reply, &payload),
+    )
+    .await
+    .expect("the NATS request did not reach the responder")
+    .expect("the NATS request could not be answered");
+}
+
 /// Another socket listens on the port the scenario drew for its ZeroMQ ingest address before any
 /// statement names it, as a port Docker publishes for a container, or a server bound to that port
 /// explicitly, would: a listener with `SO_REUSEADDR` on every address, which the port's hold does
@@ -28488,6 +28770,23 @@ async fn when_nats_message_is_published(
         .expect("failed to publish nats message");
 }
 
+#[when(expr = "NATS message with reply {string} is published to subject {string}")]
+async fn when_nats_message_with_reply_is_published(
+    world: &mut ScenarioWorld,
+    reply: String,
+    subject: String,
+    #[step] step: &Step,
+) {
+    let reply = expand_placeholders(world, &reply);
+    let subject = expand_placeholders(world, &subject);
+    let payload = expand_placeholders(world, docstring(step));
+    world
+        .cluster()
+        .publish_nats_with_reply(&subject, &reply, &payload)
+        .await
+        .expect("failed to publish the NATS message with its reply subject");
+}
+
 /// Provisions JetStream stream `stream` capturing `subject`, as an operator does.
 async fn provision_nats_jetstream_stream(world: &mut ScenarioWorld, stream: &str, subject: &str) {
     let stream = expand_placeholders(world, stream);
@@ -28534,6 +28833,24 @@ async fn then_nats_jetstream_stream_eventually_contains_payload(
         .wait_for_nats_stream_payload(&stream, &subject, &expected)
         .await
         .expect("NATS JetStream stream did not receive expected payload");
+}
+
+#[then(expr = "NATS JetStream stream {string} holds exactly {int} messages")]
+async fn then_nats_jetstream_stream_holds_exactly_messages(
+    world: &mut ScenarioWorld,
+    stream: String,
+    count: u64,
+) {
+    let stream = expand_placeholders(world, &stream);
+    let held = world
+        .cluster()
+        .nats_stream_message_count(&stream)
+        .await
+        .unwrap_or_else(|error| panic!("failed to read NATS JetStream stream '{stream}': {error}"));
+    assert_eq!(
+        held, count,
+        "NATS JetStream stream '{stream}' holds {held} messages"
+    );
 }
 
 /// Publishes one NATS message whose payload is a JSON array of `count` records, the `n`th of which
@@ -29743,6 +30060,144 @@ async fn when_encoded_http_payload_is_posted(
         .expect("failed to post encoded http payload");
 }
 
+#[when(
+    expr = "http CBOR payload with byte string field {string} is posted to host {string} path \
+            {string}"
+)]
+async fn when_cbor_http_payload_with_bytes_is_posted(
+    world: &mut ScenarioWorld,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let payload = expand_placeholders(world, docstring(step));
+    let json: serde_json::Value =
+        serde_json::from_str(&payload).expect("CBOR fixture must be valid JSON");
+    let mut cbor = CborValue::serialized(&json).expect("JSON fixture fits a CBOR value");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("CBOR fixture must be a map");
+    };
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == &field))
+        .expect("CBOR fixture must contain the byte string field");
+    let CborValue::Text(encoded) = value else {
+        panic!("CBOR fixture byte string must be written as base64 text");
+    };
+    let bytes = BASE64_STANDARD
+        .decode(encoded.as_bytes())
+        .expect("CBOR fixture byte string must be valid base64");
+    *value = CborValue::Bytes(bytes);
+
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture must encode");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post CBOR payload with a byte string");
+}
+
+#[when(
+    expr = "http CBOR payload with NaN float field {string} is posted to host {string} path \
+            {string}"
+)]
+async fn when_cbor_http_payload_with_nan_is_posted(
+    world: &mut ScenarioWorld,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let payload = expand_placeholders(world, docstring(step));
+    let json: serde_json::Value = serde_json::from_str(&payload).expect("fixture is JSON");
+    let mut cbor = CborValue::serialized(&json).expect("fixture fits CBOR");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("fixture is a map");
+    };
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == &field))
+        .expect("the float field exists");
+    *value = CborValue::Float(f64::NAN);
+    let (_, body) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == "body"))
+        .expect("the byte string field exists");
+    let CborValue::Text(encoded_body) = body else {
+        panic!("the byte string fixture is base64 text");
+    };
+    let bytes = BASE64_STANDARD
+        .decode(encoded_body.as_bytes())
+        .expect("the byte string fixture is valid base64");
+    *body = CborValue::Bytes(bytes);
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture encodes");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post CBOR payload with NaN");
+}
+
+#[when(
+    expr = "http CBOR payload with invalid {string} at field {string} is posted to host {string} \
+            path {string}"
+)]
+async fn when_cbor_http_payload_with_invalid_value_is_posted(
+    world: &mut ScenarioWorld,
+    invalid: String,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let payload = expand_placeholders(world, docstring(step));
+    let json: serde_json::Value = serde_json::from_str(&payload).expect("fixture is JSON");
+    let mut cbor = CborValue::serialized(&json).expect("fixture fits CBOR");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("fixture is a map");
+    };
+    let index = entries
+        .iter()
+        .position(|(key, _)| matches!(key, CborValue::Text(name) if name == &field))
+        .expect("the invalid field exists");
+    match invalid.as_str() {
+        "tagged item" => {
+            entries[index].1 = CborValue::Tag(42, Box::new(CborValue::Bytes(vec![0, 255])));
+        }
+        "non-text map key" => {
+            entries[index].1 =
+                CborValue::Map(vec![(CborValue::Integer(7.into()), CborValue::Bool(true))]);
+        }
+        "repeated key" => {
+            let duplicate = entries[index].clone();
+            entries.push(duplicate);
+        }
+        _ => panic!("unknown invalid CBOR fixture: {invalid}"),
+    }
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture encodes");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post invalid CBOR payload");
+}
+
 #[when(expr = "http payload is posted to host {string} path {string} and fails")]
 async fn when_http_payload_is_posted_and_fails(
     world: &mut ScenarioWorld,
@@ -29989,48 +30444,6 @@ async fn when_http_payload_is_acknowledged(
     .await
     .unwrap_or_else(|error| panic!("HTTP payload was not acknowledged: {error}"));
     append_cucumber_log_line("http publish completed: acknowledged");
-}
-
-#[when(
-    expr = "http payload begins acknowledged posting within {string} to node {string} with host \
-            {string} path {string}"
-)]
-async fn when_http_payload_begins_acknowledged_posting(
-    world: &mut ScenarioWorld,
-    wait: String,
-    node_id: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    assert!(
-        world.background_http_publish.is_none(),
-        "a background http publish is already active"
-    );
-    let wait = parse_duration_text(&wait)
-        .assured("the scenario declares a valid HTTP acknowledgement bound");
-    let node_id = expand_placeholders(world, &node_id);
-    let host = expand_placeholders(world, &host);
-    let path = expand_placeholders(world, &path);
-    let payload = expand_placeholders(world, docstring(step));
-    let publisher = world
-        .cluster()
-        .acknowledged_http_publisher(&node_id, &host, &path, wait);
-    let task =
-        nervix_primitives::task::spawn(async move { publisher.publish_bounded(&payload).await });
-    world.background_http_publish = Some(AbortOnDropHandle::new(task));
-}
-
-#[then("the background acknowledged http publish succeeds")]
-async fn then_the_background_acknowledged_http_publish_succeeds(world: &mut ScenarioWorld) {
-    let task = world
-        .background_http_publish
-        .take()
-        .assured("the preceding step started this scenario's acknowledged HTTP publish");
-    task.await
-        .unwrap_or_else(|error| panic!("acknowledged HTTP publish task failed: {error}"))
-        .unwrap_or_else(|error| panic!("HTTP payload was not acknowledged: {error}"));
-    append_cucumber_log_line("background http publish completed: acknowledged");
 }
 
 #[when(
@@ -35076,6 +35489,80 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded
         *expected.entry(ExpectedBrokerPayload(payload)).or_insert(0) += 1;
     }
     receive_exactly_these_broker_messages(world, &duration, expected).await;
+}
+
+#[then(
+    expr = "within {string} the observed broker receives one CBOR event with byte string {string}"
+)]
+async fn then_observed_broker_receives_cbor_bytes(
+    world: &mut ScenarioWorld,
+    duration: String,
+    expected_bytes: String,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    let message = world
+        .broker_observer
+        .as_mut()
+        .expect("broker observer must exist")
+        .try_next_message(duration)
+        .await
+        .expect("failed while waiting for a CBOR broker message")
+        .expect("timed out waiting for a CBOR broker message");
+    let value: CborValue =
+        ciborium::from_reader(message.bytes.as_slice()).expect("broker payload must be CBOR");
+    let CborValue::Map(fields) = value else {
+        panic!("CBOR event must be a map");
+    };
+    assert_eq!(fields.len(), 4, "CBOR event must have four fields");
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| matches!(key, CborValue::Text(key) if key == name))
+            .map(|(_, value)| value)
+            .unwrap_or_else(|| panic!("CBOR event must have field '{name}'"))
+    };
+    assert!(matches!(field("uid"), CborValue::Integer(value) if u64::try_from(*value) == Ok(7)));
+    assert!(matches!(field("temperature"), CborValue::Float(value) if *value == 1.25));
+    assert!(
+        matches!(field("occurred_at"), CborValue::Text(value) if value == "2024-02-29T12:34:56+00:00")
+    );
+    let expected = BASE64_STANDARD
+        .decode(expected_bytes.as_bytes())
+        .expect("expected CBOR bytes must be valid base64");
+    assert!(matches!(field("body"), CborValue::Bytes(value) if value == &expected));
+    let extra = world
+        .broker_observer
+        .as_mut()
+        .expect("broker observer must exist")
+        .try_next_message(Duration::from_millis(500))
+        .await
+        .expect("failed while checking for an extra CBOR message");
+    assert!(extra.is_none(), "CBOR emitter published an extra message");
+}
+
+#[then(expr = "within {string} the observed broker receives one CBOR event with NaN float")]
+async fn then_observed_broker_receives_cbor_nan(world: &mut ScenarioWorld, duration: String) {
+    use ciborium::value::Value as CborValue;
+
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    let message = world
+        .broker_observer
+        .as_mut()
+        .expect("broker observer exists")
+        .try_next_message(duration)
+        .await
+        .expect("failed while waiting for a CBOR broker message")
+        .expect("timed out waiting for a CBOR broker message");
+    let value: CborValue =
+        ciborium::from_reader(message.bytes.as_slice()).expect("broker payload must be CBOR");
+    let CborValue::Map(fields) = value else {
+        panic!("CBOR event must be a map");
+    };
+    assert!(fields.iter().any(|(key, value)| {
+        matches!((key, value), (CborValue::Text(name), CborValue::Float(number)) if name == "temperature" && number.is_nan())
+    }));
 }
 
 /// Like the payload step, where every table row is one exact message: its payload and the key,

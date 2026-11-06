@@ -48,8 +48,8 @@ apply anything. The revision holds:
 Each scheduled node owns a map of `Unit::Single`, `Unit::Partition(p)`, or `Unit::Instance(i)`
 placements. The unit carries its primary, assigned nodes, ownership transition, and WASM guest
 generations. The revision and planned resource assignments preserve those unit keys, and schedule
-reassignments name the node and unit together. Current graphs emit one `Single` unit for each node;
-the branch Model records one direct partition while the language has no partition syntax.
+reassignments name the node and unit together. A relay branched by a branch of several partitions
+emits one `Partition` unit per partition, and every other node emits one `Single` unit.
 
 The source digest identifies which schedule produced the installed revision. A planned change
 also carries its predecessor digest, so an incremental application is attempted only when the
@@ -92,11 +92,15 @@ both use the same schedule-to-revision planning boundary.
 | Emitters | Typed emitter and optional connector client or codec, ordered source relays and predicates, construction, request, ordering and envelope expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the emitter |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
 
-Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT, NATS and
-SQS alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only
-entities need no mode-admission recheck. Shared retry and acknowledgement-duration validation
-borrows the entity-owned policy. The destination's validated external-name type passes through the
-plan into connector configuration without normalization. Iceberg resolves its configured storage
+Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT and SQS
+alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only
+entities need no mode-admission recheck. NATS SUBJECT lowers to a core-write leaf with no
+acknowledgement policy, while NATS STREAM lowers to a separate leaf carrying the named stream,
+literal publish subject and validated PubAck window. The runtime starts the matching connector
+implementation from that leaf; neither implementation selects a publishing mode from a Model.
+Shared retry and acknowledgement-duration validation borrows the entity-owned policy. The
+destination's validated external-name type passes through the plan into connector configuration
+without normalization. Iceberg resolves its configured storage
 client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
 that resolved backend and never infers it from the statement or location.
 
@@ -282,6 +286,9 @@ The swap sequence fences delivery before stopping an owner, prepares new local p
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot
 before waking materialized-state waiters. An owner that still executes locally across a placement
 change keeps its task; a moved owner rebinds only its affected runtime and state placement. A
+partition a node keeps owning keeps its owner task, while its relay-state task restarts around the
+rebinding with the originator the new assignment issued, as
+[Materialized relay entries](data-plane-concurrency.md#materialized-relay-entries) describes. A
 reassignment rebinds the replicated state of every node it names, so a Kafka ingestor kept this way
 takes the originator its domain offsets' new binding issued: a change that only replaces a replica
 of those offsets never refuses the ingestor's commits. An ingestor instance the schedule stopped

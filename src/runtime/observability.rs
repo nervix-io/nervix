@@ -298,7 +298,7 @@ impl Runtime {
                 domain, relay,
             )));
         };
-        Ok(services.branch_presence.contains(key.as_ref()))
+        Ok(services.holds_branch(key))
     }
 
     pub(crate) fn describe_metrics_for(
@@ -325,6 +325,9 @@ impl Runtime {
             .describe_global_target(domain, kind, identifier.clone());
         if kind.eq_ignore_ascii_case(ModelKind::Emitter.as_str()) {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
+            let mut destination = self.inner.metrics.describe_emitter_interactions(&key);
+            destination.append(&mut lines);
+            lines = destination;
             if let Some(endpoint) = self.inner.client_emitters.get(&key) {
                 lines.extend(endpoint.metric_lines());
             }
@@ -421,11 +424,7 @@ impl Runtime {
         };
         // A branch is named by the fingerprint of its key: these statistics reach sessions, and a
         // branch's key fields may be `SENSITIVE`.
-        let membership = services.branch_presence.load();
-        let branches = membership
-            .branches()
-            .map(BranchKey::fingerprint)
-            .collect::<BTreeSet<_>>();
+        let branches = services.held_branch_fingerprints();
         branches
             .into_iter()
             .map(|branch| nervix_dataflow_graph::DataflowBranchStatistics {

@@ -17,7 +17,11 @@ The archive holds these files, under their paths below the checkout:
   matched as cargo-llvm-cov 0.8 matches it. Those are the scenario executable, the CLI, the paced
   simulation driver, the native Python extension, the C ABI for conformance clients, the deadlock
   report tool and the formatter, so a shard's report reads the objects the build's own report
-  would read;
+  would read. Each is stored without its DWARF debug information, most of a test executable's
+  bytes: `objcopy --strip-debug` keeps the symbol table and the coverage mapping, so
+  a shard's report is the one the build's objects give, a panic still names its location and a
+  backtrace its functions, but a backtrace names no source line and a debugger finds no variable.
+  The copies are stripped beside the build, whose own objects keep their debug information;
 - the Playwright driver that the build script of playwright-rs downloaded into its output
   directory, whose path the scenario executable holds. A scenario executable that names a driver
   the build did not leave fails the pack, rather than leaving a shard to whatever driver it finds;
@@ -54,7 +58,8 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,6 +88,14 @@ SCENARIO_EXECUTABLE = re.compile(r"^scenarios-[0-9a-f]+$")
 MAXIMUM_SHARDS = 256
 COMPRESSION = ("zstd", "-T0", "-3")
 ELF_MAGIC = b"\x7fELF"
+# What an archive's objects are stored without: their DWARF debug information. The symbol table and
+# every other section stay, the coverage mapping `cargo llvm-cov report` reads among them.
+STRIP = ("objcopy", "--strip-debug")
+# Where the stripped copies wait to be archived, under their paths below the checkout, and how many
+# are stripped at once. An objcopy holds about the copy it writes in memory: 0.74 GiB for a 2.9 GiB
+# server test executable, so eight at once stay within a build runner's memory.
+STRIPPED = Path("target/archive-stripped")
+STRIPPING_AT_ONCE = 8
 
 
 class ShardError(Exception):
@@ -328,23 +341,92 @@ def revision(root: Path) -> str:
     return completed.stdout.strip()
 
 
-def write_archive(root: Path, archive: Path, manifest_path: Path, paths: Sequence[Path]) -> Manifest:
-    """Write the files at `paths`, and a manifest of them at `manifest_path`, into one archive."""
+def strip_objects(root: Path, objects: Sequence[Path]) -> set[Path]:
+    """Copy every ELF object at `objects` without its debug information to its path below
+    STRIPPED, and return the paths copied. Paths that are one file, as Cargo links a binary from
+    `deps` beside it, stay one file among the copies."""
+    if shutil.which(STRIP[0]) is None:
+        raise ShardError(f"{STRIP[0]} is not installed")
+    staging = root / STRIPPED
+    shutil.rmtree(staging, ignore_errors=True)
+    first_paths: dict[tuple[int, int], Path] = {}
+    links: list[tuple[Path, Path]] = []
+    for path in objects:
+        source = root / path
+        if source.is_symlink() or not is_elf(source):
+            continue
+        status = source.stat()
+        identity = (status.st_dev, status.st_ino)
+        if identity in first_paths:
+            links.append((first_paths[identity], path))
+        else:
+            first_paths[identity] = path
+
+    def strip(path: Path) -> None:
+        copy = staging / path
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        completed = subprocess.run([*STRIP, str(root / path), str(copy)], capture_output=True, text=True)
+        if completed.returncode != 0:
+            raise ShardError(f"stripping {path} failed: {completed.stderr.strip()}")
+        shutil.copymode(root / path, copy)
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(STRIPPING_AT_ONCE) as pool:
+        list(pool.map(strip, first_paths.values()))
+    for first, path in links:
+        copy = staging / path
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        os.link(staging / first, copy)
+    built = sum((root / path).stat().st_size for path in first_paths.values())
+    kept = sum((staging / path).stat().st_size for path in first_paths.values())
+    print(
+        f"stripped the debug information of {len(first_paths)} objects, {built / 2**30:.2f} GiB, "
+        f"to {kept / 2**30:.2f} GiB in {time.monotonic() - started:.1f}s",
+        flush=True,
+    )
+    return {*first_paths.values(), *(path for _, path in links)}
+
+
+def write_archive(
+    root: Path, archive: Path, manifest_path: Path, paths: Sequence[Path], stripped: Collection[Path] = ()
+) -> Manifest:
+    """Write the files at `paths`, and a manifest of them at `manifest_path`, into one archive. The
+    ELF objects among `stripped` are written without their debug information, from copies that tar
+    stores under the objects' own paths, so the build keeps its objects whole."""
     if shutil.which(COMPRESSION[0]) is None:
         raise ShardError(f"{COMPRESSION[0]} is not installed")
+    try:
+        copies = strip_objects(root, list(stripped)) if stripped else set()
+        return write_listed(root, archive, manifest_path, paths, copies)
+    finally:
+        shutil.rmtree(root / STRIPPED, ignore_errors=True)
+
+
+def write_listed(root: Path, archive: Path, manifest_path: Path, paths: Sequence[Path], copies: set[Path]) -> Manifest:
+    """Write the archive of `paths`, taking the stripped copy of each path among `copies`."""
     files = []
+    sources = []
     for path in paths:
-        files.append(SuiteFile(path.as_posix(), (root / path).lstat().st_size))
+        if path in copies:
+            source = STRIPPED / path
+        else:
+            source = path
+        files.append(SuiteFile(path.as_posix(), (root / source).lstat().st_size))
+        sources.append(source.as_posix())
     manifest = Manifest(revision(root), str(root.resolve()), tuple(files))
     written = root / manifest_path
     written.parent.mkdir(parents=True, exist_ok=True)
     written.write_text(json.dumps(manifest.to_json(), indent=1) + "\n")
-    listing = "\0".join([*[file.path for file in files], manifest_path.as_posix()]) + "\0"
+    listing = "\0".join([*sources, manifest_path.as_posix()]) + "\0"
     archive.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     with archive.open("wb") as output:
+        # A stripped copy is stored under the path of the object it was copied from.
         tar = subprocess.Popen(
-            ["tar", "--create", "--file=-", "--directory", str(root), "--null", "--files-from=-"],
+            [
+                "tar", "--create", "--file=-", "--directory", str(root), "--null", "--files-from=-",
+                f"--transform=s,^{STRIPPED.as_posix()}/,,",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
         )
@@ -423,7 +505,7 @@ def pack(root: Path, archive: Path) -> Manifest:
     objects = coverage_objects(root, object_pattern(workspace_targets(root)))
     executable = scenario_executable(objects)
     print(f"scenario executable {executable}")
-    return write_archive(root, archive, MANIFEST, [*objects, *runtime_inputs(root, executable)])
+    return write_archive(root, archive, MANIFEST, [*objects, *runtime_inputs(root, executable)], stripped=objects)
 
 
 def unpack(root: Path, archive: Path) -> Manifest:

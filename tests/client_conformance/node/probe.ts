@@ -1300,6 +1300,12 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
         `EVENT PRODUCER_ENDED producer=${ended.producer()} reason=${wire.ProducerEndReason[member(ended.reason())]} message=${text(bytesOf((encoding) => ended.message(encoding)))}`,
       ];
     }
+    case wire.ServerBody.ServerNotice: {
+      const notice = member(message.body(new wire.ServerNotice()) as wire.ServerNotice | null);
+      return [
+        `EVENT NOTICE level=${wire.NoticeLevel[member(notice.level())]} kind=${wire.NoticeKind[member(notice.kind())]} message=${text(bytesOf((encoding) => notice.message(encoding)))}`,
+      ];
+    }
     default:
       throw new Error(`the corpus holds no ${wire.ServerBody[message.bodyType()]} message`);
   }

@@ -57,7 +57,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] <CONNECTOR> <ENTITY> EMITTER <name>
 ```
 
 The declared pairs are `CLIENT CONSUMER`, `HTTP REQUEST`, `KAFKA TOPIC`, `PULSAR TOPIC`,
-`RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`, `REDIS PUBSUB`, `MQTT TOPIC`, `NATS SUBJECT`, `ZEROMQ PUSH`, `SQS QUEUE`,
+`RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`, `REDIS PUBSUB`, `MQTT TOPIC`, `NATS SUBJECT`, `NATS STREAM`, `ZEROMQ PUSH`, `SQS QUEUE`,
 `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`,
 `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION` and `ICEBERG TABLE`.
 A client consumer uses `TO SCHEMA <schema> MODE ACK ...`, with native output in place of a codec.
@@ -188,7 +188,8 @@ to discard a record.
 | Pulsar | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Producer acceptance for `NO ACK`; one broker receipt per record for `ACK` |
 | RabbitMQ | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | The channel's answer to one round trip after each write for `NO ACK`; publisher confirm for `ACK` |
 | MQTT | `NO ACK` at `QOS 0`; `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` at `QOS 1` or `QOS 2` | Client acceptance at `QOS 0`, `PUBACK` at `QOS 1`, or `PUBCOMP`, which completes the QoS 2 handshake, at `QOS 2` |
-| NATS | `NO ACK`; `JETSTREAM ACK SEQUENTIAL`; `JETSTREAM ACK PARALLEL MAX <n>` | The Core NATS write's queued bytes drained and flushed on the same connection for `NO ACK`, without a server round trip; JetStream `PubAck` otherwise |
+| NATS SUBJECT | `NO ACK` | The Core NATS write's queued bytes drained and flushed on the same connection, without a server round trip |
+| NATS STREAM | `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | JetStream `PubAck` for each record |
 | Redis Pub/Sub | `NO ACK` | Server acceptance of `PUBLISH`; the subscriber count is not a delivery guarantee |
 | ZeroMQ | `NO ACK` | Socket acceptance |
 | SQS | `ACK` | Successful per-record or per-entry service response |
@@ -644,6 +645,13 @@ records, not attempts. `bytes_total` counts a codec body's record with the ordin
 accounting, the logical Arrow data of the finalized record, while a request without a body adds
 no payload bytes. A request's method, target and headers and the response add nothing to either
 counter, and the counters carry only the ordinary graph labels, never a request value.
+
+The `destination:` section of `DESCRIBE EMITTER` separately reports host publish and commit
+attempts and their elapsed wall durations. Retried host attempts each count once, while the
+`sent` counters above continue to count each delivered record once. All operation/outcome
+children exist at zero when the task starts. See
+[Connector Interactions](metrics-and-observability.md#connector-interactions) for the families,
+bounded outcomes, labels and process-local lifetime.
 
 ## Batching
 
@@ -1113,7 +1121,8 @@ Each emitter that writes transport headers declares a
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ EXCHANGE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `MQTT TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
-| `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `NATS SUBJECT` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `NATS STREAM` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 
 `CLIENT CONSUMER`, `REDIS PUBSUB`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
@@ -1895,9 +1904,18 @@ option: an emitter without acknowledgement needs no session, and an acknowledged
 it.
 
 Every statement writes its quality of service as `QOS 0`, `QOS 1` or `QOS 2` before `MODE`. Neither
-has a default, and the two pair by what can complete a publish: nothing answers QoS 0, so `QOS 0`
-takes `NO ACK`, and a broker answers QoS 1 and 2, so `QOS 1` and `QOS 2` take `ACK SEQUENTIAL` or
-`ACK PARALLEL MAX <n>`.
+has a default. The legal pairings and their completion points are:
+
+| QoS | Mode families | Record completes when | Session requested |
+| --- | --- | --- | --- |
+| `0` | `NO ACK` | The client accepts the publish | Clean |
+| `1` | `ACK SEQUENTIAL`, `ACK PARALLEL` | The broker answers `PUBACK` | Persistent |
+| `2` | `ACK SEQUENTIAL`, `ACK PARALLEL` | The broker answers `PUBCOMP` | Persistent |
+
+Use the complete mode bodies from the declaration below: every mode has a retry policy, and
+acknowledged modes also require `ACK TIMEOUT`.
+`SESSION` is written only on an ingestor; the emitter derives it from QoS. The ingest-side
+combination of `NO ACK` with QoS 1 or 2 is not an emitter pairing.
 
 <!-- connector-matrix:emit-mqtt-topic:start -->
 ```plexus,ignore
@@ -1939,6 +1957,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
 
+#### MQTT topics, properties and user properties
+
 `TOPIC` names one literal topic, published to exactly as written, letter case included. It follows
 the [ingestion topic filter rule](ingestors.md#external-names) without the `+` and `#` wildcards,
 so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `addr` names the broker
@@ -1973,6 +1993,8 @@ CREATE refuses an unsupported QoS number with its value and accepted levels, suc
 offers only the modes the written quality of service pairs with, and a statement that writes
 another is refused with the mode underlined and what it writes named, such as
 `MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1`.
+
+#### MQTT alterations and delivery recovery
 
 `ALTER` holds every result to the same pairing, once every operation of the statement has applied.
 `SET MODE` changes the mode within a quality of service, so `SET MODE ACK PARALLEL MAX 8 ...` is
@@ -2026,6 +2048,7 @@ CREATE NATS SUBJECT EMITTER <name>
   TO <client> SUBJECT 'orders.Created'
     MODE <mode>
     ENCODE USING <codec>
+    [REPLY TO reply_queue]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -2039,17 +2062,17 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | NATS client |
 | Locator and validation rule | SUBJECT 'orders.Created' (nats_publish_subject) |
-| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | REPLY TO reply_queue |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |
-| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted<br>a JetStream acknowledgement: `ACK TIMEOUT` |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted |
 | Driver limits | Messages above the server's max_payload are rejected. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -2059,8 +2082,13 @@ See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md
 `SUBJECT` names one literal subject, published to exactly as written, letter case included. It
 follows the [ingestion subject rule](ingestors.md#external-names) without the `*` and `>`
 wildcards, so `SUBJECT 'orders.*'` is refused when the emitter is created. A message carries its
-subject, the written headers and the payload; the emitter sets no reply subject or JetStream
-message id of its own. `BATCH` is optional. The NATS protocol sets no message size of its own:
+subject, the written headers and the payload. Optional `REPLY TO <expression>` evaluates a
+`STRING` once for each outgoing record and sets its reply subject. It follows the publication
+subject rule. A literal is validated when the emitter is created or altered; an invalid computed
+name is rejected per record before any bytes are published.
+A retry retains that evaluated reply subject. Header writes retain their order, including
+interleaved repeated names, with exact name matching. `BATCH` is optional.
+The NATS protocol sets no message size of its own:
 each server announces its `max_payload`, and the client refuses a batch message above it before
 writing it, as [Broker and message emitters](#broker-and-message-emitters) describes.
 
@@ -2091,11 +2119,55 @@ NATS emitters use the same optional token, user NKey or mounted credentials-file
 as ingestors. The [NATS client authentication rules](ingestors.md#nats) define mutual exclusion,
 confidential inspection and TLS configuration for both directions.
 
-`JETSTREAM` waits for one `PubAck` per record. The stream must already exist and capture the
-subject; a missing stream is an infrastructure error that remains under backpressure until an
-operator provisions it.
+### NATS STREAM
 
-`JETSTREAM` hands records to the client one after another, with at most `MAX <n>` of them awaiting
+<!-- connector-matrix:emit-nats-stream:start -->
+```plexus,ignore
+CREATE NATS STREAM EMITTER <name>
+  FROM <relay>
+  TO <client> STREAM 'orders'
+  (SUBJECT 'orders.created')
+    MODE <mode>
+    ENCODE USING <codec>
+    [MESSAGE ID id]
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | NATS client |
+| Locator and validation rule | STREAM 'orders' (nats_stream) |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `SUBJECT 'orders.created'` (string literal checked by nats_publish_subject); required |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | MESSAGE ID id |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; its MESSAGE ID envelope and written headers travel with the payload. |
+| Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it<br>PubAck answers awaiting settlement: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the stream lookup: `ACK TIMEOUT`<br>a JetStream acknowledgement: `ACK TIMEOUT` |
+| Driver limits | Messages above the server's max_payload are rejected. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [NATS STREAM capability and mirror reference](connector-capabilities.md#nats-stream-emit).
+<!-- connector-matrix:emit-nats-stream:end -->
+
+`STREAM` names a stream that must exist before the emitter opens; the connector looks it up and
+reports a missing external entity at open if it is absent. `SUBJECT` names one literal publication
+subject, and every publish carries the expected-stream header. A subject the named stream does not
+capture is rejected for that record through `ON MESSAGE ERROR`. `MESSAGE ID <expr>` writes
+`Nats-Msg-Id` for server-side deduplication. The host evaluates the ID once for the record, so a
+retry after a lost `PubAck` sends the same ID.
+
+`ACK` hands records to the client one after another, with at most `MAX <n>` of them awaiting
 their `PubAck` at once, or one under `ACK SEQUENTIAL`, each until `ACK TIMEOUT` after its
 hand-over. A publish that fails, because a `PubAck` failed or did not arrive in time, or because the
 client did not take a record within `ACK TIMEOUT` while its connection stopped draining, first

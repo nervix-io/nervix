@@ -89,7 +89,8 @@ pub use domain_clock::{
     DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
 };
 pub use event::{
-    Leadership, LeadershipObserved, NoticeLevel, ServerNotice, SessionEndReason, SessionEnding,
+    Leadership, LeadershipObserved, NoticeKind, NoticeLevel, ServerNotice, SessionEndReason,
+    SessionEnding,
 };
 pub use frame::{
     BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, FrameError,

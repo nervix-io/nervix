@@ -28,15 +28,15 @@ use crate::{
     IngestorDeclaration, IngestorEntity, IngestorEntityBody, IngestorEntityKind,
     IngestorEntityModel, IngestorInput, KafkaEmitter, KafkaIngestor, KafkaOffsetMode,
     KafkaTopicIngestor, LocatorDeclaration, MongoDbEmitter, MqttEmitter, MqttIngestor,
-    MqttTopicIngestor, MySqlEmitter, NatsEmitter, NatsIngestor, NatsSubjectIngestor,
-    OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric, OtelMetricKind, OtelScope,
-    PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor, PulsarEmitter, PulsarIngestor,
-    PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicIngestor,
-    RabbitMqEmitter, RabbitMqIngestor, RabbitMqQueueIngestor, RedisEmitter, RedisIngestor,
-    RedisPubSubIngestor, SentryEmitter, SqsEmitter, SqsFifoGroup, SqsIngestor, SqsQueueIngestor,
-    SyslogIngestor, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestor, WebsocketsUpgradeHeader, ZeroMqIngestor,
-    ZeroMqPullIngestor,
+    MqttTopicIngestor, MySqlEmitter, NatsEmitter, NatsIngestor, NatsStreamIngestor,
+    NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
+    OtelMetricKind, OtelScope, PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor,
+    PulsarEmitter, PulsarIngestor, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor,
+    RabbitMqQueueIngestor, RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter,
+    SqsEmitter, SqsFifoGroup, SqsIngestor, SqsQueueIngestor, SyslogIngestor,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestor, WebsocketsUpgradeHeader, ZeroMqIngestor, ZeroMqPullIngestor,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -532,6 +532,15 @@ impl IngestorPresentationModel for NatsSubjectIngestor {
     }
 }
 
+impl IngestorPresentationModel for NatsStreamIngestor {
+    fn entity_presentation(&self) -> EntityPresentation {
+        let mut presentation = EntityPresentation::ingestor(self);
+        presentation.external_locator(self.stream.as_str());
+        presentation.written_option("CONSUMER", string_literal(self.consumer.as_str()));
+        presentation
+    }
+}
+
 macro_rules! queue_ingestor_presentations {
     ($($Model:ty),+ $(,)?) => {
         $(impl IngestorPresentationModel for $Model {
@@ -576,6 +585,7 @@ impl IngestorEntity {
             Self::Pulsar(PulsarIngestor::Topic(entity)) => entity.entity_presentation(),
             Self::Mqtt(MqttIngestor::Topic(entity)) => entity.entity_presentation(),
             Self::Nats(NatsIngestor::Subject(entity)) => entity.entity_presentation(),
+            Self::Nats(NatsIngestor::Stream(entity)) => entity.entity_presentation(),
             Self::RabbitMq(RabbitMqIngestor::Queue(entity)) => entity.entity_presentation(),
             Self::Redis(RedisIngestor::PubSub(entity)) => entity.entity_presentation(),
             Self::Prometheus(PrometheusIngestor::Query(entity)) => entity.entity_presentation(),
@@ -659,9 +669,7 @@ impl EmitterEntity {
                 presentation.external_locator(entity.topic.as_str());
                 presentation.written_option("QOS", entity.qos.spelling().to_owned());
             }
-            Self::Nats(NatsEmitter::Subject(entity)) => {
-                presentation.external_locator(entity.subject.as_str())
-            }
+            Self::Nats(entity) => entity.present_options(presentation),
             Self::Sqs(SqsEmitter::Queue(entity)) => {
                 presentation.external_locator(entity.queue.as_str());
                 let group = match &entity.fifo_group {
@@ -700,6 +708,18 @@ impl EmitterEntity {
             }
         }
         Ok(())
+    }
+}
+
+impl NatsEmitter {
+    fn present_options(&self, presentation: &mut EntityPresentation) {
+        match self {
+            Self::Subject(entity) => presentation.external_locator(entity.subject.as_str()),
+            Self::Stream(entity) => {
+                presentation.external_locator(entity.stream.as_str());
+                presentation.written_option("SUBJECT", string_literal(entity.subject.as_str()));
+            }
+        }
     }
 }
 

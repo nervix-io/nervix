@@ -34,13 +34,13 @@ use nervix_client_wire::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
     DomainClockDetachOutcome, DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved,
     InspectTransactionRequest, InspectionOutcome, LeaderRedirect, Leadership,
-    MAX_IN_FLIGHT_REQUESTS, NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView,
-    RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
-    SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition,
-    SubscribeOutcome, SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
-    SubscriptionRows, SubscriptionType, SuggestRequest, Suggestion as WireSuggestion,
-    SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly, TransferPart,
-    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
+    MAX_IN_FLIGHT_REQUESTS, NoticeKind, NoticeLevel, ReplyBody, RequestCancelled, RequestId,
+    RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage,
+    ServerNotice, SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome,
+    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
+    Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
+    TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
     websocket::{CONSOLE_SESSION_PATH, ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -73,6 +73,7 @@ mod backup_dialog;
 mod clock_display;
 mod command_retry;
 mod create_dialog;
+mod node_panel;
 mod request_handoff;
 mod resource_upload;
 mod transaction_inspector;
@@ -87,6 +88,7 @@ use create_dialog::{
     ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
     CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission, SubscriptionDispatch,
 };
+use node_panel::{ClusterEventLog, NodePanel};
 use request_handoff::{RequestReceiver, RequestSender, request_handoff};
 use resource_upload::UploadAnswer;
 use transaction_inspector::{InspectorSignals, TransactionInspector};
@@ -185,6 +187,9 @@ struct WebConsoleSignals {
     /// once when that domain is selected.
     domain_snapshot: RwSignal<Option<DomainSnapshotView>>,
     cluster_counters: RwSignal<ClusterCounters>,
+    /// The membership and leadership notices of the node each session reached, which the node
+    /// panel lists beside the connection state instead of the REPL transcript.
+    cluster_events: RwSignal<ClusterEventLog>,
     active_domain: RwSignal<Option<DomainName>>,
     clock_display: RwSignal<ClockDisplay>,
     /// The clock attachment each connection asked for. The session loop records the one a
@@ -1282,6 +1287,10 @@ enum SessionStep {
     Redirect(Url),
     /// End the connection and connect again at the same address after the reconnect delay.
     Reconnect,
+    /// Stop reading the connection at once: a reply on it broke the session contract, so nothing
+    /// later on it can be trusted. Its unanswered ordered requests wait for the next connection,
+    /// which opens at the same address after the reconnect delay.
+    Abandon,
 }
 
 /// How a connection ended.
@@ -1505,6 +1514,7 @@ fn App() -> impl IntoView {
     let suggestion_continuation = RwSignal::new(None::<String>);
     let domain_snapshot = RwSignal::new(None::<DomainSnapshotView>);
     let cluster_counters = RwSignal::new(ClusterCounters::default());
+    let cluster_events = RwSignal::new(ClusterEventLog::default());
     let resource_details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
     let domains_loaded = RwSignal::new(false);
     let auth_token = RwSignal::new(web_console_auth_token_from_location());
@@ -1531,6 +1541,7 @@ fn App() -> impl IntoView {
         suggestion_continuation,
         domain_snapshot,
         cluster_counters,
+        cluster_events,
         active_domain,
         clock_display,
         clock_selection,
@@ -2028,6 +2039,7 @@ fn App() -> impl IntoView {
                 <Header
                     active_theme=active_theme
                     websocket_state=web_console_session.state
+                    cluster_events=cluster_events
                     active_domain=active_domain
                     clock_display=clock_display
                     domains=domains
@@ -2494,6 +2506,8 @@ async fn drain_closed_connection(
         received = true;
         match receive_frame(signals, state, requests, &frame) {
             SessionStep::Redirect(leader) => return Some(ConnectionEnd::Redirected(leader)),
+            // Nothing after a reply that broke the session contract is read.
+            SessionStep::Abandon => return Some(ConnectionEnd::Dropped),
             SessionStep::Continue
             | SessionStep::RetryCommand(_)
             | SessionStep::Reattach { .. }
@@ -2639,7 +2653,7 @@ async fn serve_connection(
                 }
             }
             SessionStep::Redirect(leader) => return ConnectionEnd::Redirected(leader),
-            SessionStep::Reconnect => return ConnectionEnd::Dropped,
+            SessionStep::Reconnect | SessionStep::Abandon => return ConnectionEnd::Dropped,
         }
         for message in requests.release_held() {
             if !send_message(&mut socket, &codec, signals, requests, message).await {
@@ -2963,8 +2977,18 @@ fn apply_event(
             Leadership::Unknown => redirect_step(signals, &LeaderRedirect { leader: None }),
         },
         ServerEvent::Notice(notice) => {
-            let line = notice_line(notice);
-            signals.terminal_lines.update(|lines| lines.push(line));
+            match notice.kind {
+                NoticeKind::Membership | NoticeKind::Leadership => {
+                    let session = signals.session_generation.get_untracked();
+                    signals
+                        .cluster_events
+                        .update(|events| events.record(session, notice));
+                }
+                NoticeKind::ClusterParameters | NoticeKind::Runtime | NoticeKind::ControlPlane => {
+                    let line = notice_line(notice);
+                    signals.terminal_lines.update(|lines| lines.push(line));
+                }
+            }
             SessionStep::Continue
         }
         ServerEvent::Domains(observed) => {
@@ -3226,12 +3250,14 @@ fn apply_reply(
 
 /// Applies the outcome of a command.
 ///
-/// A command the serving node could not run because it does not lead is sent again at the leader's
-/// console, and a command the leader could not bind to the session's transaction is sent again
-/// once the transaction is attached. An unknown outcome waits before repeating on the open
-/// connection, which continues serving other messages. Each attempt keeps the command's execution
-/// reference, so the server recovers its recorded outcome
-/// instead of running it twice. A definitive outcome goes to whoever reads the command.
+/// An outcome that names another execution than the command's own is refused before anything it
+/// carries is applied, as [`refuse_foreign_outcome`] describes. A command the serving node could
+/// not run because it does not lead is sent again at the leader's console, and a command the
+/// leader could not bind to the session's transaction is sent again once the transaction is
+/// attached. An unknown outcome waits before repeating on the open connection, which continues
+/// serving other messages. Each attempt keeps the command's execution reference, so the server
+/// recovers its recorded outcome instead of running it twice. A definitive outcome goes to
+/// whoever reads the command.
 fn apply_command_outcome(
     signals: WebConsoleSignals,
     requests: &mut SessionRequests,
@@ -3240,6 +3266,16 @@ fn apply_command_outcome(
     purpose: CommandPurpose,
     mut outcome: CommandOutcome,
 ) -> SessionStep {
+    if outcome.execution_reference != request.execution_reference {
+        return refuse_foreign_outcome(
+            signals,
+            requests,
+            order,
+            request,
+            purpose,
+            outcome.execution_reference,
+        );
+    }
     if let Some(redirect) = command_redirect(&outcome.disposition) {
         if let CommandPurpose::Create(context) = &purpose {
             signals
@@ -3297,6 +3333,54 @@ fn apply_command_outcome(
         }
     }
     SessionStep::Continue
+}
+
+/// A command outcome that names another execution than its command's own, which the session
+/// contract forbids (E-5 of the client implementation manual).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "protocol violation: the reply to command execution '{expected}' names execution \
+     '{received}'; the console reconnects and sends the command again under its own reference"
+)]
+struct ForeignCommandOutcome {
+    expected: CommandExecutionReference,
+    received: CommandExecutionReference,
+}
+
+/// Refuses a command outcome that names another execution (E-5), before anything it carries is
+/// applied: its result, its redirect, its unknown outcome, its detached transaction or its
+/// transaction status.
+///
+/// The reply broke the session contract, so the console reports the violation and stops reading
+/// the connection, which interrupts every request still waiting on it (F-8). The command keeps
+/// its place in the issue order and its whole original request, so the next connection sends it
+/// again under its own execution reference, and the server answers with the command's own
+/// recorded outcome instead of running it twice (E-3).
+fn refuse_foreign_outcome(
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    order: IssueOrder,
+    request: CommandRequest,
+    purpose: CommandPurpose,
+    received: CommandExecutionReference,
+) -> SessionStep {
+    let violation = ForeignCommandOutcome {
+        expected: request.execution_reference.clone(),
+        received,
+    };
+    signals
+        .terminal_lines
+        .update(|lines| lines.push(TermLine::error(violation.to_string())));
+    if let CommandPurpose::Create(context) = &purpose {
+        signals
+            .create
+            .queued_reconnect(context.attempt, context.draft_revision);
+    }
+    requests.hold_again(IssuedRequest {
+        order,
+        request: ConsoleRequest::Command { request, purpose },
+    });
+    SessionStep::Abandon
 }
 
 fn show_create_outcome(
@@ -4198,6 +4282,7 @@ fn notice_line(notice: ServerNotice) -> TermLine {
 fn Header(
     active_theme: RwSignal<usize>,
     websocket_state: RwSignal<ConsoleConnectionState>,
+    cluster_events: RwSignal<ClusterEventLog>,
     active_domain: RwSignal<Option<DomainName>>,
     clock_display: RwSignal<ClockDisplay>,
     domains: RwSignal<Vec<DomainView>>,
@@ -4236,6 +4321,7 @@ fn Header(
                 <span class=move || websocket_state.get().pill_class()>
                     {move || websocket_state.get().label()}
                 </span>
+                <NodePanel events=cluster_events />
                 <Show
                     when=move || selected_domain()
                         .is_some_and(|domain| domain.state_command().is_some())
@@ -8120,6 +8206,8 @@ impl TermLineKind {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    mod foreign_execution;
+
     use leptos::prelude::Owner;
     use nervix_client_wire::{
         DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockObserved,
@@ -8341,6 +8429,7 @@ mod tests {
             suggestion_continuation: RwSignal::new(None),
             domain_snapshot: RwSignal::new(None),
             cluster_counters: RwSignal::new(ClusterCounters::default()),
+            cluster_events: RwSignal::new(ClusterEventLog::default()),
             active_domain: RwSignal::new(Some(domain.clone())),
             clock_display: RwSignal::new(ClockDisplay::selected(Some(domain.clone()), true)),
             clock_selection: RwSignal::new(ClockSelection::default()),
@@ -9776,6 +9865,71 @@ mod tests {
         );
     }
 
+    fn server_notice(level: NoticeLevel, kind: NoticeKind, message: &str) -> ServerEvent {
+        ServerEvent::Notice(ServerNotice {
+            level,
+            kind,
+            message: message.to_string(),
+        })
+    }
+
+    #[test]
+    fn membership_and_leadership_notices_go_to_the_node_panel_and_the_rest_to_the_transcript() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
+            let state = RwSignal::new(ConsoleConnectionState::Connected);
+            let mut requests = SessionRequests::new();
+            let notices = [
+                server_notice(
+                    NoticeLevel::Info,
+                    NoticeKind::Membership,
+                    "node 'node-3' left",
+                ),
+                server_notice(
+                    NoticeLevel::Info,
+                    NoticeKind::Leadership,
+                    "raft transition: state=Follower leader=node-2 term=3",
+                ),
+                server_notice(
+                    NoticeLevel::Info,
+                    NoticeKind::ClusterParameters,
+                    "cluster parameters committed at revision 4",
+                ),
+                server_notice(
+                    NoticeLevel::Error,
+                    NoticeKind::Runtime,
+                    "emitter 'redis_orders' publish failed",
+                ),
+                server_notice(
+                    NoticeLevel::Error,
+                    NoticeKind::ControlPlane,
+                    "resource 'model' failed to load",
+                ),
+            ];
+            for notice in notices {
+                let step = apply_event(signals, state, &mut requests, notice);
+                assert!(matches!(step, SessionStep::Continue));
+            }
+
+            assert_eq!(signals.cluster_events.with(ClusterEventLog::received), 2);
+            let transcript = signals.terminal_lines.with(|lines| {
+                lines
+                    .lines
+                    .iter()
+                    .map(|entry| entry.line.text.clone())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                transcript,
+                vec![
+                    "cluster parameters committed at revision 4".to_string(),
+                    "error: emitter 'redis_orders' publish failed".to_string(),
+                    "error: resource 'model' failed to load".to_string(),
+                ]
+            );
+        });
+    }
+
     /// The notice with which the server ends the generation `subscription`.
     fn subscription_ended(subscription: SubscriptionHandle, message: &str) -> ServerEvent {
         ServerEvent::SubscriptionEnded(SubscriptionEnded {
@@ -11102,6 +11256,7 @@ mod tests {
                 };
                 let original = request.clone();
                 let mut outcome = completed_outcome("the command's outcome is not known yet");
+                outcome.execution_reference = request.execution_reference.clone();
                 outcome.disposition = CommandDisposition::OutcomeUnknown(cause);
                 let step =
                     apply_command_outcome(signals, &mut requests, order, request, purpose, outcome);
@@ -11169,6 +11324,7 @@ mod tests {
             };
             let reference = request.execution_reference.clone();
             let mut outcome = completed_outcome("leadership moved during admission");
+            outcome.execution_reference = reference.clone();
             outcome.disposition = CommandDisposition::OutcomeUnknown(
                 nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
             );
@@ -12602,6 +12758,7 @@ mod tests {
                 panic!("the test issued a create command");
             };
             let mut unknown = completed_outcome("leadership moved during admission");
+            unknown.execution_reference = request.execution_reference.clone();
             unknown.disposition = CommandDisposition::OutcomeUnknown(
                 nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
             );

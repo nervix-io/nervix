@@ -1524,7 +1524,7 @@ mod tests {
     }
 
     fn envelope_variant(variant: u8) -> BatchEnvelope {
-        match variant % 5 {
+        match variant % 6 {
             0 => BatchEnvelope {
                 key: None,
                 headers: EmitterHeaders::Text(Vec::new()),
@@ -1558,7 +1558,7 @@ mod tests {
                 message_group: None,
                 clauses: None,
             },
-            _ => BatchEnvelope {
+            4 => BatchEnvelope {
                 key: None,
                 headers: EmitterHeaders::Text(vec![
                     ("trace".to_owned(), "first".to_owned()),
@@ -1591,6 +1591,19 @@ mod tests {
                     ],
                     ..Default::default()
                 })),
+            },
+            _ => BatchEnvelope {
+                key: None,
+                headers: EmitterHeaders::Text(Vec::new()),
+                message_group: None,
+                clauses: Some(
+                    RecordEnvelope {
+                        message_id: Some(format!("message-{variant}")),
+                        reply_to: Some(format!("reply-{variant}")),
+                        ..RecordEnvelope::default()
+                    }
+                    .into(),
+                ),
             },
         }
     }

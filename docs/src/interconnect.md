@@ -588,6 +588,14 @@ applied separately to incoming and outgoing work across all peers and connection
 These reservations mean that ordinary management traffic cannot consume the capacity required to
 resolve already-started relay work or determine whether a peer is healthy.
 
+Consensus heartbeats use the management pool independently of log replication. The worker waits
+for one answer from each follower up to the leader lease (the configured maximum election timeout),
+and its interconnect request uses the same full bound. An answer after one heartbeat interval
+but before that lease expires can therefore reach Raft; timeout or transport failure still ends the
+request and releases its management stream. Initial empty replication probes continue to use their
+shorter soft deadline and the same typed management response. This changes neither the wire shape
+nor pool and admission quotas.
+
 Leasing an established stream allocates nothing and acquires no shared discovery map. An immutable
 persistent target table selects the peer's fixed pool arrays. Each slot retains its cancellation
 lifetime, one atomic worker claim and an `ArcSwapOption` containing the current authenticated
@@ -782,6 +790,19 @@ A logical outgoing channel is identified by the authenticated destination node, 
 domain, destination relay, and concrete branch. Different channels may run concurrently. Within one
 channel, the sender preserves FIFO order and permits at most one batch to wait for runtime admission.
 Each sender channel has a unique incarnation and a monotonically increasing sequence number.
+
+Every relay payload names the unit of the relay its batch belongs to: the single unit of a relay
+with one owner, or the partition of a partitioned relay that owns the batch's key, as
+[Relay Partitions](relay.md#relay-partitions) describes. A producer resolves the partition once,
+when it binds the channel for a concrete branch, and the owner routes of that relay are a table of
+one owner per unit that a schedule replaces whole. A schedule that moves one partition's owner
+retires only the channels of that partition's branches; the producers of every other partition keep
+delivering on the channels they hold, and each partition has its own routing generation that a
+forced recovery fences on its own. A node admits a routed payload only for a unit it owns: the
+receiver refuses one addressed to a unit it does not own as owned elsewhere, and once it has decoded
+the key it refuses, as `RemoteRelayDecodeError::Unit`, a payload whose key lands in a partition other
+than the one the payload names. A subscription or consumer payload carries the unit of the
+partition owner that fanned it out.
 
 For fan-out, the source encodes an Arrow batch once and shares those immutable encoded bytes across
 destinations and transport retries. Delivery metadata, admission state, and attached record
@@ -1233,6 +1254,17 @@ retries. Closing the transport cancels queued work and exchanges in flight.
 Each node's Chitchat live set is its own failure-detector estimate. An isolated peer can remain
 listed live until its missing heartbeats are observed, even after its links stop carrying requests;
 application probes provide the separate signal that eventually makes its work eligible for failover.
+
+Chitchat wakes the node's membership task whenever any live member's state changes, including every
+key a member publishes. The task republishes subscription interest, prerequisites and routes from
+each value it receives, and compares the value's live set with the one it saw before. It keeps that
+set as its own state, keyed by node name with the highest incarnation listed live for it, so an old
+and a new incarnation that are briefly both live count as one member. Only a node that joined, left,
+or became a new incarnation produces an event: the task logs it at `info` with the node and its
+incarnation, and offers it to the sessions attached to the node as a `Membership` notice, such as
+`node 'node-3' left` or `node 'node-3' restarted (incarnation 1793845627114630656)`. A value that
+only changes published keys, such as subscription interest, offers nothing. The node's own run is
+its first member, so it never reports itself joining.
 
 Chitchat continues to select known dead peers for exchanges during its 24-hour dead-node retention
 period. When application health has retired one of those peers from the outbound pool, a gossip

@@ -77,6 +77,11 @@ election timeout. Gossip derives its failure detector the same way: it assumes t
 intervals between a peer's heartbeats until it has observed some, and takes no gap longer than
 twenty gossip intervals as a sample, 5 and 10 seconds by default.
 
+The maximum Raft election timeout also bounds the leader lease and a heartbeat's response wait.
+The interval still schedules heartbeats; an answer later than one interval but inside the lease
+can renew it using that request's sending time. This adds no node setting or separate timing
+prerequisite.
+
 A proposed new prerequisite first has to establish why a committed cluster parameter applied by
 rebuilding its owner cannot express it.
 
@@ -420,7 +425,7 @@ transition, even when a later command has changed another parameter.
 
 `DESCRIBE CLUSTER` reports committed values and each node's running revision and values. A node
 that has not applied the current record remains visibly behind. Sessions receive an informational
-notice after their node successfully installs a parameter revision. The installation supervisor
+`ClusterParameters` notice after their node successfully installs a parameter revision. The installation supervisor
 retries a failed graph installation; a retry of the same revision sends no additional parameter
 notice. A joining or returning node obtains the
 live cluster's published record before activating services that consume it and verifies that
@@ -458,6 +463,11 @@ The compiler accepts this contract on a constant, including an associated consta
 `fixed` kind and one nonempty reason. Duplicate, malformed and misplaced contracts fail. The
 source scanner validates the gate before excluding a constant, including inactive code. The
 reason remains reviewed evidence; neither parser nor compiler proves its prose true.
+
+The one-minute and fifteen-minute metric EMA windows, their decay conversion and the published
+connector-interaction duration buckets are fixed observation contracts. Their declarations carry
+the fixed reasons in the metric owners; they are not node settings. The current resolution is
+documented in [Metrics And Observability](metrics-and-observability.md#connector-interactions).
 
 `just ratchet --show hidden_tunables` lists the temporary count's sites. It counts numeric
 `const` items of types `Duration`, `usize`, `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`,

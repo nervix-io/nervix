@@ -3,9 +3,10 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** The materialized-state command, its required scheduled metadata, payload and branch
-//!   sensitivity, local or owner reads, and the text presented to the session.
-//! - **Depends on.** The committed schedule for relay/schema/branch declarations, the runtime for
-//!   materialized records, and the command and presentation owners for the result boundary.
+//!   sensitivity, and the text presented to the session.
+//! - **Depends on.** The committed schedule for relay/schema/branch declarations, the reads of each
+//!   unit's records wherever the schedule places it, and the command and presentation owners for
+//!   the result boundary.
 //! - **Must not know.** How materialized records are executed, persisted or replicated.
 
 #![cfg_attr(
@@ -101,32 +102,9 @@ impl SessionServiceImpl {
         };
 
         let entries = match self
-            .inner
-            .runtime
-            .local_materialized_stream_state(domain, &show.relay, &payload_sensitivity)
+            .materialized_state_of_every_unit(domain, &show.relay, relay_node, &payload_sensitivity)
             .await
         {
-            Ok(entries) if !entries.is_empty() => entries,
-            Ok(_) if !relay_node.executes_on(self.inner.consensus.local_node_id()) => {
-                if let Some(primary_node) = relay_node.primary_node() {
-                    match self
-                        .inner
-                        .runtime
-                        .remote_materialized_stream_state(
-                            primary_node,
-                            domain,
-                            &show.relay,
-                            &payload_sensitivity,
-                        )
-                        .await
-                    {
-                        Ok(entries) => entries,
-                        Err(error) => return command_error(format!("{error:#}")),
-                    }
-                } else {
-                    Vec::new()
-                }
-            }
             Ok(entries) => entries,
             Err(error) => return command_error(format!("{error:#}")),
         };

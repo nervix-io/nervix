@@ -130,6 +130,7 @@ impl<'a> ConfiguredQuery<'a> {
             | ChoiceTarget::IngestPulsarSource
             | ChoiceTarget::IngestMqttSource
             | ChoiceTarget::IngestNatsSource
+            | ChoiceTarget::IngestNatsStreamSource
             | ChoiceTarget::IngestRabbitMqSource
             | ChoiceTarget::IngestRedisPubSubSource
             | ChoiceTarget::IngestPrometheusSource
@@ -1626,7 +1627,7 @@ mod tests {
                 strictness: WireSchemaStrictness::Loose,
                 fields: vec![WireSchemaField {
                     name: FieldName::parse("message").assured("valid field"),
-                    ty: nervix_models::CborType::String,
+                    ty: nervix_models::CborType::Text,
                     optional: false,
                 }],
             }),

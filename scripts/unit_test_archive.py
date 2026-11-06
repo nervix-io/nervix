@@ -7,8 +7,9 @@ dependencies compile once and the jobs that run them need no compiler or cache. 
 test-coverage-binaries` keeps Cargo's messages in `target/unit-tests/cargo-messages.jsonl`, and
 `plan` reads the test executables from them into `target/unit-tests/programs.json`. `pack` writes
 those executables, every other object `cargo llvm-cov report` reads and the generated inputs a test
-reads into one archive, and `unpack` restores it into a checkout of the same revision and path,
-with the checks `scripts/scenario_shards.py` makes for the scenario suite.
+reads into one archive, the objects without their debug information as `scripts/scenario_shards.py`
+stores them, and `unpack` restores it into a checkout of the same revision and path, with the checks
+`scripts/scenario_shards.py` makes for the scenario suite.
 
 The scenario suite's own executable stays out: the shards run it, and it is the largest object in
 the directory. The pack therefore takes every other object the target directory holds, which is the
@@ -120,7 +121,11 @@ def pack(root: Path, archive: Path) -> shards.Manifest:
         if program.executable not in held:
             raise shards.ShardError(f"the build left no {program.executable}")
     return shards.write_archive(
-        root, archive, MANIFEST, [*kept, *shards.generated_inputs(root), *jvm_inputs(root, programs), PROGRAMS],
+        root,
+        archive,
+        MANIFEST,
+        [*kept, *shards.generated_inputs(root), *jvm_inputs(root, programs), PROGRAMS],
+        stripped=kept,
     )
 
 

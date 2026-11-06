@@ -31,7 +31,8 @@ curl http://127.0.0.1:<observability-port>/metrics
 Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay
 branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a
 relay is branched by high-cardinality values such as tenant, user, account, or device id. Branch
-lifecycle metrics identify the declared branch, not the concrete key.
+lifecycle metrics identify the declared branch, not the concrete key. A partitioned relay's series
+carry its partition, whose cardinality is bounded by the partition count its branch declares.
 
 ## Metric Labels
 
@@ -42,15 +43,17 @@ Graph metric series use these labels:
 - `target`: relay or node name
 - `physical_node_id`: Nervix cluster node where the metric was observed
 - `direction`: `received` or `sent`
-- `stream`: logical relay associated with the observation, or `-` when no relay applies
+- `relay`: logical relay associated with the observation, or `-` when no relay applies
 - `peer_kind` and `peer`: relay peer labels for node-to-relay observations, or `-` when no peer applies
+- `partition`: the partition of a partitioned relay that records a `RELAY` series, or `-` for a
+  relay with one owner and for every other series
 - `branch`: named branch declaration on branch lifecycle metrics
 - `reason`: branch eviction reason, either `lru` or `ttl`
 - `le`: Prometheus histogram bucket boundary
 
-For a single-input emitter, sent metrics retain that input relay as `stream`. A multi-input
+For a single-input emitter, sent metrics retain that input relay as `relay`. A multi-input
 emitter's received metrics identify the actual source relay, while its sent metrics aggregate the
-shared emitter pipeline with `stream="-"` because one flush may contain work from several sources.
+shared emitter pipeline with `relay="-"` because one flush may contain work from several sources.
 
 An emitter's sent metrics count the records its destination delivered, each once, however many
 attempts it took: a flush that completes after retries counts its delivered records once, and a
@@ -66,8 +69,15 @@ carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-an
 Example Prometheus series:
 
 ```text
-nervix_messages_total{domain="prod",target_kind="RELAY",target="notifications",physical_node_id="node-1",direction="received",stream="notifications",peer_kind="-",peer="-"} 42
+nervix_messages_total{domain="prod",target_kind="RELAY",target="notifications",physical_node_id="node-1",direction="received",relay="notifications",peer_kind="-",peer="-",partition="-"} 42
+nervix_messages_total{domain="prod",target_kind="RELAY",target="tenant_events",physical_node_id="node-2",direction="received",relay="tenant_events",peer_kind="-",peer="-",partition="1"} 17
 ```
+
+`DESCRIBE` metric lines of a partitioned relay name the partition after the relay, for example
+`messages_total received relay=tenant_events partition=1 physical_node=node-2 total=17 ...`.
+Every `RELAY` series a partitioned relay records names one of its partitions, so such a relay has no
+`RELAY` series with `partition="-"`. A partition's series exist on the node that owns it and are
+withdrawn when that owner ends, as when the partition moves to another node.
 
 Example `DESCRIBE INGESTOR` edge metric section:
 
@@ -89,6 +99,10 @@ Nervix records these raw metric families:
   `8192`, `16384`, `32768`, and `65536`, followed by `+Inf`. The rolling HDR histograms used by
   `DESCRIBE` track batch sizes through 65,536 messages.
 - `nervix_delivery_latency_seconds`: histogram of delivery latency between graph nodes
+- `nervix_emitter_publish_attempts_total`: completed host publish and commit attempts, split by
+  `operation` and `outcome`; see [Connector Interactions](#connector-interactions)
+- `nervix_emitter_publish_duration_seconds`: elapsed wall seconds per host publish or commit
+  attempt, split by `operation`
 - `nervix_relay_buffer_len`: histogram of runtime relay buffer occupancy in queued batches
 - `nervix_branch_instances`: current concrete branch keys with at least one runtime instance on the
   physical node
@@ -463,6 +477,54 @@ family of their own: their transfers appear in the interconnection series and th
 the `bulk` and `restore_metadata` memory classes. [Backup And
 Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) defines each series.
 
+## Connector Interactions
+
+Emitter destination observations describe the host's interaction with a connector, separately
+from delivered graph traffic. Both interaction families carry `domain`, `emitter`,
+`physical_node_id`, `connector` and `entity`. Connector names use the vocabulary's display form,
+such as `REDIS`; entities use their declared name, such as `PUBSUB`. `operation` is `publish` or
+`commit`. Each starting emitter registers every operation/outcome child and histogram at zero,
+even if that connector has no separate commit operation.
+
+`nervix_emitter_publish_attempts_total` records one outcome per nonempty host publish attempt or
+due staged commit, including each retry. It never counts one attempt per record. Its bounded
+`outcome` label projects the typed result the host already handles:
+
+- `succeeded`: the operation completed, including settled per-record rejections that do not fail
+  the operation
+- `transient`: an existing retryable publish failure, a stop deadline or shutdown while stalled,
+  or cancellation of an attempt before it has a definitive answer
+- `misconfigured`: the connector returned the host's invalid-connector-configuration outcome
+- `violation`: a terminal preparation or connector-contract failure, including an unknown or
+  repeated record answer
+
+This observation does not change retry, acknowledgement or error policy. In particular, delivered
+records still increase the existing `messages_total sent` only once. A connector can make several
+external calls inside one host attempt; these families do not count those calls separately.
+
+`nervix_emitter_publish_duration_seconds` observes elapsed wall time once per started attempt,
+including failed and cancelled attempts. Its finite bucket boundaries are `0.001`, `0.005`,
+`0.01`, `0.05`, `0.1`, `0.5`, `1`, `5` and `30` seconds, followed by `+Inf`. Empty flushes and
+commits that are not due record neither a counter nor a duration.
+
+Interaction observations are process-local and are retained for that process's lifetime. A
+restarted task with the same labels continues its totals; another connector entity or physical
+node has separate children. A new process starts at zero. These observations are neither
+replicated nor restored from snapshots, and removing a task does not withdraw its history.
+
+`DESCRIBE EMITTER` renders a `destination:` section after status and before the graph-edge
+`metrics:` section. The existing owner route also supplies this section when another node receives
+the command. Each counter line includes its full family and label selector, `total`, the wall
+average rate and the one-minute and fifteen-minute wall EMA rates. Domain rates are `-`, because
+an attempt has no domain timestamp. Each duration line includes its full selector, `count` and
+`sum_seconds`. For example:
+
+```text
+destination:
+  nervix_emitter_publish_attempts_total{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish",outcome="succeeded"} total=2 wall_rate_per_sec=0.5 domain_rate_per_sec=- wall_rate_ema_1m_per_sec=0.4 wall_rate_ema_15m_per_sec=0.1 domain_rate_ema_1m_per_sec=- domain_rate_ema_15m_per_sec=-
+  nervix_emitter_publish_duration_seconds{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish"} count=2 sum_seconds=0.003
+```
+
 ## DESCRIBE Metrics
 
 `DESCRIBE` commands include metric summaries for the described target when metrics exist. For a
@@ -521,7 +583,7 @@ Histogram summaries include:
 - `domain_p50_1m`, `domain_p90_1m`, `domain_p99_1m`: one-minute domain-clock decayed percentiles
 - `domain_p50_15m`, `domain_p90_15m`, `domain_p99_15m`: fifteen-minute domain-clock decayed percentiles
 
-Histogram `DESCRIBE` lines do not include raw `count` / `sum` values or rates. For `messages_per_batch`, the raw observation count is the batch count and the raw sum is the message count; those are already reported clearly by `batches_total` and `messages_total`. The histogram answers distribution questions such as typical and tail batch size. Percentiles are rendered as decimal estimates interpolated within the configured histogram bucket range rather than as raw bucket boundary labels. The same rule applies to delivery latency: `messages_total` and `batches_total` answer throughput questions, while `delivery_latency_seconds` answers latency distribution questions.
+Graph-edge histogram `DESCRIBE` lines do not include raw `count` / `sum` values or rates. For `messages_per_batch`, the raw observation count is the batch count and the raw sum is the message count; those are already reported clearly by `batches_total` and `messages_total`. The histogram answers distribution questions such as typical and tail batch size. Percentiles are rendered as decimal estimates interpolated within the configured histogram bucket range rather than as raw bucket boundary labels. The same rule applies to delivery latency: `messages_total` and `batches_total` answer throughput questions, while `delivery_latency_seconds` answers latency distribution questions. Connector-interaction durations use the separate `count` and `sum_seconds` summary described above.
 
 Relay buffer summaries use `relay_buffer_len`. The percentile values are queued batch slots
 observed in the single buffer on the relay owner, and `capacity=<n>` shows that buffer's declared

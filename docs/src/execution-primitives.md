@@ -116,6 +116,40 @@ no interleaving. What it reports, and what it cannot, belong to
 
 ## Policy Boundaries
 
+### Allowance clock adapter
+
+`nervix-rate-limit` captures `nervix_primitives::time::Instant` once per admission and implements
+governor's `Clock` and `Reference` over that captured value. Every clause therefore uses the same
+physical-clock coordinate. The engine returns a deadline; its caller owns `time::sleep_until` and
+retry. It reads no UTC clock and uses no governor timer, default clock, keyed store or jitter.
+Its relative GCRA store translates the captured epoch offset into remaining nanoseconds before
+calling governor and translates the result back afterwards. Quotas bound a burst horizon to
+`u64::MAX / 2`, so governor's intermediate sum of two horizons fits its nanosecond representation.
+The replenishment interval rounds up to whole nanoseconds, preserving the requested rate ceiling.
+
+This adapter adds no primitive. Ordinary and Turmoil admissions read the boundary's corresponding
+clock. Shuttle's `Instant::now` remains a real clock read, so its keyed-store check injects fixed
+offsets and checks synchronization independently of elapsed time. The Loom model exercises only
+the actual selected atomic cell, without reading a clock. Relative generations and their UTC
+conversions take explicit anchors and perform no clock reads. The public engine scenarios test
+elapsed waits on the ordinary boundary timer; they do not qualify a cluster or host integration.
+
+### Authentication clock adapter
+
+The node's failed-name admission owner samples the selected monotonic instant under its map
+guard. It gives governor a snapshot clock at zero and the bucket's remaining arrival mark,
+then reanchors the complete updated mark at that selected instant. The per-second quota bounds
+the remaining mark by one burst, so the conversion does not depend on node uptime. Its exclusive
+state-store cell uses no backend clock or atomic store, and quota waits use boundary timers after
+the map guard ends. This adds no primitive or mode selection.
+
+The authentication owner's paused-clock tests qualify elapsed refill and concurrent refusal
+ordering. Its `authentication-quota-clock` property compares every decision, exact wait and complete
+arrival mark with a persistent governor limiter. Public authentication scenarios qualify the real
+transport waits separately; these asynchronous mutex and timer paths are untracked by Deloxide.
+
+### Executor and clock permissions
+
 The boundary supplies mechanisms and decides no policy. `net` never decides what a name means: a
 node resolves through its own resolver in `nervix-dns`, no mode but Turmoil's offers a lookup, and
 the boundary check rejects `tokio::net::lookup_host` and the `ToSocketAddrs` traits, which resolve

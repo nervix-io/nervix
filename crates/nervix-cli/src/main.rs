@@ -35,10 +35,10 @@ use nervix_client_core::{
     AutocompleteOutcome, AutocompleteSuggestion, Client, ClientError as CoreClientError,
     CommandExecutionReference, ConnectDns, ConnectOptions, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockAttachRefusal, DomainClockDetachDisposition,
-    DomainClockDetachOutcome, DomainClockEvent, DomainName, NoticeLevel, ResourceUploadIdentity,
-    ServerEvent, SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
-    SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
-    TransactionStatus,
+    DomainClockDetachOutcome, DomainClockEvent, DomainName, NoticeKind, NoticeLevel,
+    ResourceUploadIdentity, ServerEvent, SubscriptionDeliveryBehavior, SubscriptionEvent,
+    SubscriptionRequest, SuggestionKind as ClientSuggestionKind, TlsRequirement,
+    TransactionLifecycle, TransactionStatus,
 };
 use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
@@ -1462,17 +1462,23 @@ fn format_domain_clock_event(event: &DomainClockEvent) -> String {
 }
 
 fn format_server_event(event: &ServerEvent) -> String {
-    let label = if event.message.starts_with("raft transition:") {
-        "topology"
-    } else {
-        "server"
-    };
     format!(
         "[events] {} {}: {}",
-        label,
+        notice_kind_label(event.kind),
         notice_level_label(event.level),
         event.message
     )
+}
+
+/// The label a server notice prints with, naming the kind of event the server sent it as.
+fn notice_kind_label(kind: NoticeKind) -> &'static str {
+    match kind {
+        NoticeKind::Membership => "membership",
+        NoticeKind::Leadership => "leadership",
+        NoticeKind::ClusterParameters => "cluster parameters",
+        NoticeKind::Runtime => "runtime",
+        NoticeKind::ControlPlane => "control plane",
+    }
 }
 
 /// The label a server notice's level prints with.
@@ -2218,33 +2224,72 @@ mod tests {
     }
 
     #[test]
-    fn raft_transition_server_events_are_labeled_as_topology() {
+    fn every_server_notice_is_labelled_by_its_kind() {
+        /// One notice and the line the REPL prints for it.
+        struct Printed {
+            notice: ServerEvent,
+            line: &'static str,
+        }
+        let printed = [
+            Printed {
+                notice: ServerEvent {
+                    level: NoticeLevel::Info,
+                    kind: NoticeKind::Membership,
+                    message: "node 'node-3' left".to_string(),
+                },
+                line: "[events] membership INFO: node 'node-3' left",
+            },
+            Printed {
+                notice: ServerEvent {
+                    level: NoticeLevel::Info,
+                    kind: NoticeKind::Leadership,
+                    message: "raft transition: state=Leader leader=node-1 term=2".to_string(),
+                },
+                line: "[events] leadership INFO: raft transition: state=Leader leader=node-1 \
+                       term=2",
+            },
+            Printed {
+                notice: ServerEvent {
+                    level: NoticeLevel::Info,
+                    kind: NoticeKind::ClusterParameters,
+                    message: "cluster parameters committed at revision 3".to_string(),
+                },
+                line: "[events] cluster parameters INFO: cluster parameters committed at revision \
+                       3",
+            },
+            Printed {
+                notice: ServerEvent {
+                    level: NoticeLevel::Error,
+                    kind: NoticeKind::Runtime,
+                    message: "relay 'orders' failed".to_string(),
+                },
+                line: "[events] runtime ERROR: relay 'orders' failed",
+            },
+            Printed {
+                notice: ServerEvent {
+                    level: NoticeLevel::Warning,
+                    kind: NoticeKind::ControlPlane,
+                    message: "resource refresh was delayed".to_string(),
+                },
+                line: "[events] control plane WARN: resource refresh was delayed",
+            },
+        ];
+        for Printed { notice, line } in printed {
+            assert_eq!(format_server_event(&notice), line);
+        }
+    }
+
+    #[test]
+    fn a_notice_is_labelled_by_its_kind_whatever_its_text_says() {
         let rendered = format_server_event(&ServerEvent {
-            level: NoticeLevel::Info,
-            message: "raft transition: state=Leader leader=node-1 term=2".to_string(),
+            level: NoticeLevel::Error,
+            kind: NoticeKind::Runtime,
+            message: "raft transition: state=Leader".to_string(),
         });
         assert_eq!(
             rendered,
-            "[events] topology INFO: raft transition: state=Leader leader=node-1 term=2"
+            "[events] runtime ERROR: raft transition: state=Leader"
         );
-    }
-
-    #[test]
-    fn non_raft_server_events_keep_server_label() {
-        let rendered = format_server_event(&ServerEvent {
-            level: NoticeLevel::Warning,
-            message: "runtime warning".to_string(),
-        });
-        assert_eq!(rendered, "[events] server WARN: runtime warning");
-    }
-
-    #[test]
-    fn server_error_notices_print_with_the_error_label() {
-        let rendered = format_server_event(&ServerEvent {
-            level: NoticeLevel::Error,
-            message: "relay 'orders' failed".to_string(),
-        });
-        assert_eq!(rendered, "[events] server ERROR: relay 'orders' failed");
     }
 
     fn live_subscription() -> nervix_client_core::SubscriptionHandle {

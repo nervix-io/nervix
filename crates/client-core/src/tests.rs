@@ -15,6 +15,8 @@ mod cancellation;
 #[cfg(not(feature = "shuttle"))]
 mod clock_restoration;
 #[cfg(not(feature = "shuttle"))]
+mod foreign_execution;
+#[cfg(not(feature = "shuttle"))]
 mod host_stack;
 #[cfg(not(feature = "shuttle"))]
 mod reports;
@@ -40,9 +42,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, ClientFrame, ClientMessage, ClientRequest,
     CommandDisposition, Diagnostic, DomainInfo, DomainList, DomainsObserved, EncodedFrame,
-    LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints, NoticeLevel, OutcomeOrigin,
-    Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection, RowSchema,
-    ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
+    LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints, NoticeKind, NoticeLevel,
+    OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection,
+    RowSchema, ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
     SessionLimits, SourceSpan, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
     SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRefusal,
     SubscriptionRowsEncoder, SubscriptionType, UnknownOutcomeCause, UnsubscribeDisposition,
@@ -242,6 +244,7 @@ fn notice_frame(message: &str) -> VerifiedFrame<ServerFrame> {
     verified(
         ServerNotice {
             level: NoticeLevel::Info,
+            kind: NoticeKind::Membership,
             message: message.to_string(),
         }
         .encode(&SESSION_LIMITS)
@@ -275,16 +278,19 @@ fn ended_frame(handle: SubscriptionHandle) -> VerifiedFrame<ServerFrame> {
     )
 }
 
-/// An exchange with no server behind it: its frames go nowhere, and its reader has finished.
+/// An exchange served by hand, whose production reader waits until the exchange ends.
 fn detached_exchange(
     frames: mpsc::Sender<EncodedFrame<ClientFrame>>,
     pending: Arc<Mutex<PendingReplies>>,
+    emitters: EventTargets,
 ) -> Exchange {
-    let emitters = SessionEvents::new().emitters;
     let generation = emitters.begin_generation();
+    let reader = ExchangeReader::new(pending.clone(), emitters.clone(), generation.clone());
     Exchange {
         requests: Arc::new(ExchangeRequests { frames, pending }),
-        reader: nervix_primitives::task::spawn(std::future::ready(())),
+        reader: Some(nervix_primitives::task::spawn(
+            reader.run(nervix_primitives::stream::pending()),
+        )),
         emitters,
         generation,
         channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
@@ -318,7 +324,7 @@ pub(crate) fn test_client(domain_name: &str) -> Client {
     drop(outbound);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
     client_on(
-        detached_exchange(frames, pending),
+        detached_exchange(frames, pending, SessionEvents::new().emitters),
         Some(domain(domain_name)),
     )
 }
@@ -346,7 +352,7 @@ impl Loopback {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
         let client = client_reaching(
-            detached_exchange(frames, pending.clone()),
+            detached_exchange(frames, pending.clone(), SessionEvents::new().emitters),
             session_domain,
             servers,
         );
@@ -369,7 +375,7 @@ impl Loopback {
         ClientMessage::decode(&frame).assured("a request the client encoded decodes")
     }
 
-    /// Answers a request the way the exchange's reader would.
+    /// Completes a waiter directly; dispatcher witnesses separately route encoded frames.
     async fn answer(&self, request: RequestId, body: ReplyBody) {
         let waiter = self
             .pending
@@ -386,10 +392,8 @@ impl Loopback {
     async fn replace_exchange(&mut self) {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let mut replacement = detached_exchange(frames, pending.clone());
         let emitters = self.client.inner.events.emitters.clone();
-        replacement.generation = emitters.begin_generation();
-        replacement.emitters = emitters;
+        let replacement = detached_exchange(frames, pending.clone(), emitters);
         self.requests = requests;
         self.pending = pending;
         self.client.install(replacement).await;
@@ -1058,6 +1062,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
         &generation,
         ServerEvent {
             level: NoticeLevel::Info,
+            kind: NoticeKind::Leadership,
             message: "oversized".to_string(),
         },
         129,
@@ -1621,12 +1626,14 @@ fn wire_outcomes_convert_into_public_outcomes() {
 
     let server = ServerEvent::from(ServerNotice {
         level: NoticeLevel::Warning,
+        kind: NoticeKind::ControlPlane,
         message: "watch out".to_string(),
     });
     assert_eq!(
         server,
         ServerEvent {
             level: NoticeLevel::Warning,
+            kind: NoticeKind::ControlPlane,
             message: "watch out".to_string(),
         }
     );
@@ -1914,7 +1921,10 @@ async fn a_subscription_needs_a_selected_domain() {
     let (frames, outbound) = mpsc::channel(1);
     drop(outbound);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
-    let client = client_on(detached_exchange(frames, pending), None);
+    let client = client_on(
+        detached_exchange(frames, pending, SessionEvents::new().emitters),
+        None,
+    );
 
     let error = client
         .subscribe(&SubscriptionRequest::new("live", "orders"))
@@ -2624,26 +2634,6 @@ async fn an_unknown_outcome_is_recovered_with_the_same_execution_reference() {
 }
 
 #[nervix_primitives::test]
-async fn a_command_reply_for_another_execution_cannot_claim_success() {
-    let mut loopback = Loopback::new(Some(domain("tenant")));
-    let client = loopback.client.clone();
-    let execution =
-        nervix_primitives::task::spawn(async move { client.execute("SHOW CLUSTER STATUS;").await });
-    let request = loopback.next_request().await;
-    loopback
-        .answer(
-            request.request_id,
-            command_reply(completed(), "wrong execution"),
-        )
-        .await;
-    let result = execution.await.assured("the command task completes");
-    assert!(
-        result.is_err(),
-        "a completed reply with another durable identity is not proof for this command"
-    );
-}
-
-#[nervix_primitives::test]
 async fn cancelling_a_command_releases_its_pending_reply() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
@@ -2884,6 +2874,7 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
     let generation = client.inner.exchange.lock().await.generation.clone();
     let notice = |message: &str| ServerEvent {
         level: NoticeLevel::Warning,
+        kind: NoticeKind::Runtime,
         message: message.to_string(),
     };
     let notices = &client.inner.events.emitters.notices;
