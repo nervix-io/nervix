@@ -2023,6 +2023,14 @@ no longer tied to the call: a client that goes away does not stop it, and repeat
 under the same reference returns its outcome. A call that ends before the whole archive arrived
 changes nothing and releases what the leader staged for it.
 
+A reply that fails frame verification or exceeds the native transport's receive limit cannot
+establish a restore outcome. The native client ends the exact session whose channel carried that
+attempt, leaving a replacement session intact, and reports the original restore reference as
+uncertain. Repeating the same statement and archive under that reference recovers the outcome.
+If no earlier attempt could have been admitted, authentication or other server refusals received
+before a response, a declared `RestoreUploadFailed`, and local archive refusals keep their
+definitive meaning. An unreadable reply is no evidence of refusal.
+
 Only the leader the archive was streamed to holds it, until the restore finishes or the retry
 validity of its reference ends. If leadership moves, or that leader restarts, while the restore
 applies, the reply is a `LeaderRedirect` or the call fails, and repeating the stream on the new
