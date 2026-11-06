@@ -58,9 +58,14 @@ pub(super) fn generated_placement(arbitrary: &mut Arbitrary<'_>) -> RuntimeState
 
 pub(super) fn generated_unit(arbitrary: &mut Arbitrary<'_>) -> nervix_models::Unit {
     match arbitrary.entropy().byte() % 3 {
-        0 => nervix_models::Unit::Single,
-        1 => nervix_models::Unit::Partition(u32::from(arbitrary.entropy().byte())),
-        _ => nervix_models::Unit::Instance(u32::from(arbitrary.entropy().byte())),
+        0 => nervix_models::Unit::SINGLE,
+        1 => nervix_models::Unit::partition(u32::from(arbitrary.entropy().byte())),
+        _ => nervix_models::Unit::try_instance(
+            arbitrary
+                .entropy()
+                .boundary_biased(0..=nervix_models::Unit::MAX_INSTANCE_INDEX),
+        )
+        .assured("the fixture index fits the execution-unit range"),
     }
 }
 
@@ -80,10 +85,14 @@ fn separate_units_of_one_entity_have_distinct_state_keys() {
     let mut placement = generated_placement(&mut arbitrary);
     let mut keys = std::collections::BTreeSet::new();
     for unit in [
-        nervix_models::Unit::Single,
-        nervix_models::Unit::Partition(0),
-        nervix_models::Unit::Partition(1),
-        nervix_models::Unit::Instance(0),
+        nervix_models::Unit::SINGLE,
+        nervix_models::Unit::partition(0),
+        nervix_models::Unit::partition(1),
+        nervix_models::Unit::FIRST_INSTANCE,
+        nervix_models::Unit::try_instance(u64::from(u32::MAX) + 1)
+            .assured("the fixture index fits the execution-unit range"),
+        nervix_models::Unit::try_instance(nervix_models::Unit::MAX_INSTANCE_INDEX)
+            .assured("the fixture index fits the execution-unit range"),
     ] {
         placement.unit = unit;
         let key = placement.as_storage_key();
@@ -344,7 +353,7 @@ fn fixture_key() -> Vec<u8> {
         state: RuntimeState::BranchAggregated,
         kind: ModelKind::Relay,
         identifier: ModelName::parse("events").assured("the fixture name follows the name rule"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     StateNamespace::Initial

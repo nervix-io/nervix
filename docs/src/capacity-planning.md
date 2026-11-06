@@ -75,8 +75,8 @@ Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that
 the work that submitted it reports the refusal as its own failure. The one exception is work the
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
-paced ingestor handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
-acknowledgement, and an Iceberg commit's read of the staged rows its emitter already accepted.
+paced ingestor handed over, and of a payload a NATS SUBJECT, ZeroMQ or Syslog source read without
+an acknowledgement, and an Iceberg commit's read of the staged rows its emitter already accepted.
 Holding one of those source loops pushes back into its transport, so a node whose
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).

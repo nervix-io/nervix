@@ -19,6 +19,18 @@ Domain creation is never transaction content. A transaction is bound to one alre
 domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is rejected. See
 [Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions).
 
+## Duration Literals
+
+A duration literal can contain several number-and-unit spans, such as `13m 49s` or
+`1h 2m 3s 4ms 5us 6ns`. Fractional spans such as `1.5s` are supported too. The spans add
+together without losing nanosecond precision. Canonical Plexus may render a duration using
+several spans, and that text is accepted wherever a duration literal is expected. The following
+clause remains separate: for example, `PERIOD 1m 30s SKEW 250ms` names two durations.
+
+Each consumer still applies its own bounds. Cluster parameters use the limits in
+[Node Settings](node-settings.md#committed-parameter-changes); paced domain periods and skews
+use the limits below.
+
 ## Paced Domains
 
 Paced domains maintain a domain clock.

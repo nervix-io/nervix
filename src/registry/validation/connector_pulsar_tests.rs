@@ -45,7 +45,7 @@ fn a_pulsar_subscription_type_that_reads_through_one_consumer_refuses_more_insta
                 ownership: PulsarSubscriptionOwnership::Provisioned,
                 kind,
             },
-            instances,
+            instances: nervix_models::IngestorInstances::Count(instances),
             mode: PulsarIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
         }));

@@ -943,7 +943,7 @@ mod tests {
                         .expect("valid consumer group identifier"),
                     start_at: IngestStartPosition::Latest,
                 },
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: KafkaIngestMode::AckParallel {
                     max: nonzero!(10u64),
                     batch_timeout: "500ms".to_string(),
@@ -1068,7 +1068,10 @@ mod tests {
         else {
             panic!("expected kafka ingestor source");
         };
-        assert_eq!(*instances, nonzero!(1u64));
+        assert_eq!(
+            *instances,
+            nervix_models::IngestorInstances::Count(nonzero!(1u64))
+        );
         assert_eq!(
             mode,
             &KafkaIngestMode::AckSequential {
@@ -1156,7 +1159,7 @@ mod tests {
                     },
                     kind: nervix_models::PulsarSubscriptionType::Shared,
                 },
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: PulsarIngestMode::AckSequential {
                     timeout: "15s".to_string(),
                     retry_policy: RetryPolicy {
@@ -1216,7 +1219,7 @@ mod tests {
                     .expect("valid client identifier"),
                 queue: nervix_models::RabbitMqQueueName::try_from("notifications")
                     .expect("valid queue identifier"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: RabbitMqIngestMode::AckSequential {
                     timeout: "20s".to_string(),
                     retry_policy: RetryPolicy {
@@ -1373,7 +1376,11 @@ mod tests {
             };
             assert_eq!(subscription.name.as_str(), "Readers", "{source}");
             assert_eq!(subscription.ownership, expected, "{source}");
-            assert_eq!(*instances, nonzero!(2u64), "{source}");
+            assert_eq!(
+                *instances,
+                nervix_models::IngestorInstances::Count(nonzero!(2u64)),
+                "{source}"
+            );
         }
     }
 
@@ -1620,7 +1627,7 @@ mod tests {
                     .expect("valid client identifier"),
                 topic: nervix_models::MqttTopicFilter::try_from("notifications")
                     .expect("valid topic filter"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 session: MqttSession::Clean,
                 qos: MqttQos::Qos0,
                 mode: MqttIngestMode::NoAck,
@@ -1656,7 +1663,10 @@ mod tests {
         };
         assert_eq!(client.as_str(), "mqtt_main");
         assert_eq!(topic.as_str(), "notifications");
-        assert_eq!(*instances, nonzero!(1u64));
+        assert_eq!(
+            *instances,
+            nervix_models::IngestorInstances::Count(nonzero!(1u64))
+        );
         assert_eq!(*session, MqttSession::Clean);
         assert_eq!(*qos, MqttQos::Qos1);
     }
@@ -1685,7 +1695,7 @@ mod tests {
                     .expect("valid client identifier"),
                 topic: nervix_models::MqttTopicFilter::try_from("devices/+/notifications")
                     .expect("valid topic filter"),
-                instances: nonzero!(3u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(3u64)),
                 session: MqttSession::Persistent,
                 qos: MqttQos::Qos1,
                 mode: MqttIngestMode::AckParallel {
@@ -1821,7 +1831,7 @@ mod tests {
                     "nats_notifications_group"
                 )
                 .expect("valid queue group identifier"),
-                instances: nonzero!(3u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(3u64)),
                 mode: NatsIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             }))
@@ -2375,7 +2385,7 @@ mod tests {
                     .expect("valid client identifier"),
                 queue: nervix_models::SqsQueueName::try_from("notifications")
                     .expect("valid queue identifier"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: SqsIngestMode::AckSequential {
                     timeout: "45s".to_string(),
                     retry_policy: RetryPolicy {
@@ -2406,7 +2416,10 @@ mod tests {
         else {
             panic!("expected kafka ingestor source");
         };
-        assert_eq!(instances, nonzero!(3u64));
+        assert_eq!(
+            instances,
+            nervix_models::IngestorInstances::Count(nonzero!(3u64))
+        );
     }
 
     #[test]
@@ -2429,7 +2442,10 @@ mod tests {
         else {
             panic!("expected rabbitmq ingestor source");
         };
-        assert_eq!(instances, nonzero!(2u64));
+        assert_eq!(
+            instances,
+            nervix_models::IngestorInstances::Count(nonzero!(2u64))
+        );
     }
 
     #[test]
@@ -2450,7 +2466,10 @@ mod tests {
         else {
             panic!("expected sqs ingestor source");
         };
-        assert_eq!(instances, nonzero!(4u64));
+        assert_eq!(
+            instances,
+            nervix_models::IngestorInstances::Count(nonzero!(4u64))
+        );
     }
 
     #[test]

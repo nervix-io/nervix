@@ -56,26 +56,13 @@ const JSON_TYPES: [JsonType; 5] = [
     JsonType::Boolean,
 ];
 
-const CBOR_TYPES: [CborType; 19] = [
-    CborType::String,
-    CborType::Number,
+const CBOR_TYPES: [CborType; 6] = [
     CborType::Integer,
-    CborType::Object,
-    CborType::Array,
+    CborType::Float,
     CborType::Boolean,
-    CborType::Null,
-    CborType::U8,
-    CborType::I8,
-    CborType::U16,
-    CborType::I16,
-    CborType::U32,
-    CborType::I32,
-    CborType::U64,
-    CborType::I64,
-    CborType::Datetime,
-    CborType::F32,
-    CborType::F64,
+    CborType::Text,
     CborType::Bytes,
+    CborType::Array,
 ];
 
 const AVRO_TYPES: [AvroType; 8] = [
@@ -184,7 +171,7 @@ impl Arbitrary<'_> {
             .pick([WireSchemaStrictness::Strict, WireSchemaStrictness::Loose])
     }
 
-    /// A JSON wire schema, which is also the shape of a CBOR wire schema.
+    /// A JSON wire schema in its declared vocabulary.
     pub fn json_wire_schema(&mut self) -> CreateJsonWireSchema {
         self.wire_schema(JSON_TYPES)
     }

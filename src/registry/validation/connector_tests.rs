@@ -1255,7 +1255,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
                             client: ClientName::parse("mqtt_main").expect("valid identifier"),
                             topic: nervix_models::MqttTopicFilter::parse("notifications")
                                 .expect("valid topic filter"),
-                            instances: nonzero!(2u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(2u64)),
                             session: MqttSession::Clean,
                             qos: MqttQos::Qos0,
                             mode: MqttIngestMode::NoAck,
@@ -1335,7 +1335,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                                     .expect("valid consumer group"),
                                 start_at: nervix_models::IngestStartPosition::Earliest,
                             },
-                            instances: nonzero!(1u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
@@ -1614,7 +1614,7 @@ fn mqtt_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> Inge
     IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
         client: ClientName::parse("mqtt_main").expect("valid identifier"),
         topic: nervix_models::MqttTopicFilter::parse("notifications").expect("valid topic filter"),
-        instances: nonzero!(1u64),
+        instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
         session,
         qos,
         mode,
@@ -1841,7 +1841,9 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                                             .expect("valid consumer group"),
                                         start_at: nervix_models::IngestStartPosition::Earliest,
                                     },
-                                    instances: nonzero!(1u64),
+                                    instances: nervix_models::IngestorInstances::Count(nonzero!(
+                                        1u64
+                                    )),
                                     mode: KafkaIngestMode::NoAck,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
@@ -1926,7 +1928,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                                     .expect("valid consumer group"),
                                 start_at: nervix_models::IngestStartPosition::Earliest,
                             },
-                            instances: nonzero!(1u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
@@ -2022,7 +2024,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                                     .expect("valid consumer group"),
                                 start_at: nervix_models::IngestStartPosition::Earliest,
                             },
-                            instances: nonzero!(1u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
@@ -2573,6 +2575,50 @@ fn kafka_emitter() -> CreateEmitter {
         panic!("the fixture builds an emitter");
     };
     emitter
+}
+
+#[test]
+fn literal_nats_reply_subjects_are_validated_before_execution() {
+    let domain: DomainName = named("validation");
+    let mut emitter = kafka_emitter();
+    *emitter.connector = EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
+        client: named("nats_main"),
+        subject: named("requests"),
+        mode: nervix_models::NatsSubjectPublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+    }));
+    let check = |emitter: &CreateEmitter| {
+        validate_emitter_publishing_contract(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
+            emitter,
+        )
+    };
+    for value in ["", "replies.*", "replies..x", "reply space"] {
+        emitter.envelope.reply_to = Some(Expression::Literal(nervix_models::Literal::String(
+            value.to_string(),
+        )));
+        let error = check(&emitter).expect_err("an invalid literal is refused at preflight");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::InvalidConnectorDeclaration {
+                issue: ConnectorDeclarationIssue::NatsReplySubject,
+                ..
+            }
+        ));
+        assert!(error.contains::<nervix_models::ExternalNameError>());
+    }
+    for reply in [None, Some("'Replies.Created'"), Some("input.tenant")] {
+        emitter.envelope.reply_to = reply.map(|value| {
+            nervix_plexus::parse_expression(value).expect("the current reply expression parses")
+        });
+        check(&emitter).expect("an absent, valid literal or computed reply is admitted");
+    }
 }
 
 fn envelope_schema() -> CreateSchema {

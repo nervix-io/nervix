@@ -32,7 +32,13 @@ use nervix_connector::{
     physical_time::actual_utc_now,
 };
 
-use super::{emitter_publishing::EmitterStopDrainOutcome, *};
+use super::{
+    emitter_publishing::EmitterStopDrainOutcome, emitter_retry::EmitterBufferedKeepalive, *,
+};
+
+#[path = "emitter_branch_retention.rs"]
+pub(super) mod branch_retention;
+use branch_retention::EmitterBranchRetention;
 
 pub(in crate::runtime) struct EmitterTask;
 
@@ -49,6 +55,8 @@ pub(in crate::runtime) struct EmitterConnectorContext {
     pub(super) status: Arc<task_status::TaskStatus<EmitterRetryStatus>>,
     /// Drain observers retain the registered counter independently of this context.
     pub(super) confirmation_waits: Arc<AtomicUsize>,
+    /// The process-local metric store independently retains these children for inspection.
+    pub(super) interactions: EmitterInteractionMetrics,
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) emitter: EmitterName,
@@ -548,6 +556,7 @@ struct EmitterTaskState {
     connector: EmitterConnectorState,
     buffer: EmitterBatchBuffer,
     retry: EmitterRetrySchedule,
+    keepalive: EmitterBufferedKeepalive,
     backoff: RuntimeReconnectBackoff,
     reconnect_on_wake: bool,
 }
@@ -617,6 +626,7 @@ impl EmitterTaskState {
             connector,
             buffer,
             retry,
+            keepalive: EmitterBufferedKeepalive::default(),
             backoff,
             reconnect_on_wake,
         }
@@ -625,6 +635,12 @@ impl EmitterTaskState {
     fn wake(&self, context: &EmitterConnectorContext) -> RuntimeWake {
         self.retry
             .wake(self.connector.cadence_wake(&context.clock, &self.buffer))
+    }
+
+    fn keep_buffered_work_alive(&mut self) {
+        if !self.retry.is_active() && self.keepalive.take_due() {
+            self.connector.pending_acks(&self.buffer).keep_alive();
+        }
     }
 
     fn receives_input(&self, buffered_messages: usize) -> bool {
@@ -736,6 +752,7 @@ struct EmitterTaskLoop<'a> {
     context: &'a EmitterConnectorContext,
     batch_context: EmitterBatchContext<'a>,
     state: EmitterTaskState,
+    retention: EmitterBranchRetention,
     interaction: RelayInteraction<EmitterTaskCommand>,
     plan: &'a EmitterStartPlan,
     connector_label: String,
@@ -816,6 +833,12 @@ impl EmitterTask {
         };
         let dispatcher = runtime.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
+        let task_interactions = runtime.inner.metrics.register_emitter_interactions(
+            domain,
+            &task_emitter,
+            physical_node_id,
+            plan.connector.kind(),
+        );
         let task_input_metrics = inputs
             .iter()
             .map(|(relay, _)| {
@@ -834,6 +857,7 @@ impl EmitterTask {
             Some(relay) => {
                 EmitterOutputMetrics::Relay(runtime.inner.metrics.resolve_node_batch_metrics(
                     NodeBatchMetricsSpec {
+                        unit: Unit::SINGLE,
                         domain,
                         kind: ModelKind::Emitter,
                         node: &ModelName::from(&emitter.name),
@@ -857,6 +881,10 @@ impl EmitterTask {
         let task_flush_policy = emitter.flush_policy.clone();
         let task_error_policies = emitter.error_policies.clone();
         let task_materialized_state = emitter.materialized_state.clone();
+        let retention = EmitterBranchRetention::new(
+            &emitter.inputs,
+            runtime.inner.branch_instance_expiration_scan_interval,
+        );
         let routing_relay = inputs
             .first()
             .map(|(relay, _)| relay.clone())
@@ -972,6 +1000,7 @@ impl EmitterTask {
                 ),
                 status,
                 confirmation_waits,
+                interactions: task_interactions,
                 runtime: runtime.clone(),
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
@@ -1017,6 +1046,7 @@ impl EmitterTask {
                 context: &context,
                 batch_context,
                 state,
+                retention,
                 interaction,
                 plan: &plan,
                 connector_label,
@@ -1087,7 +1117,18 @@ impl EmitterTaskLoop<'_> {
     async fn run(&mut self) -> EmitterEnding {
         loop {
             nervix_primitives::task::consume_budget().await;
-            let wake = self.state.wake(self.context);
+            if self.state.buffer.is_empty() {
+                self.retention.clear();
+                if self.state.connector.staged_messages() == 0 {
+                    self.state.keepalive.clear();
+                }
+            }
+            // Retry replaces ordinary flush wakes. Maintenance joins that final wake so it
+            // still runs while a physical retry owns publication.
+            let wake = self.state.keepalive.wake(
+                self.retention.wake(self.state.wake(self.context)),
+                self.state.retry.is_active(),
+            );
             let receive_input = self
                 .state
                 .receives_input(self.buffered_messages.load(Ordering::Acquire));
@@ -1365,6 +1406,15 @@ impl EmitterTaskLoop<'_> {
                     break EmitterEnding::InteractionStopped;
                 }
                 RelayInteractionEvent::Wake => {
+                    self.maintain_branches().await;
+                    self.state.keep_buffered_work_alive();
+                    // Maintenance and liveness alone are not publication attempts: they must
+                    // not reset retry backoff, clear status or advance a logical cadence.
+                    // An unreadable logical clock returns through the interaction's existing
+                    // timing-error path on the next iteration, retaining all buffered work.
+                    if !matches!(self.state.wake(self.context).is_reached(), Ok(true)) {
+                        continue;
+                    }
                     let retry_was_active = self.state.retry.is_active();
                     let retry_is_due = self.state.retry.retry_is_due();
                     let stall_cleared = self.state.retry.release_if_stall_cleared(
@@ -1457,19 +1507,13 @@ impl EmitterTaskLoop<'_> {
                     self.context.metrics_dirty.mark();
                     let wait_for_required_state = !self.interaction.is_terminal_drain();
                     let publish_batch = match self
-                        .batch_context
-                        .process(
-                            &input_relay,
-                            batch,
-                            &mut *self.work_cancel_rx,
-                            wait_for_required_state,
-                            work.as_mut(),
-                        )
+                        .process_input(&input_relay, batch, wait_for_required_state, work.as_mut())
                         .await
                     {
                         Some(batch) => batch,
                         None => continue,
                     };
+                    self.state.keepalive.include_batch(&publish_batch);
 
                     if self.interaction.is_draining() {
                         if let Err(error) = self

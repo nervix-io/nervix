@@ -180,13 +180,12 @@ impl UnfoldingDomain {
             branched_senders: entrypoints.senders,
             quiesce,
             shutdown,
-            instance_index: 1,
-            readiness: self
-                .runtime
-                .prepare_ingestor_readiness(&self.domain, &self.ingestor, NonZeroU64::MIN)
-                .into_iter()
-                .next()
-                .assured("the source fixture declares one instance"),
+            unit: Unit::SINGLE,
+            readiness: self.runtime.prepare_ingestor_readiness(
+                &self.domain,
+                &self.ingestor,
+                Unit::SINGLE,
+            ),
             buffered_intake: intake.buffered,
             flush_each_intake: intake.flush_each_intake,
             unacknowledged_admission: intake.admission,
@@ -197,7 +196,7 @@ impl UnfoldingDomain {
     /// The quiesce control the fixture's running ingestor holds.
     pub(super) fn quiesce(&self) -> Arc<IngestorQuiesceControl> {
         self.runtime
-            .ingestor_quiesce_control(&self.domain, &self.ingestor)
+            .ingestor_quiesce_control(&self.domain, &self.ingestor, nervix_models::Unit::SINGLE)
             .assured("a running ingestor holds its quiesce control")
     }
 
@@ -369,7 +368,8 @@ pub(super) fn quiesce_control(
     mode: IngestQuiesceMode,
 ) -> Arc<IngestorQuiesceControl> {
     let metrics = RuntimeMetrics::default();
-    let labels = metrics.register_ingestor_quiesce(&fixture.domain, &fixture.ingestor, None);
+    let labels =
+        metrics.register_ingestor_quiesce(&fixture.domain, &fixture.ingestor, Unit::SINGLE, None);
     Arc::new(IngestorQuiesceControl::new(mode, metrics, labels))
 }
 
@@ -391,7 +391,7 @@ async fn an_unacknowledged_batch_is_refused_and_counted_when_its_source_cannot_h
         format!("{refused:#}").contains("the node's bounded execution did not unfold the payload"),
         "the failure names the unfolding the node did not admit: {refused:#}"
     );
-    assert_eq!(host.unfolding_refused.get(), 1);
+    assert_eq!(host.interactions.unfolding_refused.get(), 1);
     assert_eq!(
         host.collector.len(),
         0,
@@ -401,7 +401,7 @@ async fn an_unacknowledged_batch_is_refused_and_counted_when_its_source_cannot_h
     filled.release().await;
     let accepted = take_in_unacknowledged(&mut host, 8).await;
     assert!(matches!(accepted, Ok(())), "{accepted:?}");
-    assert_eq!(host.unfolding_refused.get(), 1);
+    assert_eq!(host.interactions.unfolding_refused.get(), 1);
     assert_eq!(
         fixture.delivered_user_ids(1).await,
         vec![Some(RuntimeValue::I64(8))]
@@ -435,7 +435,7 @@ async fn the_ingestor_stopping_ends_a_batch_waiting_for_the_extension_workers() 
         0,
         "the dropped batch leaves no row behind"
     );
-    assert_eq!(host.unfolding_refused.get(), 0);
+    assert_eq!(host.interactions.unfolding_refused.get(), 0);
     filled.release().await;
     fixture.finish().await;
 }
@@ -544,7 +544,7 @@ async fn a_new_dropping_quiesce_drops_a_batch_waiting_for_the_extension_workers(
         0,
         "the dropped batch leaves no row behind"
     );
-    assert_eq!(host.unfolding_refused.get(), 0);
+    assert_eq!(host.interactions.unfolding_refused.get(), 0);
     filled.release().await;
     fixture.finish().await;
 }
@@ -606,7 +606,7 @@ async fn a_refusing_sources_payload_read_while_suspended_is_refused_and_counted(
         format!("{refused:#}").contains("the node's bounded execution did not unfold the payload"),
         "the failure names the unfolding the node did not admit: {refused:#}"
     );
-    assert_eq!(host.unfolding_refused.get(), 1);
+    assert_eq!(host.interactions.unfolding_refused.get(), 1);
     assert_eq!(
         host.collector.len(),
         0,
@@ -735,7 +735,7 @@ async fn an_acknowledged_batch_is_refused_for_redelivery_when_the_extension_work
         "the failure names the unfolding the node did not admit: {refused:#}"
     );
     assert_eq!(
-        host.unfolding_refused.get(),
+        host.interactions.unfolding_refused.get(),
         0,
         "a batch its source presents again is not counted as refused"
     );

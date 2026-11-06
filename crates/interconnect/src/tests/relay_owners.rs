@@ -56,7 +56,7 @@ async fn remote_relay_frame_cost() {
                 kind: RelayPayloadKind::Routed,
                 domain: DomainName::parse("capacity").assured("the fixture domain is valid"),
                 relay: RelayName::parse("records").assured("the fixture relay is valid"),
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 key: None,
                 batch_ipc: executor
                     .try_charge_owned(MemoryClass::Relay, bytes.clone())
@@ -147,7 +147,7 @@ async fn peer_departure_reclaims_an_admitted_relays_capacity() {
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("capacity").assured("the fixture domain is valid"),
         relay: RelayName::parse("records").assured("the fixture relay is valid"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -200,7 +200,7 @@ fn turnover_payload(
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("turnover").assured("the fixture domain is valid"),
         relay: RelayName::parse("records").assured("the fixture relay is valid"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])

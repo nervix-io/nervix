@@ -143,6 +143,18 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "runtime-kafka-unit-layouts",
+            "runtime-ingestor-metric-layouts",
+            "models-ingestor-instancing",
+            "interconnect-intake-units",
+            "typed-runner-lease",
+            "typed-runner-policy",
+            "typed-runner-compilation",
+            "typed-runner-completion",
+            "typed-runner-identity",
+            "typed-runner-matrix",
+            "typed-gate-baseline",
+            "typed-gate-product-graph",
             "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",
@@ -212,6 +224,7 @@ class InventoryTests(unittest.TestCase):
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
             "typed-non-aws-lc-crypto",
             "nats-user-authentication",
+            "nats-subject-grammar",
             "plexus-statement",
             "plexus-statement-text",
             "plexus-emitter-envelopes",
@@ -226,6 +239,8 @@ class InventoryTests(unittest.TestCase):
             "websocket-retained-metadata",
             "ingest-metadata-projection",
             "sqs-system-metadata",
+            "nats-delivery-metadata",
+            "nats-ordered-header-transport",
             "endpoint-request-metadata",
             "websocket-client-config",
             "mqtt-client-config",
@@ -256,6 +271,7 @@ class InventoryTests(unittest.TestCase):
             "models-archived-counts",
             "consensus-archived-counts",
             "registry-archived-models",
+            "inferencer-tensor-columns",
             "runtime-window-archived-counts",
             "simd-constant-division",
             "simd-checked-lanes",
@@ -345,6 +361,7 @@ class InventoryTests(unittest.TestCase):
             "wasm-generated-pools",
             "wasm-generated-pools-malformed",
             "expiry-map-operations",
+            "authentication-quota-clock",
             "rate-limit-quota-bounds",
             "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
@@ -427,6 +444,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
             "nervix-connector-rabbitmq",
+            "nervix-connector-nats",
             "nervix-connector-pulsar",
             "nervix-connector-kafka",
             "nervix-paced-simulation",
@@ -439,6 +457,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-vm",
             "nervix-approx-into",
             "nervix-columnar-json",
+            "nervix-ratchet",
             "nervix-bounded-write",
             "nervix-connector",
             "nervix-connector-sqs",
@@ -465,6 +484,29 @@ class InventoryTests(unittest.TestCase):
             )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
+
+    def test_inferencer_state_domains_include_the_required_model_field(self) -> None:
+        versions = {
+            target.id: target.domain_version for target in bolero.load_inventory().targets
+        }
+        for target, version in {
+            "plexus-model": 50,
+            "plexus-archive-model": 52,
+            "plexus-statement": 50,
+            "plexus-statement-text": 49,
+            "plexus-format-document": 49,
+            "plexus-format-text": 48,
+            "models-archived-models": 49,
+            "registry-archived-models": 44,
+            "consensus-state-records": 42,
+            "consensus-state-corruption": 42,
+            "consensus-raft-records": 42,
+            "registry-stored-models": 39,
+            "registry-stored-models-corruption": 39,
+            "inferencer-tensor-columns": 1,
+        }.items():
+            with self.subTest(target=target):
+                self.assertEqual(versions[target], version)
 
     def test_invalid_case_budget_and_duplicate_id_fail(self) -> None:
         text = bolero.INVENTORY.read_text()
@@ -636,7 +678,17 @@ class DiscoveryTests(unittest.TestCase):
                 found["bolero_new"] = manifest.parent / "src/lib.rs"
             return found
 
-        with mock.patch.object(bolero, "static_targets", side_effect=unregistered):
+        with (
+            mock.patch.object(bolero, "static_targets", side_effect=unregistered),
+            mock.patch.object(bolero, "listed_tests",
+                              side_effect=lambda package, test_target, ignored, features, manifest=None:
+                              [] if ignored else
+                              [item["test_name"] for item in self.compiled(package, test_target)]),
+            mock.patch.object(bolero, "compiled_targets", side_effect=self.compiled),
+            mock.patch.object(bolero, "command", side_effect=AssertionError(
+                "discovery unit tests must not run Cargo"
+            )),
+        ):
             with self.assertRaisesRegex(bolero.BoleroError, "differ from inventory"):
                 bolero.discover(self.inventory)
 

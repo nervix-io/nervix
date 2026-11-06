@@ -33,7 +33,9 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | HTTP polling requests and client secrets, responses, failed polls, the response bound, and the `HTTP CLIENT` keys, redirects and proxy both directions share | `Ingestors` → `HTTP REQUEST`, then `Emitters` → `HTTP client transport` |
 | Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
+| Pulsar topic names, subscription ownership/TYPE/start position, received metadata, shared client authentication/TLS, receipt deadlines and delayed delivery | `Ingestors` → `Pulsar`, `Emitters` → `Pulsar`, then the `PULSAR TOPIC` mirror in `Connector Capabilities` |
 | Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
+| MQTT shared-subscription support, session/QoS/mode pairings, client identities, keep-alive and recovery | `Ingestors` → `MQTT`, `Emitters` → `MQTT`, then `Connector Capabilities` → `MQTT TOPIC` |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
@@ -68,12 +70,22 @@ For the CLI's `subscribe` and `domain-clock` shell streams and their line format
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
 
+For native subscription and clock recovery, read [Rust Client Library](https://docs.nervix.io/client-library.html)
+and [Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html), especially
+S-7 and K-5. Keep an unanswered reopening distinct from a refusal, and account for the live-edge gap.
+
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
-the open session, a reply that names another execution, and reconnect behavior, read
+the open session, unreadable replies, replies naming another execution, uncertain restore outcomes,
+and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
 [Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
 directly. Follow the same documentation version as the selected index; these client chapters are
 outside the curated Plexus index.
+
+For native command or restore recovery after an execution-reference mismatch, read
+[Client Library](https://docs.nervix.io/client-library.html) and the command and restore contracts in
+[Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html) directly.
+Keep the original execution reference when recovering an uncertain outcome.
 
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
@@ -161,6 +173,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Order records by expressions within a time bound | `REORDERER` |
 | Produce width/step aggregates | `WINDOW PROCESSOR` |
 | Run an ONNX model | `INFERENCER` |
+| Carry ONNX state between rows of each branch | `INFERENCER`; read `Runtime Nodes` → `State tensors` for the fixed-shape, initialization and reset contract |
 | Run custom guest processing | `WASM PROCESSOR` |
 | Reuse trusted batch-column logic inside expressions | `UDF` |
 | Match records from left and right relay sets | `CORRELATOR` |
@@ -194,6 +207,9 @@ bound PULL ingestor with connecting PUSH peers when a peer can restart: a connec
 does not detect or recover a lost peer. Read the ZeroMQ sections of Ingestors and Emitters for the
 current connection, retry and deadline limits.
 
+- Check [ingestor instancing](../../../../docs/src/ingestors.md#instancing) before adding placement
+  rules. Validate connector capability, count addressability, constructing branch structure and
+  Kafka offset ownership; inspect each instance with `DESCRIBE INGESTOR`.
 - Every referenced name is declared in the active domain before use.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
   schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,
@@ -215,6 +231,8 @@ current connection, retry and deadline limits.
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
   WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`. SYSLOG is a predefined singleton wire
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
+- CBOR wire fields use exactly `integer`, `float`, `boolean`, `text`, `bytes`, or `array`. `bytes`
+  carries native CBOR byte strings; `DATETIME` binds `text` with `ENCODE field AS RFC3339`.
 - Every codec explicitly declares text interchange with `ENCODE field AS RFC3339` for datetimes
   and `ENCODE field AS BASE64` for bytes in JSON or AVRO strings. Read `Schemas And Codecs` for
   the exact binding matrix and native byte representations. Every JAQ-backed
@@ -266,7 +284,7 @@ current connection, retry and deadline limits.
   record reported delivered; write `MANDATORY` after the payload, on either entity, to reject such a
   record through `ON MESSAGE ERROR` instead. See
   [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq).
-- For Core NATS completion, reconnect retries and finish outcomes, read
+- For Core NATS completion, JetStream PubAck, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
   For NATS client authentication, secret inspection and mounted credentials, read
@@ -474,9 +492,10 @@ current connection, retry and deadline limits.
   persistent session a new client cannot take over. Use that section for `RETAIN`, typed publish
   `PROPERTIES` and ordered, repeated user properties written with `write_header`.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
-  path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
-  whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
-  the client key table in `Ingestors` → `MQTT`; its `tls_*` files belong only with `mqtts`. Write
+  path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` as
+  milliseconds representing whole seconds and the source admission bound `max_packet_size` as
+  their own keys, checked against the client key table in `Ingestors` → `MQTT`; its `tls_*` files
+  belong only with `mqtts`. Write
   MQTT wildcards only in an ingestor's `TOPIC`, as whole levels with `#` last and never a leading
   `$share` level, which Nervix forms itself; an emitter's `TOPIC` is one literal topic. Check both
   against the MQTT sections of `Ingestors` and `Emitters`.
@@ -513,45 +532,44 @@ current connection, retry and deadline limits.
   attribute that is not UTF-8 does not survive the read.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
-  tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
+  tokens with `>` last; a `NATS SUBJECT` emitter uses `MODE NO ACK` and one literal subject.
+  Subject names are at most 1,024 UTF-8 bytes and have no whitespace, controls, empty tokens or
+  embedded wildcards; these limits are Nervix's declared contract. Check both against the NATS
   sections of `Ingestors` and `Emitters`.
 - A `NATS STREAM` ingestor reads a durable pull consumer an operator provisioned:
   `STREAM '<stream>' CONSUMER '<consumer>'` with `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL`, and
   `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
   refuses a push consumer and one whose acknowledgement policy is not explicit. `SET STREAM` and
   `SET CONSUMER` move it in place, and it continues from the position of the consumer it then
-  names. Read `Ingestors` → `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and
-  `AckWait`.
-- A `PULSAR TOPIC` emitter's `TIMESTAMP <expression>` is each message's event time: an exact,
-  non-null, non-sensitive `DATETIME`, written as the millisecond that contains it, and a time before
-  `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Its `DELIVER AFTER
-  <duration>` delays each message from its batch's execution time, not from the send, for shared
-  subscriptions only, and the broker may deliver up to its tick, one second by default, early. Read
-  `Emitters` → `Pulsar`.
-- Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
-  `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
-  domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
-  the operator must create before the ingestor reads. The owner is followed by a required
-  `TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE`; `FAILOVER` and `EXCLUSIVE` read through one consumer,
-  so they refuse more than one instance. Consumers register as
-  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for what each type delivers, missing
-  and held subscriptions, removal failures and which subscription `ALTER` retains or removes.
-  Changing only consumer policy, including `SET TYPE`, or
-  handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
-  topic or subscription name retires the preceding owned subscription best-effort.
-- A `PULSAR TOPIC` ingestor exposes `metadata.topic`, `message_id`, `key` and `producer_name` as
-  `STRING`, `publish_time` and `event_time` as `DATETIME`, `ordering_key` as `BYTES`, and
-  `sequence_id` and `redelivery_count` as `I64`. These fields are nullable and non-sensitive;
-  missing keys and event times stay null, and empty keys and epoch times remain present. A batch
-  member's present sequence ID or event time overrides its envelope, including zero; an omitted
-  member field inherits it. Use `TIMESTAMP AT metadata.event_time` for producer time or
-  `TIMESTAMP AT metadata.publish_time` for broker publication time. An absent event time follows
-  the route's timestamp-admission error policy. Message properties remain ordered, case-sensitive
-  transport headers. Read `Ingestors` → `Pulsar` for identity formatting and conversion bounds.
-- A `PULSAR CLIENT`'s `namespace` is exactly `'tenant/namespace'` (default `public/default`), and
-  its TLS keys require a `pulsar+ssl://` `addr`; check both against `Ingestors` → `Pulsar` before
-  generating a client. A client authenticates with a confidential `auth_token`, a paired
-  `tls_cert_file` and `tls_key_file`, or both, the same way in both directions.
+  names. The stream keeps unread messages only as long as its own retention and limits allow, so
+  check them before relying on `SUSPEND` across a long pause. Read `Ingestors` → `NATS` for
+  redelivery, `MaxRequestBatch`, `MaxRequestExpires` and `AckWait`.
+- For NATS routing by the actual delivery, use the metadata fields declared in `Ingestors` →
+  `NATS`; a wildcard subscription's subject is concrete, and a stream's reply is its acknowledgement
+  subject. `NATS SUBJECT` emitters can write `REPLY TO`; read `Emitters` → `NATS` for its value
+  rules and retry boundary. Both directions preserve header order and require TLS for `tls://`,
+  and a client with `tls_ca_file` trusts only that file, not the platform's roots.
+- A `NATS STREAM` emitter publishes to an operator-provisioned `STREAM '<stream>'` and a literal
+  `SUBJECT '<subject>'` that stream captures. Use `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX
+  <n>` with an `ACK TIMEOUT` and retry policy. The stream is looked up when the emitter opens, and
+  a missing one keeps the emitter unavailable, holding its records, until an operator provisions
+  it; a subject the named stream does not capture is rejected per record. `MESSAGE ID <expression>`
+  writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream within the
+  stream's duplicate window. The emitter's own `Nats-Expected-Stream`, and under `MESSAGE ID` its
+  `Nats-Msg-Id`, replace a written header spelled exactly that way. Read `Emitters` → `NATS` for the
+  full declaration and guarantee boundary.
+- For `PULSAR TOPIC`, read [Ingestors → Pulsar](../../../../docs/src/ingestors.md#pulsar)
+  before selecting subscription ownership, creation position, TYPE, instances or a metadata time.
+  Keep an existing cursor distinct from its creation policy, and preserve null metadata and
+  explicitly present zero values. The manual owns the exact fields, consumer rules and recovery semantics.
+  Read [When The Codec Refuses A Payload](../../../../docs/src/ingestors.md#when-the-codec-refuses-a-payload)
+  before promising redelivery.
+- Read [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) before choosing event time,
+  delayed delivery or a receipt deadline. Check the subscription type and the broker's timing
+  policy before promising a delay.
+- Both directions use the [Pulsar client reference](../../../../docs/src/ingestors.md#pulsar-client).
+  Verify the topic's qualification, namespace, TLS scheme, credential pairing and secret redaction
+  there. Check the generated capability mirror for options that belong to only one direction.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The
@@ -693,6 +711,10 @@ Choose checks relevant to the configured graph:
   incomplete application batches, retries, ACKs and rejections.
 - Read `Ingestors` and `Emitters` for the `SHOW INGESTORS`, `SHOW EMITTERS` and `DESCRIBE`
   inspection contracts, including effective options versus canonical `SHOW CREATE` configuration.
+- `DESCRIBE EMITTER` also reports connector publish/commit attempts and wall durations under
+  `destination:`. Read `Metrics And Observability` → `Connector Interactions` for the bounded
+  outcomes, registered-at-zero children and process-local history. These attempts are separate
+  from edge counters, which count each delivered record once.
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports

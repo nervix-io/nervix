@@ -681,7 +681,7 @@ mod tests {
             },
             identifier: ModelName::parse("source").assured("test entity is valid"),
             state,
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         }
     }
@@ -700,9 +700,9 @@ mod tests {
         let dir = tempfile::tempdir().assured("state directory opens");
         let store = open_store(dir.path());
         let mut first = placement("orders", RuntimeState::KafkaOffset);
-        first.unit = nervix_models::Unit::Partition(0);
+        first.unit = nervix_models::Unit::partition(0);
         let mut second = first.clone();
-        second.unit = nervix_models::Unit::Partition(1);
+        second.unit = nervix_models::Unit::partition(1);
         let authority = authority();
         store
             .stage_checkpoint(&authority, &first, 11, b"first")

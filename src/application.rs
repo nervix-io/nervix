@@ -74,6 +74,7 @@ use futures_util::{
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_client_wire::NoticeKind;
 use nervix_consensus::{ConsensusSettings, TransactionState};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
@@ -200,6 +201,7 @@ mod session_service;
 mod shutdown;
 mod startup;
 mod state_replication_requests;
+mod statement_grammar;
 mod statement_routing;
 mod subscription;
 mod termination_signals;
@@ -1013,8 +1015,7 @@ impl Application {
                     consensus.proposer().local_node_id().clone(),
                 ),
                 service_tasks: ServiceTasks::default(),
-                auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-                failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
+                authentication_pacing: SessionServiceImpl::new_authentication_pacing(),
                 traffic: client_traffic::ClientTraffic::new(runtime.metrics().client_traffic()),
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 command_executions: Default::default(),
@@ -2040,7 +2041,7 @@ impl Application {
                                 &request.coordination,
                                 &request.domain,
                                 &request.relays,
-                                &request.affected_entities,
+                                &request.targets,
                                 request.purpose,
                                 EntityGateLease {
                                     deadline,
@@ -2081,7 +2082,7 @@ impl Application {
                         &request.coordination,
                         &request.domain,
                         &request.relays,
-                        &request.affected_entities,
+                        &request.targets,
                         request.purpose,
                     );
                     if let Ok(status) = &result
@@ -2258,7 +2259,9 @@ impl Application {
                                 .map_err(|failure| {
                                     OwnershipHandoffError::participant(failure.to_string())
                                 })?;
-                            if !scheduled.is_primary_on(service.inner.consensus.local_node_id()) {
+                            if !scheduled.unit(request.unit).is_some_and(|unit| {
+                                unit.is_primary_on(service.inner.consensus.local_node_id())
+                            }) {
                                 return Err(OwnershipHandoffError::participant(format!(
                                     "{} '{}' is not owned by this source node",
                                     request.entity.kind.as_str(),
@@ -2268,12 +2271,13 @@ impl Application {
                             service
                                 .inner
                                 .runtime
-                                .capture_ownership_handoff_state(
+                                .capture_selected_ownership_handoff_state(
                                     &request.coordination,
                                     &request.domain,
                                     &request.entity,
                                     request.unit,
                                     request.base_schedule_fingerprint,
+                                    request.selection,
                                 )
                                 .await
                         }
@@ -2709,7 +2713,10 @@ impl Application {
                                     );
                             }
                             Envelope::Control(ControlEnvelope::RuntimeErrorEvent(event)) => {
-                                service_for_interconnect.broadcast_error(event.message);
+                                service_for_interconnect
+                                    .inner
+                                    .events
+                                    .report_error(NoticeKind::Runtime, event.message);
                             }
                         }
                     }
@@ -2725,7 +2732,9 @@ impl Application {
                 nervix_primitives::select! {
                     _ = cluster_events_shutdown.cancelled() => break,
                     received = cluster_event_rx.recv() => match received {
-                        Ok(message) => cluster_events.relay_info(message),
+                        Ok(change) => {
+                            cluster_events.relay_info(NoticeKind::Membership, change.to_string());
+                        }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "cluster event relay fell behind the event bus");
                         }
@@ -2743,7 +2752,9 @@ impl Application {
                 nervix_primitives::select! {
                     _ = consensus_events_shutdown.cancelled() => break,
                     received = consensus_event_rx.recv() => match received {
-                        Ok(message) => consensus_events.relay_info(message),
+                        Ok(message) => {
+                            consensus_events.relay_info(NoticeKind::Leadership, message);
+                        }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "consensus event relay fell behind the event bus");
                         }

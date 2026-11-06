@@ -64,6 +64,12 @@ process that recovers what an earlier one left uncertain builds the handle again
 reference or identity, with `ExecutionHandle::with_reference` or
 `ExecutionHandle::with_upload_identity`.
 
+A command reply naming another execution reference ends its session as a protocol violation.
+Every request still waiting on that session is interrupted, and the client repeats the original
+command through normal session recovery, preserving its reference, query, domain, transaction
+position and preview. If recovery cannot finish, the call reports `UncertainCommand` under the
+original reference. It never returns the foreign outcome or adopts its transaction or redirect.
+
 `execute_prepared_with_cancellation` takes a `CancellationToken` its caller may cancel. While a
 command, `BACKUP` included, waits for its reply, cancelling the token sends `CancelRequest` for it,
 and the call keeps waiting for the reply that ends the command. A command the server cancelled
@@ -80,7 +86,7 @@ completed is not stopped.
 The client classifies a command's statements before it sends them, with the Plexus statement
 grammar. It builds the grammar once on each thread that prepares a command and keeps it for the
 life of that thread: the first command a thread prepares pays for building it, and each such thread
-holds about a megabyte and a half for it.
+holds about 1.7 MB for it.
 
 Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection attempt (10
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
@@ -177,6 +183,12 @@ reads the state a subscription is in. `subscribe` and `unsubscribe` reopen a clo
 every other call. Deleting a subscription that no open session holds, because its session ended or
 the current session refused to open it again, completes without a request and releases the name.
 
+An unanswered reopening ends its session at `request_timeout`. The exchange reader then stops
+routing frames and wakes the subscription reader, which opens the next session even when the
+preceding transport is still connected. The client reports no `RestorationFailed` event for an
+unanswered request. The subscription stays desired and resumes at the new session's live edge;
+records published during its gap are not replayed.
+
 ## Backing Up
 
 `execute` runs `BACKUP CLUSTER TO '<file>';` and `BACKUP DOMAIN [<name>] TO '<file>';` as one
@@ -227,6 +239,23 @@ the same execution reference, which joins the restore or returns its recorded ou
 change resumes a restore instead of repeating it. An error that may hide an admitted restore is
 `ClientError::UncertainCommand` with the restore's execution reference, and running the restore
 again under that reference recovers its outcome.
+
+A restore reply naming another execution reference ends the session used for its attempt and
+returns `UncertainCommand` under the restore's own reference, above
+`ExecutionReferenceMismatch`. The outcome remains unknown even if the foreign reply reports a
+failure. Repeat with `restore_with_reference` and the original reference, statement and archive to
+learn the restore's own outcome.
+
+An unreadable restore reply, including a malformed frame, a message above the receive limit,
+a verified reply that cannot be decoded or one naming another transport request, leaves that
+original execution uncertain. The client ends the session selected for the stream and interrupts
+its pending requests, preserving any replacement installed while its reply was outstanding. Keep
+the exact statement and archive and pass their original reference to `restore_with_reference` to
+recover the outcome. The report retains the typed validation cause or tonic's bounded receive
+failure. Missing or empty local archives, authentication refusals and valid declared stream
+refusals remain definitive if no earlier attempt could have been admitted. The shared bindings
+classify uncertainty as `NX_ERROR_UNCERTAIN`;
+the CLI exits with status 3 and prints the execution reference.
 
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.
@@ -451,7 +480,9 @@ belong to the client rather than to one session, so a reader keeps calling them 
   as described above.
 - `next_server_event()` never opens a session itself. Notices end with the session that delivered
   them, including the ones not read yet, and the stream continues with the notices of the next
-  session.
+  session. Each `ServerEvent` carries the notice's `level`, its `kind` (`NoticeKind::Membership`,
+  `Leadership`, `ClusterParameters`, `Runtime` or `ControlPlane`) and its display text; a reader
+  routes notices by `kind` and never by their text.
 
 A failed read leaves its stream open. `ClientError::EventOverflow` from `next_server_event()` means
 notices arrived faster than they were read: the client dropped the ones it held, and the next read

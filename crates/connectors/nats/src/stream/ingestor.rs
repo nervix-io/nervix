@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** The durable pull consumer each NATS STREAM ingestor instance reads, the check that
 //!   an operator provisioned it as a pull consumer that acknowledges each message explicitly,
-//!   message headers as ingest headers, and the acknowledgement and negative acknowledgement of
-//!   each delivery.
+//!   borrowed message headers and demand-driven typed delivery metadata, and the acknowledgement and
+//!   negative acknowledgement of each delivery.
 //! - **Depends on.** The connector contract, typed client configuration entries, the crate's NATS
 //!   client connection, `error-stack` and `async-nats`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -22,25 +22,30 @@
     )
 )]
 
-use std::fmt;
+use std::{cell::OnceCell, fmt, num::NonZeroU64};
 
 use async_nats::{
     Message as NatsMessage, Subject,
     jetstream::{
         consumer::{AckPolicy, Config as ConsumerConfig, FromConsumer as _, PullConsumer, pull},
         context::{ConsumerInfoError, ConsumerInfoErrorKind},
+        message::Info,
     },
 };
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_connector::{
-    BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
-    IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume, IngestorSettlement,
+    BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataFailure,
+    IngestMetadataRow, IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest,
+    IngestorConnector, IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult,
+    IngestorResume, IngestorSettlement,
 };
 use nervix_execution::Executor;
-use nervix_models::{ClientConfigEntry, ConnectorKind, NatsConsumerName, NatsStreamName};
+use nervix_models::{
+    ClientConfigEntry, ConnectorKind, IngestorMetadataType, NatsConsumerName, NatsStreamName,
+    Timestamp,
+};
 use nervix_primitives::sync::mpsc;
 use thiserror::Error;
 
@@ -294,6 +299,68 @@ pub struct NatsStreamIngestorMessage {
     position: NatsStreamIngestorPosition,
 }
 
+#[derive(Debug, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "typed field failures survive retention and become validation outcomes only \
+                  where a program reads the field"
+    )
+)]
+enum NatsStreamMetadataError {
+    #[error("invalid {connector} JetStream delivery metadata", connector = ConnectorKind::Nats)]
+    DeliveryMetadata {
+        #[source]
+        source: async_nats::Error,
+    },
+    #[error("a {connector} JetStream delivery has a zero stream sequence", connector = ConnectorKind::Nats)]
+    StreamSequence,
+    #[error("a {connector} JetStream delivery count must be positive", connector = ConnectorKind::Nats)]
+    DeliveryCount,
+    #[error("a {connector} JetStream publication timestamp is outside the signed Unix-nanosecond range", connector = ConnectorKind::Nats)]
+    PublicationTimestamp {
+        #[source]
+        source: std::num::TryFromIntError,
+    },
+}
+
+/// One synchronous metadata visit borrows and parses its acknowledgement only when a requested
+/// field needs it. The cache lives on the visitor's stack, and each delivery keeps its opaque
+/// transport acknowledgement independently of metadata decoding.
+struct NatsStreamMetadataVisit<'a> {
+    acknowledgement: &'a str,
+    info: OnceCell<Result<Info<'a>, IngestMetadataFailure>>,
+}
+
+impl NatsStreamMetadataVisit<'_> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the connector supplies a synchronous projection from parsed delivery \
+                      metadata; local projection bodies remain analyzed"
+        )
+    )]
+    fn field(
+        &self,
+        ty: IngestorMetadataType,
+        values: &mut dyn IngestMetadataValues,
+        emit: impl Fn(&Info<'_>, &mut dyn IngestMetadataValues),
+    ) {
+        values.deferred(ty, &|values| {
+            let info = self.info.get_or_init(|| {
+                Info::from_reply(self.acknowledgement).map_err(|source| {
+                    IngestMetadataFailure::new(NatsStreamMetadataError::DeliveryMetadata { source })
+                })
+            });
+            match info {
+                Ok(info) => emit(info, values),
+                Err(failure) => values.invalid(ty, failure),
+            }
+        });
+    }
+}
+
 impl NatsStreamIngestorMessage {
     /// The delivery `message` carries, with the subject it is acknowledged on.
     pub(super) fn delivered(message: NatsMessage) -> NatsStreamIngestorResult<Self> {
@@ -325,7 +392,62 @@ impl IngestorMessage for NatsStreamIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(&self.headers)
+        IngestMetadataRow {
+            fields: self,
+            headers: IngestRowHeaders::Borrowed(&self.headers),
+            position: None,
+        }
+    }
+}
+
+impl IngestMessageMetadata for NatsStreamIngestorMessage {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        self.headers.visit_metadata(values);
+        let metadata = NatsStreamMetadataVisit {
+            acknowledgement: self.position.acknowledgement.as_str(),
+            info: OnceCell::new(),
+        };
+        metadata.field(IngestorMetadataType::String, values, |info, values| {
+            values.string(info.stream)
+        });
+        metadata.field(IngestorMetadataType::String, values, |info, values| {
+            values.string(info.consumer)
+        });
+        metadata.field(
+            IngestorMetadataType::U64,
+            values,
+            |info, values| match NonZeroU64::new(info.stream_sequence) {
+                Some(sequence) => values.u64(sequence.get()),
+                None => values.invalid(
+                    IngestorMetadataType::U64,
+                    &IngestMetadataFailure::new(NatsStreamMetadataError::StreamSequence),
+                ),
+            },
+        );
+        metadata.field(
+            IngestorMetadataType::Datetime,
+            values,
+            |info, values| match i64::try_from(info.published.unix_timestamp_nanos()) {
+                Ok(nanos) => values.datetime(Timestamp::from_unix_nanos(nanos)),
+                Err(source) => values.invalid(
+                    IngestorMetadataType::Datetime,
+                    &IngestMetadataFailure::new(NatsStreamMetadataError::PublicationTimestamp {
+                        source,
+                    }),
+                ),
+            },
+        );
+        metadata.field(
+            IngestorMetadataType::U64,
+            values,
+            |info, values| match NonZeroU64::new(info.delivered) {
+                Some(delivered) => values.u64(delivered.get()),
+                None => values.invalid(
+                    IngestorMetadataType::U64,
+                    &IngestMetadataFailure::new(NatsStreamMetadataError::DeliveryCount),
+                ),
+            },
+        );
     }
 }
 
@@ -442,6 +564,9 @@ impl BrokerIngestorConnector for NatsStreamIngestor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod metadata_tests;
 
 #[cfg(test)]
 #[cfg_attr(

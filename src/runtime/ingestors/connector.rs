@@ -41,7 +41,10 @@ use super::{
     },
     IngestorConnectorStartError, IngestorStartError,
 };
-use crate::runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryEnd};
+use crate::{
+    metrics::IngestorInteractionMetrics,
+    runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryEnd},
+};
 
 #[path = "connector_acknowledgement.rs"]
 mod acknowledgement;
@@ -69,8 +72,21 @@ pub(super) const INGESTOR_RECONNECT_POLICY: ParsedRetryPolicy = ParsedRetryPolic
 
 impl IngestorSpec {
     /// The identity this ingestor's running ingestor is registered under.
-    pub(in crate::runtime) fn runtime_key(&self) -> DomainNodeRef {
-        DomainNodeRef::node_in(self.domain.clone(), ModelKind::Ingestor, self.name.clone())
+    pub(in crate::runtime) fn runtime_key(&self) -> DomainNodeUnitRef {
+        DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(self.domain.clone(), ModelKind::Ingestor, self.name.clone()),
+            self.unit,
+        )
+    }
+
+    pub(in crate::runtime) fn instance_index(&self) -> u64 {
+        match self.unit.kind() {
+            nervix_models::UnitKind::Single => 0,
+            nervix_models::UnitKind::Instance(index) => index,
+            nervix_models::UnitKind::Partition(_) => {
+                unreachable!("an ingestor plan declares Single or Instance units")
+            }
+        }
     }
 
     /// The context every failure to initialize this ingestor's ingestor is reported under.
@@ -128,18 +144,17 @@ pub(super) trait IngestorInstance: Send + 'static {
     ) -> BoxFuture<'static, ()>;
 }
 
-/// A task a ingestor runs beside its instances for as long as the ingestor runs.
+/// A task an ingestor unit runs beside its source for that unit's lifetime.
 pub(super) trait IngestorCompanion: Send + 'static {
     /// Returns the task, which ends at shutdown.
     fn start(self: Box<Self>, shutdown: watch::Receiver<bool>) -> BoxFuture<'static, ()>;
 }
 
-/// One ingestor composed from its plan: the instances its connector opened and how the host runs
-/// them.
+/// One ingestor unit composed from its plan: its opened source and how the host runs it.
 pub(super) struct IngestorStart {
-    /// Every opened instance, in instance order.
-    pub(super) instances: Vec<Box<dyn IngestorInstance>>,
-    /// Tasks the ingestor runs beside its instances, such as the watch that tells domain-offset
+    /// The exact instance selected by this unit plan.
+    pub(super) instance: Box<dyn IngestorInstance>,
+    /// Tasks the unit runs beside its source, such as the watch that tells domain-offset
     /// Kafka instances their topic's partitions changed.
     pub(super) companions: Vec<Box<dyn IngestorCompanion>>,
     /// Whether what the ingestor reads while quiesced passes through the quiesce control, which may
@@ -175,7 +190,7 @@ pub(super) struct BrokerIngestorStart<'a, P> {
 }
 
 impl<P> BrokerIngestorStart<'_, P> {
-    /// Parses the declared delivery mode and opens every instance to run under the broker loop.
+    /// Resolves acknowledgement policy and opens this unit's selected global instance.
     ///
     /// Nothing is registered here, so a mode that fails to parse or an instance that fails to open
     /// leaves no running ingestor behind.
@@ -205,23 +220,18 @@ impl<P> BrokerIngestorStart<'_, P> {
             capabilities: ingestor.ingestor_capabilities(instances, acknowledgement.support()),
             acknowledgement,
         };
-        let mut opened: Vec<Box<dyn IngestorInstance>> =
-            Vec::with_capacity(plan.capabilities.instances().get().arch_into());
-        for instance_index in 0..plan.capabilities.instances().get() {
-            nervix_primitives::task::consume_budget().await;
-            let source = C::open(&plan.connector, instance_index)
-                .await
-                .change_context_lazy(|| ingestor.initialize_failure())?;
-            opened.push(Box::new(BrokerIngestorInstance {
-                source,
-                policy: BrokerIngestorPolicy::new(
-                    plan.acknowledgement,
-                    plan.capabilities.position_class(),
-                ),
-            }));
-        }
+        let source = C::open(&plan.connector, ingestor.instance_index())
+            .await
+            .change_context_lazy(|| ingestor.initialize_failure())?;
+        let instance = Box::new(BrokerIngestorInstance {
+            source,
+            policy: BrokerIngestorPolicy::new(
+                plan.acknowledgement,
+                plan.capabilities.position_class(),
+            ),
+        });
         Ok(IngestorStart {
-            instances: opened,
+            instance,
             companions: Vec::new(),
             buffered_intake,
             flush_each_intake,
@@ -336,7 +346,7 @@ impl<P> PacedIngestorStart<P> {
             intake_batch,
         });
         Ok(IngestorStart {
-            instances: vec![instance],
+            instance,
             companions: Vec::new(),
             buffered_intake: false,
             flush_each_intake: false,
@@ -383,10 +393,10 @@ where
 
 impl Runtime {
     /// Registers a composed ingestor and starts it: the branch runtimes its routes feed, its
-    /// readiness, a task for every companion and every instance, and the running ingestor that
+    /// readiness, its companion tasks and its source task, and the running unit that
     /// stopping it removes.
     ///
-    /// Nothing here can fail, so a ingestor is registered only once everything that could stop it
+    /// Nothing here can fail, so an ingestor is registered only once everything that could stop it
     /// from starting has succeeded.
     pub(super) fn host_ingestor(
         &self,
@@ -397,7 +407,7 @@ impl Runtime {
         source: IngestorStart,
     ) {
         let IngestorStart {
-            instances,
+            instance,
             companions,
             buffered_intake,
             flush_each_intake,
@@ -419,66 +429,58 @@ impl Runtime {
             &ModelName::from(&ingestor.name),
             branched_templates,
         );
-        let instance_count: u64 = instances.len().arch_into();
-        let expected_instances = NonZeroU64::new(instance_count).assured(
-            "every source composition opens the non-zero instance count its source declares",
-        );
-        let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, expected_instances);
-
+        let instance_index = ingestor.instance_index();
+        let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, ingestor.unit);
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances.len());
-        for companion in companions {
-            tasks.push(nervix_primitives::task::spawn(
-                companion.start(shutdown_tx.subscribe()),
-            ));
-        }
-        for (instance_index, (instance, readiness)) in
-            (0_u64..).zip(instances.into_iter().zip(readiness))
-        {
-            let host = RuntimeIngestorHost::new(RuntimeIngestorHostSpec {
-                handles: handles.clone(),
-                runtime: self.clone(),
-                domain: domain.clone(),
-                ingestor: ingestor.name.clone(),
-                timestamp_source: ingestor.timestamp_source.clone(),
-                output_routes: output_routes.clone(),
-                filter_where: filter_where.clone(),
-                codec: codec.clone(),
-                metrics: metrics.clone(),
-                branched_senders: branched_runtime.senders.clone(),
-                quiesce: quiesce.clone(),
-                shutdown: shutdown_tx.subscribe(),
-                instance_index,
-                readiness,
-                buffered_intake,
-                flush_each_intake,
-                unacknowledged_admission,
-                general_error_policy: ingestor.general_error_policy.clone(),
-            });
-            let run = instance.start(host, shutdown_tx.subscribe());
-            let task_domain = domain.clone();
-            let task_ingestor = ingestor.name.clone();
-            let task_client_mounts = client_mounts.clone();
-            let connector_label = connector_label.clone();
-            tasks.push(nervix_primitives::task::spawn(async move {
-                let _client_mounts = task_client_mounts;
-                info!(
-                    domain = task_domain.as_str(),
-                    ingestor = task_ingestor.as_str(),
-                    connector = connector_label,
-                    instance = instance_index,
-                    "started source ingestor instance"
-                );
-                run.await;
-                info!(
-                    domain = task_domain.as_str(),
-                    ingestor = task_ingestor.as_str(),
-                    connector = connector_label,
-                    instance = instance_index,
-                    "stopped source ingestor instance"
-                );
-            }));
-        }
+        let mut tasks = companions
+            .into_iter()
+            .map(|companion| {
+                nervix_primitives::task::spawn(companion.start(shutdown_tx.subscribe()))
+            })
+            .collect::<Vec<_>>();
+        let host = RuntimeIngestorHost::new(RuntimeIngestorHostSpec {
+            handles: handles.clone(),
+            runtime: self.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.name.clone(),
+            unit: ingestor.unit,
+            timestamp_source: ingestor.timestamp_source.clone(),
+            output_routes: output_routes.clone(),
+            filter_where: filter_where.clone(),
+            codec: codec.clone(),
+            metrics: metrics.clone(),
+            branched_senders: branched_runtime.senders.clone(),
+            quiesce: quiesce.clone(),
+            shutdown: shutdown_tx.subscribe(),
+            readiness,
+            buffered_intake,
+            flush_each_intake,
+            unacknowledged_admission,
+            general_error_policy: ingestor.general_error_policy.clone(),
+        });
+        let run = instance.start(host, shutdown_tx.subscribe());
+        let task_domain = domain.clone();
+        let task_ingestor = ingestor.name.clone();
+        let task_client_mounts = client_mounts.clone();
+        let connector_label = connector_label.clone();
+        tasks.push(nervix_primitives::task::spawn(async move {
+            let _client_mounts = task_client_mounts;
+            info!(
+                domain = task_domain.as_str(),
+                ingestor = task_ingestor.as_str(),
+                connector = connector_label,
+                instance = instance_index,
+                "started source ingestor instance"
+            );
+            run.await;
+            info!(
+                domain = task_domain.as_str(),
+                ingestor = task_ingestor.as_str(),
+                connector = connector_label,
+                instance = instance_index,
+                "stopped source ingestor instance"
+            );
+        }));
 
         self.inner.ingestors.insert(
             ingestor.runtime_key(),
@@ -523,7 +525,7 @@ pub(super) struct RuntimeIngestorHostSpec {
     pub(super) branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     pub(super) quiesce: Arc<IngestorQuiesceControl>,
     pub(super) shutdown: watch::Receiver<bool>,
-    pub(super) instance_index: u64,
+    pub(super) unit: Unit,
     pub(super) readiness: ingestor_quiesce::IngestorInstanceReadiness,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
@@ -558,17 +560,8 @@ pub(super) struct RuntimeIngestorHost {
     buffered_intake: bool,
     flush_each_intake: bool,
     unacknowledged_admission: QueueAdmission,
-    /// Counts the unacknowledged payloads this host did not deliver because the node's extension
-    /// workers had no room to unfold them.
-    unfolding_refused: prometheus::IntCounter,
-    /// Counts the positions this host discarded after a reconnect because the broker redelivers
-    /// them.
-    transport_redeliveries: prometheus::IntCounter,
-    /// Counts the payloads this host's ingestor dropped because they exceed its client's size bound.
-    oversized_payloads: prometheus::IntCounter,
-    /// Counts header values the connector skipped because their bytes are not valid UTF-8, for
-    /// this host's polls and the endpoint bindings it hands out.
-    header_values_dropped: prometheus::IntCounter,
+    /// Retained source host counters, also handed to endpoint bindings where needed.
+    interactions: IngestorInteractionMetrics,
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
     /// it hands out.
     decode_rejections: DecodeRejections,
@@ -579,15 +572,18 @@ pub(super) struct RuntimeIngestorHost {
 
 impl RuntimeIngestorHost {
     pub(super) fn new(spec: RuntimeIngestorHostSpec) -> Self {
-        let status_key = DomainNodeRef::node_in(
-            spec.domain.clone(),
-            ModelKind::Ingestor,
-            spec.ingestor.clone(),
+        let status_key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(
+                spec.domain.clone(),
+                ModelKind::Ingestor,
+                spec.ingestor.clone(),
+            ),
+            spec.unit,
         );
         let status = spec.runtime.ingestor_status(&status_key);
-        let ack_root_trackers = spec
-            .runtime
-            .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor);
+        let ack_root_trackers =
+            spec.runtime
+                .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor, spec.unit);
         let collector = IngestRouteCollector::new(
             spec.output_routes.metadata.clone(),
             INGEST_GROUP_MAX_ROWS,
@@ -595,33 +591,16 @@ impl RuntimeIngestorHost {
         );
         let quiesce_observation = spec.quiesce.observation();
         let dispatcher = spec.runtime.inner.remote_dispatcher.load();
-        let unfolding_refused = spec.runtime.inner.metrics.ingestor_unfolding_refused(
-            &spec.domain,
-            &spec.ingestor,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let transport_redeliveries = spec.runtime.inner.metrics.ingestor_transport_redeliveries(
-            &spec.domain,
-            &spec.ingestor,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let oversized_payloads = spec.runtime.inner.metrics.ingestor_oversized_payloads(
-            &spec.domain,
-            &spec.ingestor,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let header_values_dropped = spec.runtime.inner.metrics.ingestor_header_values_dropped(
-            &spec.domain,
-            &spec.ingestor,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let decode_rejections = DecodeRejections::new(
-            spec.general_error_policy,
-            spec.runtime.inner.metrics.ingestor_decode_rejections(
+        let (interactions, decode_rejections_counter) =
+            spec.runtime.inner.metrics.register_ingestor_interactions(
                 &spec.domain,
                 &spec.ingestor,
+                spec.unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-            ),
+            );
+        let decode_rejections = DecodeRejections::new(
+            spec.general_error_policy,
+            decode_rejections_counter,
             status.clone(),
         );
         let delivery_stop = spec.shutdown.clone();
@@ -629,7 +608,7 @@ impl RuntimeIngestorHost {
             .runtime
             .inner
             .fault_injection
-            .source_confirmation_delay(&status_key);
+            .source_confirmation_delay(&status_key.entity);
         Self {
             handles: spec.handles,
             status,
@@ -647,16 +626,19 @@ impl RuntimeIngestorHost {
             ack_root_trackers,
             shutdown: spec.shutdown,
             delivery_stop,
-            instance_index: spec.instance_index,
+            instance_index: match spec.unit.kind() {
+                nervix_models::UnitKind::Single => 0,
+                nervix_models::UnitKind::Instance(index) => index,
+                nervix_models::UnitKind::Partition(_) => {
+                    unreachable!("source hosts run ingestor units")
+                }
+            },
             readiness: spec.readiness,
             collector,
             buffered_intake: spec.buffered_intake,
             flush_each_intake: spec.flush_each_intake,
             unacknowledged_admission: spec.unacknowledged_admission,
-            unfolding_refused,
-            transport_redeliveries,
-            oversized_payloads,
-            header_values_dropped,
+            interactions,
             decode_rejections,
             confirmation_delay,
         }
@@ -681,7 +663,7 @@ impl RuntimeIngestorHost {
             metrics: self.metrics.clone(),
             branched_senders: self.branched_senders.clone(),
             decode_rejections: self.decode_rejections.clone(),
-            header_values_dropped: self.header_values_dropped.clone(),
+            header_values_dropped: self.interactions.header_values_dropped.clone(),
         }
     }
 
@@ -752,7 +734,7 @@ impl RuntimeIngestorHost {
             nervix_primitives::task::consume_budget().await;
             let metadata = BufferedIngestMetadata::retain(&message.metadata);
             let retained = BufferedIngestPayload::new(message.payload, metadata, actual_utc_now());
-            match self.quiesce.intake(self.instance_index, retained, false) {
+            match self.quiesce.intake(retained, false) {
                 IngestorQuiesceIntake::Dispatch(_) => admitted.push(message),
                 IngestorQuiesceIntake::Buffered
                 | IngestorQuiesceIntake::Dropped
@@ -968,7 +950,7 @@ impl RuntimeIngestorHost {
     ) -> IngestorIntakeResult<bool> {
         // Observed before the decision is taken, so a newer one is never missed.
         let decided = self.quiesce.observation();
-        match self.quiesce.intake(self.instance_index, payload, false) {
+        match self.quiesce.intake(payload, false) {
             IngestorQuiesceIntake::Dispatch(payload) => {
                 self.deliver_unacknowledged(payload, decided).await
             }
@@ -1020,7 +1002,7 @@ impl RuntimeIngestorHost {
                 LiveDeliveryEnd::Redecide => {
                     self.collector.discard_undispatched_payloads();
                     decided = self.quiesce.observation();
-                    match self.quiesce.intake(self.instance_index, payload, false) {
+                    match self.quiesce.intake(payload, false) {
                         IngestorQuiesceIntake::Dispatch(returned) => {
                             payload = returned;
                             continue;
@@ -1071,7 +1053,9 @@ impl RuntimeIngestorHost {
     /// Counts `payloads` an unacknowledged intake did not deliver because the node's extension
     /// workers had no room to unfold them.
     fn count_refused(&self, payloads: usize) {
-        self.unfolding_refused.inc_by(payloads.arch_into());
+        self.interactions
+            .unfolding_refused
+            .inc_by(payloads.arch_into());
     }
 
     /// Consumes every payload of an unacknowledged or retained batch its codec refused, as the
@@ -1244,11 +1228,15 @@ impl IngestorHostServices for RuntimeIngestorHost {
             positions,
             "discarded positions of a lost connection that the broker redelivers"
         );
-        self.transport_redeliveries.inc_by(positions.arch_into());
+        self.interactions
+            .transport_redeliveries
+            .inc_by(positions.arch_into());
     }
 
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
-        self.oversized_payloads.inc_by(payloads.get().arch_into());
+        self.interactions
+            .oversized_payloads
+            .inc_by(payloads.get().arch_into());
     }
 
     fn record_unconfirmed_stop(&self, positions: usize) {
@@ -1283,7 +1271,7 @@ impl RuntimeIngestorHost {
         )
     )]
     async fn deliver_retained(&mut self) -> IngestorIntakeResult<bool> {
-        let Some(retained) = self.quiesce.take_buffered(self.instance_index) else {
+        let Some(retained) = self.quiesce.take_buffered() else {
             return Ok(false);
         };
         let decode = self.runtime.decode_raw_ingest_payload(

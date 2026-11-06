@@ -72,6 +72,7 @@ impl PulsarTopicIngestorStartPlan {
         &self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
+        _units: &[Unit],
         replacement: Option<&Self>,
     ) -> error_stack::Result<(), RuntimeError> {
         let context = || RuntimeError::RetireIngestorEntity {

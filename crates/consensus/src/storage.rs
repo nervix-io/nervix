@@ -95,10 +95,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_emitter_keys_logs";
-const KEYSPACE_META: &str = "raft_emitter_keys_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_emitter_keys_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_emitter_keys_snapshots";
+const KEYSPACE_LOGS: &str = "raft_unit_keys_logs";
+const KEYSPACE_META: &str = "raft_unit_keys_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_unit_keys_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_unit_keys_snapshots";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
@@ -230,7 +230,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 11,
+    ClusterState = 14,
 }
 
 #[derive(Debug)]

@@ -369,7 +369,8 @@ reconciliation passes propose no further address change. The stored address supp
 contact hints; Raft traffic resolves the authenticated node identity through the interconnect.
 
 The consensus event stream and `info` log record `raft add learner`, `raft wait for learner`,
-`raft update address`, `raft promote voters`, and `raft membership updated` transitions.
+`raft update address`, `raft promote voters`, and `raft membership updated` transitions. Every
+report on the consensus event stream reaches the node's sessions as a `Leadership` notice.
 `SHOW CLUSTER STATUS` reports the local `raft.last_log_index`, `raft.last_applied`, and each member's
 learner or voter role and recorded address.
 
@@ -491,28 +492,33 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The current emitter Models carry explicit key expressions, source-partition routing and expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces: `raft_emitter_keys_logs`,
-`raft_emitter_keys_meta`, `raft_emitter_keys_state`, and `raft_emitter_keys_snapshots`. Opening it validates
-the complete keyspace namespace before reading any records. This namespace identifies the current
-Model shape, including the separate JSON and CBOR wire type enums, AVRO representation types,
-explicit `BASE64` codec encoding, a Pulsar subscription's required type, an owned Pulsar
-subscription's required start position, a Kafka consumer group's required start position, the
-serialized Sentry platform field, an ingestor's `TIMESTAMP AT metadata.<field>` source, the `NATS
-STREAM` ingestor entity, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS QUEUE
-ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC ingestor
-writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside its
-publishing mode, a `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, whether a polled
-HTTP request's header holds a literal or names a client secret, and the branch partition count every
-resolved branch declaration of the committed schedule carries. It identifies the current statement
-shape as well, which the statements a transaction keeps are stored in: `ALTER BRANCH` among those
-statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that changes one part of its
-entity's body, an envelope clause or the properties, or one part of a construction where it stands.
-Its state metadata requires the current `ClusterState` encoding, including committed cluster
-parameters, the durable restore installation gate and the unit-keyed committed schedule in which a
-relay of a partitioned branch is scheduled as one unit per partition. Native counts in commands,
-queued transactions, progress, outcomes, and plan, report and topology headers are archived as
-fixed-width 64-bit values with checked native decoding. Log replay, state recovery and snapshot
-installation therefore retain their complete magnitudes. See
+The current emitter Models carry explicit key expressions, source-partition routing and
+expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces: `raft_unit_keys_logs`,
+`raft_unit_keys_meta`, `raft_unit_keys_state`, and
+`raft_unit_keys_snapshots`. Opening it validates the complete keyspace namespace before
+reading any records. This namespace identifies the current Model shape, including the separate JSON
+and CBOR wire type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec encoding, a Pulsar
+subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+consumer group's required start position, the serialized Sentry platform field, an ingestor's
+`TIMESTAMP AT metadata.<field>` source, the separate `NATS STREAM` ingestor and emitter entities, an SQS QUEUE emitter's `SEND` request shape, the receive
+count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
+MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
+writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
+whether a polled HTTP request's header holds a literal or names a client secret, and the branch
+partition count every resolved branch declaration of the committed schedule carries. It identifies
+the current statement shape as well, which the statements a transaction keeps are stored in:
+`ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+changes one part of its entity's body, an envelope clause or the properties, or one part of a
+construction where it stands. Its state metadata requires the current `ClusterState` encoding, 14,
+including committed cluster parameters, the durable restore installation gate and the unit-keyed
+committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
+The current shape also requires inferencer state bindings and their initial expressions,
+typed ingestor instancing, exact-unit placement-group members
+and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions,
+progress, outcomes, and plan, report and topology
+headers are archived as fixed-width 64-bit values with checked native decoding. Log replay, state
+recovery and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
 
 The committed domain schedule stores the current unit map on every scheduled node. Each unit owns

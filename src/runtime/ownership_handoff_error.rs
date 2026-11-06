@@ -65,6 +65,8 @@ pub(crate) enum OwnershipHandoffError {
     /// The node's runtime state storage failed; its `RuntimePersistenceError` report is beneath.
     #[error("ownership handoff state storage failed")]
     Persistence,
+    #[error("ingestor instance layout state could not be prepared")]
+    IngestorUnitLayout,
 }
 
 impl OwnershipHandoffError {

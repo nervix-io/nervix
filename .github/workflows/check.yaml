@@ -1111,15 +1111,11 @@ jobs:
         with:
           tool: just@latest,cargo-llvm-cov
 
-      # Playwright's global install goes into the Node.js this step pins.
+      # Native client probes use Node.js; browser probes use the archived Playwright driver.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-
-      - name: Install playwright
-        run: |
-          npm install -g playwright
 
       - name: Setup uv for Python driver coverage
         uses: astral-sh/setup-uv@v6
@@ -1270,7 +1266,7 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
-      # The CRAP report runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
+      # The CRAP report runs the cargo-crap version nervix-ratchet crap pins, built through kache.
       - name: Runner diagnostics before Install the pinned complexity analyzer
         uses: ./.github/actions/runner-diagnostics
         with:

@@ -51,7 +51,7 @@ Feature: Attached acknowledgements across consumer moves
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=moved_sink_source owner=node-1
+      - domain={{domain}} kind=ingestor name=moved_sink_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -154,7 +154,7 @@ Feature: Attached acknowledgements across consumer moves
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=owner_move_source owner=node-1
+      - domain={{domain}} kind=ingestor name=owner_move_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """

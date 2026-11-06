@@ -491,7 +491,22 @@ through one R2 bucket, which fails independently of GitHub. Only the steps that 
 them use `.github/actions/ci-artifact-upload` and `.github/actions/ci-artifact-download`.
 `scripts/ci_artifacts.py` states the format: a tar stream cut into 128 MiB parts, each sent and
 retried on its own, and a manifest written last, so an unfinished upload cannot be read. A rerun of
-a test job keeps its archive, and a rerun of `scenarios-build` replaces both.
+a test job keeps its archive, and a rerun of `scenarios-build` replaces both. The archives hold the
+test executables without their debug information, most of a test executable's bytes, as
+[Scenario Shards](integration-test-lifecycle.md#scenario-shards) describes.
+
+A transfer reports every ten seconds how much it moved and how fast, how many parts are done,
+moving, waiting to retry or queued, and which moving part is the slowest, so the step's log shows a
+transfer that crawls as well as one that stopped. A connection that does not open within 20 s, one
+that moves nothing for 60 s, and a part that moves less than 256 KiB/s over 30 s are cut off. R2
+sometimes serves an object at a few KiB/s to every request for it, so a part downloaded too slowly
+is not asked for again as it was: what is left of it is split into four byte ranges, each a request
+of its own on a connection of its own, and a range still too slow is split again, down to 2 MiB and
+up to 16 ranges a part. A range that cannot be split resumes after the bytes it already holds.
+Failed requests are retried after 2 s doubling to 30 s, at random by up to half again, and six
+failures in a row without a byte kept fail the transfer. A transfer that needed retries ends with a
+warning in the run's summary, and one that is cancelled reports how far it got as its error. `just
+test-ci-artifacts` runs the script's tests against a local fake of the bucket.
 
 | Repository setting | Kind | Value |
 | --- | --- | --- |
@@ -678,8 +693,8 @@ and exact `value`, `identity` and `state` roles at their semantic owners. The
 [typed-state contracts](./typed-states.md#source-owned-identity-and-installation-contracts) state the
 supported scope. `just test-typed-ratchet-contracts <unittest selector...>` runs focused pass/fail
 compiler fixtures after preparing `just test-typed-ratchet-compiler`. `just test-ratchet-units`
-also qualifies language provenance before resolution; `python3 -m scripts.check_layer_provenance`
-prints current source/manifest violations. Calibration logs and complete matrix/coverage outputs
+also qualifies language provenance before resolution; `just ratchet` prints current
+source/manifest violations. Calibration logs and complete matrix/coverage outputs
 belong on the owning task, not in the source tree. Compilation under a modeled mode qualifies
 recognition and supplies no concurrency execution evidence.
 

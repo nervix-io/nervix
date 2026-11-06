@@ -1022,7 +1022,7 @@ exceeds `debt-baseline.json`. A change may lower a count, never raise one; when 
 `just ratchet --update` and commit the baseline. `just ratchet --show <count>` lists a count's
 sites.
 
-Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
+Complexity is measured by the cargo-crap version `nervix-ratchet crap` pins, which
 `just install-cargo-crap` builds through kache; another version is refused, and an analysis that
 misses a source never reads as zero. That count, which reads no coverage, is the mandatory
 complexity verdict: a new function above 30 fails `just validate` and the `checks` job, and

@@ -90,7 +90,7 @@ where
         let root = KafkaOffsetsStream {
             domain: self.domain.as_str().to_string(),
             entity: self.entity.as_str().to_string(),
-            unit: self.unit,
+            unit: self.unit.into(),
             schema: *self.schema.as_digest(),
             revision: self.revision,
             applied_start_generation: self.applied_start_generation,
@@ -160,7 +160,7 @@ where
             domain: self.domain.as_str().to_string(),
             owner_kind: self.owner_kind.as_str().to_string(),
             entity: self.entity.as_str().to_string(),
-            unit: self.unit,
+            unit: self.unit.into(),
             schema: *self.schema.as_digest(),
             revision: self.revision,
             branches: CheckedEntries {
@@ -202,7 +202,7 @@ where
 struct KafkaOffsetsStream<'a, I: ExactSizeIterator<Item = KafkaPartitionWire> + Clone> {
     domain: String,
     entity: String,
-    unit: Unit,
+    unit: crate::wire::UnitWire,
     schema: [u8; 32],
     revision: u64,
     applied_start_generation: Option<u64>,
@@ -219,7 +219,7 @@ struct BranchLifecycleStream<'a, I: ExactSizeIterator<Item = BranchLifecycleEntr
     domain: String,
     owner_kind: String,
     entity: String,
-    unit: Unit,
+    unit: crate::wire::UnitWire,
     schema: [u8; 32],
     revision: u64,
     #[rkyv(with = IteratorAsVec<CheckedEntry<'a, BranchLifecycleEntryWire>>, omit_bounds)]
@@ -501,7 +501,7 @@ mod tests {
         let wire = KafkaOffsetsWire {
             domain: record.domain.as_str().to_string(),
             entity: record.entity.as_str().to_string(),
-            unit: record.unit,
+            unit: record.unit.into(),
             schema: *record.schema.as_digest(),
             revision: record.revision,
             applied_start_generation: record.applied_start_generation,
@@ -522,7 +522,7 @@ mod tests {
             domain: record.domain.as_str().to_string(),
             owner_kind: record.owner_kind.as_str().to_string(),
             entity: record.entity.as_str().to_string(),
-            unit: record.unit,
+            unit: record.unit.into(),
             schema: *record.schema.as_digest(),
             revision: record.revision,
             branches: record
@@ -638,7 +638,7 @@ mod tests {
             });
         }
         BranchLifecycleRecord {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: DomainName::parse("payments").assured("the domain is an accepted literal"),
             owner_kind: ModelKind::Ingestor,
             entity: ModelName::parse("source").assured("the entity is an accepted literal"),
@@ -797,7 +797,7 @@ mod tests {
     fn a_record_above_the_limit_reports_its_whole_length_and_forwards_no_more_than_the_limit() {
         let topic = "t".repeat(200);
         let stream = StreamedKafkaOffsets {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: DomainName::parse("payments").assured("the domain is an accepted literal"),
             entity: ModelName::parse("source").assured("the entity is an accepted literal"),
             schema: SchemaFingerprint::from_digest([5; 32]),

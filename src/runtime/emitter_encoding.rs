@@ -191,6 +191,11 @@ impl EmitterConnector for EncodedRecordEmitter {
         let record_count = records.len();
         let outcome = self.connector.publish(records).await;
         let outcome = context.received_outcome(record_count, outcome);
+        let outcome = context
+            .runtime
+            .inner
+            .fault_injection
+            .received_emitter_record_outcome(&context.emitter, record_count, outcome);
         prepared
             .answers(batches, payloads, outcome)?
             .apply(context, batches, DeliveredAcknowledgements::Host)
@@ -1091,9 +1096,18 @@ mod tests {
     }
 
     fn context_with(executor: Executor) -> EmitterConnectorContext {
+        let context = emitter_context();
+        let runtime = Runtime::with_executor(executor);
+        let interactions = runtime.inner.metrics.register_emitter_interactions(
+            &context.domain,
+            &context.emitter,
+            None,
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
+        );
         EmitterConnectorContext {
-            runtime: Runtime::with_executor(executor),
-            ..emitter_context()
+            runtime,
+            interactions,
+            ..context
         }
     }
 

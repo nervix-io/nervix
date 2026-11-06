@@ -20,8 +20,9 @@ use futures_util::future::BoxFuture;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
-    ChoiceTarget, ChoiceValue, CommandRequest, DomainPaceChoice, NoticeLevel, ServerNotice,
-    SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    ChoiceTarget, ChoiceValue, CommandRequest, DomainPaceChoice, NoticeKind, NoticeLevel,
+    ServerNotice, SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus,
+    TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
 use nervix_interconnect::Transport;
@@ -32,10 +33,7 @@ use nervix_models::{
 };
 use nervix_plexus::{
     Token, Word,
-    client_statement::{
-        ClientStatement, CompletionExpectation, local_path_fragment,
-        parse_client_statement_sources, suggest_client_expectations,
-    },
+    client_statement::{ClientStatement, CompletionExpectation},
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
 };
@@ -48,7 +46,7 @@ use nervix_vm::program::FunctionName;
 use tracing::{debug, warn};
 
 use super::{
-    authentication::AuthRateLimiter,
+    authentication::AuthenticationPacing,
     backup::{CaptureSectionKey, CapturedSectionStage, ServerRetainedBackups},
     client_consumers::ClientConsumerRouter,
     client_producers::ClientProducerRouter,
@@ -73,6 +71,7 @@ use super::{
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     service_tasks::ServiceTasks,
     session::admission::{CancelledBeforeAdmission, RequestAdmission},
+    statement_grammar::with_statement_grammar,
     subscription::{
         SessionCommandOperation, SessionSubscriptions, SessionView, SubscriptionInterests,
         SubscriptionSampler,
@@ -110,24 +109,27 @@ impl SessionEvents {
         }
     }
 
-    /// Report a control-plane failure this node recovered from.
-    fn report_error(&self, message: impl Into<String>) {
-        let message = message.into();
-        warn!(error = %message, "server error reported to sessions");
-        self.publish(NoticeLevel::Error, message);
+    /// Report a failure of `kind` recovered from: a control-plane failure of this node, or a runtime
+    /// failure of any node, which a peer's runtime fans out here and traces only at `debug`.
+    pub(in crate::application) fn report_error(&self, kind: NoticeKind, message: String) {
+        warn!(error = %message, ?kind, "server error reported to sessions");
+        self.publish(NoticeLevel::Error, kind, message);
     }
 
-    /// Offer a transition the cluster or consensus bus has already recorded.
-    ///
-    /// Those buses write their own `info` line before handing the text here, so this is a relay
-    /// rather than a report and it logs nothing of its own.
-    pub(in crate::application) fn relay_info(&self, message: String) {
-        self.publish(NoticeLevel::Info, message);
+    /// Offer, as `kind`, an event its owner already recorded in its own `info` line (a live-set
+    /// change, a consensus transition, an installed parameter revision); it logs nothing itself.
+    pub(in crate::application) fn relay_info(&self, kind: NoticeKind, message: String) {
+        self.publish(NoticeLevel::Info, kind, message);
     }
 
-    fn publish(&self, level: NoticeLevel, message: String) {
+    fn publish(&self, level: NoticeLevel, kind: NoticeKind, message: String) {
+        let notice = ServerNotice {
+            level,
+            kind,
+            message,
+        };
         self.sender
-            .send(ServerNotice { level, message })
+            .send(notice)
             .discarded("the record this event carries is written before it is offered");
     }
 
@@ -182,8 +184,7 @@ pub(in crate::application) struct SessionServiceInner {
     /// Routes each client emitter consumer to its current execution owner.
     pub(in crate::application) client_consumers: ClientConsumerRouter,
     pub(in crate::application) service_tasks: ServiceTasks,
-    pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
-    pub(in crate::application) failed_auth_rate_limit_keys: DashMap<String, (), RandomState>,
+    pub(in crate::application) authentication_pacing: AuthenticationPacing,
     /// The series the traffic of this node's client listeners is recorded into.
     pub(in crate::application) traffic: ClientTraffic,
     pub(in crate::application) transaction_bindings: DashMap<String, String, RandomState>,
@@ -1447,7 +1448,9 @@ impl SessionServiceImpl {
 
     /// Report a control-plane failure this node recovered from to the sessions attached to it.
     pub(in crate::application) fn broadcast_error(&self, message: impl Into<String>) {
-        self.inner.events.report_error(message);
+        self.inner
+            .events
+            .report_error(NoticeKind::ControlPlane, message.into());
     }
 
     /// Resolves one structured control against a single observed application revision.
@@ -1592,11 +1595,13 @@ impl SessionServiceImpl {
         };
 
         let context = completion_context(req.input(), cursor);
-        let grammar = suggest_client_expectations(&context.grammar_input, context.grammar_cursor);
+        let expectations = with_statement_grammar(|grammar| {
+            grammar.suggest_expectations(&context.grammar_input, context.grammar_cursor)
+        });
 
         let mut suggestions = Vec::new();
         let mut references = Vec::new();
-        for item in grammar {
+        for item in expectations {
             match item {
                 CompletionExpectation::Semantic(reference) => references.push(reference),
                 CompletionExpectation::Literal(item) => {
@@ -1700,7 +1705,9 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>();
 
-        if let Some(local_path) = local_path_fragment(req.input(), cursor) {
+        let local_path =
+            with_statement_grammar(|grammar| grammar.local_path_fragment(req.input(), cursor));
+        if let Some(local_path) = local_path {
             response_suggestions.push(Suggestion {
                 value: local_path.fragment.to_string(),
                 kind: SuggestionKind::LocalDirectoryLookup,
@@ -1762,7 +1769,8 @@ impl SessionServiceImpl {
         let expected_transaction_position = req
             .expected_transaction_position
             .map(TransactionPosition::accepted_operations);
-        let client_statements = match parse_client_statement_sources(&req.query) {
+        let parsed = with_statement_grammar(|grammar| grammar.parse_sources(&req.query));
+        let client_statements = match parsed {
             Ok(statements) => statements,
             Err(report) => {
                 let result = self
@@ -2085,6 +2093,7 @@ pub(in crate::application) fn conflicting_reference(
 )]
 mod tests {
     mod application_deadline;
+    mod completion_context;
 
     use std::time::Duration;
 
@@ -2275,87 +2284,6 @@ mod tests {
             String::new(),
         );
         assert_eq!(choices_for(&pace), Err(ChoiceStatus::MissingContext));
-    }
-
-    #[test]
-    fn completion_context_preserves_prefix_for_post_filtering() {
-        let input = "CREATE SCHE";
-        let CompletionContext {
-            grammar_input,
-            grammar_cursor,
-            prefix,
-            ..
-        } = completion_context(input, input.len());
-
-        assert_eq!(grammar_input, "CREATE ");
-        assert_eq!(grammar_cursor, "CREATE ".len());
-        assert_eq!(prefix, "sche");
-
-        let input = "SHOW CLUSTR;";
-        let CompletionContext {
-            grammar_input,
-            grammar_cursor,
-            prefix,
-            ..
-        } = completion_context(input, "SHOW CLU".len());
-        assert_eq!(grammar_input, "SHOW ;");
-        assert_eq!(grammar_cursor, "SHOW ".len());
-        assert_eq!(prefix, "clu");
-        assert_eq!(word_end(input, "SHOW CLU".len()), "SHOW CLUSTR".len());
-    }
-
-    #[test]
-    fn keyword_completion_is_filtered_by_original_prefix() {
-        let input = "CREATE SCHE";
-        let context = completion_context(input, input.len());
-        let filtered = suggest_client_expectations(&context.grammar_input, context.grammar_cursor)
-            .into_iter()
-            .filter_map(|item| {
-                let CompletionExpectation::Literal(item) = item else {
-                    return None;
-                };
-                context.literal_range(input, &item).map(|_| item)
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(filtered, vec!["SCHEMA".to_string()]);
-    }
-
-    #[test]
-    fn phrase_completion_replaces_matching_words_around_the_cursor() {
-        let input = "TIME RA";
-        let context = completion_context(input, input.len());
-        assert_eq!(
-            context.literal_range(input, "TIME RATE"),
-            Some(0..input.len())
-        );
-
-        let input = "TIME RATE;";
-        let context = completion_context(input, 2);
-        assert_eq!(context.literal_range(input, "TIME RATE"), Some(0..9));
-
-        let input = "OTHER RA";
-        let context = completion_context(input, input.len());
-        assert_eq!(context.literal_range(input, "TIME RATE"), None);
-    }
-
-    #[test]
-    fn rebind_member_completion_finds_the_resource_across_whitespace() {
-        for input in [
-            "REBIND RESOURCE bundle TO VERSION 2 FOR HASH MAP ",
-            "REBIND\nRESOURCE\tbundle\nTO\tVERSION 2\nFOR\tHASH MAP ",
-        ] {
-            assert_eq!(
-                rebind_resource_before_for(input, input.len())
-                    .as_ref()
-                    .map(ResourceName::as_str),
-                Some("bundle")
-            );
-        }
-        assert_eq!(
-            rebind_resource_before_for("REBIND RESOURCE bundle TO VERSION 2 ", 36),
-            None
-        );
     }
 
     #[test]

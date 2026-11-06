@@ -210,6 +210,7 @@ mod backup;
 mod cli_outcomes;
 mod clickhouse_connections;
 mod client_consumers;
+mod client_foreign_execution;
 mod client_producers;
 mod client_traffic;
 mod common;
@@ -221,11 +222,13 @@ mod domain_clock_attachment;
 mod domain_resume;
 mod emitter_destinations;
 mod emitter_finish;
+mod emitter_metrics;
 mod endpoint_intake;
 mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
+mod ingestor_instances;
 mod kafka_metadata;
 mod materialized_state_inspection;
 mod mqtt_fixtures;
@@ -254,9 +257,12 @@ mod restarted_voter;
 mod session_protocol;
 mod session_tls;
 mod standalone_transaction;
+mod subscription_restoration;
 mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
+mod web_console_restore_faults;
+mod web_console_unreadable;
 mod websocket_lifecycle;
 mod wide_row_intake;
 
@@ -505,6 +511,10 @@ struct ScenarioWorld {
     saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
     /// How the last restore stream a scenario shaped itself ended.
     last_restore_end: Option<crate::backup::restore::RestoreStreamEnd>,
+    /// The real restore whose reply a bounded gRPC peer made unreadable to its client.
+    restore_codec_result: Option<crate::backup::restore_codec::Observation>,
+    /// A real restore whose test peer substituted its reply, and its exact-reference recovery.
+    restore_reply_validation: Option<Box<backup::restore_reply_validation::RestoreValidation>>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<crate::backup::restore::BackgroundRestore>,
     /// Real filesystem capacity held while an accepted restore tries its client inspection.
@@ -1435,6 +1445,34 @@ fn when_controlled_nats_endpoint_holds_after(world: &mut ScenarioWorld, publishe
     controlled_nats_endpoint(world).hold_after(publishes);
 }
 
+#[when("the controlled NATS endpoint drops replies after its next publish")]
+fn when_controlled_nats_endpoint_drops_replies_after_next_publish(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).drop_replies_after_next_publish();
+}
+
+#[then(expr = "within {string} the controlled NATS endpoint forwards at least {int} publishes")]
+async fn then_controlled_nats_endpoint_forwards_publishes(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: u64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    nervix_primitives::time::timeout(
+        duration,
+        controlled_nats_endpoint(world).forwarded_publishes_at_least(count),
+    )
+    .await
+    .expect("the controlled NATS endpoint did not forward enough publishes");
+}
+
+#[then(expr = "within {string} the controlled NATS endpoint discards a server reply")]
+async fn then_controlled_nats_endpoint_discards_reply(world: &mut ScenarioWorld, duration: String) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    nervix_primitives::time::timeout(duration, controlled_nats_endpoint(world).discarded_reply())
+        .await
+        .expect("the controlled NATS endpoint did not discard a server reply");
+}
+
 /// Stands a forwarder in front of the MQTT broker that can drop chosen PUBLISH packets, and names
 /// its address `{{mqtt_filtered_addr}}`.
 #[given("an MQTT endpoint that drops chosen publishes is configured")]
@@ -1892,6 +1930,18 @@ async fn given_nats_is_running(world: &mut ScenarioWorld) {
         .await
         .expect("NATS test container should start");
     refresh_dependency_configuration(world);
+}
+
+#[given("the plaintext NATS endpoint is addressed with the TLS scheme")]
+async fn given_plaintext_nats_has_tls_scheme(world: &mut ScenarioWorld) {
+    let address = expand_placeholders(world, "{{nats_addr}}");
+    let mut url = url::Url::parse(&address).expect("the NATS test endpoint is a URL");
+    url.set_scheme("tls")
+        .expect("a NATS URL accepts the TLS scheme");
+    world.placeholders.insert(
+        "nats_tls_scheme_addr".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
 }
 
 #[given("NATS TLS is running")]
@@ -4096,20 +4146,6 @@ async fn then_server_process_cluster_has_schema(world: &mut ScenarioWorld, schem
     world.last_command_output = Some(output);
 }
 
-#[given("a release nervix-server process is started for the client-wire baseline")]
-async fn given_release_server_process_is_started_for_client_wire_baseline(
-    world: &mut ScenarioWorld,
-) {
-    let executable = std::env::var_os("NERVIX_CLIENT_WIRE_BASELINE_SERVER")
-        .verified("the client-wire baseline recipe supplies its release server executable");
-    start_ready_server_process_with_launch(
-        world,
-        ServerProcessLaunch::Executable(PathBuf::from(executable)),
-        &[],
-    )
-    .await;
-}
-
 #[given(expr = "a nervix-server process is started with drain timeout {string}")]
 async fn given_nervix_server_process_is_started_with_drain_timeout(
     world: &mut ScenarioWorld,
@@ -4677,35 +4713,6 @@ async fn when_server_process_is_restarted_from_existing_database(world: &mut Sce
         .restart()
         .await
         .unwrap_or_else(|error| panic!("failed to restart nervix-server: {error}"));
-}
-
-#[when("the current client-wire baseline is captured")]
-async fn when_current_client_wire_baseline_is_captured(world: &mut ScenarioWorld) {
-    let domain = world.domain.clone();
-    let test_id = world.test_id.clone();
-    let process = world
-        .server_process
-        .as_ref()
-        .verified("the preceding step started a nervix-server process");
-    let artifact = crate::common::client_wire_baseline::capture(process, &domain, &test_id)
-        .await
-        .unwrap_or_else(|error| panic!("client-wire baseline failed: {error:#}"));
-    world.placeholders.insert(
-        "client_wire_baseline_artifact".to_string(),
-        artifact.display().to_string(),
-    );
-}
-
-#[then("the client-wire baseline artifact exists")]
-fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
-    let artifact = world
-        .placeholders
-        .get("client_wire_baseline_artifact")
-        .verified("the preceding step captured the baseline artifact");
-    assert!(
-        Path::new(artifact).is_file(),
-        "client-wire baseline artifact was not written to {artifact}"
-    );
 }
 
 #[given(
@@ -5921,6 +5928,28 @@ async fn then_cli_repl_eventually_displays(world: &mut ScenarioWorld, expected: 
             terminal.transcript()
         );
     }
+}
+
+/// Counts what the REPL displayed so far. A preceding step waits for a later line, so the count is
+/// taken after the events it bounds were printed rather than read from a quiet terminal.
+#[then(expr = "the CLI REPL displays {string} exactly {int} times")]
+async fn then_cli_repl_displays_exactly_times(
+    world: &mut ScenarioWorld,
+    expected: String,
+    expected_count: usize,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    let count = terminal.occurrences(&expected);
+    assert_eq!(
+        count,
+        expected_count,
+        "the CLI REPL displayed {expected:?} {count} times; it displayed:{}",
+        terminal.transcript()
+    );
 }
 
 /// Rows a relay publishes while the cluster is still converging after a node restart can be lost in
@@ -10519,7 +10548,7 @@ async fn given_node_has_large_resource_file(
 }
 
 /// The generated ONNX models a fixture resource directory carries under `models/`.
-const ONNX_FIXTURE_MODELS: [&str; 7] = [
+const ONNX_FIXTURE_MODELS: [&str; 9] = [
     "simple_score.onnx",
     "alternate_score.onnx",
     "batch_score.onnx",
@@ -10527,6 +10556,8 @@ const ONNX_FIXTURE_MODELS: [&str; 7] = [
     "matrix_identity.onnx",
     "scalar_identity.onnx",
     "f64_score.onnx",
+    "running_sum.onnx",
+    "checked_running_sum.onnx",
 ];
 
 fn onnx_fixture_path(fixture: &str) -> PathBuf {
@@ -10548,6 +10579,14 @@ async fn place_onnx_fixture_resource_directory(
         .cluster()
         .node_base_dir(node_id)
         .expect("node base dir should exist");
+    place_onnx_fixture_resource_directory_at(world, base_dir, placeholder).await
+}
+
+async fn place_onnx_fixture_resource_directory_at(
+    world: &mut ScenarioWorld,
+    base_dir: PathBuf,
+    placeholder: &str,
+) -> PathBuf {
     let resource_dir = base_dir.join("fixtures").join(placeholder);
     let resource_dir = crate::common::runner_offload::off_the_runner(move || {
         ensure_onnx_runtime_loaded();
@@ -10575,6 +10614,31 @@ async fn place_onnx_fixture_resource_directory(
         .placeholders
         .insert(placeholder.to_string(), resource_dir.display().to_string());
     resource_dir
+}
+
+#[given(expr = "an ONNX fixture resource directory {string} exists")]
+async fn given_onnx_fixture_resource_directory_exists(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    if world.temp_root.is_none() {
+        world.temp_root = Some(
+            crate::common::runner_offload::off_the_runner(|| {
+                tempfile::Builder::new()
+                    .prefix("nervix-inference-fixtures-")
+                    .tempdir()
+                    .expect("the scenario owns its fixture root")
+            })
+            .await,
+        );
+    }
+    let base_dir = world
+        .temp_root
+        .as_ref()
+        .expect("the fixture root was initialized")
+        .path()
+        .to_path_buf();
+    place_onnx_fixture_resource_directory_at(world, base_dir, &placeholder).await;
 }
 
 #[given(expr = "node {string} has ONNX fixture resource directory {string}")]
@@ -13615,6 +13679,39 @@ async fn given_command_finalization_pause(world: &mut ScenarioWorld, node_id: St
     );
 }
 
+#[given(expr = "command reconciliation of execution reference {string} pauses on node {string}")]
+fn given_command_reconciliation_pause(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let reference = command_execution_reference(world, &execution_reference);
+    let reference = nervix_models::CommandExecutionReference::parse(reference)
+        .assured("scenario execution references are UUIDv7 values");
+    world
+        .fault_injection
+        .defer_command_reconciliation_on(crate::common::cluster::node_name(&node_id), reference);
+}
+
+#[when(
+    expr = "the command reconciliation pause for execution reference {string} on node {string} is \
+            released"
+)]
+fn when_command_reconciliation_pause_is_released(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let reference = command_execution_reference(world, &execution_reference);
+    let reference = nervix_models::CommandExecutionReference::parse(reference)
+        .assured("scenario execution references are UUIDv7 values");
+    world
+        .fault_injection
+        .resume_command_reconciliation_on(&crate::common::cluster::node_name(&node_id), &reference);
+}
+
 #[then(expr = "the command finalization pause on node {string} is reached")]
 async fn then_command_finalization_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -16540,7 +16637,10 @@ async fn background_command_outcome(
     ));
     let outcome = match &mut probe {
         Some(probe) => match probe
-            .observe(prepared.run(session.held_command_session(&query)))
+            .observe(
+                node.as_deref(),
+                prepared.run(session.held_command_session(&query)),
+            )
             .await?
         {
             ProbeReply::AfterBoundary(outcome) => {
@@ -19217,6 +19317,27 @@ async fn then_only_transaction_id_is_saved_as_placeholder(
     save_only_transaction_id(world, placeholder, None);
 }
 
+#[then(expr = "placeholder {string} equals placeholder {string}")]
+fn then_placeholder_equals(
+    world: &mut ScenarioWorld,
+    actual_placeholder: String,
+    expected_placeholder: String,
+) {
+    let actual = world
+        .placeholders
+        .get(&actual_placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{actual_placeholder}' is not defined"));
+    let expected = world
+        .placeholders
+        .get(&expected_placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{expected_placeholder}' is not defined"));
+    assert_eq!(
+        actual, expected,
+        "placeholders '{actual_placeholder}' and '{expected_placeholder}' must identify the same \
+         value"
+    );
+}
+
 #[then(expr = "the only open transaction id is saved as placeholder {string}")]
 async fn then_only_open_transaction_id_is_saved_as_placeholder(
     world: &mut ScenarioWorld,
@@ -21181,6 +21302,58 @@ async fn then_show_create_emitter_renders_these_clauses(
     }
 }
 
+#[then(
+    expr = "inferencer {string} is recreated from SHOW CREATE as {string} with its state \
+            declaration intact"
+)]
+async fn then_inferencer_is_recreated_from_show_create(
+    world: &mut ScenarioWorld,
+    name: String,
+    copy: String,
+) {
+    let leader = current_leader_node(world).await;
+    let canonical = world
+        .cluster()
+        .run_command(
+            &leader,
+            &world.domain,
+            &format!("SHOW CREATE INFERENCER {name};"),
+        )
+        .await
+        .expect("SHOW CREATE returns the inferencer's public declaration");
+    assert!(
+        canonical.contains("STATE"),
+        "the declaration retains STATE: {canonical}"
+    );
+    let statements = nervix_plexus::client_statement::parse_client_statements(&canonical)
+        .expect("the public declaration is executable Plexus");
+    assert_eq!(statements.len(), 1, "SHOW CREATE returns one declaration");
+    let recreated = canonical.replacen(
+        &format!("INFERENCER {name}"),
+        &format!("INFERENCER {copy}"),
+        1,
+    );
+    assert_ne!(canonical, recreated, "the copy has a distinct name");
+    world
+        .cluster()
+        .run_command(&leader, &world.domain, &recreated)
+        .await
+        .expect("the server accepts its complete stateful declaration under a new name");
+    let rendered_copy = world
+        .cluster()
+        .run_command(
+            &leader,
+            &world.domain,
+            &format!("SHOW CREATE INFERENCER {copy};"),
+        )
+        .await
+        .expect("SHOW CREATE returns the recreated declaration");
+    assert_eq!(
+        rendered_copy, recreated,
+        "recreation preserves the complete declaration"
+    );
+}
+
 #[then("the last command output is saved as the relocation plan")]
 async fn then_last_command_output_is_saved_as_the_relocation_plan(world: &mut ScenarioWorld) {
     let output = world
@@ -21434,6 +21607,37 @@ async fn then_selector_contains_docstring(
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// The elements `selector` matches, one per docstring line, in whatever order they arrived: replies
+/// to requests a connection sends together are shown as they come. A preceding step waits for the
+/// outcome these lines must sit beside, so a line that should not be there has arrived by the time
+/// the elements are compared.
+#[then(regex = r#"^selector "([^"]+)" shows exactly these lines in any order$"#)]
+async fn then_selector_shows_exactly_these_lines_in_any_order(
+    world: &mut ScenarioWorld,
+    selector: String,
+    #[step] step: &Step,
+) {
+    let expected = expand_placeholders(world, docstring(step).trim());
+    let mut expected = expected.lines().map(str::trim).collect::<Vec<_>>();
+    expected.sort_unstable();
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let texts = page
+        .locator(&selector)
+        .all_inner_texts()
+        .await
+        .expect("selector text must be readable");
+    let mut shown = texts.iter().map(|text| text.trim()).collect::<Vec<_>>();
+    shown.sort_unstable();
+    assert_eq!(
+        shown, expected,
+        "expected selector '{selector}' to show exactly these lines in any order"
+    );
 }
 
 #[then(expr = "selector {string} contains {string} for {int} milliseconds")]
@@ -24556,6 +24760,10 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
     let direction = expand_placeholders(world, &direction);
     let relay = expand_placeholders(world, &relay);
     let prefix = format!("{metric} {direction} relay={relay} physical_node=");
+    assert_numeric_metric_lines(world, step, &prefix, output);
+}
+
+fn assert_numeric_metric_lines(world: &ScenarioWorld, step: &Step, prefix: &str, output: &str) {
     let assertions = expand_placeholders(world, docstring(step))
         .lines()
         .map(str::trim)
@@ -24565,7 +24773,7 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
     let lines = output
         .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with(&prefix))
+        .filter(|line| line.starts_with(prefix))
         .collect::<Vec<_>>();
 
     assert!(
@@ -27066,6 +27274,27 @@ async fn given_nats_subject_is_observed(world: &mut ScenarioWorld, subject: Stri
     );
 }
 
+#[when(expr = "the observed NATS request to reply subject {string} is answered")]
+async fn when_observed_nats_request_is_answered(
+    world: &mut ScenarioWorld,
+    reply: String,
+    #[step] step: &Step,
+) {
+    let reply = expand_placeholders(world, &reply);
+    let payload = expand_placeholders(world, docstring(step));
+    let observer = world
+        .broker_observer
+        .as_mut()
+        .expect("the request subject is observed");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        observer.answer_nats_request(&reply, &payload),
+    )
+    .await
+    .expect("the NATS request did not reach the responder")
+    .expect("the NATS request could not be answered");
+}
+
 /// Another socket listens on the port the scenario drew for its ZeroMQ ingest address before any
 /// statement names it, as a port Docker publishes for a container, or a server bound to that port
 /// explicitly, would: a listener with `SO_REUSEADDR` on every address, which the port's hold does
@@ -28559,6 +28788,23 @@ async fn when_nats_message_is_published(
         .expect("failed to publish nats message");
 }
 
+#[when(expr = "NATS message with reply {string} is published to subject {string}")]
+async fn when_nats_message_with_reply_is_published(
+    world: &mut ScenarioWorld,
+    reply: String,
+    subject: String,
+    #[step] step: &Step,
+) {
+    let reply = expand_placeholders(world, &reply);
+    let subject = expand_placeholders(world, &subject);
+    let payload = expand_placeholders(world, docstring(step));
+    world
+        .cluster()
+        .publish_nats_with_reply(&subject, &reply, &payload)
+        .await
+        .expect("failed to publish the NATS message with its reply subject");
+}
+
 /// Provisions JetStream stream `stream` capturing `subject`, as an operator does.
 async fn provision_nats_jetstream_stream(world: &mut ScenarioWorld, stream: &str, subject: &str) {
     let stream = expand_placeholders(world, stream);
@@ -28605,6 +28851,24 @@ async fn then_nats_jetstream_stream_eventually_contains_payload(
         .wait_for_nats_stream_payload(&stream, &subject, &expected)
         .await
         .expect("NATS JetStream stream did not receive expected payload");
+}
+
+#[then(expr = "NATS JetStream stream {string} holds exactly {int} messages")]
+async fn then_nats_jetstream_stream_holds_exactly_messages(
+    world: &mut ScenarioWorld,
+    stream: String,
+    count: u64,
+) {
+    let stream = expand_placeholders(world, &stream);
+    let held = world
+        .cluster()
+        .nats_stream_message_count(&stream)
+        .await
+        .unwrap_or_else(|error| panic!("failed to read NATS JetStream stream '{stream}': {error}"));
+    assert_eq!(
+        held, count,
+        "NATS JetStream stream '{stream}' holds {held} messages"
+    );
 }
 
 /// Publishes one NATS message whose payload is a JSON array of `count` records, the `n`th of which
@@ -29812,6 +30076,144 @@ async fn when_encoded_http_payload_is_posted(
         )
         .await
         .expect("failed to post encoded http payload");
+}
+
+#[when(
+    expr = "http CBOR payload with byte string field {string} is posted to host {string} path \
+            {string}"
+)]
+async fn when_cbor_http_payload_with_bytes_is_posted(
+    world: &mut ScenarioWorld,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let payload = expand_placeholders(world, docstring(step));
+    let json: serde_json::Value =
+        serde_json::from_str(&payload).expect("CBOR fixture must be valid JSON");
+    let mut cbor = CborValue::serialized(&json).expect("JSON fixture fits a CBOR value");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("CBOR fixture must be a map");
+    };
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == &field))
+        .expect("CBOR fixture must contain the byte string field");
+    let CborValue::Text(encoded) = value else {
+        panic!("CBOR fixture byte string must be written as base64 text");
+    };
+    let bytes = BASE64_STANDARD
+        .decode(encoded.as_bytes())
+        .expect("CBOR fixture byte string must be valid base64");
+    *value = CborValue::Bytes(bytes);
+
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture must encode");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post CBOR payload with a byte string");
+}
+
+#[when(
+    expr = "http CBOR payload with NaN float field {string} is posted to host {string} path \
+            {string}"
+)]
+async fn when_cbor_http_payload_with_nan_is_posted(
+    world: &mut ScenarioWorld,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let payload = expand_placeholders(world, docstring(step));
+    let json: serde_json::Value = serde_json::from_str(&payload).expect("fixture is JSON");
+    let mut cbor = CborValue::serialized(&json).expect("fixture fits CBOR");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("fixture is a map");
+    };
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == &field))
+        .expect("the float field exists");
+    *value = CborValue::Float(f64::NAN);
+    let (_, body) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == "body"))
+        .expect("the byte string field exists");
+    let CborValue::Text(encoded_body) = body else {
+        panic!("the byte string fixture is base64 text");
+    };
+    let bytes = BASE64_STANDARD
+        .decode(encoded_body.as_bytes())
+        .expect("the byte string fixture is valid base64");
+    *body = CborValue::Bytes(bytes);
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture encodes");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post CBOR payload with NaN");
+}
+
+#[when(
+    expr = "http CBOR payload with invalid {string} at field {string} is posted to host {string} \
+            path {string}"
+)]
+async fn when_cbor_http_payload_with_invalid_value_is_posted(
+    world: &mut ScenarioWorld,
+    invalid: String,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let payload = expand_placeholders(world, docstring(step));
+    let json: serde_json::Value = serde_json::from_str(&payload).expect("fixture is JSON");
+    let mut cbor = CborValue::serialized(&json).expect("fixture fits CBOR");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("fixture is a map");
+    };
+    let index = entries
+        .iter()
+        .position(|(key, _)| matches!(key, CborValue::Text(name) if name == &field))
+        .expect("the invalid field exists");
+    match invalid.as_str() {
+        "tagged item" => {
+            entries[index].1 = CborValue::Tag(42, Box::new(CborValue::Bytes(vec![0, 255])));
+        }
+        "non-text map key" => {
+            entries[index].1 =
+                CborValue::Map(vec![(CborValue::Integer(7.into()), CborValue::Bool(true))]);
+        }
+        "repeated key" => {
+            let duplicate = entries[index].clone();
+            entries.push(duplicate);
+        }
+        _ => panic!("unknown invalid CBOR fixture: {invalid}"),
+    }
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture encodes");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post invalid CBOR payload");
 }
 
 #[when(expr = "http payload is posted to host {string} path {string} and fails")]
@@ -35100,6 +35502,80 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded
     receive_exactly_these_broker_messages(world, &duration, expected).await;
 }
 
+#[then(
+    expr = "within {string} the observed broker receives one CBOR event with byte string {string}"
+)]
+async fn then_observed_broker_receives_cbor_bytes(
+    world: &mut ScenarioWorld,
+    duration: String,
+    expected_bytes: String,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    let message = world
+        .broker_observer
+        .as_mut()
+        .expect("broker observer must exist")
+        .try_next_message(duration)
+        .await
+        .expect("failed while waiting for a CBOR broker message")
+        .expect("timed out waiting for a CBOR broker message");
+    let value: CborValue =
+        ciborium::from_reader(message.bytes.as_slice()).expect("broker payload must be CBOR");
+    let CborValue::Map(fields) = value else {
+        panic!("CBOR event must be a map");
+    };
+    assert_eq!(fields.len(), 4, "CBOR event must have four fields");
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| matches!(key, CborValue::Text(key) if key == name))
+            .map(|(_, value)| value)
+            .unwrap_or_else(|| panic!("CBOR event must have field '{name}'"))
+    };
+    assert!(matches!(field("uid"), CborValue::Integer(value) if u64::try_from(*value) == Ok(7)));
+    assert!(matches!(field("temperature"), CborValue::Float(value) if *value == 1.25));
+    assert!(
+        matches!(field("occurred_at"), CborValue::Text(value) if value == "2024-02-29T12:34:56+00:00")
+    );
+    let expected = BASE64_STANDARD
+        .decode(expected_bytes.as_bytes())
+        .expect("expected CBOR bytes must be valid base64");
+    assert!(matches!(field("body"), CborValue::Bytes(value) if value == &expected));
+    let extra = world
+        .broker_observer
+        .as_mut()
+        .expect("broker observer must exist")
+        .try_next_message(Duration::from_millis(500))
+        .await
+        .expect("failed while checking for an extra CBOR message");
+    assert!(extra.is_none(), "CBOR emitter published an extra message");
+}
+
+#[then(expr = "within {string} the observed broker receives one CBOR event with NaN float")]
+async fn then_observed_broker_receives_cbor_nan(world: &mut ScenarioWorld, duration: String) {
+    use ciborium::value::Value as CborValue;
+
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    let message = world
+        .broker_observer
+        .as_mut()
+        .expect("broker observer exists")
+        .try_next_message(duration)
+        .await
+        .expect("failed while waiting for a CBOR broker message")
+        .expect("timed out waiting for a CBOR broker message");
+    let value: CborValue =
+        ciborium::from_reader(message.bytes.as_slice()).expect("broker payload must be CBOR");
+    let CborValue::Map(fields) = value else {
+        panic!("CBOR event must be a map");
+    };
+    assert!(fields.iter().any(|(key, value)| {
+        matches!((key, value), (CborValue::Text(name), CborValue::Float(number)) if name == "temperature" && number.is_nan())
+    }));
+}
+
 /// Like the payload step, where every table row is one exact message: its payload and the key,
 /// headers and FIFO group the broker delivered it with. An empty cell is a message delivered
 /// without that attribute. Headers are `name=value` pairs separated by `;`, in the order the
@@ -36037,9 +36513,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
-            "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @client_wire_tls_cost) and (not @client_conformance_toolchain) and (not \
-             @deadlock_diagnostics)"
+            "(not @client_wire_expected_failure) and (not @client_wire_tls_cost) and (not \
+             @client_conformance_toolchain) and (not @deadlock_diagnostics)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
@@ -36135,6 +36610,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                         });
                 }
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
+                if let ScenarioBodyResult::StepFailed(_) | ScenarioBodyResult::BeforeHookFailed =
+                    &body
+                {
+                    web_console_connections::record_browser_state(world).await;
+                }
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
                 world.stop_consensus_load();

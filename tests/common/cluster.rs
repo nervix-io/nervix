@@ -3107,6 +3107,24 @@ impl Cluster {
         publish_nats(&self.dependencies, subject, payload).await
     }
 
+    pub(crate) async fn publish_nats_with_reply(
+        &self,
+        subject: &str,
+        reply: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        let client = nats_client(&self.dependencies).await?;
+        client
+            .publish_with_reply(
+                subject.to_string(),
+                reply.to_string(),
+                payload.as_bytes().to_vec().into(),
+            )
+            .await
+            .map_err(io::Error::other)?;
+        client.flush().await.map_err(io::Error::other)
+    }
+
     pub(crate) async fn provision_nats_stream(
         &self,
         stream: &str,
@@ -5524,6 +5542,42 @@ pub(crate) struct AcknowledgedHttpPublisher {
 }
 
 impl AcknowledgedHttpPublisher {
+    /// Posts once and requires a completed graph acknowledgement. A refusal stays a failure;
+    /// there is no replay that could introduce another row into a cardinality assertion.
+    pub(crate) async fn publish_once(&self, payload: &str) -> io::Result<()> {
+        nervix_primitives::time::timeout(self.wait, async {
+            let response = self
+                .client
+                .post(&self.uri)
+                .header("Host", &self.host)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload.to_owned())
+                .send()
+                .await
+                .map_err(io::Error::other)?;
+            let status = response.status();
+            let body = response.bytes().await.map_err(io::Error::other)?;
+            if status != reqwest::StatusCode::OK {
+                return Err(io::Error::other(format!(
+                    "the single post received {status} {} instead of its completed graph \
+                     acknowledgement",
+                    String::from_utf8_lossy(&body)
+                )));
+            }
+            let outcome: serde_json::Value =
+                serde_json::from_slice(&body).map_err(io::Error::other)?;
+            if outcome != serde_json::json!({ "outcome": "completed", "cause": "none" }) {
+                return Err(io::Error::other(format!(
+                    "the single post received {status} {outcome} instead of its completed graph \
+                     acknowledgement"
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
+    }
+
     /// Bounds the complete request and its explicit refusal retries, including a stalled request
     /// or response body. Run this on an owned runtime task when the scenario runner can stall.
     pub(crate) async fn publish_bounded(&self, payload: &str) -> io::Result<()> {
@@ -7400,10 +7454,12 @@ async fn publish_nats_with_headers(
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
     let client = nats_client(dependencies).await?;
-    let mut header_map = async_nats::HeaderMap::new();
-    for (name, value) in headers {
-        header_map.append(*name, *value);
-    }
+    let header_map = async_nats::HeaderMap::from_ordered(
+        headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+    );
     client
         .publish_with_headers(
             subject.to_string(),
@@ -8091,7 +8147,9 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
 }
 
 async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
-    async_nats::connect(dependencies.get(NATS_ADDR)?)
+    async_nats::ConnectOptions::new()
+        .ordered_headers()
+        .connect(dependencies.get(NATS_ADDR)?)
         .await
         .map_err(io::Error::other)
 }
@@ -8345,6 +8403,7 @@ async fn nats_consumer_exists(
 async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
     let ca_path = dependencies.tls_ca_path()?;
     async_nats::ConnectOptions::new()
+        .ordered_headers()
         .add_root_certificates(ca_path.to_path_buf())
         .require_tls(true)
         .connect(dependencies.get(NATS_TLS_ADDR)?)

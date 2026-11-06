@@ -54,6 +54,14 @@ pub struct TransportIngestorInput {
 }
 
 impl IngestorInput {
+    /// The units declared by an instance-capable source; a client or single transport has none.
+    pub fn instances(&self) -> Option<crate::IngestorInstances> {
+        match self {
+            Self::Transport(input) => input.source.instances(),
+            Self::Client(_) => None,
+        }
+    }
+
     /// The connector and entity of the source, which capability decisions read: whether its
     /// messages carry headers, which metadata they expose, and where it executes.
     pub const fn entity_kind(&self) -> IngestorEntityKind {
@@ -149,6 +157,15 @@ impl IngestorInput {
             Self::Transport(input) => input.source.supports_quiesce(quiesce),
             Self::Client(_) => ClientProducerIngestor::CAPABILITIES
                 .declared_quiesce(quiesce.kind())
+                .is_some(),
+        }
+    }
+
+    pub fn supports_quiesce_kind(&self, kind: crate::IngestQuiesceKind) -> bool {
+        match self {
+            Self::Transport(input) => input.source.supports_quiesce_kind(kind),
+            Self::Client(_) => ClientProducerIngestor::CAPABILITIES
+                .declared_quiesce(kind)
                 .is_some(),
         }
     }

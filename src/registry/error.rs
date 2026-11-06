@@ -130,7 +130,7 @@ pub(crate) enum ConnectorDeclarationIssue {
     )]
     PulsarSingleConsumerType {
         kind: nervix_models::PulsarSubscriptionType,
-        instances: std::num::NonZeroU64,
+        instances: nervix_models::IngestorInstances,
     },
     #[error("VALUES requires at least one mapping")]
     EmptyValues,
@@ -155,6 +155,11 @@ pub(crate) enum ConnectorDeclarationIssue {
     },
     #[error("{0}")]
     Envelope(nervix_models::EnvelopeDeclarationError),
+    #[error(
+        "{} REPLY TO requires a valid publication subject",
+        ConnectorKind::Nats
+    )]
+    NatsReplySubject,
     #[error("{0}")]
     Delivery(nervix_models::UnmetDeliveryRequirement),
     #[error("{0}")]
@@ -257,6 +262,19 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error("inferencer '{node}' has invalid tensor schemas in domain '{domain}'")]
+    InferencerTensorSchemas { domain: DomainName, node: ModelName },
+    #[error("inferencer '{node}' tensor port '{port}' is invalid in domain '{domain}'")]
+    InferencerState {
+        domain: DomainName,
+        node: ModelName,
+        port: String,
+    },
+    #[error("ingestor '{ingestor}' has invalid instancing in domain '{domain}'")]
+    IngestorInstancing {
+        domain: DomainName,
+        ingestor: nervix_models::IngestorName,
+    },
     #[error("{parameter} limit {maximum} is below {actual} required by resource {resource:?}")]
     ResourceParameterLimit {
         resource: nervix_models::ResourceId,
@@ -731,7 +749,7 @@ mod tests {
             strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: named("value"),
-                ty: nervix_models::CborType::String,
+                ty: nervix_models::CborType::Text,
                 optional: false,
             }],
         }));

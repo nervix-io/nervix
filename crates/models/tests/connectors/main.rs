@@ -44,6 +44,7 @@ use nervix_models::{
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
 
+mod instancing;
 mod surface;
 
 fn named<N>(raw: &str) -> N
@@ -178,6 +179,7 @@ fn the_emitter_kinds_name_every_pair_once_with_its_phrase() {
             "REDIS PUBSUB",
             "MQTT TOPIC",
             "NATS SUBJECT",
+            "NATS STREAM",
             "ZEROMQ PUSH",
             "SQS QUEUE",
             "SENTRY EVENT",
@@ -326,14 +328,29 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         },
-        IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-            ConnectorKind::Nats,
-        ),
-        IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-            ConnectorKind::Nats,
-        ),
+        IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("subject", IngestorMetadataType::String),
+                ("reply", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
+        },
+        IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("subject", IngestorMetadataType::String),
+                ("reply", IngestorMetadataType::String),
+                ("stream", IngestorMetadataType::String),
+                ("consumer", IngestorMetadataType::String),
+                ("sequence", IngestorMetadataType::U64),
+                ("timestamp", IngestorMetadataType::Datetime),
+                ("delivered", IngestorMetadataType::U64),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
+        },
         IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => IngestorDeclaration {
             headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
             metadata: &[
@@ -559,7 +576,7 @@ fn an_mqtt_source_suspends_only_a_persistent_session_delivered_at_least_once() {
         IngestorEntity::from(MqttTopicIngestor {
             client: named("broker"),
             topic: named("orders/#"),
-            instances: std::num::NonZeroU64::MIN,
+            instances: nervix_models::IngestorInstances::ONE,
             session,
             qos,
             mode,
@@ -625,7 +642,7 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
         client: named("events"),
         topic: named("orders"),
         offset_mode: KafkaOffsetMode::Domain,
-        instances: std::num::NonZeroU64::MIN,
+        instances: nervix_models::IngestorInstances::ONE,
         mode: KafkaIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Suspend,
     });
@@ -747,8 +764,12 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
             &["NoAck", "BrokerAck"],
         ),
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => codec(
-            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-            &["NoAck", "NatsJetStream"],
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            &["NoAck"],
+        ),
+        EmitterEntityKind::Nats(NatsEmitterEntity::Stream) => codec(
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            &["BrokerAck"],
         ),
         EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterDeclaration {
             batch: EmitterBatchLegality::Optional {
@@ -1307,7 +1328,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
             client: named("events"),
             topic: named("orders"),
             offset_mode: KafkaOffsetMode::Domain,
-            instances: std::num::NonZeroU64::MIN,
+            instances: nervix_models::IngestorInstances::ONE,
             mode,
             quiesce: IngestQuiesceMode::Suspend,
         })
@@ -1354,7 +1375,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
         let source = IngestorEntity::from(MqttTopicIngestor {
             client: named("broker"),
             topic: named("orders/#"),
-            instances: std::num::NonZeroU64::MIN,
+            instances: nervix_models::IngestorInstances::ONE,
             session: MqttSession::Persistent,
             qos: MqttQos::Qos1,
             mode,

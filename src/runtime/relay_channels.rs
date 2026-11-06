@@ -116,7 +116,7 @@ pub(in crate::runtime) struct SubscriptionChannels {
 
 impl Default for RelayChannels {
     fn default() -> Self {
-        Self::for_units(&[Unit::Single])
+        Self::for_units(&[Unit::SINGLE])
     }
 }
 

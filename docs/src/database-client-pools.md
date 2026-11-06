@@ -76,10 +76,12 @@ command answers. A flush containing several inserts releases capacity between th
 emitters can make progress. An emitter waiting out a flush interval or a retry backoff holds no
 connection at all.
 
-Because a Postgres or MySQL insert keeps its connection until it has an answer for every row it
-carries, isolating a rejected row never waits for the pool a second time, whether other emitters
+A Postgres or MySQL insert keeps its connection until the insert and any row isolation complete or
+fail, so isolating a rejected row never waits for the pool a second time, whether other emitters
 of the client queue for the same connections or the pool would have to open a new one. The host
-handles the per-record outcomes when the write completes, including any later inserts in it.
+handles the per-record outcomes when the write completes, including any later inserts in it. An
+infrastructure failure during isolation leaves the interrupted row and the unanswered suffix for
+retry, preserving the outcomes already returned for earlier rows.
 
 When capacity is exhausted the operation waits, and that wait applies backpressure through the
 emitter's existing bounded input and flush buffers. A full pool is a waiting state rather than a
@@ -107,6 +109,13 @@ another for its first checkout, which opens one where `MIN` is zero. Its separat
 installed as PostgreSQL's `statement_timeout`. Each isolated INSERT has its own budget; a local
 timeout closes the interrupted connection instead of returning a pending response to the pool.
 See the [Postgres emitter contract](emitters.md#postgres) for its range and retry semantics.
+
+Returning a healthy Postgres connection starts a separate driver health probe, which keeps the
+pool permit until the peer answers. That probe has no deadline; neither `pool_test_before_acquire`
+nor `timeout_ms` bounds it. A completed INSERT therefore does not establish that its connection is
+available for another borrower. A caller waiting for that capacity still has its own
+`pool_acquire_timeout_ms` budget. The interrupted-query close path keeps the separate five-second
+driver bound declared in the [connector contract](connector-contract.md#emitter-boundary).
 
 MySQL uses `pool_acquire_timeout_ms`, 30 seconds by default, for each checkout, including connection
 establishment and authentication. Its optional `timeout_ms` also bounds each checkout, initial
