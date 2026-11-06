@@ -1,8 +1,8 @@
-//! When an emitter tries again after a failed publish or an unavailable emitter.
+//! Physical retry and acknowledgement liveness for the work an emitter holds.
 //!
 //! Layer: data plane.
 //! - **Owns.** The monotonic deadline of an emitter's next attempt, the keepalive of the
-//!   acknowledgements it holds until then, and how long each retry waits.
+//!   acknowledgements it holds between publishes, and how long each retry waits.
 //! - **Depends on.** The emitter's declared backoff, the physical-time capability, the
 //!   acknowledgements of its buffered and staged work, and its transient-error status.
 //! - **Must not know.** What the emitter publishes, which connector it publishes through, or the
@@ -22,6 +22,61 @@ use nervix_connector::{
 use super::*;
 
 pub(super) const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
+
+/// One physical beat for buffered or connector-staged work. It retains no ACK handles and
+/// admits each input's obligations once, so hot input neither postpones the beat nor repeatedly
+/// copies the growing buffer's acknowledgements. A retry owns its own beat while active.
+#[derive(Default)]
+pub(super) struct EmitterBufferedKeepalive {
+    next: Option<PhysicalDeadline>,
+}
+
+impl EmitterBufferedKeepalive {
+    pub(super) fn include_batch(&mut self, batch: &EmitterPublishBatch) {
+        if self.next.is_none() && batch.relay_batch().acks.iter().any(|acks| !acks.is_empty()) {
+            self.arm();
+        }
+    }
+
+    fn arm(&mut self) {
+        self.next = Some(
+            PhysicalDeadlineCapability::operational()
+                .after(RETRY_ACK_ALIVE_EACH)
+                .assured("the acknowledgement keepalive interval is a fixed hundred milliseconds"),
+        );
+    }
+
+    pub(super) fn wake(&self, ordinary: RuntimeWake, retry_active: bool) -> RuntimeWake {
+        match (retry_active, self.next) {
+            (false, Some(next)) => ordinary.with_physical(next),
+            _ => ordinary,
+        }
+    }
+
+    pub(super) fn take_due(&mut self) -> bool {
+        if self
+            .next
+            .is_some_and(|next| PhysicalDeadlineCapability::operational().is_reached(next))
+        {
+            self.arm();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn refresh(&mut self, acks: &EmitterAcknowledgements) {
+        if acks.is_empty() {
+            self.clear();
+        } else if self.next.is_none() {
+            self.arm();
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.next = None;
+    }
+}
 
 /// One deferral of an emitter's publish attempt: how long the emitter waits, which
 /// acknowledgements it keeps alive meanwhile, and what the operator is told about the wait.
@@ -129,6 +184,19 @@ impl EmitterRetrySchedule {
         }
         self.acks.extend(acks);
         if let Some(retry_at) = self.retry_at
+            && self.ack_alive_at.is_none()
+        {
+            self.ack_alive_at = Some(Self::next_ack_alive_at(retry_at));
+        }
+    }
+
+    /// Branch retirement replaces the held-work view without moving the physical retry or an
+    /// already armed keepalive beat. Connector-staged work is included by the caller.
+    pub(super) fn replace_acks(&mut self, acks: EmitterAcknowledgements) {
+        self.acks = acks;
+        if self.acks.is_empty() {
+            self.ack_alive_at = None;
+        } else if let Some(retry_at) = self.retry_at
             && self.ack_alive_at.is_none()
         {
             self.ack_alive_at = Some(Self::next_ack_alive_at(retry_at));
@@ -262,8 +330,88 @@ mod tests {
     use super::*;
     use crate::runtime::{
         emitter_publishing::emitter_publish_failure,
-        test_fixtures::{emitter_context, input_batch},
+        test_fixtures::{emitter_context, input_batch, input_batch_with},
     };
+
+    #[nervix_primitives::test]
+    async fn buffered_keepalive_preserves_its_beat_and_refreshes_only_surviving_obligations() {
+        let mut keepalive = EmitterBufferedKeepalive::default();
+        keepalive.include_batch(&EmitterPublishBatch::from_batch(
+            input_batch(),
+            Timestamp::from_unix_nanos(0),
+        ));
+        assert!(keepalive.next.is_none());
+
+        let (runtime, mut completion) = AckSet::root();
+        let first = EmitterPublishBatch::from_batch(
+            input_batch_with(1, 0, runtime.clone()),
+            Timestamp::from_unix_nanos(0),
+        );
+        keepalive.include_batch(&first);
+        let beat = keepalive.next;
+        assert!(beat.is_some());
+        keepalive.include_batch(&first);
+        assert_eq!(keepalive.next, beat, "hot input cannot postpone a held ACK");
+
+        let (staged, mut staged_completion) = AckSet::root();
+        let held = EmitterAcknowledgements {
+            runtime,
+            connector: Some(EmitterRecordAcknowledgements::new(staged)),
+        };
+        keepalive.refresh(&held);
+        assert_eq!(keepalive.next, beat);
+        keepalive.next = Some(
+            PhysicalDeadlineCapability::operational()
+                .after(Duration::ZERO)
+                .assured("an immediate fixture beat fits the physical clock"),
+        );
+        let ordinary = keepalive.wake(RuntimeWake::never(), false);
+        assert!(
+            ordinary
+                .is_reached()
+                .assured("a physical beat needs no domain clock")
+        );
+        assert!(
+            !keepalive
+                .wake(RuntimeWake::never(), true)
+                .is_reached()
+                .assured("a retry owns its own physical beat")
+        );
+        assert!(keepalive.take_due());
+        held.keep_alive();
+        assert_eq!(completion.wait_for_progress().await, AckProgress::Alive);
+        assert_eq!(
+            staged_completion.wait_for_progress().await,
+            AckProgress::Alive
+        );
+        assert!(!keepalive.take_due());
+
+        keepalive.refresh(&EmitterAcknowledgements::default());
+        assert!(keepalive.next.is_none());
+        assert!(!keepalive.take_due());
+    }
+
+    #[nervix_primitives::test]
+    async fn retiring_the_last_branch_ack_keeps_the_physical_retry_deadline() {
+        let (acks, completion) = AckSet::root();
+        let mut retry = EmitterRetrySchedule::default();
+        retry
+            .schedule(Duration::from_secs(60), acks.clone(), false)
+            .assured("a one-minute fixture retry fits the physical clock");
+        let deadline = retry.retry_at;
+        assert!(retry.ack_alive_at.is_some());
+        acks.no_ack("emitter source branch retired");
+        retry.replace_acks(EmitterAcknowledgements::default());
+        assert!(retry.is_active());
+        assert_eq!(retry.retry_at, deadline);
+        assert!(retry.ack_alive_at.is_none());
+        assert!(retry.acks.is_empty());
+        assert!(!retry.retry_is_due());
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck("emitter source branch retired".to_string())
+        );
+    }
 
     #[nervix_primitives::test]
     async fn emitter_backoff_resets_to_the_declared_initial_delay() {

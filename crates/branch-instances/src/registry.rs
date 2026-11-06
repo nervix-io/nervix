@@ -56,6 +56,11 @@ where
         }
     }
 
+    /// Whether this registry holds any concrete branch instance.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn states(&self) -> Vec<Arc<V>> {
         self.entries
             .values()
