@@ -111,7 +111,7 @@ Feature: ZeroMQ ingestion
       """
       transient error: -
       """
-    # A ZeroMQ source keeps no transport position, so its reconnect discards nothing for the
+    # A ZeroMQ ingestor keeps no transport position, so its reconnect discards nothing for the
     # broker to redeliver.
     And within "5s" DESCRIBE INGESTOR "zeromq_notifications" on the leader node contains
       """

@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Browser presentation and editing of one ingestor's source and node-wide settings.
 //! - **Depends on.** The ingestor draft, typed choices, and the route editor.
-//! - **Must not know.** Source connectors, registry snapshots, or command dispatch internals.
+//! - **Must not know.** Ingestor connectors, registry snapshots, or command dispatch internals.
 
 #![cfg_attr(
     nervix_lint,

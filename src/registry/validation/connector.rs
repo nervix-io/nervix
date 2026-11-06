@@ -2,7 +2,7 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** The source and emitter contracts: the client an ingestor or emitter may use, the
+//! - **Owns.** The ingestor and emitter contracts: the client an ingestor or emitter may use, the
 //!   publishing and mapping rules of each emitter, the headers each side supports, the timestamp
 //!   source an ingestor declares, and the hostnames and paths a listener claims.
 //! - **Depends on.** The connector Models and the schema rules.

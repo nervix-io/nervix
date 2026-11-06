@@ -123,7 +123,7 @@ Feature: NATS ingestion
   # The ingestor reads through an endpoint the scenario controls, so the NATS server can go down for
   # this ingestor alone while the other scenarios keep sharing it. A lost connection ends the
   # subscription and the host reopens it on its reconnect cadence: DESCRIBE INGESTOR shows the failed
-  # reconnects and a growing delay. A successful subscription makes the source ready; the previous
+  # reconnects and a growing delay. A successful subscription makes the ingestor ready; the previous
   # failure and backoff remain until the next accepted batch proves progress.
   @nats_ingestor_lost_connection
   Scenario Outline: NATS ingestor reports a lost server connection and reconnects on its reconnect cadence

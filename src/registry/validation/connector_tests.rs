@@ -1,4 +1,4 @@
-//! Validation of the source and emitter contracts.
+//! Validation of the ingestor and emitter contracts.
 //!
 //! Layer: test harness.
 //!

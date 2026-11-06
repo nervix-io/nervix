@@ -66,7 +66,7 @@ impl Runtime {
             IngestAcknowledgement::Request { timeout, .. } => {
                 Self::parse_ack_timeout(domain, ingestor, timeout)?;
                 // Request intake owns this window; there is no broker position for the polling
-                // source loop to confirm.
+                // ingestor loop to confirm.
                 Ok(IngestorAckPolicy::None)
             }
             IngestAcknowledgement::Sequential { timeout, retry } => {

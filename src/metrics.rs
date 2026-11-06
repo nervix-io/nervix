@@ -3722,7 +3722,7 @@ impl RuntimeMetrics {
     }
 
     /// The count of positions an ingestor host of `ingestor` on `physical_node_id` discarded after a
-    /// reconnect because the broker redelivers them. The series exists from the first time a
+    /// reconnect because the broker redelivers them. The series exists from the first time an
     /// ingestor host or a describe of the ingestor asks for it.
     pub(crate) fn ingestor_transport_redeliveries(
         &self,
@@ -3763,7 +3763,7 @@ impl RuntimeMetrics {
             ])
     }
 
-    /// The count of payloads the source of an ingestor host of `ingestor` on `physical_node_id`
+    /// The count of payloads the connector of `ingestor` on `physical_node_id`
     /// dropped because they exceed its client's message size bound. The series exists from the
     /// first time an ingestor host or a describe of the ingestor asks for it.
     pub(crate) fn ingestor_oversized_payloads(

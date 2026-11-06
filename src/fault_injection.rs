@@ -228,7 +228,7 @@ struct FaultInjectionState {
     /// cordon that node's own graceful shutdown drain set.
     delayed_shutdown_cordon_releases: DashMap<ClusterNodeName, Duration, RandomState>,
     /// Waits, keyed by an ingestor, that its ingestor hosts spend between learning that a batch was
-    /// acknowledged through the graph and letting the source confirm the batch's positions on its
+    /// acknowledged through the graph and letting the connector confirm the batch's positions on its
     /// transport, as a transport slow to answer an acknowledgement would.
     delayed_ingestor_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
     /// Waits, keyed by the node whose state is written, that a snapshot task spends before the last
@@ -1226,7 +1226,7 @@ impl FaultInjection {
     }
 
     /// Makes every ingestor host of `ingestor` wait `delay` after a batch was acknowledged through
-    /// the graph before its source confirms the batch's positions on its transport, as a transport
+    /// the graph before its connector confirms the batch's positions on its transport, as a transport
     /// slow to answer an acknowledgement would. A host reads the delay as it starts, so a scenario
     /// arms it before the ingestor starts.
     pub fn delay_ingestor_confirmation(&self, ingestor: DomainNodeRef, delay: Duration) {
