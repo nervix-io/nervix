@@ -46,6 +46,8 @@ use tonic::{
 use url::Url;
 
 use super::cause_beneath;
+
+mod restore_codec;
 #[cfg(feature = "autocomplete")]
 use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit};
 use crate::{
@@ -451,6 +453,20 @@ impl TestServer {
 
     /// Starts a server listening on `address`, a loopback address with a free port or port 0.
     async fn start_at(address: SocketAddr) -> Self {
+        Self::start_service(address, |service| service).await
+    }
+
+    /// Installs a call-specific peer around the same session fixture and its exchange owner.
+    async fn start_service<S>(address: SocketAddr, wrap: impl FnOnce(SessionService) -> S) -> Self
+    where
+        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
+            + NamedService
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
         let listener = TcpListener::bind(address)
             .await
             .assured("the loopback interface accepts a listener");
@@ -471,6 +487,7 @@ impl TestServer {
             upload_reply_mode: upload_reply_mode.clone(),
             restore_reply_gate: restore_reply_gate.clone(),
         };
+        let service = wrap(service);
         let task = nervix_primitives::task::spawn(async move {
             Server::builder()
                 .add_service(service)

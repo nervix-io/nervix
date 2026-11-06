@@ -3027,8 +3027,17 @@ the I/O error kind, above the I/O error when the client read the file itself, an
 reply that does not decode as `ClientError::InvalidRestoreReply` above the codec's report; an error
 that may hide an admitted restore is `ClientError::UncertainCommand` with its execution reference,
 above the failure that left the outcome unknown. The C binding classifies an unreadable or empty
-archive as `NX_ERROR_INVALID_ARGUMENT`, a failed call as `NX_ERROR_TRANSPORT`, and an undecodable
-reply as `NX_ERROR_PROTOCOL`.
+archive as `NX_ERROR_INVALID_ARGUMENT` and a definitive failed call as `NX_ERROR_TRANSPORT`.
+
+A structurally rejected native restore reply retains the complete frame-verification report
+through tonic's standard-error source, where its typed rejection can be inspected. Tonic's own
+receive-size failure happens before frame verification and retains its status instead. The
+restore receive phase distinguishes either from a server refusal received before the response;
+no classification reads a status message. After ending only the session selected for that stream,
+the client reports `UncertainCommand` under the original execution reference above
+`InvalidRestoreReply` and the receive failure. The shared binding exposes `NX_ERROR_UNCERTAIN`
+with that reference, and the CLI reports status 3. A replacement session and definitive local,
+authentication and declared stream refusals retain their meanings.
 
 ## Sensitive Data And Observability
 

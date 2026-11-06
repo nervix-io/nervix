@@ -350,6 +350,20 @@ test-client-foreign-execution: build-web-console download-onnxruntime build-test
     PY
     exit "$result"
 
+# Exercise real native/CLI restores through a bounded reply-corrupting peer without preparing
+# unrelated simulation drivers. The ordinary scenario runner and its lifecycle stay in charge.
+test-restore-codec-replies *args: build-deps build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    mkdir -p {{ quote(cargo_target_dir + "/restore-codec-replies") }}
+    restore_codec_log="$(mktemp {{ quote(cargo_target_dir + "/restore-codec-replies/run.XXXXXX.log") }})"
+    cargo test --package nervix-scenarios --test scenarios -- --tags @client_restore_codec_rejection {{ quote(args) }} 2>&1 | tee "$restore_codec_log"
+    if ! rg --quiet '^8 scenarios([ (]|$)' "$restore_codec_log"; then
+        echo "expected all eight restore reply scenarios to execute" >&2
+        exit 1
+    fi
+
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
 test-backup-cut-cleanup: build-deps build-test-cli

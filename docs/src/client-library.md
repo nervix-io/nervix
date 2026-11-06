@@ -240,6 +240,15 @@ returns `UncertainCommand` under the restore's own reference, above
 failure. Repeat with `restore_with_reference` and the original reference, statement and archive to
 learn the restore's own outcome.
 
+An unreadable restore reply, including a malformed frame or a message above the receive limit,
+leaves that original execution uncertain. The client ends the session selected for the stream
+and preserves any replacement installed while its reply was outstanding. Keep the exact statement
+and archive and pass their original reference to `restore_with_reference` to recover the outcome.
+The report retains the local verification cause or tonic's bounded receive failure. Missing or
+empty local archives, authentication refusals and valid declared stream refusals remain
+definitive. The shared bindings classify uncertainty as `NX_ERROR_UNCERTAIN`; the CLI exits with
+status 3 and prints the execution reference.
+
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.
 A stream the leader refused before the restore ran is a failed outcome whose message names the

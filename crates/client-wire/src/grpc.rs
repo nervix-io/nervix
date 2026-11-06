@@ -1,12 +1,19 @@
 //! Frames over gRPC.
 //!
+//! Layer: edges.
+//! Owns: framing, verification and typed local rejection provenance for gRPC messages.
+//! Depends on: the wire frames and limits, tonic, and primitive shared ownership.
+//! Must not know: session recovery, execution outcomes or server runtime state.
+//!
 //! The session is served as the gRPC service `nervix.session.Session`. Each gRPC message holds
 //! exactly one frame, delimited by gRPC's own length prefix, so a frame carries no size prefix of
 //! its own. The codec plugs into tonic directly; no generated gRPC code is involved.
 
-use std::{fmt, marker::PhantomData};
+use std::{error::Error, fmt, marker::PhantomData};
 
 use bytes::{Buf, BufMut, Bytes};
+use error_stack::Report;
+use nervix_primitives::sync::StdArc;
 use tonic::{
     Status,
     codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder},
@@ -43,6 +50,51 @@ pub const RESTORE_BACKUP_PATH: &str = "/nervix.session.Session/RestoreBackup";
 /// allocation alive, so small frames get an allocation of their own; a large frame dominates its
 /// allocation anyway and is taken without a copy.
 const COPY_BELOW_BYTES: usize = 64 * 1024;
+
+/// A local decoder rejection, retained as a tonic status's source.
+///
+/// Status codes alone cannot distinguish a local verification failure from a remote refusal.
+/// This marker retains the complete verification report without exposing untrusted frame bytes.
+#[derive(Debug)]
+pub struct FrameRejection {
+    report: Report<FrameError>,
+}
+
+impl FrameRejection {
+    /// The complete frame-verification report, including its typed context and attachments.
+    pub fn report(&self) -> &Report<FrameError> {
+        &self.report
+    }
+
+    /// Finds local provenance in an error's source chain, without interpreting its text.
+    pub fn find_in<'a>(mut error: &'a (dyn Error + 'static)) -> Option<&'a Self> {
+        loop {
+            if let Some(rejection) = error.downcast_ref::<Self>() {
+                return Some(rejection);
+            }
+            error = error.source()?;
+        }
+    }
+}
+
+impl fmt::Display for FrameRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("local frame verification failed")
+    }
+}
+
+impl Error for FrameRejection {}
+
+fn frame_rejection(report: Report<FrameError>) -> Status {
+    let mut status = match report.current_context() {
+        FrameError::TooLarge { .. } => Status::resource_exhausted(report.to_string()),
+        FrameError::Truncated { .. }
+        | FrameError::WrongIdentifier { .. }
+        | FrameError::Invalid { .. } => Status::internal(report.to_string()),
+    };
+    status.set_source(StdArc::new(FrameRejection { report }));
+    status
+}
 
 /// A tonic codec that sends frames of one root and receives frames of another.
 pub struct FrameCodec<Outbound: FrameRoot, Inbound: FrameRoot> {
@@ -164,15 +216,57 @@ impl<Inbound: FrameRoot> Decoder for FrameDecoder<Inbound> {
         };
         match VerifiedFrame::verify(bytes, &self.limits) {
             Ok(frame) => Ok(Some(frame)),
-            Err(error) => {
-                let status = match error.current_context() {
-                    FrameError::TooLarge { .. } => Status::resource_exhausted(error.to_string()),
-                    FrameError::Truncated { .. }
-                    | FrameError::WrongIdentifier { .. }
-                    | FrameError::Invalid { .. } => Status::internal(error.to_string()),
-                };
-                Err(status)
-            }
+            Err(error) => Err(frame_rejection(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use meticulous::OptionExt as _;
+
+    use super::*;
+
+    #[test]
+    fn a_frame_rejection_retains_the_complete_verification_report() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct Observation(u32);
+
+        for error in [
+            FrameError::Truncated {
+                root: RestoreReplyFrame::NAME,
+                actual: 3,
+            },
+            FrameError::TooLarge {
+                root: RestoreReplyFrame::NAME,
+                actual: 65,
+                limit: 64,
+            },
+        ] {
+            let expected_code = match error {
+                FrameError::TooLarge { .. } => tonic::Code::ResourceExhausted,
+                _ => tonic::Code::Internal,
+            };
+            let message = error.to_string();
+            let status = frame_rejection(Report::new(error.clone()).attach(Observation(7)));
+            let rejection = FrameRejection::find_in(&status)
+                .assured("the codec's status keeps its local verification provenance");
+            assert_eq!(rejection.report().current_context(), &error);
+            assert_eq!(
+                rejection.report().downcast_ref::<Observation>(),
+                Some(&Observation(7))
+            );
+            assert_eq!(status.code(), expected_code);
+            assert_eq!(status.message(), message);
+            let report = Report::new(status);
+            assert_eq!(format!("{report:#}").matches(&message).count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_remote_status_has_no_local_frame_provenance() {
+        assert!(
+            FrameRejection::find_in(&Status::internal("local frame verification failed")).is_none()
+        );
     }
 }

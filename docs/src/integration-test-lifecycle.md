@@ -169,6 +169,12 @@ caller; the recipe does not expand their contents as shell code. The reuse recip
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
 
+`just test-restore-codec-replies` prepares the server assets, CLI and diagnostic reporter and runs
+only the restore reply rejection feature with the ordinary scenario runner. It forwards caller
+arguments by the same quoting rule. The bounded peer forwards the original upload to a real node,
+waits for its completed restore outcome and replaces only the reply; native and CLI cases then
+recover that outcome under the original execution reference on one- and three-node clusters.
+
 ## What Runs Where
 
 The emitter assembly outline observes the emitter's public received-message total before each
