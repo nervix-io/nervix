@@ -26,7 +26,7 @@ Feature: NATS ingestion
           'addr' = '{{nats_addr}}'
         };
         CREATE NATS SUBJECT INGESTOR nats_notifications
-        FROM nats_main SUBJECT 'notifications_{{test_id}}' QUEUE GROUP 'nats_notifications_group_{{test_id}}' INSTANCES <instances> MODE NO ACK
+        FROM nats_main SUBJECT '<subscribe_subject>' QUEUE GROUP 'nats_notifications_group_{{test_id}}' INSTANCES <instances> MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -38,11 +38,11 @@ Feature: NATS ingestion
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
-    And NATS message is published to subject "notifications_{{test_id}}"
+    And NATS message is published to subject "<publish_subject>"
       """
       {"user_id":42}
       """
-    And NATS message is published to subject "notifications_{{test_id}}"
+    And NATS message is published to subject "<publish_subject>"
       """
       {"user_id":43}
       """
@@ -53,10 +53,12 @@ Feature: NATS ingestion
       """
 
     Examples:
-      | cluster_size | instances | replica_count |
-      | 1            | 1         | 0             |
-      | 1            | 2         | 0             |
-      | 3            | 2         | 1             |
+      | cluster_size | instances | replica_count | subscribe_subject           | publish_subject                      |
+      | 1            | 1         | 0             | notifications_{{test_id}}   | notifications_{{test_id}}            |
+      | 1            | 2         | 0             | notifications_{{test_id}}   | notifications_{{test_id}}            |
+      | 3            | 2         | 1             | notifications_{{test_id}}   | notifications_{{test_id}}            |
+      | 1            | 1         | 0             | notifications_{{test_id}}.* | notifications_{{test_id}}.created    |
+      | 3            | 2         | 1             | notifications_{{test_id}}.> | notifications_{{test_id}}.created.eu |
 
   Scenario Outline: NATS ingestor reports transient source failures and recovers
     Given NATS is running
