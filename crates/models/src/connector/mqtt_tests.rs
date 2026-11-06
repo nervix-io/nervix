@@ -81,7 +81,7 @@ fn topic_ingestion_acknowledges_only_through_a_session_the_broker_keeps() {
 
     let suspend = ingest
         .declared_quiesce(IngestQuiesceKind::Suspend)
-        .assured("a kept session lets the source suspend");
+        .assured("a kept session lets the ingestor suspend");
     assert_eq!(suspend.requires, kept_session);
     assert_eq!(
         ingest.declared_quiesce(IngestQuiesceKind::Buffer),
@@ -140,22 +140,25 @@ fn topic_ingestion_subscribes_a_filter_with_a_required_session_and_quality_of_se
 #[case::kept_at_most_once(MqttSession::Persistent, MqttQos::Qos0)]
 #[case::kept_at_least_once(MqttSession::Persistent, MqttQos::Qos1)]
 #[case::kept_exactly_once(MqttSession::Persistent, MqttQos::Qos2)]
-fn an_unacknowledged_source_reports_the_session_and_quality_of_service_it_wrote(
+fn an_unacknowledged_ingestor_reports_the_session_and_quality_of_service_it_wrote(
     #[case] session: MqttSession,
     #[case] qos: MqttQos,
 ) {
-    let source = topic_source(session, qos, MqttIngestMode::NoAck);
+    let ingestor = topic_ingestor(session, qos, MqttIngestMode::NoAck);
 
-    assert_eq!(source.chosen("SESSION"), Some(session.keyword()));
-    assert_eq!(source.chosen("QOS"), Some(qos.spelling()));
-    assert_eq!(source.chosen("INSTANCES"), None);
+    assert_eq!(ingestor.chosen("SESSION"), Some(session.keyword()));
+    assert_eq!(ingestor.chosen("QOS"), Some(qos.spelling()));
     assert_eq!(
-        source.acknowledgement(),
+        ingestor.chosen("INSTANCES"),
+        Some(ingestor.instances.choice())
+    );
+    assert_eq!(
+        ingestor.acknowledgement(),
         IngestAcknowledgement::Unacknowledged
     );
-    assert!(!source.mode.is_ack());
-    assert_eq!(source.mode.acknowledgement_window(), None);
-    assert_eq!(source.unmet_delivery(), None);
+    assert!(!ingestor.mode.is_ack());
+    assert_eq!(ingestor.mode.acknowledgement_window(), None);
+    assert_eq!(ingestor.unmet_delivery(), None);
 }
 
 #[test]
@@ -189,18 +192,18 @@ fn acknowledged_modes() -> [MqttIngestMode; 2] {
 #[rstest]
 #[case::at_least_once(MqttQos::Qos1)]
 #[case::exactly_once(MqttQos::Qos2)]
-fn an_acknowledged_source_subscribes_through_a_persistent_session_at_qos_one_or_two(
+fn an_acknowledged_ingestor_subscribes_through_a_persistent_session_at_qos_one_or_two(
     #[case] qos: MqttQos,
 ) {
     let [sequential, parallel] =
-        acknowledged_modes().map(|mode| topic_source(MqttSession::Persistent, qos, mode));
+        acknowledged_modes().map(|mode| topic_ingestor(MqttSession::Persistent, qos, mode));
 
-    for source in [&sequential, &parallel] {
-        assert_eq!(source.chosen("SESSION"), Some("PERSISTENT"));
-        assert_eq!(source.chosen("QOS"), Some(qos.spelling()));
-        assert!(source.mode.is_ack());
-        assert_eq!(source.unmet_delivery(), None);
-        assert!(source.supports_quiesce(&IngestQuiesceMode::Suspend));
+    for ingestor in [&sequential, &parallel] {
+        assert_eq!(ingestor.chosen("SESSION"), Some("PERSISTENT"));
+        assert_eq!(ingestor.chosen("QOS"), Some(qos.spelling()));
+        assert!(ingestor.mode.is_ack());
+        assert_eq!(ingestor.unmet_delivery(), None);
+        assert!(ingestor.supports_quiesce(&IngestQuiesceMode::Suspend));
     }
     assert_eq!(
         sequential.mode.acknowledgement_window(),
@@ -221,9 +224,9 @@ fn an_acknowledged_mode_outside_a_kept_session_names_both_written_values(
     #[case] qos_spelling: &'static str,
 ) {
     for mode in acknowledged_modes() {
-        let source = topic_source(session, qos, mode);
-        let delivery = source.acknowledgement().kind();
-        let unmet = source
+        let ingestor = topic_ingestor(session, qos, mode);
+        let delivery = ingestor.acknowledgement().kind();
+        let unmet = ingestor
             .unmet_delivery()
             .assured("an acknowledged mode needs the persistent session at QoS 1 or 2");
         assert_eq!(unmet.entity, MqttTopicIngestor::KIND);
@@ -250,7 +253,7 @@ fn an_acknowledged_mode_outside_a_kept_session_names_both_written_values(
                 delivery.phrase()
             )
         );
-        assert!(!source.supports_quiesce(&IngestQuiesceMode::Suspend));
+        assert!(!ingestor.supports_quiesce(&IngestQuiesceMode::Suspend));
     }
 }
 
@@ -292,11 +295,11 @@ fn an_acknowledged_mode_beside_options_a_statement_does_not_answer_names_them_un
     );
 }
 
-fn topic_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> MqttTopicIngestor {
+fn topic_ingestor(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> MqttTopicIngestor {
     MqttTopicIngestor {
         client: ClientName::try_from("mqtt_main").assured("a lowercase identifier is a name"),
         topic: MqttTopicFilter::try_from("devices/+").assured("one wildcard level is a filter"),
-        instances: NonZeroU64::MIN,
+        instances: crate::IngestorInstances::ONE,
         session,
         qos,
         mode,
@@ -544,7 +547,7 @@ fn topic_ingestion_bounds_its_connection_by_the_keep_alive_but_not_its_suback() 
     let mut overflows = Vec::with_capacity(ingest.bounds.buffers.len());
     for buffer in ingest.bounds.buffers {
         let BufferBound::Bounded { overflow, .. } = buffer.bound else {
-            panic!("every MQTT source buffer is bounded: {}", buffer.holds);
+            panic!("every MQTT ingestor buffer is bounded: {}", buffer.holds);
         };
         overflows.push(overflow);
     }
@@ -646,7 +649,7 @@ fn every_keep_alive_bound_names_the_client_key_and_the_default_it_states() {
     }
     assert_eq!(
         named, 3,
-        "two source waits and the emitter's silent connection"
+        "two ingestor waits and the emitter's silent connection"
     );
 }
 

@@ -158,7 +158,7 @@ impl RestorationChannel {
         request: ClientRequest,
     ) -> error_stack::Result<PendingRequest, ClientError> {
         let kind = RequestKind::from(&request);
-        let Some(registered) = self.requests.register() else {
+        let Some(registered) = self.requests.register_for(&request) else {
             let failure = self.requests.pending.lock().failure();
             return Err(Report::new(failure));
         };

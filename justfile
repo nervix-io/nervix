@@ -40,10 +40,10 @@ install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
 # Build the pinned cargo-crap, which the complexity count and the CRAP report run, into a root of its
-# own below the target directory. scripts/cargo_crap.py declares the version; a build already there
+# own below the target directory. nervix-ratchet crap declares the version; a build already there
 # is kept.
-install-cargo-crap:
-    python3 -m scripts.cargo_crap install
+install-cargo-crap: build-ratchet-runner
+    {{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }} crap install --root {{ quote(justfile_directory()) }} --target-dir {{ quote(cargo_target_dir) }}
 
 # Server library properties embed the same real console assets as the product.
 bolero-deps: build-web-console
@@ -330,25 +330,77 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
-# Run the native-client and CLI foreign-reference witnesses with only the tools they start.
-test-client-foreign-execution: build-web-console download-onnxruntime build-test-cli
+# These checks reuse the scenario executable for both embedded nodes and a server process.
+test-inferencer-state *args: build-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    mkdir -p {{ quote(cargo_target_dir + "/client-foreign-execution") }}
-    output="$(mktemp {{ quote(cargo_target_dir + "/client-foreign-execution/run.XXXXXXXX.log") }})"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
+
+# Run the native-client and CLI foreign-reference witnesses with only the tools they start.
+test-client-foreign-execution: (test-client-recovery-witnesses "client-foreign-execution" "(A native command|The CLI) recovers its own execution after a foreign command reply")
+
+# Run the native-client and CLI reply-kind witnesses with only the tools they start.
+test-client-reply-kind: (test-client-recovery-witnesses "client-reply-kind" "(A native command|The CLI) recovers its own execution after a reply of another kind")
+
+# Its output stays under the target directory's `witnesses` folder.
+# Run the four one- and three-node native-client and CLI outlines `name` selects, with their tools.
+test-client-recovery-witnesses witnesses name: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    mkdir -p {{ quote(cargo_target_dir + "/" + witnesses) }}
+    output="$(mktemp {{ quote(cargo_target_dir + "/" + witnesses + "/run.XXXXXXXX.log") }})"
     result=0
-    cargo test --package nervix-scenarios --test scenarios -- --name '(A native command|The CLI) recovers its own execution after a foreign command reply' --retry 0 | tee "$output" || result=$?
-    python3 - "$output" <<'PY'
+    cargo test --package nervix-scenarios --test scenarios -- --name {{ quote(name) }} --retry 0 | tee "$output" || result=$?
+    python3 - "$output" {{ quote(witnesses) }} <<'PY'
     import re
     import sys
     from pathlib import Path
     output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
     counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
     if counts != ["4"]:
-        raise SystemExit(f"foreign execution witnesses must execute four scenarios; reported counts: {counts}")
+        raise SystemExit(f"{sys.argv[2]} witnesses must execute four scenarios; reported counts: {counts}")
     PY
     exit "$result"
+
+# Exercise real native/CLI restores through a bounded reply-corrupting peer without preparing
+# unrelated simulation drivers. The ordinary scenario runner and its lifecycle stay in charge.
+test-restore-codec-replies *args: build-deps build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    mkdir -p {{ quote(cargo_target_dir + "/restore-codec-replies") }}
+    restore_codec_log="$(mktemp {{ quote(cargo_target_dir + "/restore-codec-replies/run.XXXXXX.log") }})"
+    cargo test --package nervix-scenarios --test scenarios -- --tags @client_restore_codec_rejection {{ quote(args) }} 2>&1 | tee "$restore_codec_log"
+    python3 - "$restore_codec_log" <<'PY'
+    import re
+    import sys
+    from pathlib import Path
+    output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
+    counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
+    if counts != ["8"]:
+        raise SystemExit(f"restore reply witnesses must execute eight scenarios; reported counts: {counts}")
+    PY
+
+# Exercise later archive failures after a completed restore lost its answer, using only the
+# tools these native/CLI cases start and requiring all four topology/client examples.
+test-restore-attempt-history *args: build-deps build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    mkdir -p {{ quote(cargo_target_dir + "/restore-attempt-history") }}
+    restore_history_log="$(mktemp {{ quote(cargo_target_dir + "/restore-attempt-history/run.XXXXXX.log") }})"
+    cargo test --package nervix-scenarios --test scenarios -- --tags @client_restore_uncertainty {{ quote(args) }} 2>&1 | tee "$restore_history_log"
+    python3 - "$restore_history_log" <<'PY'
+    import re
+    import sys
+    from pathlib import Path
+    output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
+    counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
+    if counts != ["4"]:
+        raise SystemExit(f"restore attempt witnesses must execute four scenarios; reported counts: {counts}")
+    PY
 
 # Exercise restore reply validation through the native client and CLI on one and three nodes.
 # These cases start no paced driver or diagnostic report subprocess.
@@ -412,6 +464,13 @@ test-scenarios-binary binary *args: download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    exec "$@"
+
+# Replay a compiled unit-test executable against its frozen source without a Cargo rebuild.
+[positional-arguments]
+test-unit-binary binary *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
     exec "$@"
 
 # Replay a compiled ONNX inspection owner with an explicit runtime library.
@@ -601,6 +660,29 @@ test-command-recovery-scenarios: build-web-console wasm-processor-guests downloa
         --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
         --concurrency 1 --retry 0
 
+# Exercise list fields of every schemaful wire format through the in-process cluster: AVRO item
+# types, list-element ENCODE rules and the refusals of lists a wire type cannot carry.
+[positional-arguments]
+test-wire-schema-lists *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/wire_schema_lists.feature "$@"
+
+# Exercise explicit COMMIT outcome recovery and a recorded failed prefix through in-process nodes.
+test-explicit-commit-recovery: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/{explicit_commit_recovery,plexus_transactions}.feature") }} \
+        --tags '@explicit_commit_recovery or @transaction_failed_resume' \
+        --concurrency 1 --retry 0
+
+# Exercise multi-span cluster durations with only the in-process server's prerequisites.
+test-cluster-duration-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/cluster/cluster_parameters.feature \
+        --tags @multi_span_cluster_duration --concurrency 2 --retry 0
+
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
     cargo test --package nervix-test-environment {{ args }}
@@ -629,25 +711,6 @@ test-scenarios-reuse *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TESTCONTAINERS_MODE=reusable
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
-
-# Measure the public client protocol against a release nervix-server process.
-# The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.
-client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" output="target/client-wire-baseline": build-web-console download-onnxruntime
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo build --release --package nervix-server --bin nervix-server
-    export NERVIX_CLIENT_WIRE_BASELINE_SERVER={{ quote(cargo_target_dir + "/release/nervix-server") }}
-    export NERVIX_CLIENT_WIRE_BASELINE_SERVER_PROFILE=release
-    export NERVIX_CLIENT_WIRE_BASELINE_SAMPLES={{ quote(samples) }}
-    export NERVIX_CLIENT_WIRE_BASELINE_UPLOAD_SAMPLES={{ quote(upload_samples) }}
-    export NERVIX_CLIENT_WIRE_BASELINE_PAYLOAD_BYTES={{ quote(payload_bytes) }}
-    export NERVIX_CLIENT_WIRE_BASELINE_OUTPUT={{ quote(output) }}
-    cargo test --package nervix-scenarios --test scenarios -- \
-        --input tests/features/runtime/client_wire_baseline.feature \
-        --tags @client_wire_baseline \
-        --concurrency 1 \
-        --retry 0
 
 # Capture the web console images the book publishes. The capture tool starts a real nervix-server,
 # seeds it with nervix-cli, and drives the console in a browser, so the images are build output
@@ -2362,8 +2425,13 @@ test-turmoil-coverage-runner:
 
 # Exercise the Deloxide lane runner: its inventory, discovery, supervision of real processes,
 # accounting, record, replay, qualification classes, applicability check and CI contract.
-test-deloxide-lane-runner:
-    python3 -m unittest --quiet scripts.tests.test_deloxide_lane
+# A unittest target selects a focused class or method; the default keeps the complete module.
+test-deloxide-lane-runner target="scripts.tests.test_deloxide_lane":
+    python3 -m unittest --quiet {{ quote(target) }}
+
+# Verify interruption, timeout and process-group cleanup through real child processes.
+test-deloxide-supervision:
+    python3 -m unittest scripts.tests.test_deloxide_lane.SupervisionTests
 
 # Line coverage of collection and canonical runner changes, with actual command/artifact fixtures,
 # including Turmoil's CI contract and the Deloxide lane's supervision of real processes.
@@ -2632,6 +2700,10 @@ benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
 
 cargo-fmt:
     cargo +nightly fmt
+
+# Format selected Rust files without revisiting their child modules.
+fmt-rust-files +files:
+    rustup run nightly rustfmt --config skip_children=true {{ quote(files) }}
 
 # Format one package during a focused implementation cycle.
 cargo-fmt-package package:
@@ -2926,6 +2998,9 @@ clippy-target lane package args toolchain="":
 # share one directory of their own, so a package checked again, or one beside it, reuses its build.
 cargo-clippy-package package *args: (clippy-target "package" package ["--all-targets", args])
 
+# Lint one library, including its test profile, without selecting product binaries in a model mode.
+cargo-clippy-package-lib package *args: (clippy-target "package" package ["--lib", args])
+
 # Lint every product Clippy target, with four concurrent processes by default.
 cargo-clippy jobs=default_jobs: (run-with-jobs "clippy-targets" jobs)
 
@@ -2943,12 +3018,20 @@ audit:
 
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
 ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
-    python3 -m scripts.ratchet {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    gate=({{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }} gate {{ args }})
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        exec python3 scripts/native_coverage.py exec "${gate[@]}"
+    fi
+    exec "${gate[@]}"
 
 # Focused regression checks for the debt gate, its shared Rust source scanner and its pinned
 # complexity analyzer.
 test-ratchet-units: typed-ratchet-source-build install-cargo-crap
-    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
+    just ratchet-tests lib
+    just test-typed-ratchet-reports
+    python3 -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
 
 test-ratchet-audit-caller:
     python3 -m unittest scripts.tests.test_lint_audit
@@ -2961,7 +3044,7 @@ typed-ratchet-source-build:
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
         source_toolchain="nightly-2026-09-17"
     fi
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$source_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$source_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --package nervix-ratchet
 
 typed-ratchet-build: build-ratchet-runner
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
@@ -3149,7 +3232,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap tes
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.ratchet,scripts.cargo_crap,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.rust_source,scripts.check_typed_errors,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
@@ -3266,7 +3349,7 @@ validate-dns-dependencies:
 # Turmoil and Deloxide lints and the source, dependency and documentation validations. The second
 # lints the Shuttle and Loom modes and the compiler tooling, builds the ratchet's tools and runs the
 # ratchet once its own lints have finished. Together the two parts are every check `validate` runs,
-# which scripts/tests/test_ratchet.py holds the checks job's matrix to.
+# which scripts/tests/test_validation_entrypoint.py holds the checks job's matrix to.
 validate-ci jobs=default_jobs shard="": (run-with-jobs validate_ci_recipe(shard) jobs)
 
 validate_ci_recipe(shard) := if shard == "" { "validate-ci-targets" } else if shard == "1/2" { "validate-ci-shard-1" } else if shard == "2/2" { "validate-ci-shard-2" } else { error("validate-ci takes shard 1/2 or 2/2, or none for every check, not " + shard) }
@@ -3504,6 +3587,10 @@ coverage-connector-matrix: connector-declarations
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci scripts.tests.test_runner_diagnostics scripts.tests.test_record_runner_load
 
+# Exercise bounded runner report publication without the remote-cache fixtures.
+test-runner-diagnostics:
+    uv run --locked python -m unittest scripts.tests.test_runner_diagnostics
+
 # Retain the kache remote contract's own measured line coverage beside the other Python tooling.
 coverage-kache-ci:
     #!/usr/bin/env bash
@@ -3517,14 +3604,18 @@ coverage-kache-ci:
 test-go-ci-tool:
     python3 -m unittest scripts.tests.test_go_ci_tool
 
+# Run one Python script owner or named test without the full documentation suite.
+test-script-unit test:
+    uv run --locked python -m unittest {{ quote(test) }}
+
 # Measure the installer's Python lines separately from Rust's ordinary LCOV.
 coverage-go-ci-tool:
     mkdir -p target/go-ci-tool
     COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage run --branch --source=scripts.install_go_ci_tool -m unittest scripts.tests.test_go_ci_tool
     COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage report -m --include=scripts/install_go_ci_tool.py
 
-# Every script test runs here, the ratchet's included, so this installs the source parser and the
-# pinned complexity analyzer those tests measure with.
+# Every script test runs here, including the advisory CRAP report and CI-entrypoint checks, so
+# this builds the Rust gate and installs its pinned complexity analyzer.
 test-docs: typed-ratchet-source-build install-cargo-crap
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
@@ -3651,12 +3742,12 @@ test-chaos-rate-probe:
 test-chaos-hold-quorum:
     exec bash scripts/chaos/tests/hold-quorum-self-test.sh
 
-# Judge a failover-length pause's sink progress and source consumer-group handoff from retained
+# Judge a failover-length pause's emitter progress and source consumer-group handoff from retained
 # pause timelines without a product image.
 test-chaos-pause-delivery:
     exec bash scripts/chaos/tests/pause-delivery-self-test.sh
 
-# Retain shell coverage of the failover-length pause's sink progress and consumer-group handoff controls.
+# Retain shell coverage of the failover-length pause's emitter progress and consumer-group handoff controls.
 coverage-chaos-pause-delivery:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -3690,6 +3781,10 @@ test-chaos-local-image:
 # Bound startup artifact publication by the controller's actual remaining budget.
 test-chaos-startup-status:
     exec bash scripts/chaos/tests/startup-status-self-test.sh
+
+# Verify fresh public requests in run-owned observation helpers, including input and failures.
+test-chaos-observation-helpers:
+    exec bash scripts/chaos/tests/observation-helpers-self-test.sh
 
 # Derive the backup run's graph from the checked-in baseline fixture, as every verifier self-check does.
 test-chaos-backup-fixture:
@@ -4078,8 +4173,8 @@ generate-dev-tls:
     set -euo pipefail
     bash scripts/generate_dev_tls.sh
 
-generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx":
-    python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }}
+generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx" running_sum_output="tests/fixtures/onnx/running_sum.onnx" checked_running_sum_output="tests/fixtures/onnx/checked_running_sum.onnx":
+    python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }} --running-sum-output {{ running_sum_output }} --checked-running-sum-output {{ checked_running_sum_output }}
 
 # Download a CPU or CUDA 13 runtime; `host` selects the current machine's platform.
 download-onnxruntime flavor="cpu" platform="host":
@@ -4087,7 +4182,11 @@ download-onnxruntime flavor="cpu" platform="host":
 
 # Check runtime package selection and the CPU/CUDA image build targets.
 test-onnxruntime:
-    uv run --locked python -m unittest scripts.tests.test_onnxruntime
+    uv run --locked python -m unittest scripts.tests.test_onnxruntime scripts.tests.test_train_simple_onnx
+
+# Check the caller-selected destinations of every generated ONNX model.
+test-onnx-fixtures:
+    python3 -m unittest scripts.tests.test_train_simple_onnx
 
 # Build both final targets with fixture binaries and check layer sharing and runtime dependencies.
 test-onnxruntime-docker:

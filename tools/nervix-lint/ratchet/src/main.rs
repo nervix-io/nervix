@@ -20,6 +20,8 @@ enum Operation {
     Analyze(nervix_ratchet::matrix::Analyze),
     PrepareContracts(nervix_ratchet::contracts::PrepareContracts),
     QualifyCache(nervix_ratchet::cache::QualifyCache),
+    Gate(nervix_ratchet::gate::Options),
+    Crap(nervix_ratchet::crap::Options),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -30,8 +32,8 @@ fn main() -> anyhow::Result<()> {
             Some(Entry::Explicit)
         }
         Some(
-            "analyze" | "prepare-contracts" | "qualify-cache" | "--help" | "-h" | "help"
-            | "--version" | "-V",
+            "analyze" | "prepare-contracts" | "qualify-cache" | "gate" | "crap" | "--help" | "-h"
+            | "help" | "--version" | "-V",
         )
         | None => None,
         // Cargo supplies the actual rustc path as the first wrapper argument. A wrapper path
@@ -41,13 +43,38 @@ fn main() -> anyhow::Result<()> {
     let result = if let Some(entry) = wrapper {
         match nervix_ratchet::wrapper::execute(&arguments, entry) {
             Ok(never) => match never {},
-            Err(error) => Err(error),
+            Err(error) => Err(anyhow::anyhow!("{error:?}")),
         }
     } else {
         match Cli::parse().command {
-            Operation::Analyze(options) => options.run().map(|_| 0),
-            Operation::PrepareContracts(options) => options.run().map(|()| 0),
-            Operation::QualifyCache(options) => options.run().map(|()| 0),
+            Operation::Analyze(options) => options
+                .run()
+                .map(|_| 0)
+                .map_err(|error| anyhow::anyhow!("{error:?}")),
+            Operation::PrepareContracts(options) => options
+                .run()
+                .map(|()| 0)
+                .map_err(|error| anyhow::anyhow!("{error:?}")),
+            Operation::QualifyCache(options) => options
+                .run()
+                .map(|()| 0)
+                .map_err(|error| anyhow::anyhow!("{error:?}")),
+            Operation::Gate(options) => match options.run() {
+                Ok(status) => Ok(status),
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    Ok(1)
+                }
+            },
+            Operation::Crap(options) => {
+                match nervix_ratchet::crap::run(options, &nervix_ratchet::gate::repository_root()) {
+                    Ok(status) => Ok(status),
+                    Err(error) => {
+                        eprintln!("error: {error:#}");
+                        Ok(1)
+                    }
+                }
+            }
         }
     };
     let status = match result {

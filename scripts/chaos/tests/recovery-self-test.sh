@@ -197,7 +197,7 @@ raft.membership:
 
 [schedule]
 - domain=chaos_baseline kind=codec name=chaos_json owner=- replicas=-
-- domain=chaos_baseline kind=ingestor name=chaos_ingestor owner=node-1 replicas=-
+- domain=chaos_baseline kind=ingestor name=chaos_ingestor unit=instance:0 owner=node-1 replicas=-
 - domain=chaos_baseline kind=relay name=chaos_records owner=node-3 replicas=- transition_from=node-2 state_recovery=complete
 - domain=chaos_baseline kind=emitter name=chaos_emitter owner=node-3 replicas=-
 

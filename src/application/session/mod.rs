@@ -79,9 +79,7 @@ use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,
 };
-use nervix_plexus::client_statement::{
-    ClientStatement, ParsedClientStatement, parse_client_statement_sources,
-};
+use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -105,6 +103,7 @@ use super::{
     command_result::CommandResult,
     model_mutation::command_error,
     session_service::{SessionServiceImpl, rejected_source_response},
+    statement_grammar::with_statement_grammar,
     subscription::{
         OpenedSubscription, RefusedSubscription, SessionDelivery, SessionSubscriptions, SessionView,
     },
@@ -1142,25 +1141,25 @@ async fn serve_command(
         return None;
     };
     let outcome = command_outcome(execution_reference, response);
+    #[cfg(not(feature = "testing"))]
+    let body = ReplyBody::Command(Box::new(outcome));
     #[cfg(feature = "testing")]
-    let outcome = {
-        let mut outcome = outcome;
-        shared
-            .service
-            .inner
-            .runtime
-            .fault_injection()
-            .substitute_command_reply(&reply_script_request, &mut outcome);
-        outcome
-    };
-    let disposition = if tracing::enabled!(tracing::Level::DEBUG) {
+    let body = shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .script_command_reply(&reply_script_request, outcome);
+    // Only a testing script answers a command with a reply of another kind, which has no
+    // command disposition.
+    let disposition = if tracing::enabled!(tracing::Level::DEBUG)
+        && let ReplyBody::Command(outcome) = &body
+    {
         Some(outcome.disposition.clone())
     } else {
         None
     };
-    let queued = shared
-        .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
-        .await;
+    let queued = shared.finish_with(request_id, body).await;
     if queued == QueuedReply::Reply {
         disposition
     } else {
@@ -1210,6 +1209,16 @@ async fn serve_subscribe(
         message,
         diagnostics: Vec::new(),
     };
+    #[cfg(feature = "testing")]
+    shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .pause_subscription_response_delivery_if_armed(
+            shared.service.inner.consensus.local_node_id(),
+        )
+        .await;
     // The rows follow the reply that announces their schema. A subscription whose reply was not
     // queued, because the request was cancelled, the session ended or the reply could not be
     // encoded, was never announced, so it is abandoned before it delivers anything.
@@ -1252,7 +1261,8 @@ async fn open_subscription(
             subscription_in_transaction(),
         ));
     }
-    let statements = match parse_client_statement_sources(&statement) {
+    let parsed = with_statement_grammar(|grammar| grammar.parse_sources(&statement));
+    let statements = match parsed {
         Ok(statements) => statements,
         Err(report) => {
             return Err(RefusedSubscription::from_result(

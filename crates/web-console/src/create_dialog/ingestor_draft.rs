@@ -279,7 +279,7 @@ pub(super) enum IngestorDraftError {
     TimestampField,
     #[error("The timestamp field belongs to a changed codec; select it again")]
     TimestampFieldChanged,
-    #[error("Enter a valid source FILTER WHERE expression")]
+    #[error("Enter a valid ingestor FILTER WHERE expression")]
     Filter,
     #[error("Add at least one output route")]
     Routes,

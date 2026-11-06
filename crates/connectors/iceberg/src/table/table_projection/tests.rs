@@ -391,7 +391,7 @@ fn a_batch_without_the_planned_staged_schema_is_refused() {
 }
 
 #[test]
-fn a_staged_layout_the_sink_does_not_lay_out_is_refused_naming_its_arrow_type() {
+fn a_staged_layout_the_emitter_does_not_lay_out_is_refused_naming_its_arrow_type() {
     let table = table(vec![NestedField::optional(
         1,
         "name",
@@ -946,7 +946,7 @@ fn bolero_staged_columns_land_in_the_table_columns_of_their_names() {
                 columns.push(generated.staged_values(*index));
             }
             // A table whose every column is optional can be written with no column mapped, so the
-            // batch states its rows, as the sink's staging does.
+            // batch states its rows, as the emitter's staging does.
             let options = RecordBatchOptions::new().with_row_count(Some(generated.values.len()));
             let staged_batch =
                 RecordBatch::try_new_with_options(StdArc::clone(&staged), columns, &options)

@@ -2,6 +2,12 @@
 
 *Plexus, the Nervix graph definition language.*
 
+`just test-cluster-duration-scenarios` selects the one- and three-node multi-span cluster
+duration regression. It prepares the console assets, WASM processor guests and ONNX runtime
+that the in-process server loads, and needs no external transport or client-tool build.
+`just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
+rebuilding it; its evidence applies only to the source inputs that produced that executable.
+
 The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
 system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
 address explicitly and presents the node's fixture certificate. The redirect scenario launches a
@@ -19,29 +25,43 @@ name, and the console recorder checks an opened WSS connection to the advertised
 ## Focused Native Command Recovery
 
 `just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
-outlines on one and three nodes, with retries disabled. It builds the server's console assets,
-loads the ONNX runtime and builds the CLI before starting the scenario runner. These cases start
-no paced simulation or Python driver, so the focused recipe does not build those tools. The
-ordinary scenario runner and its startup, execution, parallelism and teardown budgets are
-unchanged. Broad `just test-scenarios` and CI keep their complete tool prerequisites.
-The recipe checks that all four cases execute and keeps its output under
-`target/client-foreign-execution`.
+outlines on one and three nodes, and `just test-client-reply-kind` the native-client and CLI
+outlines whose command is answered with a reply of another kind, each with retries disabled. Both
+run through `just test-client-recovery-witnesses <witnesses> <name>`, which builds the server's
+console assets, loads the ONNX runtime and builds the CLI before starting the scenario runner with
+`name` as its scenario filter. These cases start no paced simulation or Python driver, so the
+focused recipes do not build those tools. The ordinary scenario runner and its startup, execution,
+parallelism and teardown budgets are unchanged. Broad `just test-scenarios` and CI keep their
+complete tool prerequisites. Each recipe checks that all four of its cases execute and keeps its
+output under its own `target/<witnesses>` directory: `target/client-foreign-execution` or
+`target/client-reply-kind`.
 
 The focused client owner can be explored with
-`just test-client-shuttle exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter`.
+`just test-client-shuttle exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter`
+or `just test-client-shuttle exchange::shuttle_tests::shuttle_a_reply_of_another_kind_racing_registration_interrupts_every_waiter`.
 It runs that production owner's declared exploration and its nondeterminism check in a separate
 Shuttle build directory, retaining failing schedules. The canonical `just test-shuttle` inventory
 and package-wide discovery still qualify the full selection in CI.
 
 `just test-client-recovery-diagnostic <selection>` uses the canonical Deloxide runner for each of
 `deloxide`, `deloxide-order`, `deloxide-stress` and `deloxide-stress-restore`. It validates the full
-register first, then retains all registered workloads in the four feature files reached by the
+register first, then retains all registered workloads in every feature file reached by the
 client request and exchange owners. Their existing tags, invocations, bounds, supervision and
 accounting remain in force. Each record declares its selected owners and features and sets
 `whole_workspace` to false; this scope cannot enter a whole-workspace coverage collection.
 The selections share a diagnostic build directory, as the canonical lane does, and retain separate
 attempt records for each selection.
 `just test-client-recovery-runner` checks scope completeness against feature discovery.
+
+## Focused Wire Schema List Scenarios
+
+`just test-wire-schema-lists` runs `tests/features/runtime/wire_schema_lists.feature` through the
+ordinary harness on one and three nodes: AVRO arrays with declared item types, JSON and CBOR list
+elements under their codec rules, and the refusals of lists a wire type cannot carry. It builds the
+server's console assets and WASM guests and loads the ONNX runtime, which every in-process node
+needs. These cases start no CLI, paced simulation or Python driver, so the recipe does not build
+those tools. Its arguments reach the scenario runner unchanged, such as `--name`, `--concurrency`
+and `--retry`. Broad `just test-scenarios` and CI keep their complete tool prerequisites.
 
 ## Delayed Consensus Heartbeat Answers
 
@@ -104,6 +124,33 @@ A focused startup scenario occupies the observability port to force the first la
 before runtime initialization.
 The harness joins that attempt and retries on a fresh observability port within the same readiness
 budget. The pacer's advertised endpoint, private target and retained connections stay in place.
+
+## Interrupted Membership Fixture
+
+The membership-recovery outline starts two stable voters and arms a one-shot interruption of the
+third node's promotion. The existing storage fault owner pauses an applied write after its durable
+sync. While that pause prevents the first membership step's reply, the fixture drives OpenRaft's
+caller until its effective joint configuration appears, then stops polling that caller. It releases
+the worker and observes the joint membership's applied log entry before refusing the caller's
+continuation with the same no-leader redirect as an unconfirmed lease. The uniform step is never
+submitted by that interrupted call. A retained witness contains both actual voter sets and the
+applied index; no fabricated membership or transport outage establishes the precondition.
+
+The storage pause's existing RAII release handles cancellation, and the complete fixture stays
+inside the existing membership mutation deadline. Its arming and witness observations clone node
+controls from the test registry before awaiting; ordinary builds delegate directly to the usual
+OpenRaft change. The public assertions wait for uniform membership, stop each possible voter in a
+separate example, and require both survivors to apply new commands. The registered diagnostic
+workloads also reach the storage pause's tracked condition-variable wait and release.
+
+Harness voter-convergence waits require the expected voters, `raft.membership_joint: false`, and
+`raft.membership_committed: true` together. A union that matches the requested identities while
+still joint, or a uniform entry that has not committed, cannot complete cluster construction or a
+new member's convergence wait. Real-process start and relaunch convergence require the same
+membership observations alongside agreement on the leader and fresh connected peer targets.
+Missing status observations are not treated as successful readiness.
+The in-process status parser is shared with the focused Rust harness tests, so its readiness
+matrix executes under the standard test runner alongside the real-process convergence reader.
 
 ## Wide Subscription Row Input
 
@@ -168,6 +215,19 @@ expressions containing spaces, and brace input globs, are single arguments when 
 caller; the recipe does not expand their contents as shell code. The reuse recipe also sets
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
+
+`just test-restore-codec-replies` prepares the server assets, CLI and diagnostic reporter and runs
+only the restore reply rejection feature with the ordinary scenario runner. It forwards caller
+arguments by the same quoting rule. The bounded peer forwards the original upload to a real node,
+waits for its completed restore outcome and replaces only the reply; native and CLI cases then
+recover that outcome under the original execution reference on one- and three-node clusters.
+
+`just test-restore-attempt-history` uses the same prerequisites and quoting rule and requires all
+four native/CLI one-/three-node examples in `client_restore_uncertainty.feature`. Its peer waits
+for a real completed restore, removes the local archive and loses the answer with a retryable
+transport failure. The original restore call must remain uncertain when its next attempt cannot
+open the archive. The fixture restores the exact bytes only after that call ends, then recovers
+the completed outcome under the original statement and reference. No product fault hook is used.
 
 ## What Runs Where
 
@@ -1560,6 +1620,35 @@ The harness keeps these boundaries explicit.
   its entity gate pause, holds the new leader's run of the same transaction until the first run
   has refused and released its hold, and requires the alteration to end refused with every frame
   delivered once.
+- **Subscription reopening replies.** The native restoration outline opens an acknowledged
+  subscription through the existing TCP forwarder, ends that connection, and holds one successful
+  reopening reply on the serving node while its transport stays live. Its explicitly configured
+  request timeout ends that attempt. A reader already waiting must open another session, reach an
+  active subscription, and receive exactly one row from one subsequent HTTP post within the
+  existing thirty-second observation bound. Initial connection retains its ordinary connection
+  budget. The one-shot pause uses the command-pause owner and teardown releases it even after a
+  failed assertion. The same one- and three-node examples run in the Deloxide active, order and
+  stressed lifecycle selections: the request registry and event queues use tracked blocking
+  locks, while the watch and transport waits remain untracked and have their Shuttle check.
+- **Console restoration observations.** The browser's bounded frame gate can hold the next session
+  as well as the initial one: at most 64 frames and 1 MiB, released in receive order. It records
+  overflow or a held connection ending as a fixture failure. A reconnect that must preserve an
+  idle transaction uses the existing resettable TCP proxy: a clean WebSocket close with no request
+  in flight deliberately reverts it. The proxy resets its current sockets and keeps listening for
+  the replacement session, without changing the node or its leadership. A retained transaction
+  prompt alone does not establish that the replacement session's domain list has enabled its
+  input. Controlled restoration scenes release that gate, observe the restored subscription tab,
+  select Plexus REPL again, and require visible enabled input before arming a command reply pause.
+  A scene with multiple losses observes the intended replacement leader before using its tab;
+  an interruption notice from an earlier loss does not establish that phase. Clock notifications
+  are matched to the successful attach replies of distinct recorded
+  session connections; repeated acknowledgements on one connection fail, and the terminal must
+  render each acknowledgement exactly once. The recorder counts the browser's received frames,
+  excluding the gate's synthetic redelivery of a frame it already recorded. Extra real connections
+  do not imply extra domain-clock generations. Failed browser scenes retain their connection
+  frames, terminal, held-frame count and prompt visibility and disabled state before cleanup
+  releases the pauses. Reading this evidence has the existing console assertion bound and reports
+  an unreadable page without preventing pause cleanup.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup
@@ -1613,9 +1702,10 @@ The harness keeps these boundaries explicit.
   grows with every node's wait for CPU, its control-class queue included, whether or not a peer is
   silent.
   Its completion regression also holds every application-revision reply from the two followers
-  after sampling the reply. Local revision publication and gossip continue, so the same prepared
-  client's user creation, relay creation and cluster-status query must finish in order while
-  those replies remain held. This batch has one twenty-second harness budget. On 25 October
+  after sampling the reply. The followers keep reporting their progress to the leader, so the same
+  prepared client's user creation, relay creation and cluster-status query must finish in order,
+  through those reports, while the replies remain held. This batch has one twenty-second harness
+  budget. On 25 October
   2026, with 16 runtime workers, 48 slots, six large materialized workloads and 192 distinct
   health cases, 88 original requests exceeded nine seconds but all succeeded before fault
   release in 9.016 to 11.998 seconds. Every pre-release status still reported node-3 connected.
@@ -2814,11 +2904,11 @@ the whole server, so no build has to produce another file and no launch has to f
 `nervix-server`, and `main` reads `arg0` before it does anything else. A process of that name calls
 `run_server_process`, the entry point the `nervix-server` executable's own `main` calls, and none of
 the suite runs. Clap takes the program's name from the same `arg0`, so the command line a scenario
-reads is the product's. The dependency lifecycle helper is selected the same way. The launches of
-another file are the client protocol's measurements, whose subject is a release build:
-`just client-wire-baseline` and `just client-wire-tls-cost` build that server and name it to the
-suite. The transport cost starts two such processes that differ only in their session listener: one
-serves plaintext gRPC, and the other serves TLS on the port a plaintext listener would use,
+reads is the product's. The dependency lifecycle helper is selected the same way. The remaining
+measurement that launches another file is `just client-wire-tls-cost`, whose subject is a release
+build. It builds that server and names it to the suite. The transport cost starts two such
+processes that differ only in their session listener: one serves plaintext gRPC, and the other
+serves TLS on the port a plaintext listener would use,
 presenting the development certificate in-process TLS nodes present. The process's readiness probe
 and the clients the fixture opens follow the listener's transport.
 

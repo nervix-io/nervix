@@ -3,10 +3,10 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The Prometheus client Model with the `CONFIG` keys it declares and the API root
-//!   its address names, the query source Model with its delivery mode and response bound, and what
-//!   each declares, which includes the sample a query source delivers and the metadata beside it.
+//!   its address names, the query ingestor Model with its delivery mode and response bound, and what
+//!   each declares, which includes the sample a query ingestor delivers and the metadata beside it.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and client declarations, the HTTP transport's request
+//! - **Depends on.** The shared ingestor and client declarations, the HTTP transport's request
 //!   timeout, the URL Standard parser, the domain clock's period, the byte size a limit holds and
 //!   the names a body references.
 //! - **Must not know.** The Prometheus HTTP API's endpoints, how a client is built or an answer is
@@ -66,7 +66,7 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     )
 };
 
-/// Why a Prometheus client's `CONFIG { … }` block cannot configure a query source. Each error
+/// Why a Prometheus client's `CONFIG { … }` block cannot configure a query ingestor. Each error
 /// names the key at fault and never quotes a value, which can name a credential's file.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PrometheusClientConfigError {
@@ -211,9 +211,10 @@ const PROMETHEUS_QUERY_METADATA: IngestorMetadataDeclaration = IngestorMetadataD
 ]);
 
 /// A query answer carries each sample's labels, which its payload holds, and no transport headers
-/// of its own, so a query source reads none.
+/// of its own, so a query ingestor reads none.
 impl IngestorDeclaration for PrometheusQueryIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: PROMETHEUS_QUERY_METADATA,
         executes_on_every_cluster_node: false,
@@ -356,11 +357,11 @@ impl crate::IngestorEntityChange for PrometheusQueryIngestorChange {
 
 connector_ingestors! {
     connector Prometheus = "PROMETHEUS";
-    /// What a Prometheus source reads.
+    /// What a Prometheus ingestor reads.
     pub enum PrometheusIngestor;
     /// The alterations of the ingestors that read a Prometheus entity.
     pub enum PrometheusQueryIngestorAlteration;
-    /// The entities a Prometheus source reads.
+    /// The entities a Prometheus ingestor reads.
     pub enum PrometheusIngestorEntity {
         Query(PrometheusQueryIngestor => PrometheusQueryIngestorChange) = "QUERY", "Prometheus";
     }
@@ -399,7 +400,7 @@ mod tests {
     #[test]
     fn the_declared_response_bound_default_is_the_one_in_effect() {
         let [_, max_body_size, _] = PrometheusQueryIngestor::CAPABILITIES.options else {
-            panic!("a query source declares QUERY, MAX BODY SIZE and EVERY");
+            panic!("a query ingestor declares QUERY, MAX BODY SIZE and EVERY");
         };
         assert_eq!(max_body_size.keywords, "MAX BODY SIZE");
         let OptionPresence::Optional {

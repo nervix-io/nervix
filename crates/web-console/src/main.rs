@@ -40,7 +40,8 @@ use nervix_client_wire::{
     SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionEnded,
     SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
     Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
-    TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
+    TransferError, TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest,
+    VerifiedFrame,
     websocket::{CONSOLE_SESSION_PATH, ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -216,6 +217,17 @@ struct WebConsoleSignals {
 }
 
 impl WebConsoleSignals {
+    /// Reports the violation before the session loop stops reading and recovers its commands.
+    fn interrupt_unreadable_session(self, reason: &str) -> SessionStep {
+        self.terminal_lines.update(|lines| {
+            lines.push(TermLine::error(format!(
+                "protocol violation: {reason}; pending command outcomes are unknown; reconnecting \
+                 to recover them under their original execution references"
+            )));
+        });
+        SessionStep::Abandon
+    }
+
     /// Keep detach ahead of attach on the session's ordered request lane. The selected clock is
     /// marked before this call, so a refused request stays refused until selection or connection
     /// changes instead of being queued again by a later render.
@@ -779,8 +791,8 @@ enum Routed {
     Event(ServerEvent),
     /// The terminal reply to a request that awaited it.
     Reply(Box<AnsweredRequest>),
-    /// A reply that could not be read. The request it answers is over.
-    Unreadable(Box<UnreadableReply>),
+    /// A protocol violation. Waiting requests stay unanswered until the session ends.
+    Unreadable(Report<TransferError>),
     /// A reply to a request the console no longer awaits.
     Untracked,
     /// A part of a reply that is still arriving.
@@ -791,12 +803,6 @@ enum Routed {
 struct AnsweredRequest {
     request: IssuedRequest,
     body: ReplyBody,
-}
-
-/// A request whose reply could not be read, and why.
-struct UnreadableReply {
-    request: IssuedRequest,
-    reason: String,
 }
 
 /// What became of a request one of the console's controls issued.
@@ -1217,13 +1223,7 @@ impl SessionRequests {
         let appended = assembly.append(part);
         let complete = assembly.is_complete();
         if let Err(error) = appended {
-            let request = self
-                .answer(request_id)
-                .verified("the request was found in flight above");
-            return Routed::Unreadable(Box::new(UnreadableReply {
-                request,
-                reason: format!("failed to reassemble a reply: {}", error.current_context()),
-            }));
+            return Routed::Unreadable(error);
         }
         if !complete {
             return Routed::Pending;
@@ -1232,18 +1232,24 @@ impl SessionRequests {
             .transfers
             .remove(&request_id)
             .verified("the assembly was completed above");
-        let request = self
-            .answer(request_id)
-            .verified("the request was found in flight above");
         match assembly.finish() {
-            Ok(reply) => Routed::Reply(Box::new(AnsweredRequest {
-                request,
-                body: reply.body,
-            })),
-            Err(error) => Routed::Unreadable(Box::new(UnreadableReply {
-                request,
-                reason: format!("failed to reassemble a reply: {}", error.current_context()),
-            })),
+            Ok(reply) => {
+                let request = self
+                    .answer(request_id)
+                    .verified("the request was found in flight above");
+                Routed::Reply(Box::new(AnsweredRequest {
+                    request,
+                    body: reply.body,
+                }))
+            }
+            Err(error) => Routed::Unreadable(error),
+        }
+    }
+
+    /// Holds an interrupted ordered request whole; the new connection recreates its own controls.
+    fn hold_interrupted(&mut self, issued: IssuedRequest) {
+        if issued.request.is_ordered() && !issued.request.belongs_to_connection() {
+            self.hold_again(issued);
         }
     }
 
@@ -1258,9 +1264,7 @@ impl SessionRequests {
             let Some(issued) = request.awaited else {
                 continue;
             };
-            if issued.request.is_ordered() && !issued.request.belongs_to_connection() {
-                self.hold_again(issued);
-            }
+            self.hold_interrupted(issued);
         }
         self.held
             .retain(|_, request| !request.belongs_to_connection());
@@ -2774,37 +2778,16 @@ fn receive_frame(
     let message = match ServerMessage::decode(frame) {
         Ok(message) => message,
         Err(error) => {
-            let reason = format!(
-                "failed to decode a server message: {}",
-                error.current_context()
-            );
-            // A reply that cannot be read still ends the request it answers.
-            let answered = match frame.request_id() {
-                Some(request_id) => requests.answer(request_id),
-                None => None,
-            };
-            match answered {
-                Some(unread) => {
-                    requests.command_retries.finished(unread.order);
-                    fail_request(signals, unread.request, reason);
-                }
-                None => {
-                    signals
-                        .terminal_lines
-                        .update(|lines| lines.push(TermLine::error(reason)));
-                }
-            }
-            return SessionStep::Continue;
+            let reason = format!("failed to decode a server message: {error:#}");
+            return signals.interrupt_unreadable_session(&reason);
         }
     };
     match requests.route(message) {
         Routed::Event(event) => apply_event(signals, state, requests, event),
         Routed::Reply(answered) => apply_reply(signals, requests, *answered),
-        Routed::Unreadable(unreadable) => {
-            let UnreadableReply { request, reason } = *unreadable;
-            requests.command_retries.finished(request.order);
-            fail_request(signals, request.request, reason);
-            SessionStep::Continue
+        Routed::Unreadable(error) => {
+            let reason = format!("failed to reassemble a reply: {error:#}");
+            signals.interrupt_unreadable_session(&reason)
         }
         Routed::Untracked | Routed::Pending => SessionStep::Continue,
     }
@@ -3108,15 +3091,14 @@ fn apply_reply(
 ) -> SessionStep {
     let AnsweredRequest { request, body } = answered;
     let IssuedRequest { order, request } = request;
-    if !matches!(&body, ReplyBody::Command(_)) {
-        requests.command_retries.finished(order);
-    }
     match (request, body) {
         (request, ReplyBody::Rejected(rejected)) => {
+            requests.command_retries.finished(order);
             fail_request(signals, request, rejected.message);
             SessionStep::Continue
         }
         (request, ReplyBody::Cancelled(cancelled)) => {
+            requests.command_retries.finished(order);
             fail_request(signals, request, cancellation_reason(cancelled));
             SessionStep::Continue
         }
@@ -3242,8 +3224,8 @@ fn apply_reply(
             SessionStep::Continue
         }
         (request, _) => {
-            fail_request(signals, request, UNEXPECTED_REPLY.to_string());
-            SessionStep::Continue
+            requests.hold_interrupted(IssuedRequest { order, request });
+            signals.interrupt_unreadable_session(UNEXPECTED_REPLY)
         }
     }
 }
@@ -8207,6 +8189,8 @@ impl TermLineKind {
 )]
 mod tests {
     mod foreign_execution;
+    mod reply_kind;
+    mod unreadable_reply;
 
     use leptos::prelude::Owner;
     use nervix_client_wire::{
@@ -10817,6 +10801,26 @@ mod tests {
     }
 
     fn suggestion_parts(request_id: RequestId) -> Vec<ServerMessage> {
+        suggestion_frames(request_id)
+            .iter()
+            .map(|frame| ServerMessage::decode(frame).assured("a verified part decodes"))
+            .collect()
+    }
+
+    /// The one verified frame a server sends `reply` in.
+    fn reply_frame(reply: &Reply) -> VerifiedFrame<ServerFrame> {
+        let ReplyDelivery::Frame(frame) = reply
+            .encode(&SESSION_LIMITS)
+            .assured("a test reply is far below the session limits")
+        else {
+            panic!("a test reply fits one frame");
+        };
+        frame
+            .verify(&SESSION_LIMITS)
+            .assured("an encoded frame verifies under the limits it was encoded for")
+    }
+
+    fn suggestion_frames(request_id: RequestId) -> Vec<VerifiedFrame<ServerFrame>> {
         let small_frames = SessionLimits::try_from(SessionLimitSettings {
             frame_bytes: std::num::NonZeroUsize::new(1024).assured("a literal nonzero size"),
             transfer_bytes: std::num::NonZeroUsize::new(SESSION_LIMITS.transfer_bytes())
@@ -10857,7 +10861,7 @@ mod tests {
             let frame = part
                 .verify(&small_frames)
                 .assured("an encoded part verifies under the limits it was encoded for");
-            messages.push(ServerMessage::decode(&frame).assured("a verified part decodes"));
+            messages.push(frame);
         }
         messages
     }
@@ -12777,7 +12781,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_create_and_wrong_command_replies_report_terminal_failures() {
+    fn a_cancelled_create_fails_and_a_reply_of_another_kind_interrupts_its_session() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let mut requests = SessionRequests::new();
@@ -12834,7 +12838,7 @@ mod tests {
                     }),
                 },
             );
-            assert!(matches!(step, SessionStep::Continue));
+            assert!(matches!(step, SessionStep::Abandon));
             assert!(
                 signals
                     .terminal_lines

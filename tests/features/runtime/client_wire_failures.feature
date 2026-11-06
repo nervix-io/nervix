@@ -141,7 +141,7 @@ Feature: Client wire failure regressions
       CREATE RELAY held_records SCHEMA held_record UNBRANCHED;
       CREATE VHOST held_edge held-binding-{{test_id}}.example.com;
       CREATE ENDPOINT held_ingress ON held_edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_codec
         TO held_records INHERIT ALL UNBRANCHED
@@ -957,7 +957,7 @@ Feature: Client wire failure regressions
       CREATE KAFKA CLIENT relocation_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR relocation_offset_source
+      CREATE KAFKA TOPIC INGESTOR relocation_offset_ingestor
         FROM relocation_kafka TOPIC 'relocation_offsets_{{test_id}}'
           OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 200ms MAX 5s
@@ -971,7 +971,7 @@ Feature: Client wire failure regressions
       ON GENERAL ERROR LOG;
       START;
       """
-    Then within "5s" DESCRIBE INGESTOR "relocation_offset_source" on the leader node contains
+    Then within "5s" DESCRIBE INGESTOR "relocation_offset_ingestor" on the leader node contains
       """
       kafka observed partitions: 0
       """
@@ -991,7 +991,7 @@ Feature: Client wire failure regressions
       """
     Then the relocation publication pause for domain "{{domain}}" is reached
     When Kafka topic "relocation_offsets_{{test_id}}" partition count is changed to 2
-    Then within "5s" DESCRIBE INGESTOR "relocation_offset_source" on the leader node contains
+    Then within "5s" DESCRIBE INGESTOR "relocation_offset_ingestor" on the leader node contains
       """
       kafka observed partitions: 0,1
       """
@@ -999,7 +999,7 @@ Feature: Client wire failure regressions
     Then the background Plexus execution fails with "schedule changed"
     When these Plexus commands are executed on the leader node
       """
-      DESCRIBE INGESTOR relocation_offset_source;
+      DESCRIBE INGESTOR relocation_offset_ingestor;
       """
     Then the last command output contains
       """
@@ -1030,9 +1030,9 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
-        FROM wire_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
+        FROM wire_ingress MODE ACK MAX 8 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wire_record_codec
         TO wire_records INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1045,7 +1045,7 @@ Feature: Client wire failure regressions
       """
       CREATE SUBSCRIPTION wire_seen TO wire_records;
       """
-    And http payload is posted to node "{{old_leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+    And one http payload is posted with a completed graph acknowledgement to node "{{old_leader}}" host "client-wire-{{test_id}}.example.com" path "/records"
       """
       {"tenant":"acme","sequence":1}
       """
@@ -1066,7 +1066,7 @@ Feature: Client wire failure regressions
       DESCRIBE DOMAIN;
       """
     Then client "subscriber" subscription "wire_seen" is active
-    When within "30s" client "subscriber" receives a subscription payload from repeated http posts to node "{{new_leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+    When within "30s" client "subscriber" receives one subscription row from one acknowledged http post to node "{{new_leader}}" host "client-wire-{{test_id}}.example.com" path "/records"
       """
       {"tenant":"beta","sequence":2}
       """
@@ -1075,6 +1075,74 @@ Feature: Client wire failure regressions
       key={"tenant":"beta"}
       payload={"sequence":2,"tenant":"beta"}
       """
+
+  @client_wire_subscription_restore
+  @client_wire_subscription_timeout @deloxide_stress
+  Scenario Outline: An unanswered subscription reopening lets a waiting native reader open another session
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wire_record (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE CODEC wire_record_codec
+        FROM WIRE JSON SCHEMA wire_record_json
+        TO SCHEMA wire_record;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
+      CREATE VHOST edge client-wire-{{test_id}}.example.com;
+      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
+        FROM wire_ingress MODE ACK MAX 8 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wire_record_codec
+        TO wire_records INHERIT ALL
+        BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with request timeout "5s"
+    When client "subscriber" executes these Plexus commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    And one http payload is posted with a completed graph acknowledgement to node "{{leader}}" host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"acme","sequence":1}
+      """
+    Then within "10s" client "subscriber" receives a subscription payload
+      """
+      key={"tenant":"acme"} payload={"sequence":1,"tenant":"acme"}
+      """
+    Given the next subscription opening reply on node "{{leader}}" is held
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" client "subscriber" observes subscription "wire_seen" interrupted
+    When client "subscriber" waits through the held reopening of subscription "wire_seen" on node "{{leader}}" then receives one http payload with host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then the last relay subscription payload contains
+      """
+      key={"tenant":"beta"}
+      payload={"sequence":2,"tenant":"beta"}
+      """
+    And client "subscriber" subscription "wire_seen" is active
+    And the subscription opening reply on node "{{leader}}" is held
+    When the subscription opening reply on node "{{leader}}" is released
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @client_wire_subscription_restore
   Scenario Outline: A native client deletes a subscription its lost session held and opens the name again
@@ -1097,7 +1165,7 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records INHERIT ALL UNBRANCHED
@@ -1277,7 +1345,7 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records
@@ -1322,7 +1390,7 @@ Feature: Client wire failure regressions
     And the last relay subscription payload masks field "sequence"
     When these Plexus commands are executed on the leader node
       """
-      DROP INGESTOR wire_source;
+      DROP INGESTOR wire_ingestor;
       DROP RELAY wire_records;
       """
     Then within "30s" client "subscriber" observes subscription "wire_seen" ended with reason "RelayRemoved"
@@ -1363,7 +1431,7 @@ Feature: Client wire failure regressions
       CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
       CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wide_source
+      CREATE HTTP ENDPOINT INGESTOR wide_ingestor
         FROM wide_ingress MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wide_record_codec
         TO wide_records
@@ -1415,6 +1483,36 @@ Feature: Client wire failure regressions
     Then the last command output contains
       """
       recovered_identity
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_reply_kind @deloxide_stress
+  Scenario Outline: A native command recovers its own execution after a reply of another kind on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "recovering" is connected to node "{{leader}}"
+    And the next successful reply to native command "CREATE SCHEMA reply_kind_identity (value STRING);" is a reply of another kind
+    When client "recovering" executes these Plexus commands
+      """
+      CREATE SCHEMA reply_kind_identity (value STRING);
+      """
+    Then the native command recovered its own execution reference after a reply of another kind
+    When client "recovering" executes these Plexus commands
+      """
+      SHOW CREATE SCHEMA reply_kind_identity;
+      """
+    Then the last command output contains
+      """
+      reply_kind_identity
       """
 
     Examples:

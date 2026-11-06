@@ -118,11 +118,29 @@ A node-wide materialized-state dependency and an `ON MESSAGE ERROR SEND TO` rout
 exact-branch compatible with every source. Consequently, an emitter whose inputs use differently
 named branches cannot configure one branch-bound dependency or error relay across those inputs.
 
+Nervix applies each source's declared branch TTL and `MAX INSTANCES ... EVICT LRU` to the work
+this emitter still holds for that source, with the instance limit applied per source partition.
+Equal keys from different source relays remain separate, and an unbranched source has no branch
+instances to expire. An upstream relay and another emitter keep their own branch lifetimes; see
+[TTL](relay.md#ttl).
+
+Expiry or LRU eviction discards the affected source branch's unresolved host-buffered rows,
+prepared output and pending materialized-state wait. Discarded members are left unacknowledged.
+Rows already transferred to a staging connector keep its commit and acknowledgement lifecycle.
+State becoming ready later cannot revive the discarded input, and a later input with the same key
+starts fresh work. Surviving branches keep their prepared bytes, member mappings and accepted
+execution snapshots. This retention rule applies with and without `BATCH`, and retains no history
+of completed work.
+
 All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`, and
 `DESCRIBE EMITTER` reports the declared policy on its `flush:` line. `FLUSH`
 means Nervix collects an in-memory Arrow batch before handing it to the external emitter. `FLUSH EACH`
 is a domain-logical duration, so a paced domain's `TIME RATE` accelerates or slows it; retry
 backoff, acknowledgement keepalive, and emitter acknowledgement timeouts stay on the physical clock.
+While a partial buffer or staging connector holds acknowledged work, the host keeps its source
+alive every 100 physical milliseconds, including while another input waits for materialized state.
+New input does not postpone this beat. The beat acknowledges no records and stops when no work
+remains; an active retry supplies its own keepalive instead.
 See [Domains And Time](domains-and-time.md) for the full clock split. The
 [Plexus Overview](plexus-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
@@ -1262,7 +1280,7 @@ Transport-specific expectations:
   certificate. A plaintext `redis://` address reads none of the three files; see
   [Redis Pub/Sub](#redis-pubsub).
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
-- `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `NATS`: use `tls://...` in `addr`; Nervix trusts the platform's native roots, or only `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client certificate; a `nats://` address uses TLS only when the server requires it. See [NATS](./ingestors.md#nats).
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](./ingestors.md#pulsar).
 - `SQS`: use an `https://...` `endpoint`; Nervix trusts the platform's native roots, or only
   `tls_ca_file` when it is set, and honors optional `timeout_ms`. `CREATE SQS CLIENT` refuses a
@@ -1491,6 +1509,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-emit).
 <!-- connector-matrix:emit-pulsar-topic:end -->
 
+The emitter uses the same [Pulsar topic names](ingestors.md#pulsar-topic-names) as the ingestor:
+short names use the client's namespace and fully qualified persistent or non-persistent names are
+sent as written. Provision the output topic before starting the emitter. `SUBSCRIPTION`, `TYPE`
+and `INSTANCES` configure consumption and are unavailable on an emitter.
+
 `ACK` waits for each broker receipt, for up to `ACK TIMEOUT` after that record's hand-over. The
 driver uses the same timeout, including values longer than thirty seconds. If a later enqueue
 fails, receipts already given are settled before retry, so confirmed records are not sent again.
@@ -1561,7 +1584,8 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
   topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
   to `public/default`. Fully qualified topic names are sent as written.
-- optional `'auth_token'`: the token the client authenticates with
+- optional `'auth_token'`: the token the client authenticates with; `DESCRIBE CLIENT` and
+  `SHOW CREATE CLIENT` show it redacted
 - optional `'tls_ca_file'`: PEM-encoded CA bundle a `pulsar+ssl://...` connection trusts beside the
   bundled public roots and the host's trust store
 - optional `'tls_cert_file'` and `'tls_key_file'`: the PEM-encoded client certificate the client
@@ -1571,8 +1595,8 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'tls_hostname_verification_enabled'`: `false` accepts a certificate from a trusted
   authority whatever address it names; defaults to `true`
 
-The [ingestor manual](ingestors.md#pulsar) states what each credential authenticates as and what
-each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
+The [Pulsar client reference](ingestors.md#pulsar-client) states what each credential authenticates
+as and what each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
 `pulsar://...` address and a `namespace` that is not exactly a tenant and a namespace.
 
 The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry
@@ -1581,6 +1605,12 @@ error, as in `the PULSAR broker refused the connection with AuthenticationError:
 again on that policy.
 
 ### RabbitMQ
+
+Choose `RABBITMQ QUEUE` to address a queue through the default exchange, or `RABBITMQ EXCHANGE`
+to let a named exchange route each message by its record's computed key. Provision the queue,
+exchange and bindings outside Nervix. Both entities share the client, publishing modes and envelope
+below; the [queue ingestor](ingestors.md#rabbitmq) consumes a bound queue and has its own
+consumer acknowledgement policy.
 
 <!-- connector-matrix:emit-rabbitmq-queue:start -->
 ```plexus,ignore
@@ -1665,6 +1695,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [RABBITMQ EXCHANGE capability and mirror reference](connector-capabilities.md#rabbitmq-exchange-emit).
 <!-- connector-matrix:emit-rabbitmq-exchange:end -->
 
+#### Destinations and routing
+
 `RABBITMQ QUEUE` is the default-exchange shorthand: `QUEUE` names an existing queue, and the
 emitter publishes each message to the broker's default exchange with the queue's name as its
 routing key, which routes it to that queue. The same case-preserving queue-name type is used for
@@ -1688,6 +1720,8 @@ the queues whose binding pattern matches it, and a fanout exchange to every boun
 the key. Records whose keys differ never share a [batch payload](#batch-payloads), so a batch
 message carries the one key its members share. `SHOW CREATE EMITTER` retains the exchange's name
 and the routing key's expression.
+
+#### Persistence, timestamp, properties and headers
 
 Both RabbitMQ entities accept `PERSISTENT`, then `MANDATORY`, then `TIMESTAMP <expression>`
 and `PROPERTIES { … }`, after `ENCODE USING` and before construction. `PERSISTENT` writes AMQP
@@ -1718,12 +1752,19 @@ printing its value. The registry checks exact types, nullability and sensitivity
 carries the original evaluated properties and timestamp. `write_header` remains separate: writing
 a header named `content_type` sets an AMQP table entry, not the basic `content_type` property.
 
+The header model is `sorted_by_name` with exact names, shared with the queue ingestor. Write each
+literal header name once: `CREATE` and `ALTER` refuse repeated names, and the AMQP table carries
+one value per exact name in ascending byte order. Header insertion order is not a transport
+contract. Neither a header nor a property reaches an output automatically; set every value the
+emitter should send explicitly.
+
 ```plexus,ignore
 CREATE RABBITMQ QUEUE EMITTER notifications FROM events
   TO broker QUEUE 'notifications'
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s
   ENCODE USING event_codec
   PERSISTENT
+  MANDATORY
   TIMESTAMP input.occurred_at
   PROPERTIES { 'content_type' = 'application/json', 'message_id' = input.id,
                'priority' = 5 AS U8 }
@@ -1736,6 +1777,8 @@ CREATE RABBITMQ QUEUE EMITTER notifications FROM events
 replaces the whole property set and `DROP PROPERTIES` clears it. Each operation preserves the other
 envelope fields. The same operations apply to an `EXCHANGE` emitter. `SHOW CREATE EMITTER` and
 `DESCRIBE EMITTER` show the configured envelope.
+
+#### Unroutable messages and publishing outcomes
 
 Nervix never declares an exchange or a binding. When an exchange emitter opens, it checks that its
 exchange exists with a passive declaration; while it is missing, the emitter stays unavailable with
@@ -1777,11 +1820,23 @@ fails the write, reported naming the key and its bound, and leaves the write's m
 retry, which reopens the emitter's connection first. Without `timeout_ms` the round trip waits as
 long as the connection lives.
 
+Publisher confirms establish the broker's acceptance, not that any consumer processed the
+message. `MANDATORY` checks routing, and `PERSISTENT` requests persistence; neither replaces
+publisher confirms or a durable destination. A transient message can be routed and confirmed
+without surviving a broker restart. A lost confirm or round-trip answer can cause a retry to
+repeat a message the broker already accepted, so consumers must tolerate duplicates.
+
 The broker's `max_message_size`, 16 MiB by default in RabbitMQ 4.x, bounds each message body;
 headers do not count. The broker closes the channel a larger body arrives on, and the emitter
 rejects that message through `ON MESSAGE ERROR` in either mode, instead of retrying it or
 acknowledging it, then keeps publishing on a new channel of the same connection; see
 [Broker and message emitters](#broker-and-message-emitters).
+
+#### Client connections and deadlines
+
+See the shared [RabbitMQ client contract](ingestors.md#rabbitmq-client) and
+[generated CONFIG key reference](connector-capabilities.md#rabbitmq-client) for address validation,
+mounted certificate files and mTLS. Both emitter entities use those same keys.
 
 The emitter resolves the host of the client's `addr` through the node's configured DNS resolver
 when it opens and whenever it reopens after a failed publish, so a changed DNS answer takes effect
@@ -2041,6 +2096,20 @@ QoS 1 or 2 record stays unacknowledged until the broker acknowledges it.
 
 ### NATS
 
+NATS has two emitter entities, one for each way a NATS server takes messages. Both publish through
+a `NATS CLIENT` with the same optional token, user NKey or mounted credentials-file authentication
+as ingestors, and the [NATS client authentication rules](ingestors.md#nats) define mutual
+exclusion, confidential inspection and TLS configuration for both directions. `NATS SUBJECT`
+publishes through Core NATS in `MODE NO ACK`: the server answers nothing and hands each message
+only to the subscriptions it has when the message arrives, so a write completes once the client
+has flushed it to its socket. `NATS STREAM` publishes to a subject a JetStream stream captures, in
+`MODE ACK`: the stream answers each message with a `PubAck` once it stored it, and keeps it for as
+long as its operator's retention policy and limits allow. A stream also stores what a
+`NATS SUBJECT` emitter publishes to one of its subjects, although that emitter waits for no
+answer, and a subscription receives what a `NATS STREAM` emitter publishes to its subject, so
+either [NATS ingestor](ingestors.md#nats) reads what either emitter publishes to a subject it
+reads.
+
 <!-- connector-matrix:emit-nats-subject:start -->
 ```plexus,ignore
 CREATE NATS SUBJECT EMITTER <name>
@@ -2115,12 +2184,6 @@ waits `BACKOFF` before its first attempt and doubles the wait for each further a
 When the emitter stops, its finish flushes what the client still holds by the finish deadline; see
 [Finishing an emitter](./connector-contract.md#finishing-an-emitter).
 
-NATS emitters use the same optional token, user NKey or mounted credentials-file authentication
-as ingestors. The [NATS client authentication rules](ingestors.md#nats) define mutual exclusion,
-confidential inspection and TLS configuration for both directions.
-
-### NATS STREAM
-
 <!-- connector-matrix:emit-nats-stream:start -->
 ```plexus,ignore
 CREATE NATS STREAM EMITTER <name>
@@ -2160,12 +2223,27 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [NATS STREAM capability and mirror reference](connector-capabilities.md#nats-stream-emit).
 <!-- connector-matrix:emit-nats-stream:end -->
 
-`STREAM` names a stream that must exist before the emitter opens; the connector looks it up and
-reports a missing external entity at open if it is absent. `SUBJECT` names one literal publication
-subject, and every publish carries the expected-stream header. A subject the named stream does not
-capture is rejected for that record through `ON MESSAGE ERROR`. `MESSAGE ID <expr>` writes
-`Nats-Msg-Id` for server-side deduplication. The host evaluates the ID once for the record, so a
-retry after a lost `PubAck` sends the same ID.
+`STREAM` names a stream an operator provisioned; Nervix never creates one. The emitter looks the
+stream up when it opens, within `ACK TIMEOUT`. While the stream does not exist the emitter stays
+unavailable and its records wait: `DESCRIBE EMITTER` shows `NATS stream '<stream>' does not exist`
+with the reconnect backoff, and the host opens the emitter again on its `RETRY POLICY` until the
+stream is provisioned. Once open, its client connects again after it loses its server as a
+`NATS SUBJECT` emitter's client does, and a stopping emitter has nothing to finish, since every
+publish ends with each record answered or retained for the retry. `SUBJECT` names one literal
+publication subject, under the rule of a
+`NATS SUBJECT` emitter's subject. Every message carries the expected-stream header,
+`Nats-Expected-Stream` with the stream's name, so JetStream stores it only in that stream: a record
+whose subject the named stream does not capture, because no stream or another stream captures it,
+is rejected through `ON MESSAGE ERROR`, as is one above the server's `max_payload`.
+
+`MESSAGE ID <expr>` writes `Nats-Msg-Id`. JetStream drops a message whose ID the stream already
+stored within its duplicate window, an interval the stream's operator configures. The host
+evaluates the ID once for the record, so a retry after a lost `PubAck` sends the same ID, and the
+`PubAck` JetStream returns for the dropped copy delivers the record. A message carries the written
+headers in their order, then the `Nats-Msg-Id` of `MESSAGE ID` where the emitter declares it, and
+last `Nats-Expected-Stream`. A written header spelled exactly `Nats-Expected-Stream` gives way to
+the emitter's own, and under `MESSAGE ID` so does one spelled exactly `Nats-Msg-Id`; without
+`MESSAGE ID`, a written `Nats-Msg-Id` travels as written and JetStream deduplicates by it.
 
 `ACK` hands records to the client one after another, with at most `MAX <n>` of them awaiting
 their `PubAck` at once, or one under `ACK SEQUENTIAL`, each until `ACK TIMEOUT` after its
@@ -2173,7 +2251,9 @@ hand-over. A publish that fails, because a `PubAck` failed or did not arrive in 
 client did not take a record within `ACK TIMEOUT` while its connection stopped draining, first
 settles every `PubAck` JetStream already returned: a confirmed record is delivered and never sent
 again. The retry sends the records whose `PubAck` never arrived, which JetStream may already hold,
-so delivery is at least once.
+so delivery is at least once; with `MESSAGE ID`, the stream drops such a copy within its duplicate
+window. A `PubAck` that fails because the stream's limits refuse new messages is such a failure,
+not a record rejection, so the emitter retries the record on its policy.
 
 ### ZeroMQ
 
@@ -3216,6 +3296,14 @@ mapped column when the table itself is missing. A failure no retry cures until t
 statement changes is retried the same way, such as a conflict target no unique index matches
 (`42P10`), a missing privilege (`42501`) or a value mapped to a generated column (`428C9`).
 
+If a transient failure interrupts row-by-row isolation, the rows already acknowledged or rejected
+keep their outcomes. The interrupted row and every later unanswered row remain unresolved. The
+next attempt reads the catalog again and packs those unresolved rows into bounded inserts; it does
+not retain the interrupted pass's single-row request boundaries. An interrupted INSERT may already
+have stored its row, so that row can be written again in a multi-row insert. A flush and its
+isolation pass are not one database transaction; use a stable conflict key where retries must be
+idempotent.
+
 Postgres clients declare their connection-pool bounds and connect with a `postgres://` or
 `postgresql://` URL. Nervix owns the URL's scheme and its TLS policy: the URL sets `sslmode`
 exactly once, under that name or the driver's `ssl-mode`, to one of two policies: `sslmode=disable`
@@ -4154,7 +4242,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | --- | --- | --- | --- |
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
-| NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
+| NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | On a `NATS STREAM` emitter, `MESSAGE ID`: JetStream does not store again a message whose `Nats-Msg-Id` its stream stored within the stream's duplicate window, which the stream's operator configures. A retry carries the ID its first attempt carried, and an ID computed from the record's own fields also covers its redelivery within that window. Core `NO ACK` offers none |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; persistence requires PERSISTENT and a provisioned durable queue | None |
 | SQS | Retry after an ambiguous `SendMessage` or `SendMessageBatch` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | On a FIFO queue, `DEDUPLICATION ID` or the queue's content-based deduplication: SQS does not deliver again a message whose id, or body, it accepted within the previous five minutes. A retry carries the id and body its first attempt carried, and an id computed from the record's own fields also covers its redelivery within that interval |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |

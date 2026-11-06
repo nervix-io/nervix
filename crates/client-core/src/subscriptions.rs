@@ -80,7 +80,8 @@ impl fmt::Display for SubscriptionRestorationCause {
 
 /// An attempt to open an interrupted subscription again that the current session refused for now.
 /// The subscription stays interrupted, and the client tries again after `retry_after` for as long
-/// as the subscription is desired and the session stays open.
+/// as the subscription is desired and the session stays open. An unanswered reopening ends the
+/// session at its request timeout instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionRestorationFailure {
     /// The generation the restoration would replace, which ended with its session.

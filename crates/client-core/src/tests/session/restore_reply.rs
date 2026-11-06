@@ -95,7 +95,9 @@ async fn assert_restore_reply_is_uncertain(fault: frames::ReplyFault, replace: b
     let client = server.connect().await;
     let _original_server = server.next_exchange().await;
     let original = client.inner.exchange.lock().await.requests();
-    let mut pending = original.register().assured("the original session is open");
+    let mut pending = original
+        .register_for(&ClientRequest::ListDomains)
+        .assured("the original session is open");
     let files = tempfile::tempdir().assured("the test can create its archive directory");
     let path = files.path().join("restore.nvxb");
     let archive = vec![19_u8; 300_000];

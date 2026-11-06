@@ -892,6 +892,31 @@ class PublicationTests(unittest.TestCase):
     def recorded(self) -> dict:
         return json.loads((self.report / "publication.json").read_text())
 
+    @contextlib.contextmanager
+    def available_daemon(self):
+        """Establish the daemon before exercising a later publication timeout."""
+        daemon = DaemonState(
+            running=True, config_path=None, remote="s3://kache-ci/artifacts", remote_readonly=False
+        )
+        with mock.patch.object(kache_remote.Publisher, "daemon", return_value=daemon) as probe:
+            yield probe
+
+    @contextlib.contextmanager
+    def no_pending_uploads(self):
+        uploads = kache_remote.Uploads(
+            pending=0, completed=0, failed=0, skipped=0, suppressed=0,
+            bytes_uploaded=0, remote_degraded=False,
+        )
+        with mock.patch.object(kache_remote.Publisher, "uploads", return_value=uploads):
+            yield
+
+    def expired_command(self, arguments, _environment, timeout):
+        """End the selected command at its own bound without a process-start race."""
+        self.clock.time += timeout
+        raise subprocess.TimeoutExpired(
+            ["kache", *map(str, arguments)], timeout, output=b"partial\n", stderr=b"timed out\n"
+        )
+
     def test_a_successful_job_saves_its_manifest_and_waits_for_every_upload(self) -> None:
         publication, kache, output = self.publish({"pending": [5, 3, 0], "completed": 41, "skipped": 7, "bytes": 1024})
 
@@ -926,7 +951,8 @@ class PublicationTests(unittest.TestCase):
         self.assertNotIn("::warning", output)
 
     def test_the_wait_ends_with_the_budget_and_names_the_uploads_left_to_the_drain(self) -> None:
-        publication, kache, output = self.publish({"pending": [3]}, budget=10.0)
+        with self.available_daemon() as daemon:
+            publication, kache, output = self.publish({"pending": [3]}, budget=10.0)
 
         self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
         self.assertEqual(self.clock.sleeps, [2.0, 2.0, 2.0, 2.0, 2.0])
@@ -937,15 +963,88 @@ class PublicationTests(unittest.TestCase):
             ["3 uploads were still queued or in flight when the budget ended; the daemon's shutdown drain takes them over."],
         )
         self.assertEqual(kache.commands().count(["telemetry", "write"]), 6)
+        self.assertEqual(daemon.call_count, 2)
         self.assertIn("::warning title=kache publication incomplete::3 uploads", output)
         self.assertEqual(self.recorded()["outcome"], "incomplete")
 
     def test_a_manifest_that_outlasts_the_budget_is_reported_unsaved(self) -> None:
-        publication, _kache, _output = self.publish({"manifest_seconds": 5}, budget=1.0)
+        with (
+            self.available_daemon(),
+            self.no_pending_uploads(),
+            mock.patch.object(kache_remote, "run_kache", side_effect=self.expired_command) as command,
+        ):
+            publication, _kache, _output = self.publish({}, budget=1.0)
 
         self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
         self.assertIsNone(publication.manifest.status)
-        self.assertIn("The manifest was not saved within the budget.", publication.reasons)
+        self.assertEqual(publication.reasons, ["The manifest was not saved within the budget."])
+        self.assertEqual(publication.manifest.output_tail, ["partial", "timed out"])
+        self.assertEqual(publication.manifest.seconds, 1.0)
+        command.assert_called_once()
+        self.assertEqual(command.call_args.args[0], [
+            "save-manifest", "--manifest-key", "scenarios-Linux-X64", "--namespace", "scenarios-Linux-X64"
+        ])
+        self.assertEqual(command.call_args.args[2], 1.0)
+
+    def test_a_real_manifest_process_times_out_after_successful_preflight(self) -> None:
+        with (
+            self.available_daemon(),
+            self.no_pending_uploads(),
+            mock.patch.object(kache_remote, "run_kache", wraps=kache_remote.run_kache) as command,
+        ):
+            publication, _kache, _output = self.publish({"manifest_seconds": 5}, budget=1.0)
+
+        self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
+        self.assertIsNone(publication.manifest.status)
+        self.assertEqual(publication.reasons, ["The manifest was not saved within the budget."])
+        command.assert_called_once()
+        self.assertEqual(command.call_args.args[0][:2], ["save-manifest", "--manifest-key"])
+        self.assertEqual(command.call_args.args[2], 1.0)
+
+    def test_a_telemetry_timeout_follows_a_successful_daemon_probe(self) -> None:
+        with (
+            self.available_daemon(),
+            mock.patch.object(kache_remote, "run_kache", side_effect=self.expired_command) as command,
+        ):
+            publication, _kache, _output = self.publish({}, budget=0.5)
+
+        self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
+        self.assertEqual(publication.reasons, [
+            "The daemon's uploads could not be read: `kache telemetry write` did not answer within 1 s."
+        ])
+        self.assertIsNone(publication.manifest)
+        command.assert_called_once()
+        self.assertEqual(command.call_args.args[0][:2], ["telemetry", "write"])
+        self.assertEqual(command.call_args.args[2], 1.0)
+
+    def test_a_real_telemetry_process_times_out_after_successful_daemon_probe(self) -> None:
+        with (
+            self.available_daemon(),
+            mock.patch.object(kache_remote, "run_kache", wraps=kache_remote.run_kache) as command,
+        ):
+            publication, _kache, _output = self.publish({"telemetry_seconds": 3}, budget=0.5)
+
+        self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
+        self.assertEqual(publication.reasons, [
+            "The daemon's uploads could not be read: `kache telemetry write` did not answer within 1 s."
+        ])
+        self.assertIsNone(publication.manifest)
+        command.assert_called_once()
+        self.assertEqual(command.call_args.args[0][:2], ["telemetry", "write"])
+        self.assertEqual(command.call_args.args[2], 1.0)
+
+    def test_a_job_without_remaining_budget_never_starts_its_manifest(self) -> None:
+        with (
+            self.available_daemon(),
+            self.no_pending_uploads(),
+            mock.patch.object(kache_remote, "run_kache") as command,
+        ):
+            publication, _kache, _output = self.publish({}, budget=0.0)
+
+        self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
+        self.assertIsNone(publication.manifest.status)
+        self.assertEqual(publication.reasons, ["The manifest was not saved within the budget."])
+        command.assert_not_called()
 
     def test_a_failed_manifest_and_failed_uploads_leave_publication_incomplete(self) -> None:
         publication, _kache, _output = self.publish({"manifest_status": 1, "manifest_output": "remote refused", "failed": 2})
@@ -1037,11 +1136,9 @@ class PublicationTests(unittest.TestCase):
             ({"status_text": ["Daemon: running"]}, 10.0, Outcome.UNAVAILABLE, "exited with status 3 without a JSON document"),
             ({"status_failure": "socket refused"}, 10.0, Outcome.UNAVAILABLE, "`kache --json daemon status` failed: socket refused"),
             ({"status_seconds": 3}, 0.5, Outcome.UNAVAILABLE, "`kache --json daemon status` did not answer within 1 s"),
-            ({"telemetry_seconds": 3}, 0.5, Outcome.UNAVAILABLE, "`kache telemetry write` did not answer within 1 s"),
             ({"telemetry_without": "kache.cache.uploads.pending"}, 10.0, Outcome.UNAVAILABLE, "kache telemetry has no kache.cache.uploads.pending metric"),
             ({"telemetry_corrupt": True}, 10.0, Outcome.UNAVAILABLE, "unreadable kache telemetry"),
             ({"status_text": [None, "garbage"]}, 10.0, Outcome.INCOMPLETE, "The daemon stopped answering during the wait"),
-            ({}, 0.0, Outcome.INCOMPLETE, "The manifest was not saved within the budget."),
         ):
             with self.subTest(behavior=behavior, budget=budget):
                 subprocess.run(["rm", "-rf", str(self.directory / "bin")], check=True)

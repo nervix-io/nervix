@@ -99,6 +99,10 @@ client, binding and browser; those build choices change no wire contract.
 
 ## Wire Format
 
+An instance placement identity carries an unsigned 64-bit index in the `PlacementUnit` union;
+partition indices remain unsigned 32-bit values. Client encoders and decoders preserve the full
+instance index when reporting transaction impact and execution placement.
+
 ### One Schema, Eight Frame Roots
 
 `crates/client-wire/schema/session.fbs` declares every shape of the public boundary, once. Eight
@@ -404,6 +408,47 @@ new request identity, that repeats the same execution reference. Confusing the t
 guarantees: repeating a request identity cannot recover an effect, and minting a new execution
 reference for a retry can apply an effect twice.
 
+### Which Replies Answer A Request
+
+A request is answered by its own outcome, by `RequestRejected`, which can refuse any request, or by
+`RequestCancelled`, which ends a request a cancellation reached before its outcome. A
+`CancelRequest` is answered at once, so nothing cancels it, and a submitted batch cannot be
+withdrawn, so `RequestCancelled` never answers either of them.
+
+| Request | Its outcome |
+| --- | --- |
+| `CommandRequest` | `CommandOutcome` |
+| `SuggestRequest` | `SuggestOutcome` |
+| `ChoiceLookupRequest` | `ChoiceOutcome` |
+| `ListDomainsRequest` | `DomainList` |
+| `SelectDomainRequest` | `DomainSelectionOutcome` |
+| `AttachTransactionRequest` | `AttachOutcome` |
+| `InspectTransactionRequest` | `InspectionOutcome` |
+| `SubscribeRequest` | `SubscribeOutcome` |
+| `UnsubscribeRequest` | `UnsubscribeOutcome` |
+| `CancelRequest` | `CancelOutcome` |
+| `AttachDomainClockRequest` | `DomainClockAttachOutcome` |
+| `DetachDomainClockRequest` | `DomainClockDetachOutcome` |
+| `OpenIngestorRequest` | `OpenIngestorOutcome` |
+| `SubmitBatchRequest` | `SubmissionOutcome` |
+| `CloseIngestorRequest` | `CloseIngestorOutcome` |
+| `OpenEmitterRequest` | `OpenEmitterOutcome` |
+| `ReadEmitterBatchRequest` | `ReadEmitterBatchOutcome` |
+| `SettleEmitterBatchRequest` | `SettleEmitterBatchOutcome` |
+| `CloseEmitterRequest` | `CloseEmitterOutcome` |
+
+A matching request identity alone does not make a reply the answer to its request. A reply of any
+other kind under the identity of a request that waits for its reply is a protocol violation. The
+client checks the reply's kind before it applies anything the reply carries. On a violation it
+stops reading that session, interrupts every request still waiting on it, and keeps each command
+among them uncertain under its own reference. It adopts no subscription, clock attachment,
+producer, transaction or redirect from the reply. The Rust client recovers each interrupted request
+as after any other lost session: it repeats a command under its original reference on a restored
+session, or reports `UncertainCommand` with that reference when recovery cannot finish. A reply
+whose request no longer waits, because its caller stopped waiting, is not this violation: it
+completes no request, and the reader still follows the subscription, clock or producer it opens,
+as it does for every late reply.
+
 ### Two Lanes
 
 A session serves each request on one of two lanes:
@@ -568,6 +613,10 @@ execution reference like any other lost reply.
 ## Command Dispositions
 
 Client CONFIG validation uses the ordinary failed-command outcome before configuration commits.
+An invalid connector/entity mode, option, envelope, metadata read or header write that the registry
+can judge from the declaration is likewise a failed command before graph publication. These
+refusals add no command disposition: the client still decides from the typed disposition and
+recovers an uncertain attempt under its original execution reference.
 The registry checks declared keys and the composition root runs network-free driver checks for
 standalone mutations and transaction preflight. Refusals name the client and key without rendering
 driver values that may contain credentials. A refused transaction statement leaves the transaction
@@ -955,7 +1004,12 @@ to, because such a request has already moved the transaction past what the clien
 that is admitted runs its frozen plan step by step; each step is atomic, and a failed step leaves
 the applied prefix in place rather than rolling back the transaction. A commit's outcome arrives
 only when the final step is usable on every live node, and a client waits through `COMMITTING` for
-the outcome recorded under the commit's own reference.
+the outcome recorded under the commit's own reference. If one commit execution attempt fails, the
+server reads the transaction again before answering: a finished transaction supplies its recorded
+outcome and diagnostics, including a recorded failure; a transaction still `COMMITTING` leaves the
+command applying and answers `OutcomeUnknown(StillApplying)`. A leadership loss still follows the
+leader recovery route while the outcome is unresolved. An attempt's error cannot replace a
+terminal transaction outcome another coordinator recorded before the reply.
 
 The planning basis includes the complete committed cluster-parameter record and its revision.
 A publication through `ALTER CLUSTER SET` invalidates an earlier identified preview, including
@@ -1132,6 +1186,14 @@ as long as the session stays open and the client still wants the subscription or
 the next session starts again from one second. An attach answered `DomainClockAlreadyAttached` means
 the session already holds the attachment, so the client follows the clock on that session and reads
 its frames from then on.
+
+Closing the native client's request registry also wakes its exchange reader, even while the
+transport remains live and silent. The reader stops routing frames before it interrupts that
+generation's attachments and event queues. A subscription or clock reader already waiting there
+can therefore open the next session; it does not need another command, a later back-off timer, or
+a transport failure to make progress. An unanswered reopening ends its session; the
+`RestorationFailed` event reports attempts that failed while the session stays open, including
+server refusals and local encoding failures.
 
 The client's event streams outlive the session. A caller reading subscription events, clock events,
 or notices keeps reading across the replacement: the interruptions mark the gap, and events of the
@@ -1468,6 +1530,12 @@ Its text and partial reply are released immediately, and later parts are discard
 reassembly; the final part releases its place. Waiting connection-local requests end with that
 connection, while ordered commands retain their issue order and execution references. A request
 past either outstanding bound is not sent, and the control that issued it reports why.
+
+A reply the console cannot decode or reassemble, or whose body does not answer its request kind,
+ends that session as a protocol violation. The unanswered commands retain their complete requests,
+issue order, execution references and uncertain-outcome retry delays. Recovery restores the
+session before sending them again through the same bounded window; an unreadable reply never
+settles a command as failed.
 
 A tab whose generation the server ended with `SubscriptionEnded` turns ended in the web console. It
 keeps its rows and the reason, and it is not restored on a later connection, which would not change
@@ -2012,7 +2080,11 @@ under the restore's own execution reference with the typed validation cause bene
 installed while the restore was in flight remains usable. Keep the statement, archive bytes and
 reference unchanged when repeating the restore to recover its outcome.
 
-A refusal of the stream is not recorded; sending the stream again stages the archive again. Every
+A refusal of the stream is not recorded; sending the stream again stages the archive again. A
+refusal answers the one stream it ends, not the restore: a leader refuses a stream whose start or
+statement it cannot read, or while its cluster parameters are unavailable, before it looks the
+restore up, and stages the archive again for a restore it finds admitted without it, so a refusal
+of a repeated stream says nothing about whether an earlier stream had the restore admitted. Every
 other answer is a `CommandOutcome` under the start's execution reference:
 
 - A follower reads the start, answers `LeaderRedirect`, and reads no chunk.
@@ -2051,6 +2123,20 @@ no longer tied to the call: a client that goes away does not stop it, and repeat
 under the same reference returns its outcome. A call that ends before the whole archive arrived
 changes nothing and releases what the leader staged for it.
 
+A reply that fails frame verification or exceeds the native transport's receive limit cannot
+establish a restore outcome. The native client ends the exact session whose channel carried that
+attempt, leaving a replacement session intact, and reports the original restore reference as
+uncertain. Repeating the same statement and archive under that reference recovers the outcome.
+If no earlier attempt could have been admitted, authentication or other server refusals received
+before a response, a declared `RestoreUploadFailed`, and local archive refusals keep their
+definitive meaning. An unreadable reply is no evidence of refusal.
+
+A restore's uncertainty belongs to its execution reference across attempts. If an earlier attempt
+handed over the whole archive without learning its outcome, or received `OutcomeUnknown`, a
+later local read error, stream refusal, or `ExecutionReferenceExpired` does not settle it. The
+Rust client preserves the original reference as uncertain with the later typed cause beneath it;
+only an outcome that establishes the restore's result settles the execution.
+
 Only the leader the archive was streamed to holds it, until the restore finishes or the retry
 validity of its reference ends. If leadership moves, or that leader restarts, while the restore
 applies, the reply is a `LeaderRedirect` or the call fails, and repeating the stream on the new
@@ -2063,7 +2149,11 @@ it before the start, and again as it streams. The stream ends with the chunk tha
 declared size instead of a half-close, and the console watches for a reply that arrives before
 every chunk was sent. It repeats a redirected, interrupted, or still-applying restore under the
 same reference, statement and archive, and reports the outcome as unknown, naming the reference,
-when ten minutes of repetitions leave it unknown.
+when ten minutes of repetitions leave it unknown. It reports the outcome as unknown as well when
+the restore ends without it after an attempt may have had the restore admitted, by sending the
+whole archive without learning the outcome or by an `OutcomeUnknown` answer: when the file can no
+longer be read, a reply cannot be accepted, the leader refuses a later stream, or the leader no
+longer holds the reference.
 
 ## Node Stop And Restart As A Client Observes Them
 
@@ -2294,21 +2384,31 @@ they cover, and how to run them.
 ## Measured Costs
 
 [Client Wire 16](https://app.clickup.com/t/86bc1ahz3) retains the performance report, raw samples,
-reproduction commands, tested revisions and regression alarms, and
+reproduction commands, tested revisions and regression alarms,
 [Client Wire 18](https://app.clickup.com/t/86bc8cx3h) the command preparation and transport report
-with its paired samples. Measurements qualify their recorded workload, build profile and host; they
-do not establish throughput guarantees for another revision.
+with its paired samples, and [Client Wire 61](https://app.clickup.com/t/86bcx1uz6) the reports from
+before and after the server held its grammar. Measurements qualify their recorded workload, build
+profile and host; they do not establish throughput guarantees for another revision.
+
+The broad baseline instrument used by those reports is retired. Its archived commands reproduce
+only the recorded revisions; current measurements use the focused instruments below. The original
+measurements, budgets and conclusions remain on their ClickUp tasks.
 
 Before it sends a command, a native client classifies the statements by parsing them with the
 client statement grammar. Building that grammar constructs the parser of every Plexus statement
-and allocates about a megabyte and a half, which costs far more than parsing a command with it,
-and releasing it costs about as much again. The Rust client therefore builds the grammar once on
-each thread that prepares a command and keeps it for the life of the thread. The execution
-identity and the request frame cost little beside the parse. `just client-wire-command-cost`
-measures each of these stages, and `just client-wire-tls-cost` compares the same command and fresh
-connections over plaintext and TLS in alternating pairs against two release servers. A TLS session
-pays most of what TLS costs in its handshake, when it connects; an established TLS session adds a
-few percent to a command's round trip.
+and allocates about 1.7 MB, which costs far more than parsing a command with it, and releasing it
+costs about as much again. The Rust client therefore builds the grammar once on each thread that
+prepares a command and keeps it for the life of the thread. The server reads every command,
+subscription, restore and completion request with the same grammar, held the same way: each worker
+thread of the node's runtime builds it for the first request it reads and keeps it between
+requests, so a node holds at most one grammar on each of its runtime's worker threads. A completion
+request reads both the grammar's expectations and the local path being written with that one
+grammar. The execution identity and the request frame cost little beside the parse.
+`just client-wire-command-cost` measures each of these stages, and a completion read with a held
+grammar and with one built for it, and `just client-wire-tls-cost` compares the same command and
+fresh connections over plaintext and TLS in alternating pairs against two release servers. A TLS
+session pays most of what TLS costs in its handshake, when it connects; an established TLS session
+adds a few percent to a command's round trip.
 
 The cost model follows the protocol boundaries: the server writes Arrow column values directly
 into FlatBuffers tables, verification runs once per frame, and later views borrow that frame.
@@ -2322,7 +2422,8 @@ bulk to avoid paying a host-language call for each cell.
 The protocol guarantees:
 
 - **Correlation.** A reply completes exactly the request whose identity it names, in whatever order
-  replies arrive, and never a request of another session.
+  replies arrive, and never a request of another session. A reply completes it only when its kind
+  answers that request; a reply of another kind ends the session instead.
 - **Bounded, verified frames.** Every frame fits the session limits and is verified before it is
   read. A reply larger than a frame arrives whole or not at all.
 - **One outcome per identity.** Repeating a command under the execution reference that admitted it

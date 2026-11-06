@@ -15,8 +15,6 @@
 )]
 
 use ahash::RandomState;
-use error_stack::{Report, ResultExt as _};
-use futures_util::future::BoxFuture;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
@@ -24,7 +22,7 @@ use nervix_client_wire::{
     ServerNotice, SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus,
     TextEdit,
 };
-use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
+use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Proposer};
 use nervix_interconnect::Transport;
 use nervix_models::{
     BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
@@ -33,10 +31,7 @@ use nervix_models::{
 };
 use nervix_plexus::{
     Token, Word,
-    client_statement::{
-        ClientStatement, CompletionExpectation, local_path_fragment,
-        parse_client_statement_sources, suggest_client_expectations,
-    },
+    client_statement::{ClientStatement, CompletionExpectation},
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
 };
@@ -46,7 +41,7 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded;
 use nervix_vm::program::FunctionName;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use super::{
     authentication::AuthenticationPacing,
@@ -59,9 +54,7 @@ use super::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
         OutcomeUnknownCause,
     },
-    completion::{
-        ApplicationRevisionParticipants, ApplicationRevisionPhase, wait_for_application_revision,
-    },
+    completion::ApplicationProgressState,
     configured_choices::{ConfiguredChoices, ConfiguredQuery},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::command_error,
@@ -71,9 +64,9 @@ use super::{
     },
     restore::ServerRestoreArchives,
     runtime_admission::RuntimeAdmission,
-    scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     service_tasks::ServiceTasks,
     session::admission::{CancelledBeforeAdmission, RequestAdmission},
+    statement_grammar::with_statement_grammar,
     subscription::{
         SessionCommandOperation, SessionSubscriptions, SessionView, SubscriptionInterests,
         SubscriptionSampler,
@@ -85,7 +78,13 @@ use crate::{
     cluster,
     registry::{Registry, RegistryError},
     resource::ResourceStore,
-    runtime::{ApplicationWait, Runtime},
+    runtime::Runtime,
+};
+
+mod runtime_application;
+
+pub(in crate::application) use runtime_application::{
+    ApplicationBound, RuntimeStateApplication, apply_current_cluster_runtime_state,
 };
 
 /// How many events a session can fall behind before the bus drops the oldest.
@@ -180,6 +179,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// The draws every subscription on this node samples its rows with.
     pub(in crate::application) subscription_sampler: SubscriptionSampler,
     pub(in crate::application) interconnect: Transport,
+    /// This incarnation's application progress and the reports it holds while it leads. Also held
+    /// by the revision and report handlers, the reporter and the authoritative writer.
+    pub(in crate::application) application_progress: ApplicationProgressState,
     /// Attaches the producers of this node's sessions, locally or through the node that executes
     /// their ingestor.
     pub(in crate::application) client_producers: ClientProducerRouter,
@@ -225,359 +227,6 @@ pub(in crate::application) struct SessionServiceInner {
     /// The verified archives this node's restores read, until each restore finishes or its retry
     /// validity ends.
     pub(in crate::application) restore_archives: ServerRestoreArchives,
-}
-
-/// The node-local handles that install the newest admitted runtime state.
-#[derive(Clone, Copy)]
-pub(in crate::application) struct RuntimeStateApplication<'a> {
-    pub(in crate::application) runtime: &'a Runtime,
-    pub(in crate::application) https_certificates: &'a HttpsListenerCertificates,
-    pub(in crate::application) cluster: &'a cluster::ClusterHandle,
-    pub(in crate::application) interconnect: &'a Transport,
-    pub(in crate::application) registry: &'a Registry,
-    pub(in crate::application) consensus: &'a Observer,
-    pub(in crate::application) admission: &'a RuntimeAdmission,
-    pub(in crate::application) shutdown: &'a CancellationToken,
-}
-
-/// What ends the waits of one application of the committed runtime state, beside the budget the
-/// cluster gives each revision the application installs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::application) enum ApplicationBound {
-    /// The cluster's budget alone: peer-failure detection followed by readiness propagation.
-    ClusterBudget,
-    /// The cluster's budget, or `deadline` when it comes first: a caller that must not wait for
-    /// the cluster past its own deadline, as a quiesced backup cut applying its pause. The
-    /// deadline ends only the application's waits. A local installation or activation that began
-    /// before it finishes, so this node never holds part of a revision, and every node keeps
-    /// applying the newest committed state through its own reconciliation.
-    Deadline(nervix_primitives::time::Instant),
-}
-
-impl ApplicationBound {
-    /// Resolves once the bound ends the application's current `wait`, with the report of the wait
-    /// it ended. It never resolves for the cluster's budget alone, which each of the application's
-    /// cluster-wide waits applies itself.
-    async fn ends(self, wait: ApplicationWait) -> Report<crate::runtime::RuntimeError> {
-        match self {
-            Self::ClusterBudget => std::future::pending().await,
-            Self::Deadline(deadline) => {
-                let timer = nervix_primitives::time::sleep_until(deadline);
-                tokio::pin!(timer);
-                std::future::poll_fn(|context| {
-                    // The timer rounds up to a millisecond tick. A ready installation must not
-                    // win after the actual deadline, including when it elapsed between polls.
-                    if nervix_primitives::time::Instant::now() >= deadline {
-                        return std::task::Poll::Ready(());
-                    }
-                    timer.as_mut().poll(context)
-                })
-                .await;
-                Report::new(crate::runtime::RuntimeError::ApplicationDeadline { wait })
-            }
-        }
-    }
-}
-
-/// Apply the newest admitted runtime state with a heap-backed future so command execution keeps a
-/// bounded stack regardless of the preparation and readiness paths active inside this operation.
-/// `bound` ends the application's waits; see [`ApplicationBound`].
-pub(in crate::application) fn apply_current_cluster_runtime_state(
-    application: RuntimeStateApplication<'_>,
-    bound: ApplicationBound,
-) -> BoxFuture<'_, error_stack::Result<(), crate::runtime::RuntimeError>> {
-    let RuntimeStateApplication {
-        runtime,
-        https_certificates,
-        cluster,
-        interconnect,
-        registry,
-        consensus,
-        admission,
-        shutdown,
-    } = application;
-    Box::pin(async move {
-        let local_node_id = consensus.local_node_id();
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let installation = admission.begin_installation(shutdown);
-            tokio::pin!(installation);
-            let installation = nervix_primitives::select! {
-                biased;
-                ended = bound.ends(ApplicationWait::Installation) => return Err(ended),
-                installation = &mut installation => installation,
-            };
-            let Some(installation) = installation else {
-                return Ok(());
-            };
-            #[cfg(feature = "testing")]
-            runtime
-                .pause_runtime_installation_if_armed(local_node_id)
-                .await;
-            let Some(state) = admission.runtime_state(consensus, shutdown).await else {
-                return Ok(());
-            };
-            let Some(parameters) = state.parameters else {
-                drop(installation);
-                nervix_primitives::select! {
-                    _ = shutdown.cancelled() => return Ok(()),
-                    _ = consensus.wait_for_runtime_revision_after(state.revision) => continue,
-                }
-            };
-            if let Some(construction) = runtime.construction_parameters() {
-                match construction.catch_up(parameters).change_context(
-                    crate::runtime::RuntimeError::ClusterParameterPublicationMismatch {
-                        revision: parameters.revision.get(),
-                    },
-                )? {
-                    nervix_models::ClusterParameterCatchUp::Ready => {}
-                    nervix_models::ClusterParameterCatchUp::Pending => {
-                        drop(installation);
-                        nervix_primitives::select! {
-                            _ = shutdown.cancelled() => return Ok(()),
-                            _ = consensus.wait_for_runtime_revision_after(state.revision) => continue,
-                        }
-                    }
-                }
-            }
-            cluster.publish_cluster_parameters(parameters, false).await;
-            runtime.install_cluster_parameters(parameters.values);
-            registry.install_cluster_parameters(parameters.values);
-            #[cfg(feature = "testing")]
-            if runtime.take_runtime_installation_refusal(local_node_id) {
-                return Err(Report::new(
-                    crate::runtime::RuntimeError::RuntimeInstallationRefused {
-                        node: local_node_id.clone(),
-                    },
-                ));
-            }
-            debug!(
-                %local_node_id,
-                revision = state.revision,
-                "installing admitted cluster runtime state"
-            );
-            registry
-                .synchronize_cluster_schedule(&state.schedule)
-                .change_context(crate::runtime::RuntimeError::SynchronizeRegistry {
-                    revision: state.revision,
-                })?;
-            let runtime_application = admission
-                .apply_planned_cluster_state(runtime, local_node_id, &state)
-                .await;
-            // The listener presents the certificates of the same revision before this node reports
-            // it prepared. A failed installation keeps the certificates already presented and is
-            // reported to the command that changed them through its installation barrier.
-            if let Err(error) = https_certificates
-                .install(state.revision, &state.schedule)
-                .await
-            {
-                warn!(
-                    %local_node_id,
-                    revision = state.revision,
-                    error = format!("{error:#}"),
-                    "failed to install the HTTPS listener TLS configuration"
-                );
-            }
-            runtime_application.change_context(crate::runtime::RuntimeError::ApplyRevision {
-                revision: state.revision,
-            })?;
-            #[cfg(feature = "testing")]
-            runtime
-                .pause_runtime_preparation_if_armed(local_node_id)
-                .await;
-            cluster.publish_cluster_parameters(parameters, true).await;
-            cluster
-                .set_local_runtime_revision_prepared(state.revision)
-                .await;
-            debug!(
-                %local_node_id,
-                revision = state.revision,
-                "local runtime revision prepared"
-            );
-            drop(installation);
-
-            let node_unavailability_timeout = cluster.node_unavailability_timeout();
-            // Applying a revision gets one start-time operation budget: peer-failure detection followed
-            // by readiness propagation. A peer that disconnects after this starts has only the remaining
-            // portion of that budget.
-            let deadline_overflow = || {
-                Report::new(
-                    crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
-                        node_unavailability_timeout,
-                        readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-                    },
-                )
-            };
-            let Some(readiness_timeout) = node_unavailability_timeout
-                .checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
-            else {
-                return Err(deadline_overflow());
-            };
-            let Some(deadline) =
-                nervix_primitives::time::Instant::now().checked_add(readiness_timeout)
-            else {
-                return Err(deadline_overflow());
-            };
-            let preparation = wait_for_application_revision(
-                cluster,
-                consensus,
-                interconnect,
-                state.revision,
-                ApplicationRevisionPhase::RuntimePrepared,
-                ApplicationRevisionParticipants::EveryLiveNode,
-                deadline,
-            );
-            tokio::pin!(preparation);
-            let supersession = consensus.wait_for_runtime_revision_after(state.revision);
-            tokio::pin!(supersession);
-            let preparation_result = nervix_primitives::select! {
-                biased;
-                _ = shutdown.cancelled() => return Ok(()),
-                ended = bound.ends(ApplicationWait::Preparation {
-                    revision: state.revision,
-                }) => return Err(ended),
-                newer_revision = &mut supersession => {
-                    let Some(newer_revision) = newer_revision else {
-                        return Ok(());
-                    };
-                    debug!(
-                        %local_node_id,
-                        revision = state.revision,
-                        newer_revision,
-                        "superseding runtime revision during cluster preparation"
-                    );
-                    continue;
-                }
-                result = &mut preparation => result,
-            };
-            if let Err(timeout) = preparation_result {
-                let current_revision = consensus.current_runtime_revision().await;
-                if current_revision > state.revision {
-                    debug!(
-                        %local_node_id,
-                        revision = state.revision,
-                        newer_revision = current_revision,
-                        "superseding runtime revision at cluster preparation deadline"
-                    );
-                    continue;
-                }
-                return Err(Report::new(
-                    crate::runtime::RuntimeError::RuntimeRevisionPreparation {
-                        revision: state.revision,
-                        pending_nodes: timeout.pending_nodes,
-                    },
-                ));
-            }
-            debug!(
-                %local_node_id,
-                revision = state.revision,
-                "cluster runtime revision prepared"
-            );
-
-            let activation = admission.begin_installation(shutdown);
-            tokio::pin!(activation);
-            let activation = nervix_primitives::select! {
-                biased;
-                ended = bound.ends(ApplicationWait::Activation {
-                    revision: state.revision,
-                }) => return Err(ended),
-                activation = &mut activation => activation,
-            };
-            let Some(activation) = activation else {
-                return Ok(());
-            };
-            let current_revision = consensus.current_runtime_revision().await;
-            if current_revision > state.revision {
-                debug!(
-                    %local_node_id,
-                    revision = state.revision,
-                    newer_revision = current_revision,
-                    "superseding runtime revision before source activation"
-                );
-                continue;
-            }
-            runtime
-                .start_running_domain_ingestors()
-                .await
-                .change_context(crate::runtime::RuntimeError::StartIngestors {
-                    revision: state.revision,
-                })?;
-            debug!(
-                %local_node_id,
-                revision = state.revision,
-                "started running-domain ingestors"
-            );
-            cluster
-                .set_local_runtime_revision_ready(state.revision)
-                .await;
-            drop(activation);
-            let readiness = async {
-                // A test build can hold this wait while the revision pauses a domain, as a cluster
-                // slow to apply a backup cut's pause would; the revision that resumes it passes.
-                #[cfg(feature = "testing")]
-                runtime
-                    .pause_backup_cut_application_if_armed(&state.domains)
-                    .await;
-                wait_for_application_revision(
-                    cluster,
-                    consensus,
-                    interconnect,
-                    state.revision,
-                    ApplicationRevisionPhase::RuntimeReady,
-                    ApplicationRevisionParticipants::EveryLiveNode,
-                    deadline,
-                )
-                .await
-            };
-            tokio::pin!(readiness);
-            let supersession = consensus.wait_for_runtime_revision_after(state.revision);
-            tokio::pin!(supersession);
-            let readiness_result = nervix_primitives::select! {
-                biased;
-                _ = shutdown.cancelled() => return Ok(()),
-                ended = bound.ends(ApplicationWait::Readiness {
-                    revision: state.revision,
-                }) => return Err(ended),
-                newer_revision = &mut supersession => {
-                    let Some(newer_revision) = newer_revision else {
-                        return Ok(());
-                    };
-                    debug!(
-                        %local_node_id,
-                        revision = state.revision,
-                        newer_revision,
-                        "superseding runtime revision during cluster readiness"
-                    );
-                    continue;
-                }
-                result = &mut readiness => result,
-            };
-            if let Err(timeout) = readiness_result {
-                let current_revision = consensus.current_runtime_revision().await;
-                if current_revision > state.revision {
-                    debug!(
-                        %local_node_id,
-                        revision = state.revision,
-                        newer_revision = current_revision,
-                        "superseding runtime revision at cluster readiness deadline"
-                    );
-                    continue;
-                }
-                return Err(Report::new(
-                    crate::runtime::RuntimeError::RuntimeRevisionReadiness {
-                        revision: state.revision,
-                        pending_nodes: timeout.pending_nodes,
-                    },
-                ));
-            }
-            debug!(
-                %local_node_id,
-                revision = state.revision,
-                "cluster runtime revision ready"
-            );
-            return Ok(());
-        }
-    })
 }
 
 pub(in crate::application) fn error_response(
@@ -1442,6 +1091,7 @@ impl SessionServiceImpl {
             interconnect: &self.inner.interconnect,
             registry: &self.inner.registry,
             consensus: &self.inner.consensus,
+            progress: &self.inner.application_progress,
             admission: &self.inner.runtime_admission,
             shutdown: &self.inner.drain_support_shutdown,
         };
@@ -1597,11 +1247,13 @@ impl SessionServiceImpl {
         };
 
         let context = completion_context(req.input(), cursor);
-        let grammar = suggest_client_expectations(&context.grammar_input, context.grammar_cursor);
+        let expectations = with_statement_grammar(|grammar| {
+            grammar.suggest_expectations(&context.grammar_input, context.grammar_cursor)
+        });
 
         let mut suggestions = Vec::new();
         let mut references = Vec::new();
-        for item in grammar {
+        for item in expectations {
             match item {
                 CompletionExpectation::Semantic(reference) => references.push(reference),
                 CompletionExpectation::Literal(item) => {
@@ -1705,7 +1357,9 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>();
 
-        if let Some(local_path) = local_path_fragment(req.input(), cursor) {
+        let local_path =
+            with_statement_grammar(|grammar| grammar.local_path_fragment(req.input(), cursor));
+        if let Some(local_path) = local_path {
             response_suggestions.push(Suggestion {
                 value: local_path.fragment.to_string(),
                 kind: SuggestionKind::LocalDirectoryLookup,
@@ -1767,7 +1421,8 @@ impl SessionServiceImpl {
         let expected_transaction_position = req
             .expected_transaction_position
             .map(TransactionPosition::accepted_operations);
-        let client_statements = match parse_client_statement_sources(&req.query) {
+        let parsed = with_statement_grammar(|grammar| grammar.parse_sources(&req.query));
+        let client_statements = match parsed {
             Ok(statements) => statements,
             Err(report) => {
                 let result = self
@@ -2090,6 +1745,7 @@ pub(in crate::application) fn conflicting_reference(
 )]
 mod tests {
     mod application_deadline;
+    mod completion_context;
 
     use std::time::Duration;
 
@@ -2280,87 +1936,6 @@ mod tests {
             String::new(),
         );
         assert_eq!(choices_for(&pace), Err(ChoiceStatus::MissingContext));
-    }
-
-    #[test]
-    fn completion_context_preserves_prefix_for_post_filtering() {
-        let input = "CREATE SCHE";
-        let CompletionContext {
-            grammar_input,
-            grammar_cursor,
-            prefix,
-            ..
-        } = completion_context(input, input.len());
-
-        assert_eq!(grammar_input, "CREATE ");
-        assert_eq!(grammar_cursor, "CREATE ".len());
-        assert_eq!(prefix, "sche");
-
-        let input = "SHOW CLUSTR;";
-        let CompletionContext {
-            grammar_input,
-            grammar_cursor,
-            prefix,
-            ..
-        } = completion_context(input, "SHOW CLU".len());
-        assert_eq!(grammar_input, "SHOW ;");
-        assert_eq!(grammar_cursor, "SHOW ".len());
-        assert_eq!(prefix, "clu");
-        assert_eq!(word_end(input, "SHOW CLU".len()), "SHOW CLUSTR".len());
-    }
-
-    #[test]
-    fn keyword_completion_is_filtered_by_original_prefix() {
-        let input = "CREATE SCHE";
-        let context = completion_context(input, input.len());
-        let filtered = suggest_client_expectations(&context.grammar_input, context.grammar_cursor)
-            .into_iter()
-            .filter_map(|item| {
-                let CompletionExpectation::Literal(item) = item else {
-                    return None;
-                };
-                context.literal_range(input, &item).map(|_| item)
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(filtered, vec!["SCHEMA".to_string()]);
-    }
-
-    #[test]
-    fn phrase_completion_replaces_matching_words_around_the_cursor() {
-        let input = "TIME RA";
-        let context = completion_context(input, input.len());
-        assert_eq!(
-            context.literal_range(input, "TIME RATE"),
-            Some(0..input.len())
-        );
-
-        let input = "TIME RATE;";
-        let context = completion_context(input, 2);
-        assert_eq!(context.literal_range(input, "TIME RATE"), Some(0..9));
-
-        let input = "OTHER RA";
-        let context = completion_context(input, input.len());
-        assert_eq!(context.literal_range(input, "TIME RATE"), None);
-    }
-
-    #[test]
-    fn rebind_member_completion_finds_the_resource_across_whitespace() {
-        for input in [
-            "REBIND RESOURCE bundle TO VERSION 2 FOR HASH MAP ",
-            "REBIND\nRESOURCE\tbundle\nTO\tVERSION 2\nFOR\tHASH MAP ",
-        ] {
-            assert_eq!(
-                rebind_resource_before_for(input, input.len())
-                    .as_ref()
-                    .map(ResourceName::as_str),
-                Some("bundle")
-            );
-        }
-        assert_eq!(
-            rebind_resource_before_for("REBIND RESOURCE bundle TO VERSION 2 ", 36),
-            None
-        );
     }
 
     #[test]

@@ -1,9 +1,11 @@
-//! Reproducible component costs of preparing a native client command.
+//! Reproducible component costs of preparing a native client command, and of reading a completion
+//! with the statement grammar.
 //!
 //! Outside the layer order: a benchmark harness. Product code must not name it.
 //!
-//! - **Owns.** The command workloads and the raw timing, CPU and allocation samples of each stage a
-//!   native client runs before it sends a command, and the memory a built grammar retains.
+//! - **Owns.** The command and completion workloads, the raw timing, CPU and allocation samples of
+//!   each stage a native client runs before it sends a command and of reading a completion with a
+//!   held or a newly built grammar, and the memory a built grammar retains.
 //! - **Depends on.** The public statement grammar, the execution identities and the wire request
 //!   encoding.
 //! - **Must not know.** Sessions, transports or servers: a command's round trip is measured by the
@@ -45,6 +47,24 @@ const WORKLOADS: [Workload; 2] = [
         name: "model_batch",
         query: "CREATE SCHEMA event ( seq I64 ); CREATE RELAY events SCHEMA event UNBRANCHED; \
                 CREATE RELAY copies SCHEMA event UNBRANCHED CAPACITY 4;",
+    },
+];
+
+/// What a completion reads at the end of `input`: the grammar's expectations there, and the local
+/// path being written there, as a server reads both for one completion request.
+struct CompletionWorkload {
+    name: &'static str,
+    input: &'static str,
+}
+
+const COMPLETIONS: [CompletionWorkload; 2] = [
+    CompletionWorkload {
+        name: "relay_schema",
+        input: "CREATE RELAY events SCHEMA ",
+    },
+    CompletionWorkload {
+        name: "upload_path",
+        input: "UPLOAD RESOURCE proto VERSION '/tmp/pro",
     },
 ];
 
@@ -259,6 +279,17 @@ struct Case {
 }
 
 #[derive(Serialize)]
+struct CompletionCase {
+    name: &'static str,
+    input: &'static str,
+    /// How many expectations the grammar offers at the end of the input.
+    expectations: usize,
+    /// Whether the grammar expects a local path at the end of the input.
+    local_path: bool,
+    stages: BTreeMap<&'static str, Stage>,
+}
+
+#[derive(Serialize)]
 struct Report {
     schema_version: u32,
     profile: &'static str,
@@ -270,6 +301,7 @@ struct Report {
     /// The bytes a built grammar holds while a client keeps it.
     grammar_retained_bytes: u64,
     cases: Vec<Case>,
+    completions: Vec<CompletionCase>,
 }
 
 /// The bytes a grammar holds once built: what it allocated and did not release while building.
@@ -388,16 +420,45 @@ fn preparation_stages<'a>(
     ]
 }
 
-fn run_case(
-    workload: &Workload,
-    grammar: &ClientStatementGrammar,
-    allocation: &ThreadAllocation,
-) -> Case {
-    let parsed = grammar
-        .parse_sources(workload.query)
-        .assured("every benchmark workload is valid Plexus");
-    let domain = DomainName::parse(DOMAIN).assured("the benchmark domain is a valid name");
-    let mut stages = preparation_stages(workload, grammar, allocation, &domain);
+/// The stages a server runs for one completion of `workload`, each measuring one run of itself:
+/// reading it with the grammar it holds, and with a grammar built and released for the request.
+fn completion_stages<'a>(
+    workload: &'a CompletionWorkload,
+    grammar: &'a ClientStatementGrammar,
+    allocation: &'a ThreadAllocation,
+) -> Vec<StageRun<'a>> {
+    let cursor = workload.input.len();
+    vec![
+        StageRun {
+            name: "complete_building_a_grammar",
+            run: Box::new(move || {
+                let (sample, completion) = sampled(allocation, || {
+                    let built = ClientStatementGrammar::new();
+                    let expectations = built.suggest_expectations(workload.input, cursor);
+                    let local_path = built.local_path_fragment(workload.input, cursor);
+                    (expectations, local_path)
+                });
+                drop(completion);
+                sample
+            }),
+        },
+        StageRun {
+            name: "complete_with_held_grammar",
+            run: Box::new(move || {
+                let (sample, completion) = sampled(allocation, || {
+                    let expectations = grammar.suggest_expectations(workload.input, cursor);
+                    let local_path = grammar.local_path_fragment(workload.input, cursor);
+                    (expectations, local_path)
+                });
+                drop(completion);
+                sample
+            }),
+        },
+    ]
+}
+
+/// Runs every stage in interleaved rounds, after untimed warmup rounds, and summarizes each one.
+fn measure(stages: &mut [StageRun<'_>]) -> BTreeMap<&'static str, Stage> {
     for round in 0..WARMUP_ROUNDS {
         for offset in 0..stages.len() {
             let index = (round + offset) % stages.len();
@@ -416,11 +477,42 @@ fn run_case(
     for (stage, stage_samples) in stages.iter().zip(&samples) {
         summaries.insert(stage.name, Stage::of(stage_samples));
     }
+    summaries
+}
+
+fn run_case(
+    workload: &Workload,
+    grammar: &ClientStatementGrammar,
+    allocation: &ThreadAllocation,
+) -> Case {
+    let parsed = grammar
+        .parse_sources(workload.query)
+        .assured("every benchmark workload is valid Plexus");
+    let domain = DomainName::parse(DOMAIN).assured("the benchmark domain is a valid name");
+    let mut stages = preparation_stages(workload, grammar, allocation, &domain);
     Case {
         name: workload.name,
         query: workload.query,
         statements: parsed.len(),
-        stages: summaries,
+        stages: measure(&mut stages),
+    }
+}
+
+fn run_completion(
+    workload: &CompletionWorkload,
+    grammar: &ClientStatementGrammar,
+    allocation: &ThreadAllocation,
+) -> CompletionCase {
+    let cursor = workload.input.len();
+    let expectations = grammar.suggest_expectations(workload.input, cursor);
+    let local_path = grammar.local_path_fragment(workload.input, cursor);
+    let mut stages = completion_stages(workload, grammar, allocation);
+    CompletionCase {
+        name: workload.name,
+        input: workload.input,
+        expectations: expectations.len(),
+        local_path: local_path.is_some(),
+        stages: measure(&mut stages),
     }
 }
 
@@ -463,8 +555,12 @@ fn main() {
         .iter()
         .map(|workload| run_case(workload, &grammar, &allocation))
         .collect();
+    let completions = COMPLETIONS
+        .iter()
+        .map(|workload| run_completion(workload, &grammar, &allocation))
+        .collect();
     let report = Report {
-        schema_version: 1,
+        schema_version: 2,
         profile,
         git_commit: command_output("git", &["rev-parse", "HEAD"]),
         rustc: command_output("rustc", &["-Vv"]),
@@ -473,6 +569,7 @@ fn main() {
         rounds: ROUNDS,
         grammar_retained_bytes,
         cases,
+        completions,
     };
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).assured("the benchmark output directory is writable");

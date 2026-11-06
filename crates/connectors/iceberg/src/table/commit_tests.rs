@@ -214,7 +214,7 @@ fn mapped_schema() -> StdArc<arrow_schema::Schema> {
     ]))
 }
 
-/// A emitter over `catalog`'s fixture table that stages through `executor`.
+/// An emitter over `catalog`'s fixture table that stages through `executor`.
 async fn fixture_emitter(catalog: StdArc<dyn Catalog>, executor: Executor) -> IcebergTableEmitter {
     let table = create_table(catalog.as_ref()).await;
     IcebergTableEmitter {

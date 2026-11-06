@@ -164,7 +164,9 @@ fixed arrays; each fixed array needs a positive length. Optional and sensitive f
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
 mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; CBOR offers `integer`,
 `float`, `boolean`, `text`, `bytes`, and `array`, with native byte strings for `bytes`. AVRO offers
-`boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
+the item types `boolean`, `int`, `long`, `float`, `double`, `string`, and `bytes`, and wraps the
+picked item type in one array per added layer, building `array<item>` the way an internal field
+builds vectors and fixed arrays; a layer can be removed again. Codec field encoding controls
 select `RFC3339` or `BASE64` for explicit text interchange, as described in
 [Schemas And Codecs](schemas-and-codecs.md#codecs).
 A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
@@ -499,7 +501,18 @@ both references, takes nothing from that reply, neither its result nor its redir
 retry, and stops reading the connection. It reconnects as after a lost connection and sends the
 command again in its place under its own reference, so the leader answers with the command's own
 outcome; a Create form shows **Queued until reconnect** until then. The transaction id and
-status are replicated. If the WebSocket closes
+status are replicated. A reply that cannot be decoded or reassembled also violates the session
+contract, and so does a readable reply of a kind that does not answer its request, such as a
+domain listing under a command's request identity: a request is answered only by its own outcome,
+a rejection or a cancellation. The console checks a reply's kind before it applies anything the
+reply carries, so it takes no listing, selection, subscription, clock attachment, transaction or
+redirect from a reply of another kind and never shows it as the command's failure. It reports why
+the reply broke the contract and stops reading that connection. Every command still waiting keeps
+its whole original request and its place in the issue order, including its reference, transaction
+position, preview and uncertain-outcome retry history. The next connection restores the session before repeating those commands; a visual Create
+waits for its own recovered outcome.
+
+If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
 commit remains pending through `COMMITTING` until its exact terminal result. A
@@ -693,9 +706,21 @@ message.
 
 A restore runs outside transactions, so the form refuses while the session holds one. Every attempt
 sends the same execution reference, statement, and archive: a lost connection or an unknown outcome
-streams the archive again, from its first byte, until the leader answers. If no answer arrives
-within about ten minutes, the dialog reports the restore's outcome as unknown and names its
-execution reference.
+streams the archive again, from its first byte, until the leader answers. After about ten minutes
+of retry pauses without learning the outcome, the dialog reports it as unknown and names its
+execution reference. An unreadable reply, or a reply naming another request or execution, stops
+that restore call and likewise reports **unknown** under the restore's original reference. It
+cannot establish that the restore was refused or that nothing changed; a foreign outcome is never
+shown as this restore's result.
+
+The leader admits a restore as soon as it holds the whole archive, so once an attempt has sent the
+whole archive without an answer the console can read, or the leader has answered that the outcome
+is not known yet, the restore may have run. If the restore then ends without its outcome, because
+the browser can no longer read the file, a reply cannot be read, the leader refuses a later
+stream, or the leader no longer holds the execution reference, the dialog reports the outcome as
+unknown under that reference, with what stopped it, and never as a refusal: a refusal of a later
+stream says nothing about the earlier one. A file the browser cannot read before any attempt has
+sent the whole archive changes nothing, and the dialog reports the restore as refused.
 
 The console never renders what an archive holds beyond the summary a backup reports and the report
 a restore returns.

@@ -63,36 +63,30 @@ Scenario teardown releases every armed command pause. Fault controls are compile
 | Crash/restart | One real `nervix-server` process; `SIGKILL`; same durable store and listening addresses |
 
 
-## Performance baseline
+## Performance evidence and current probes
 
-`just client-wire-baseline` builds the web console and a normal release server binary, launches
-that binary from the debug-only scenario harness, configures a fixed two-branch graph, warms the
-command path, and writes raw evidence beneath `target/client-wire-baseline/`:
+[Client Wire 01](https://app.clickup.com/t/86bc1ahkw) retains the original measurements,
+budgets and conclusions. [Client Wire 16](https://app.clickup.com/t/86bc1ahz3) retains the
+comparative report and raw evidence, including the former repository performance report.
+[Client Wire 18](https://app.clickup.com/t/86bc8cx3h) retains the completed command-preparation
+and paired HTTP/TLS study, raw samples, tested revisions, host identity, regression alarms and
+reproduction instructions.
+
+The broad baseline instrument used for those studies was retired after Client Wire 18 completed.
+Commands in those archived reports describe their recorded revisions; they are historical
+reproduction instructions, not commands for the current checkout. The measurements qualify only
+their recorded workload, build profile and host.
+
+The focused instruments remain runnable:
 
 ```console
-just client-wire-baseline
-just client-wire-baseline 100 5 1024 target/client-wire-baseline
+just client-wire-command-cost
+just client-wire-cost
+just client-wire-binding-cost
+just client-wire-binding-host-cost
+just client-wire-tls-cost
 ```
 
-The positional settings are command/subscription/snapshot samples, upload samples, payload bytes,
-and output directory. Their defaults are `100`, `5`, `1024`, and
-`target/client-wire-baseline`. The runner rejects zero samples, more than 10,000 samples, and a
-payload above 16 MiB.
-
-The fixed workload contains:
-
-* `DESCRIBE DOMAIN` over one native gRPC bidirectional session;
-* strict typed JSON HTTP input and native gRPC Row subscription delivery, alternating concrete
-  branch keys `acme` and `beta` and validating each row's `key=<json> payload=<json>` display text;
-* domain-selection graph snapshots over an authenticated console WebSocket;
-* deterministic one-file resource archives over the native gRPC client-streaming upload;
-* one MiB ingestor quiesce capacity and the current client/server/WebSocket queue capacities.
-
-`client-wire-baseline.json` records every raw observation plus p50/p90/p99/min/max/total
-latency, the exact frame or public request and response bytes, client and server user/system CPU
-ticks, per-workload process counter snapshots, client jemalloc and server-exported jemalloc phase
-snapshots, `/proc` resident and peak resident bytes, per-workload relay queue occupancy series,
-workload parameters, queue limits, git revision and worktree state, release/debug profile, complete
-`rustc -Vv`, kernel, architecture, CPU model/count, physical memory, and clock-tick rate. The raw
-final Prometheus scrape is retained as `metrics.prom` beside it. Raw frame and WebSocket access
-exist only in this benchmark harness.
+These measure command preparation, Arrow-to-Row encoding, C ABI access, Python host costs and
+paired plaintext/TLS sessions respectively. Protocol correctness remains covered independently by
+the current regressions above and `just test-client-conformance`.

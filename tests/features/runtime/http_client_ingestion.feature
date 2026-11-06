@@ -287,7 +287,7 @@ Feature: HTTP client ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "http_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "http_notifications" leaves fault mode
     Then the relay subscription receives a payload

@@ -1561,7 +1561,7 @@ impl IcebergTableEmitterClient {
 
     /// Writes `batches`, which carry the columns of `staged`, into new Parquet data files of the
     /// table, without committing them. Each batch is laid out as the table's current columns first,
-    /// each mapped column in the column of its name, so a table changed since the sink opened is
+    /// each mapped column in the column of its name, so a table changed since the emitter opened is
     /// written as it is now or refused, naming the column it cannot take.
     async fn write_data_files(
         &mut self,

@@ -1381,11 +1381,9 @@ impl Client {
                                     request: kind,
                                 }))
                             }
-                            failure @ ClientError::ExecutionReferenceMismatch { .. } => {
-                                Err(Report::new(failure).change_context(
-                                    ClientError::RequestInterrupted { request: kind },
-                                ))
-                            }
+                            failure @ (ClientError::ExecutionReferenceMismatch { .. }
+                            | ClientError::ReplyKindMismatch { .. }) => Err(Report::new(failure)
+                                .change_context(ClientError::RequestInterrupted { request: kind })),
                             failure => Err(Report::new(failure)),
                         },
                     }
@@ -1467,10 +1465,11 @@ impl Client {
     /// expects the schema the generation it replaces announced. An opening that session refuses
     /// because the relay or its domain no longer exists, or because the relay announces another
     /// schema, ends the subscription with [`SubscriptionEvent::Ended`] as the server's end would.
-    /// An opening it refuses for another reason, or leaves unanswered, is reported as
+    /// An opening it refuses for another reason while the session stays open is reported as
     /// [`SubscriptionEvent::RestorationFailed`] with its cause and sent again after a growing wait.
-    /// A subscription the server ended is never opened again, and its [`SubscriptionEvent::Ended`]
-    /// is reported
+    /// An opening left unanswered past the request timeout ends that session and wakes the reader
+    /// to open another. A subscription the server ended is never opened again, and its
+    /// [`SubscriptionEvent::Ended`] is reported
     /// once, after the events before it, even when its session ended before it was read. With
     /// nothing to restore it waits for the next session the client opens, and delivers the events
     /// of the subscriptions opened there. A failure to open a session is returned, and the next

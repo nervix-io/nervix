@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Protocol setup, the channel or pattern subscription and Redis's confirmation of it,
 //!   the sole RESP reader and the messages it parses, its bounded message handoff, idle probes on
-//!   the same socket, and ending the reader before its source resumes another connection.
+//!   the same socket, and ending the reader before its ingestor resumes another connection.
 //! - **Depends on.** Redis's command encoder and asynchronous RESP parser, validated deadlines,
 //!   and the primitive boundary's bounded channel, task and timers.
 //! - **Must not know.** Runtime hosts, graph state, quiesce policy, branches or Plexus.
@@ -41,7 +41,7 @@ use super::{ConnectedStream, RedisPubSubIngestorError, RedisPubSubIngestorResult
 
 type RedisDecoder = Decoder<AnySendSyncPartialState, PointerOffset<[u8]>>;
 
-/// The source retains this handle while the reader owns the socket and a bounded sender.
+/// The ingestor retains this handle while the reader owns the socket and a bounded sender.
 pub(super) struct RedisSubscription {
     messages: mpsc::Receiver<DeliveredMessage>,
     reader: AbortOnDropHandle<RedisPubSubIngestorResult<()>>,
@@ -95,7 +95,7 @@ impl RedisSubscription {
         match self.reader.await {
             Ok(outcome) => {
                 outcome.discarded(
-                    "terminal source closure ends intake; read outcomes are owed only while \
+                    "terminal ingestor closure ends intake; read outcomes are owed only while \
                      intake is active",
                 );
                 Ok(())
@@ -475,7 +475,7 @@ mod tests {
             }
         }
 
-        /// Confirms the subscription to `pattern` a source asks for.
+        /// Confirms the subscription to `pattern` an ingestor asks for.
         async fn psubscribe(&mut self, pattern: &str) {
             self.command(&["PSUBSCRIBE", pattern]).await;
             let mut frame = vec![self.subscription_reply_marker()];
@@ -519,7 +519,7 @@ mod tests {
             self.stream
                 .read_to_end(&mut rest)
                 .await
-                .assured("the source closes its in-memory transport without an I/O error");
+                .assured("the ingestor closes its in-memory transport without an I/O error");
         }
     }
 

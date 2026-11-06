@@ -710,7 +710,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &task.route.domain,
                 &task.route.error_relay,
-                Unit::Single,
+                Unit::SINGLE,
                 task.target.services.clone(),
                 RelayRetention::default(),
             )
@@ -909,7 +909,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &domain,
                 &route.error_relay,
-                Unit::Single,
+                Unit::SINGLE,
                 target.services.clone(),
                 RelayRetention::default(),
             )
@@ -976,7 +976,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &domain,
                 &route.error_relay,
-                Unit::Single,
+                Unit::SINGLE,
                 target.services.clone(),
                 RelayRetention::default(),
             )

@@ -463,6 +463,44 @@ async fn a_restoration_whose_exchange_ends_unanswered_is_sent_again_on_the_next_
 }
 
 #[nervix_primitives::test(start_paused = true)]
+async fn an_unanswered_subscription_restoration_wakes_the_waiting_reader() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    loopback.open("live", 1).await;
+    loopback.replace_exchange().await;
+    let interrupted = loopback
+        .client
+        .next_subscription()
+        .await
+        .assured("the lost session reports the subscription's gap");
+    assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
+    let restore = loopback.next_request().await;
+    assert!(matches!(restore.request, ClientRequest::Subscribe(_)));
+
+    let client = loopback.client.clone();
+    let reading = nervix_primitives::task::spawn(async move { client.next_subscription().await });
+    let deadline = loopback
+        .client
+        .inner
+        .connector
+        .request_timeout()
+        .checked_add(DEADLINE)
+        .assured("two test deadlines add within Duration's range");
+    let read = nervix_primitives::time::timeout(deadline, reading)
+        .await
+        .assured("the unanswered reopening wakes the subscription reader")
+        .assured("the subscription reader completes");
+    let failure = read.expect_err("the client knows no server to open another session on");
+    assert!(
+        matches!(failure.current_context(), crate::ClientError::SessionClosed),
+        "{failure:?}"
+    );
+    assert_eq!(
+        loopback.client.subscription_lifecycle(&name("live")),
+        Some(SubscriptionLifecycle::Interrupted(subscription("live", 1)))
+    );
+}
+
+#[nervix_primitives::test(start_paused = true)]
 async fn a_rejected_restoration_is_reported_and_sent_again() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback.open("live", 1).await;

@@ -29,10 +29,11 @@ use nervix_models::{
     CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
     CreateReorderer, CreateWindowProcessor, EmitterBody, FieldPath, HeaderModel,
     IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor,
-    KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, PlacementName,
-    PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion,
-    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection, expression_to_plexus,
+    KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, NodeUnitRef,
+    PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName,
+    RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
+    ResourceUsage, ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection,
+    expression_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -265,6 +266,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
     name: impl Into<ModelName>,
     ingestor: &CreateIngestor,
     ingestor_node: &ScheduledNode,
+    unit: Unit,
     summary: &RuntimeIngestorDescribe,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     let name = name.into();
@@ -272,6 +274,26 @@ pub(in crate::application) fn format_ingestor_describe_output(
         format!("ingestor: {}", name.as_str()),
         "kind: INGESTOR".to_string(),
     ];
+    if let nervix_models::UnitKind::Instance(index) = unit.kind() {
+        let owner = match ingestor_node
+            .unit(unit)
+            .and_then(|placement| placement.execution_node())
+        {
+            Some(node) => node.as_str(),
+            None => "-",
+        };
+        let status = if summary.quiesce_state.is_some() {
+            "quiesced"
+        } else if summary.running {
+            "running"
+        } else {
+            "stopped"
+        };
+        lines.push(format!(
+            "instance {index}: node={owner} status={status} ready={}",
+            summary.ready
+        ));
+    }
     lines.extend(ingestor.input.entity_presentation().describe_lines());
     lines.push("batch: none".to_owned());
     let mut flush = Vec::new();
@@ -322,7 +344,10 @@ pub(in crate::application) fn format_ingestor_describe_output(
     lines.extend([
         format!(
             "owner: {}",
-            match ingestor_node.execution_node() {
+            match ingestor_node
+                .unit(unit)
+                .and_then(|placement| placement.execution_node())
+            {
                 Some(owner) => owner.as_str(),
                 None => "-",
             }
@@ -406,7 +431,6 @@ pub(in crate::application) fn format_ingestor_describe_output(
 
     if let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
         offset_mode,
-        instances,
         ..
     }))) = ingestor.input.transport_entity()
     {
@@ -438,7 +462,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
         } else if let KafkaOffsetMode::Domain = offset_mode {
             lines.push("kafka observed partitions: -".to_string());
             lines.push("kafka rebalance epoch: 0".to_string());
-            for instance_idx in 0..instances.get() {
+            for instance_idx in 0..ingestor_node.units.len() {
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
@@ -636,7 +660,7 @@ fn format_schedule_placement_lines(scheduled_node: Option<&ScheduledNode>) -> Ve
 fn format_partition_placement_lines(scheduled_node: &ScheduledNode) -> Vec<String> {
     let mut lines = vec![format!("partitions: {}", scheduled_node.units.len())];
     for (unit, scheduled) in &scheduled_node.units {
-        let Unit::Partition(partition) = unit else {
+        let nervix_models::UnitKind::Partition(partition) = unit.kind() else {
             continue;
         };
         let owner = match scheduled_node.unit_execution_node(*unit) {
@@ -1413,6 +1437,32 @@ pub(in crate::application) fn format_placement_runtime_nodes(nodes: &[NodeRef]) 
     format_placement_runtime_nodes_in_context(nodes, nodes)
 }
 
+pub(in crate::application) fn format_placement_unit_nodes(units: &[NodeUnitRef]) -> String {
+    let context = units
+        .iter()
+        .map(|member| member.node.clone())
+        .collect::<Vec<_>>();
+    units
+        .iter()
+        .map(|member| {
+            format!(
+                "{}{}",
+                format_placement_runtime_node(&member.node, &context),
+                member.unit.label_suffix()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(in crate::application) fn placement_unit_members_equal(
+    left: &[NodeUnitRef],
+    right: &[NodeUnitRef],
+) -> bool {
+    let right = right.iter().collect::<HashSet<_>>();
+    left.len() == right.len() && left.iter().all(|member| right.contains(member))
+}
+
 pub(in crate::application) fn format_placement_runtime_nodes_in_context(
     nodes: &[NodeRef],
     context: &[NodeRef],
@@ -1576,23 +1626,19 @@ pub(in crate::application) fn placement_claim_owner(rules: &[PlacementName]) -> 
     }
 }
 
-pub(in crate::application) fn placement_group_members_equal(
-    left: &[NodeRef],
-    right: &[NodeRef],
-) -> bool {
-    let right = right.iter().collect::<HashSet<_>>();
-    left.len() == right.len() && left.iter().all(|member| right.contains(member))
-}
-
 pub(in crate::application) fn placement_group_host<'a>(
     schedule: Option<&'a nervix_models::DomainSchedule>,
     members: &[NodeRef],
 ) -> Option<&'a ClusterNodeName> {
     let schedule = schedule?;
-    let group = schedule
-        .placement_groups
-        .iter()
-        .find(|group| placement_group_members_equal(&group.members, members))?;
+    let group = schedule.placement_groups.iter().find(|group| {
+        let logical = group
+            .members
+            .iter()
+            .map(|member| member.node.clone())
+            .collect::<HashSet<_>>();
+        logical.len() == members.len() && members.iter().all(|member| logical.contains(member))
+    })?;
     group.primary_node.as_ref()
 }
 
@@ -1797,9 +1843,14 @@ mod tests {
                 panic!("the fixture constructs an ingestor");
             };
 
-            let described =
-                format_ingestor_describe_output(&ingestor.name, ingestor, &scheduled, &summary)
-                    .assured("the current ingestor configuration renders");
+            let described = format_ingestor_describe_output(
+                &ingestor.name,
+                ingestor,
+                &scheduled,
+                Unit::SINGLE,
+                &summary,
+            )
+            .assured("the current ingestor configuration renders");
 
             assert!(
                 described.lines().any(|candidate| candidate == line),

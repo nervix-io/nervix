@@ -567,7 +567,7 @@ mod tests {
             },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("filter").expect("valid identifier"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: BranchKey::from_fields([(
                 FieldName::parse("tenant").expect("valid identifier"),
                 RuntimeValue::String("acme".to_string()),

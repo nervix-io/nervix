@@ -746,14 +746,14 @@ table PartitionUnit {
 
 /// One instance of a node that runs several instances.
 table InstanceUnit {
-  instance: uint;
+  instance: ulong;
 }
 
 /// The placement unit of a scheduled node that an owner places and moves.
 union PlacementUnit {
   SingleUnit,
   PartitionUnit,
-  InstanceUnit
+  InstanceUnit = 4
 }
 
 table OwnershipMoveImpact {

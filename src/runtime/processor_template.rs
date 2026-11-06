@@ -295,6 +295,40 @@ impl RelayProcessorOperationNode {
                 Ok(())
             }
             (
+                Self::StatefulInferencer {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                    compiled_input_program,
+                    prepared,
+                    ..
+                },
+                RelayProcessorOperationTemplate::StatefulInferencer {
+                    output_routes: desired_outputs,
+                    resource: desired_resource,
+                    resource_version: desired_version,
+                    file: desired_file,
+                    compiled_input_program: desired_program,
+                    prepared: desired_prepared,
+                    ..
+                },
+            ) => {
+                let desired = desired_prepared
+                    .as_ref()
+                    .ok_or_else(|| Report::new(ProcessorTemplateError::InferencerSession))?;
+                if resource != desired_resource
+                    || resource_version != desired_version
+                    || file != desired_file
+                    || !prepared.same_binding(desired)
+                {
+                    return Err(Report::new(ProcessorTemplateError::InferencerSession));
+                }
+                output_routes.apply_template(desired_outputs)?;
+                *compiled_input_program = desired_program.clone();
+                Ok(())
+            }
+            (
                 Self::WasmProcessor {
                     output_routes,
                     resource,
@@ -631,6 +665,28 @@ impl RelayProcessorTemplate {
                         session: None,
                     }
                 }
+                RelayProcessorOperationTemplate::StatefulInferencer {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                    compiled_input_program,
+                    prepared,
+                    ..
+                } => {
+                    let prepared = prepared
+                        .as_ref()
+                        .ok_or_else(|| Report::new(ProcessorTemplateError::InferencerSession))?;
+                    RelayProcessorOperationNode::StatefulInferencer {
+                        output_routes: Self::instantiate_outputs(output_routes),
+                        resource: resource.clone(),
+                        resource_version: *resource_version,
+                        file: file.clone(),
+                        compiled_input_program: compiled_input_program.clone(),
+                        session: Box::new(prepared.instantiate()),
+                        prepared: prepared.clone(),
+                    }
+                }
                 RelayProcessorOperationTemplate::WasmProcessor {
                     output_routes,
                     resource,
@@ -683,6 +739,41 @@ impl RelayProcessorTemplate {
 }
 
 impl BranchInstanceTemplate {
+    pub(super) async fn prepare_stateful_inferencers(
+        &mut self,
+        executor: &nervix_execution::Executor,
+        udfs: Option<&UdfExecutor>,
+    ) -> error_stack::Result<(), planning::PlanningError> {
+        for processor in self.processors.values_mut() {
+            nervix_primitives::task::consume_budget().await;
+            if let RelayProcessorOperationTemplate::StatefulInferencer {
+                inputs,
+                output_schema,
+                state,
+                prepared,
+                ..
+            } = &mut processor.operation
+            {
+                *prepared = Some(Arc::new(
+                    inferencer::PreparedStatefulInference::prepare(
+                        executor,
+                        inputs,
+                        output_schema,
+                        state,
+                        udfs,
+                    )
+                    .await
+                    .change_context_lazy(|| {
+                        planning::PlanningError::PrepareInferencerState {
+                            node: processor.processor.clone(),
+                        }
+                    })?,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn prepare_wasm_processors(
         &mut self,
         runtime: &Runtime,
@@ -784,20 +875,20 @@ impl BranchInstanceTemplate {
                 .inner
                 .metrics
                 .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                    unit: self.owner.unit,
                     domain,
-                    kind: self.entity_kind,
-                    node: &ModelName::from(&self.source),
+                    kind: self.owner.node.kind,
+                    node: &ModelName::from(&self.owner.node.identifier),
                     relay: &self.root_relay,
                     physical_node_id,
                     direction: "sent",
                     branch,
                 });
         let source_input_metrics = match branch {
-            Some(branch) if self.entity_kind == ModelKind::Ingestor => {
-                Some(runtime.inner.metrics.resolve_branch_node_message_metrics(
+            Some(branch) if self.owner.node.kind == ModelKind::Ingestor => {
+                Some(runtime.inner.metrics.resolve_unit_branch_message_metrics(
                     domain,
-                    self.entity_kind,
-                    &ModelName::from(&self.source),
+                    &self.owner,
                     physical_node_id,
                     "received",
                     branch,
@@ -837,6 +928,7 @@ impl BranchInstanceTemplate {
                     .map(|output| {
                         let metrics = runtime.inner.metrics.resolve_node_batch_metrics(
                             NodeBatchMetricsSpec {
+                                unit: Unit::SINGLE,
                                 domain,
                                 kind: processor.kind,
                                 node: &processor.processor,
@@ -869,8 +961,7 @@ impl BranchInstanceTemplate {
             routing: runtime.domain_routing_cache(domain),
             routing_snapshot: None,
             domain_clock,
-            entity_kind: self.entity_kind,
-            source: self.source.clone(),
+            owner: self.owner.clone(),
             root_relay: self.root_relay.clone(),
             relays,
             materialized_states,
@@ -878,7 +969,7 @@ impl BranchInstanceTemplate {
             processors,
             error_policies: self.error_policies.clone(),
             metrics: BranchRuntimeMetrics {
-                source_dirty: runtime.branch_metrics_mark(domain, self.entity_kind, &self.source),
+                source_dirty: runtime.unit_branch_metrics_mark(domain, &self.owner),
                 processor_dirty,
                 source: source_metrics,
                 source_input: source_input_metrics,

@@ -156,18 +156,25 @@ pub struct OptionDeclaration {
 }
 
 impl OptionDeclaration {
-    /// `INSTANCES <n>`: how many consumers read the entity together, one where a statement leaves
-    /// it out.
+    /// Independent consumers by count, or one consumer for each constructed branch partition.
     pub const INSTANCES: Self = Self {
         keywords: "INSTANCES",
         presence: OptionPresence::Optional { default: Some("1") },
-        form: OptionForm::Value {
-            value: OptionValue::Count,
-            example: "INSTANCES 2",
-        },
+        form: OptionForm::Choice(&[
+            OptionChoice {
+                name: "<count>",
+                value: Some(OptionValue::Count),
+                example: "INSTANCES 2",
+            },
+            OptionChoice {
+                name: "PER PARTITION",
+                value: None,
+                example: "INSTANCES PER PARTITION",
+            },
+        ]),
     };
 
-    /// `EVERY <duration>`: the domain-time cadence on which a polled source reads.
+    /// `EVERY <duration>`: the domain-time cadence on which a polled ingestor reads.
     pub const EVERY: Self = Self {
         keywords: "EVERY",
         presence: OptionPresence::Required,

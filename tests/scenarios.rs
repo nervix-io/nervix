@@ -212,6 +212,7 @@ mod clickhouse_connections;
 mod client_consumers;
 mod client_foreign_execution;
 mod client_producers;
+mod client_reply_kind;
 mod client_traffic;
 mod common;
 mod database_batches;
@@ -227,6 +228,7 @@ mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
+mod ingestor_instances;
 mod kafka_metadata;
 mod materialized_state_inspection;
 mod mqtt_fixtures;
@@ -255,9 +257,12 @@ mod restarted_voter;
 mod session_protocol;
 mod session_tls;
 mod standalone_transaction;
+mod subscription_restoration;
 mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
+mod web_console_restore_faults;
+mod web_console_unreadable;
 mod websocket_lifecycle;
 mod wide_row_intake;
 
@@ -506,6 +511,8 @@ struct ScenarioWorld {
     saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
     /// How the last restore stream a scenario shaped itself ended.
     last_restore_end: Option<crate::backup::restore::RestoreStreamEnd>,
+    /// The real restore whose reply a bounded gRPC peer made unreadable to its client.
+    restore_codec_result: Option<crate::backup::restore_codec::Observation>,
     /// A real restore whose test peer substituted its reply, and its exact-reference recovery.
     restore_reply_validation: Option<Box<backup::restore_reply_validation::RestoreValidation>>,
     /// A restore stream a scenario sent in the background.
@@ -627,12 +634,24 @@ struct ScenarioWorld {
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
+    /// When the scenario last released a held application progress path: progress reports or
+    /// revision replies.
+    progress_hold_released_at: Option<Instant>,
+    /// When a client's background Plexus execution finished, which its task records itself.
+    background_plexus_finished_at: Option<StdArc<OnceLock<Instant>>>,
+    /// The process incarnation each node answered its application progress under when the
+    /// scenario saved it.
+    saved_application_progress_incarnations:
+        BTreeMap<String, nervix_models::ClusterNodeIncarnation>,
     /// Human-readable references in scenarios map to UUIDv7 identities so retries retain one
     /// stable creation timestamp while feature text remains legible.
     command_execution_references: BTreeMap<String, String>,
     mqtt_ingestors_by_domain: BTreeMap<String, BTreeSet<String>>,
     avro_http_field_order: Vec<String>,
     avro_http_optional_fields: BTreeSet<String>,
+    /// The type each declared AVRO wire field has, so a posted or expected payload writes every
+    /// field, array items included, as its wire schema declares.
+    avro_http_field_types: BTreeMap<String, nervix_models::AvroType>,
     fault_injection: FaultInjection,
     command_probes: CommandProbes,
     consensus_commit_delays: BTreeMap<String, Duration>,
@@ -803,6 +822,7 @@ impl fmt::Debug for ScenarioWorld {
                 "avro_http_optional_field_count",
                 &self.avro_http_optional_fields.len(),
             )
+            .field("avro_http_field_types", &self.avro_http_field_types)
             .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
             .field("saved_raft_log_heads", &self.saved_raft_log_heads)
             .field("transaction_qualification", &self.transaction_qualification)
@@ -2405,11 +2425,40 @@ async fn then_http_receiver_request_carries_encoded_payload(
         &payload,
         &world.avro_http_field_order,
         &world.avro_http_optional_fields,
+        &world.avro_http_field_types,
     );
     let request = captured_http_request(world, &name, position);
     assert_eq!(
         request.body, expected,
         "HTTP receiver '{name}' request {position} must carry the complete {wire_format} payload"
+    );
+}
+
+/// Compare a captured CBOR body, as the CBOR data item it decodes to, with the docstring's map in
+/// which every text element of `field` is the base64 spelling of a CBOR byte string. CBOR writes a
+/// map with a definite or an indefinite length; both are the same item.
+#[then(
+    expr = "HTTP receiver {string} request {int} carries this CBOR payload with byte string \
+            elements in field {string}"
+)]
+async fn then_http_receiver_request_carries_cbor_byte_string_elements(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    field: String,
+    #[step] step: &Step,
+) {
+    let payload = expand_placeholders(world, docstring(step));
+    let expected = cbor_fixture_with_byte_string_elements(&payload, &field);
+    let request = captured_http_request(world, &name, position);
+    let received: ciborium::value::Value = ciborium::from_reader(request.body.as_slice())
+        .unwrap_or_else(|error| {
+            panic!("HTTP receiver '{name}' request {position} must carry one CBOR item: {error}")
+        });
+    assert_eq!(
+        received, expected,
+        "HTTP receiver '{name}' request {position} must carry the complete CBOR payload with byte \
+         string elements in '{field}'"
     );
 }
 
@@ -4139,20 +4188,6 @@ async fn then_server_process_cluster_has_schema(world: &mut ScenarioWorld, schem
     world.last_command_output = Some(output);
 }
 
-#[given("a release nervix-server process is started for the client-wire baseline")]
-async fn given_release_server_process_is_started_for_client_wire_baseline(
-    world: &mut ScenarioWorld,
-) {
-    let executable = std::env::var_os("NERVIX_CLIENT_WIRE_BASELINE_SERVER")
-        .verified("the client-wire baseline recipe supplies its release server executable");
-    start_ready_server_process_with_launch(
-        world,
-        ServerProcessLaunch::Executable(PathBuf::from(executable)),
-        &[],
-    )
-    .await;
-}
-
 #[given(expr = "a nervix-server process is started with drain timeout {string}")]
 async fn given_nervix_server_process_is_started_with_drain_timeout(
     world: &mut ScenarioWorld,
@@ -4720,35 +4755,6 @@ async fn when_server_process_is_restarted_from_existing_database(world: &mut Sce
         .restart()
         .await
         .unwrap_or_else(|error| panic!("failed to restart nervix-server: {error}"));
-}
-
-#[when("the current client-wire baseline is captured")]
-async fn when_current_client_wire_baseline_is_captured(world: &mut ScenarioWorld) {
-    let domain = world.domain.clone();
-    let test_id = world.test_id.clone();
-    let process = world
-        .server_process
-        .as_ref()
-        .verified("the preceding step started a nervix-server process");
-    let artifact = crate::common::client_wire_baseline::capture(process, &domain, &test_id)
-        .await
-        .unwrap_or_else(|error| panic!("client-wire baseline failed: {error:#}"));
-    world.placeholders.insert(
-        "client_wire_baseline_artifact".to_string(),
-        artifact.display().to_string(),
-    );
-}
-
-#[then("the client-wire baseline artifact exists")]
-fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
-    let artifact = world
-        .placeholders
-        .get("client_wire_baseline_artifact")
-        .verified("the preceding step captured the baseline artifact");
-    assert!(
-        Path::new(artifact).is_file(),
-        "client-wire baseline artifact was not written to {artifact}"
-    );
 }
 
 #[given(
@@ -10612,7 +10618,7 @@ async fn given_node_has_large_resource_file(
 }
 
 /// The generated ONNX models a fixture resource directory carries under `models/`.
-const ONNX_FIXTURE_MODELS: [&str; 7] = [
+const ONNX_FIXTURE_MODELS: [&str; 9] = [
     "simple_score.onnx",
     "alternate_score.onnx",
     "batch_score.onnx",
@@ -10620,6 +10626,8 @@ const ONNX_FIXTURE_MODELS: [&str; 7] = [
     "matrix_identity.onnx",
     "scalar_identity.onnx",
     "f64_score.onnx",
+    "running_sum.onnx",
+    "checked_running_sum.onnx",
 ];
 
 fn onnx_fixture_path(fixture: &str) -> PathBuf {
@@ -10641,6 +10649,14 @@ async fn place_onnx_fixture_resource_directory(
         .cluster()
         .node_base_dir(node_id)
         .expect("node base dir should exist");
+    place_onnx_fixture_resource_directory_at(world, base_dir, placeholder).await
+}
+
+async fn place_onnx_fixture_resource_directory_at(
+    world: &mut ScenarioWorld,
+    base_dir: PathBuf,
+    placeholder: &str,
+) -> PathBuf {
     let resource_dir = base_dir.join("fixtures").join(placeholder);
     let resource_dir = crate::common::runner_offload::off_the_runner(move || {
         ensure_onnx_runtime_loaded();
@@ -10668,6 +10684,31 @@ async fn place_onnx_fixture_resource_directory(
         .placeholders
         .insert(placeholder.to_string(), resource_dir.display().to_string());
     resource_dir
+}
+
+#[given(expr = "an ONNX fixture resource directory {string} exists")]
+async fn given_onnx_fixture_resource_directory_exists(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    if world.temp_root.is_none() {
+        world.temp_root = Some(
+            crate::common::runner_offload::off_the_runner(|| {
+                tempfile::Builder::new()
+                    .prefix("nervix-inference-fixtures-")
+                    .tempdir()
+                    .expect("the scenario owns its fixture root")
+            })
+            .await,
+        );
+    }
+    let base_dir = world
+        .temp_root
+        .as_ref()
+        .expect("the fixture root was initialized")
+        .path()
+        .to_path_buf();
+    place_onnx_fixture_resource_directory_at(world, base_dir, &placeholder).await;
 }
 
 #[given(expr = "node {string} has ONNX fixture resource directory {string}")]
@@ -12645,9 +12686,230 @@ async fn when_application_revision_responses_are_released(
     node_id: String,
 ) {
     let node_id = expand_placeholders(world, &node_id);
+    world.progress_hold_released_at = Some(Instant::now());
     world
         .cluster()
         .release_application_revision_responses_from(&node_id);
+}
+
+#[given(expr = "application progress reports from node {string} pause before sending")]
+async fn given_application_progress_reports_are_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster()
+        .pause_application_progress_reports_from(&node_id);
+}
+
+#[then(expr = "within {string} the application progress report pause on node {string} is reached")]
+async fn then_application_progress_report_pause_is_reached(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let bound = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::timeout(
+        bound,
+        world
+            .cluster()
+            .wait_for_application_progress_report_pause(&node_id),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "no application progress report from '{node_id}' reached its pause within {duration}: \
+             {error}"
+        )
+    });
+}
+
+#[when(expr = "application progress reports from node {string} are released")]
+async fn when_application_progress_reports_are_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.progress_hold_released_at = Some(Instant::now());
+    world
+        .cluster()
+        .release_application_progress_reports_from(&node_id);
+}
+
+#[then(expr = "within {string} the background Plexus execution succeeds after the release")]
+async fn then_background_plexus_execution_succeeds_after_the_release(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let bound = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let released_at = world
+        .progress_hold_released_at
+        .verified("a preceding step released a held application progress path");
+    let finished_at = world
+        .background_plexus_finished_at
+        .take()
+        .verified("a preceding step started a timed background Plexus execution");
+    let task = world
+        .background_plexus
+        .take()
+        .verified("a preceding step started a background Plexus execution");
+    let output = nervix_primitives::time::timeout(bound, task)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the background Plexus execution did not finish within {duration}: {error}")
+        })
+        .assured("the background Plexus task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("the background Plexus execution failed: {error}"));
+    let finished_at = *finished_at
+        .get()
+        .verified("the background task records when it finished before it returns");
+    assert!(
+        finished_at >= released_at,
+        "the background Plexus execution finished {:?} before the held progress path was \
+         released, so something other than the released path completed it",
+        released_at.saturating_duration_since(finished_at)
+    );
+    append_cucumber_log_line(&format!(
+        "background Plexus execution finished {:?} after the held progress path was released",
+        finished_at.saturating_duration_since(released_at)
+    ));
+    world.last_command_output = Some(output);
+}
+
+/// Asks `querier` for the application progress of `target`, as `querier`'s revision barriers
+/// read it.
+async fn query_application_progress(
+    world: &ScenarioWorld,
+    querier: &str,
+    target: &str,
+) -> Result<nervix_interconnect::ApplicationProgress, String> {
+    let querier = crate::common::cluster::node_name(querier);
+    let target = crate::common::cluster::node_name(target);
+    match world
+        .fault_injection
+        .query_application_progress(&querier, target)
+        .await
+    {
+        Ok(answer) => Ok(answer),
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
+/// Whether `answer` reports every phase at `revision`, the runtime revision its reference node
+/// made ready, with an authoritative revision at least that runtime revision.
+fn answers_ready_revision(
+    answer: &nervix_interconnect::ApplicationProgress,
+    revision: u64,
+) -> bool {
+    let Some(authoritative) = answer.authoritative else {
+        return false;
+    };
+    authoritative >= revision
+        && answer.runtime_prepared == Some(revision)
+        && answer.runtime_ready == Some(revision)
+}
+
+#[then(
+    expr = "within {string} node {string} answers node {string} the revisions node {string} made \
+            ready"
+)]
+async fn then_node_answers_the_revisions_another_node_made_ready(
+    world: &mut ScenarioWorld,
+    duration: String,
+    target: String,
+    querier: String,
+    reference: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let querier = expand_placeholders(world, &querier);
+    let reference = expand_placeholders(world, &reference);
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let reference_answer = query_application_progress(world, &reference, &reference).await;
+        let target_answer = query_application_progress(world, &querier, &target).await;
+        if let (Ok(reference_answer), Ok(target_answer)) = (&reference_answer, &target_answer)
+            && let Some(revision) = reference_answer.runtime_ready
+            && target_answer.identity.node_id().as_str() == target
+            && answers_ready_revision(target_answer, revision)
+        {
+            append_cucumber_log_line(&format!(
+                "node '{target}' answered node '{querier}' {target_answer:?} at the runtime \
+                 revision {revision} node '{reference}' made ready"
+            ));
+            return;
+        }
+        let observation = format!("reference {reference_answer:?}, answer {target_answer:?}");
+        assert!(
+            Instant::now() < deadline,
+            "node '{target}' did not answer node '{querier}' the revisions node '{reference}' \
+             made ready within {duration}; last observation: {observation}"
+        );
+        nervix_primitives::time::sleep(LEADER_POLL_INTERVAL).await;
+    }
+}
+
+#[when(expr = "the application progress incarnation node {string} answers node {string} is saved")]
+async fn when_application_progress_incarnation_is_saved(
+    world: &mut ScenarioWorld,
+    target: String,
+    querier: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let querier = expand_placeholders(world, &querier);
+    let answer = query_application_progress(world, &querier, &target)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("node '{querier}' could not query node '{target}' for its progress: {error}")
+        });
+    world
+        .saved_application_progress_incarnations
+        .insert(target, answer.identity.incarnation());
+}
+
+#[then(
+    expr = "within {string} node {string} answers node {string} a new incarnation that prepared \
+            and readied no runtime revision"
+)]
+async fn then_node_answers_a_new_incarnation_without_runtime_progress(
+    world: &mut ScenarioWorld,
+    duration: String,
+    target: String,
+    querier: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let querier = expand_placeholders(world, &querier);
+    let previous = *world
+        .saved_application_progress_incarnations
+        .get(&target)
+        .unwrap_or_else(|| panic!("a preceding step saved the incarnation of node '{target}'"));
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let answer = query_application_progress(world, &querier, &target).await;
+        if let Ok(answer) = &answer
+            && answer.identity.incarnation() != previous
+        {
+            assert_eq!(
+                (answer.runtime_prepared, answer.runtime_ready),
+                (None, None),
+                "node '{target}' answered under its new incarnation {:?} a runtime phase, while \
+                 its runtime preparation is held: {answer:?}",
+                answer.identity.incarnation()
+            );
+            append_cucumber_log_line(&format!(
+                "node '{target}' answered node '{querier}' under its new incarnation: {answer:?}"
+            ));
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{target}' did not answer node '{querier}' under a new incarnation within \
+             {duration}; last observation: {answer:?}"
+        );
+        nervix_primitives::time::sleep(LEADER_POLL_INTERVAL).await;
+    }
 }
 
 #[when(expr = "application health probes from node {string} to node {string} fail")]
@@ -13017,7 +13279,7 @@ async fn when_leader_takes_long_to_release_shutdown_drain_cordon(
 }
 
 #[given(expr = "the transport of ingestor {string} takes {string} to confirm its acknowledgements")]
-async fn given_source_confirmation_delay(
+async fn given_ingestor_confirmation_delay(
     world: &mut ScenarioWorld,
     ingestor: String,
     delay: String,
@@ -13026,7 +13288,7 @@ async fn given_source_confirmation_delay(
     let ingestor = world.ingestor_dispatch_ref(&ingestor);
     world
         .fault_injection
-        .delay_source_confirmation(ingestor, delay);
+        .delay_ingestor_confirmation(ingestor, delay);
 }
 
 /// Every read of the junction's materialized dependencies waits this long first, as a read slow to
@@ -13393,6 +13655,61 @@ async fn when_consensus_connectivity_for_node_is_restored(
     world
         .fault_injection
         .restore_consensus_connectivity(&crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "the promotion of node {string} will be interrupted after its joint entry applies")]
+async fn given_voter_promotion_will_be_interrupted(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .interrupt_voter_promotion(crate::common::cluster::node_name(&node_id))
+        .await;
+}
+
+#[when(expr = "node {string} starts joining without waiting for voter convergence")]
+async fn when_node_starts_joining_without_voter_convergence(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .add_node_without_waiting_for_voters(&node_id)
+        .await
+        .expect("the joining node did not start");
+}
+
+#[then(expr = "the promotion of node {string} was interrupted in the applied joint configuration")]
+async fn then_promotion_was_interrupted_in_applied_joint_configuration(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let joining = crate::common::cluster::node_name(&node_id);
+    let witness = nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(witness) = world.fault_injection.interrupted_membership(&joining).await {
+                break witness;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the promotion did not reach its controlled interruption");
+    let node = crate::common::cluster::node_name;
+    assert_eq!(
+        witness.configurations,
+        vec![
+            BTreeSet::from([node("node-1"), node("node-2")]),
+            BTreeSet::from([node("node-1"), node("node-2"), node("node-3")]),
+        ],
+        "the refusal must leave both actual quorum configurations in the applied log"
+    );
+    assert!(
+        witness.log_index > 0,
+        "the joint configuration must have an applied log entry"
+    );
 }
 
 #[when(expr = "node {string} is added to the cluster")]
@@ -14128,6 +14445,73 @@ async fn given_transaction_commit_pause(
         crate::common::cluster::node_name(&node_id),
         world.domain.clone(),
         completed_statements,
+    );
+}
+
+#[given(
+    expr = "explicit COMMIT for transaction {string} on node {string} pauses after an execution \
+            error"
+)]
+async fn given_explicit_commit_failure_pause(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    node_id: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_explicit_commit_failure(crate::common::cluster::node_name(&node_id), transaction_id);
+}
+
+#[then(
+    expr = "the explicit COMMIT failure pause for transaction {string} on node {string} is reached"
+)]
+async fn then_explicit_commit_failure_pause_is_reached(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    node_id: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        TRANSACTION_COMMIT_PAUSE_TIMEOUT,
+        world.fault_injection.wait_for_explicit_commit_failure(
+            &crate::common::cluster::node_name(&node_id),
+            &transaction_id,
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "explicit COMMIT for transaction '{transaction_id}' did not reach its failed attempt \
+             boundary on '{node_id}': {error}"
+        )
+    });
+    let background = world
+        .background_plexus
+        .as_ref()
+        .verified("the preceding step started the COMMIT in the background");
+    assert!(
+        !background.is_finished(),
+        "the held COMMIT returned before its failed attempt was released"
+    );
+}
+
+#[when(
+    expr = "the explicit COMMIT failure pause for transaction {string} on node {string} is \
+            released"
+)]
+async fn when_explicit_commit_failure_pause_is_released(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    node_id: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let node_id = expand_placeholders(world, &node_id);
+    world.fault_injection.release_explicit_commit_failure(
+        &crate::common::cluster::node_name(&node_id),
+        &transaction_id,
     );
 }
 
@@ -15935,6 +16319,7 @@ fn encode_http_payload_for_codec(
     payload: &str,
     avro_field_order: &[String],
     avro_optional_fields: &BTreeSet<String>,
+    avro_field_types: &BTreeMap<String, nervix_models::AvroType>,
 ) -> Vec<u8> {
     let json_value = serde_json::from_str::<serde_json::Value>(payload).unwrap_or_else(|error| {
         panic!("http payload must be valid JSON for {wire_format}: {error}")
@@ -15943,7 +16328,12 @@ fn encode_http_payload_for_codec(
     match wire_format.to_ascii_uppercase().as_str() {
         "JSON" => serde_json::to_vec(&json_value)
             .unwrap_or_else(|error| panic!("failed to encode JSON payload: {error}")),
-        "AVRO" => encode_avro_http_payload(&json_value, avro_field_order, avro_optional_fields),
+        "AVRO" => encode_avro_http_payload(
+            &json_value,
+            avro_field_order,
+            avro_optional_fields,
+            avro_field_types,
+        ),
         "CBOR" => {
             let mut encoded = Vec::new();
             ciborium::into_writer(&json_value, &mut encoded)
@@ -15958,6 +16348,7 @@ fn encode_avro_http_payload(
     json_value: &serde_json::Value,
     field_order: &[String],
     optional_fields: &BTreeSet<String>,
+    field_types: &BTreeMap<String, nervix_models::AvroType>,
 ) -> Vec<u8> {
     use apache_avro::{Schema as AvroSchema, to_avro_datum, types::Value as AvroValue};
 
@@ -15980,13 +16371,30 @@ fn encode_avro_http_payload(
     }
 
     for (name, value) in ordered_fields {
-        let (schema_ty, avro_value) = avro_field_from_json(value);
-        let schema_ty = if schema_ty.starts_with('{') {
-            schema_ty
-        } else {
-            format!(r#""{schema_ty}""#)
+        let (schema_ty, avro_value) = match field_types.get(name) {
+            Some(declared) if value.is_null() => {
+                (avro_declared_schema(declared).to_string(), AvroValue::Null)
+            }
+            Some(declared) => (
+                avro_declared_schema(declared).to_string(),
+                avro_declared_value(value, declared),
+            ),
+            None => {
+                let (schema_ty, avro_value) = avro_field_from_json(value);
+                let schema_ty = if schema_ty.starts_with('{') {
+                    schema_ty
+                } else {
+                    format!(r#""{schema_ty}""#)
+                };
+                (schema_ty, avro_value)
+            }
         };
-        let (schema_ty, avro_value) = if optional_fields.contains(name) {
+        let (schema_ty, avro_value) = if optional_fields.contains(name) && value.is_null() {
+            (
+                format!(r#"["null",{schema_ty}]"#),
+                AvroValue::Union(0, Box::new(AvroValue::Null)),
+            )
+        } else if optional_fields.contains(name) {
             (
                 format!(r#"["null",{schema_ty}]"#),
                 AvroValue::Union(1, Box::new(avro_value)),
@@ -16006,6 +16414,96 @@ fn encode_avro_http_payload(
         .unwrap_or_else(|error| panic!("failed to build avro payload schema: {error}"));
     to_avro_datum(&schema, AvroValue::Record(value_fields))
         .unwrap_or_else(|error| panic!("failed to encode avro payload: {error}"))
+}
+
+/// The Avro schema of a declared wire type, written by the fixture from the declaration alone.
+fn avro_declared_schema(ty: &nervix_models::AvroType) -> serde_json::Value {
+    use nervix_models::AvroType;
+
+    match ty {
+        AvroType::Array(item) => {
+            serde_json::json!({ "type": "array", "items": avro_declared_schema(item) })
+        }
+        AvroType::Boolean => serde_json::json!("boolean"),
+        AvroType::Int => serde_json::json!("int"),
+        AvroType::Long => serde_json::json!("long"),
+        AvroType::Float => serde_json::json!("float"),
+        AvroType::Double => serde_json::json!("double"),
+        AvroType::Bytes => serde_json::json!("bytes"),
+        AvroType::String => serde_json::json!("string"),
+    }
+}
+
+/// A JSON fixture value written as the declared wire type: an integer as the `int` or `long` the
+/// declaration names, a float as its `float` or `double`, a `bytes` value from base64 text, and an
+/// array element by element as its items.
+fn avro_declared_value(
+    value: &serde_json::Value,
+    ty: &nervix_models::AvroType,
+) -> apache_avro::types::Value {
+    use apache_avro::types::Value as AvroValue;
+    use nervix_models::AvroType;
+
+    match ty {
+        AvroType::Array(item) => {
+            let serde_json::Value::Array(values) = value else {
+                panic!("an avro fixture array field must be a JSON array, found {value}");
+            };
+            let mut items = Vec::with_capacity(values.len());
+            for value in values {
+                items.push(avro_declared_value(value, item));
+            }
+            AvroValue::Array(items)
+        }
+        AvroType::Boolean => {
+            AvroValue::Boolean(value.as_bool().unwrap_or_else(|| {
+                panic!("an avro fixture boolean must be a JSON boolean: {value}")
+            }))
+        }
+        AvroType::Int => {
+            let integer = value
+                .as_i64()
+                .unwrap_or_else(|| panic!("an avro fixture int must be a JSON integer: {value}"));
+            AvroValue::Int(
+                i32::try_from(integer)
+                    .unwrap_or_else(|_| panic!("an avro fixture int must fit i32: {value}")),
+            )
+        }
+        AvroType::Long => AvroValue::Long(
+            value
+                .as_i64()
+                .unwrap_or_else(|| panic!("an avro fixture long must be a JSON integer: {value}")),
+        ),
+        AvroType::Float => AvroValue::Float(
+            value
+                .as_f64()
+                .unwrap_or_else(|| panic!("an avro fixture float must be a JSON number: {value}"))
+                .approx_into(),
+        ),
+        AvroType::Double => AvroValue::Double(
+            value
+                .as_f64()
+                .unwrap_or_else(|| panic!("an avro fixture double must be a JSON number: {value}")),
+        ),
+        AvroType::String => AvroValue::String(
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("an avro fixture string must be JSON text: {value}"))
+                .to_string(),
+        ),
+        AvroType::Bytes => {
+            let encoded = value.as_str().unwrap_or_else(|| {
+                panic!("an avro fixture bytes value must be base64 text: {value}")
+            });
+            AvroValue::Bytes(
+                BASE64_STANDARD
+                    .decode(encoded.as_bytes())
+                    .unwrap_or_else(|_| {
+                        panic!("an avro fixture bytes value must be base64: {value}")
+                    }),
+            )
+        }
+    }
 }
 
 fn avro_field_from_json(value: &serde_json::Value) -> (String, apache_avro::types::Value) {
@@ -16278,6 +16776,24 @@ fn commands_update_subscription_state(current: bool, commands: &str) -> bool {
 }
 
 fn record_avro_wire_optional_fields(world: &mut ScenarioWorld, document: &CommandDocument<'_>) {
+    if let Some(parsed) = &document.parsed {
+        for statement in parsed {
+            let nervix_plexus::client_statement::ClientStatement::Server(
+                nervix_models::Statement::Create(create),
+            ) = &statement.statement
+            else {
+                continue;
+            };
+            let nervix_models::Model::WireAvroSchema(schema) = &*create.body else {
+                continue;
+            };
+            for field in &schema.fields {
+                world
+                    .avro_http_field_types
+                    .insert(field.name.as_str().to_string(), field.ty.clone());
+            }
+        }
+    }
     for statement in document.statements() {
         let normalized = statement.trim_start().to_ascii_uppercase();
         if !normalized.starts_with("CREATE WIRE AVRO SCHEMA ") {
@@ -17219,21 +17735,28 @@ async fn when_named_client_begins_executing_in_the_background(
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
+    let finished_at = StdArc::new(OnceLock::new());
+    world.background_plexus_finished_at = Some(finished_at.clone());
     world.background_plexus = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
-            let mut last_output = String::new();
-            for command in statements {
-                nervix_primitives::task::consume_budget().await;
-                let outcome = client
-                    .execute(command)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if !outcome.succeeded() {
-                    return Err(outcome.message);
+            let execution = async move {
+                let mut last_output = String::new();
+                for command in statements {
+                    nervix_primitives::task::consume_budget().await;
+                    let outcome = client
+                        .execute(command)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if !outcome.succeeded() {
+                        return Err(outcome.message);
+                    }
+                    last_output = outcome.message;
                 }
-                last_output = outcome.message;
-            }
-            Ok(last_output)
+                Ok(last_output)
+            };
+            let result = execution.await;
+            finished_at.get_or_init(Instant::now);
+            result
         },
     )));
 }
@@ -21340,6 +21863,58 @@ async fn then_show_create_emitter_renders_these_clauses(
     }
 }
 
+#[then(
+    expr = "inferencer {string} is recreated from SHOW CREATE as {string} with its state \
+            declaration intact"
+)]
+async fn then_inferencer_is_recreated_from_show_create(
+    world: &mut ScenarioWorld,
+    name: String,
+    copy: String,
+) {
+    let leader = current_leader_node(world).await;
+    let canonical = world
+        .cluster()
+        .run_command(
+            &leader,
+            &world.domain,
+            &format!("SHOW CREATE INFERENCER {name};"),
+        )
+        .await
+        .expect("SHOW CREATE returns the inferencer's public declaration");
+    assert!(
+        canonical.contains("STATE"),
+        "the declaration retains STATE: {canonical}"
+    );
+    let statements = nervix_plexus::client_statement::parse_client_statements(&canonical)
+        .expect("the public declaration is executable Plexus");
+    assert_eq!(statements.len(), 1, "SHOW CREATE returns one declaration");
+    let recreated = canonical.replacen(
+        &format!("INFERENCER {name}"),
+        &format!("INFERENCER {copy}"),
+        1,
+    );
+    assert_ne!(canonical, recreated, "the copy has a distinct name");
+    world
+        .cluster()
+        .run_command(&leader, &world.domain, &recreated)
+        .await
+        .expect("the server accepts its complete stateful declaration under a new name");
+    let rendered_copy = world
+        .cluster()
+        .run_command(
+            &leader,
+            &world.domain,
+            &format!("SHOW CREATE INFERENCER {copy};"),
+        )
+        .await
+        .expect("SHOW CREATE returns the recreated declaration");
+    assert_eq!(
+        rendered_copy, recreated,
+        "recreation preserves the complete declaration"
+    );
+}
+
 #[then("the last command output is saved as the relocation plan")]
 async fn then_last_command_output_is_saved_as_the_relocation_plan(world: &mut ScenarioWorld) {
     let output = world
@@ -24746,6 +25321,10 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
     let direction = expand_placeholders(world, &direction);
     let relay = expand_placeholders(world, &relay);
     let prefix = format!("{metric} {direction} relay={relay} physical_node=");
+    assert_numeric_metric_lines(world, step, &prefix, output);
+}
+
+fn assert_numeric_metric_lines(world: &ScenarioWorld, step: &Step, prefix: &str, output: &str) {
     let assertions = expand_placeholders(world, docstring(step))
         .lines()
         .map(str::trim)
@@ -24755,7 +25334,7 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
     let lines = output
         .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with(&prefix))
+        .filter(|line| line.starts_with(prefix))
         .collect::<Vec<_>>();
 
     assert!(
@@ -28522,6 +29101,7 @@ async fn when_these_encoded_kafka_messages_are_rapidly_published(
             line,
             &world.avro_http_field_order,
             &world.avro_http_optional_fields,
+            &world.avro_http_field_types,
         ));
     }
     assert!(
@@ -30042,6 +30622,7 @@ async fn when_encoded_http_payload_is_posted(
         &payload,
         &world.avro_http_field_order,
         &world.avro_http_optional_fields,
+        &world.avro_http_field_types,
     );
     append_cucumber_log_line(&format!(
         "http publish: node=node-1 host={host} path={path} wire_format={wire_format} \
@@ -30101,6 +30682,71 @@ async fn when_cbor_http_payload_with_bytes_is_posted(
         .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
         .await
         .expect("failed to post CBOR payload with a byte string");
+}
+
+/// The CBOR map a JSON fixture describes, with every text element of the list `field`, at any
+/// nesting depth, replaced by the byte string its base64 spelling names.
+fn cbor_fixture_with_byte_string_elements(payload: &str, field: &str) -> ciborium::value::Value {
+    use ciborium::value::Value as CborValue;
+
+    fn byte_string_elements(value: &mut CborValue) {
+        match value {
+            CborValue::Array(elements) => {
+                for element in elements {
+                    byte_string_elements(element);
+                }
+            }
+            CborValue::Text(encoded) => {
+                let bytes = BASE64_STANDARD
+                    .decode(encoded.as_bytes())
+                    .expect("CBOR fixture byte string elements must be valid base64");
+                *value = CborValue::Bytes(bytes);
+            }
+            other => {
+                panic!("CBOR fixture byte string elements must be base64 text, found {other:?}")
+            }
+        }
+    }
+
+    let json: serde_json::Value =
+        serde_json::from_str(payload).expect("CBOR fixture must be valid JSON");
+    let mut cbor = CborValue::serialized(&json).expect("JSON fixture fits a CBOR value");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("CBOR fixture must be a map");
+    };
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == field))
+        .expect("CBOR fixture must contain the byte string list field");
+    let CborValue::Array(_) = value else {
+        panic!("CBOR fixture byte string list field must be an array");
+    };
+    byte_string_elements(value);
+    cbor
+}
+
+#[when(
+    expr = "http CBOR payload with byte string elements in field {string} is posted to host \
+            {string} path {string}"
+)]
+async fn when_cbor_http_payload_with_byte_string_elements_is_posted(
+    world: &mut ScenarioWorld,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let payload = expand_placeholders(world, docstring(step));
+    let cbor = cbor_fixture_with_byte_string_elements(&payload, &field);
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture must encode");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post CBOR payload with byte string elements");
 }
 
 #[when(
@@ -31165,6 +31811,7 @@ async fn then_within_duration_repeatedly_posting_encoded_http_payload_yields_sub
         &payload,
         &world.avro_http_field_order,
         &world.avro_http_optional_fields,
+        &world.avro_http_field_types,
     );
     let deadline = Instant::now() + duration;
 
@@ -36502,9 +37149,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
-            "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @client_wire_tls_cost) and (not @client_conformance_toolchain) and (not \
-             @deadlock_diagnostics)"
+            "(not @client_wire_expected_failure) and (not @client_wire_tls_cost) and (not \
+             @client_conformance_toolchain) and (not @deadlock_diagnostics)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
@@ -36600,6 +37246,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                         });
                 }
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
+                if let ScenarioBodyResult::StepFailed(_) | ScenarioBodyResult::BeforeHookFailed =
+                    &body
+                {
+                    web_console_connections::record_browser_state(world).await;
+                }
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
                 world.stop_consensus_load();

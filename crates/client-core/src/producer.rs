@@ -624,7 +624,7 @@ pub(crate) async fn send_on_exchange(
     request: ClientRequest,
     kind: RequestKind,
 ) -> error_stack::Result<PendingRequest, ClientError> {
-    let Some(registered) = exchange.register() else {
+    let Some(registered) = exchange.register_for(&request) else {
         return Err(Report::new(exchange.pending.lock().failure()));
     };
     let message = ClientMessage {
@@ -1110,15 +1110,16 @@ impl ProducerAttachment {
 
     /// Sends one attempt of a batch and waits for its outcome.
     async fn attempt(&self, batch: &Bytes) -> Attempt {
-        let Some(mut registered) = self.exchange.register() else {
+        let request = ClientRequest::SubmitBatch(SubmitBatchRequest {
+            producer: self.id,
+            batch: batch.clone(),
+        });
+        let Some(mut registered) = self.exchange.register_for(&request) else {
             return Attempt::NotSent;
         };
         let message = ClientMessage {
             request_id: registered.request_id,
-            request: ClientRequest::SubmitBatch(SubmitBatchRequest {
-                producer: self.id,
-                batch: batch.clone(),
-            }),
+            request,
         };
         let frame = match message.encode(&SESSION_LIMITS) {
             Ok(frame) => frame,

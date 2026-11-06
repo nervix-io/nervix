@@ -2,13 +2,13 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The NATS client Model, subject and stream source and emitter Models with their
+//! - **Owns.** The NATS client Model, subject and stream ingestor and emitter Models with their
 //!   delivery modes, validated subject and queue group names, stream and durable consumer names,
 //!   and each entity's declarations. The subject rule owns NATS 2.11 token syntax and Nervix's
 //!   stricter limits; the JetStream name rule owns Nervix's implementation of nats-server 2.11's
 //!   stream and consumer name rules.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The NATS driver, or how a subject is subscribed or
 //!   published to.
 
@@ -152,7 +152,7 @@ pub struct NatsSubjectIngestor {
     pub client: ClientName,
     pub subject: NatsSubjectName,
     pub queue_group: NatsQueueGroupName,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: NatsIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -259,6 +259,7 @@ const NATS_STREAM_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsSubjectIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),
@@ -294,6 +295,10 @@ impl IngestorDeclaration for NatsSubjectIngestor {
 }
 
 impl IngestorEntityBody for NatsSubjectIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }
@@ -427,6 +432,7 @@ const NATS_STREAM_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsStreamIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),
@@ -448,8 +454,8 @@ impl IngestorDeclaration for NatsStreamIngestor {
             DeclaredDelivery::ACK_SEQUENTIAL,
             DeclaredDelivery::ACK_PARALLEL,
         ],
-        // The stream keeps every message the consumer has not delivered, so a suspended source
-        // loses nothing. A source that buffers or drops while quiesced keeps pulling and
+        // The stream keeps every message the consumer has not delivered, so a suspended ingestor
+        // loses nothing. An ingestor that buffers or drops while quiesced keeps pulling and
         // acknowledges each delivery once the host buffered or dropped it.
         quiesce: &[
             DeclaredQuiesce::SUSPEND,
@@ -494,7 +500,7 @@ impl IngestorEntityBody for NatsStreamIngestor {
     }
 }
 
-/// How a NATS STREAM source settles each delivery with its consumer.
+/// How a NATS STREAM ingestor settles each delivery with its consumer.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -582,11 +588,11 @@ impl crate::IngestorEntityChange for NatsStreamIngestorChange {
 
 connector_ingestors! {
     connector Nats = "NATS";
-    /// What a NATS source reads.
+    /// What a NATS ingestor reads.
     pub enum NatsIngestor;
     /// The alterations of the ingestors that read a NATS entity.
     pub enum NatsSubjectIngestorAlteration;
-    /// The entities a NATS source reads.
+    /// The entities a NATS ingestor reads.
     pub enum NatsIngestorEntity {
         Subject(NatsSubjectIngestor => NatsSubjectIngestorChange) = "SUBJECT", "NATS";
         Stream(NatsStreamIngestor => NatsStreamIngestorChange) = "STREAM", "NATS JetStream";

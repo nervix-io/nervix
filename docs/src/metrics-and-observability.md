@@ -47,6 +47,7 @@ Graph metric series use these labels:
 - `peer_kind` and `peer`: relay peer labels for node-to-relay observations, or `-` when no peer applies
 - `partition`: the partition of a partitioned relay that records a `RELAY` series, or `-` for a
   relay with one owner and for every other series
+- `instance`: the global index of an ingestor instance, or `-` for a non-instance unit
 - `branch`: named branch declaration on branch lifecycle metrics
 - `reason`: branch eviction reason, either `lru` or `ttl`
 - `le`: Prometheus histogram bucket boundary
@@ -69,8 +70,8 @@ carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-an
 Example Prometheus series:
 
 ```text
-nervix_messages_total{domain="prod",target_kind="RELAY",target="notifications",physical_node_id="node-1",direction="received",relay="notifications",peer_kind="-",peer="-",partition="-"} 42
-nervix_messages_total{domain="prod",target_kind="RELAY",target="tenant_events",physical_node_id="node-2",direction="received",relay="tenant_events",peer_kind="-",peer="-",partition="1"} 17
+nervix_messages_total{domain="prod",target_kind="RELAY",target="notifications",physical_node_id="node-1",direction="received",relay="notifications",peer_kind="-",peer="-",partition="-",instance="-"} 42
+nervix_messages_total{domain="prod",target_kind="RELAY",target="tenant_events",physical_node_id="node-2",direction="received",relay="tenant_events",peer_kind="-",peer="-",partition="1",instance="-"} 17
 ```
 
 `DESCRIBE` metric lines of a partitioned relay name the partition after the relay, for example
@@ -657,3 +658,20 @@ Prometheus export is a separate, live process-local registry. Traffic metrics ig
 identity, while lifecycle metrics retain only the bounded declared branch name. Prometheus
 registry values are not snapshotted into Nervix internal metric state and do not migrate during a
 planned handoff or failover.
+
+## Ingestor Unit Metrics And Recovery
+
+`DESCRIBE INGESTOR` queries each unit's current owner and reports its global index, owner, running
+state and readiness. Its edge metric lines render `instance=<i>`. Source-specific quiesce,
+redelivery, decode-rejection, oversize, header-drop, read-ahead-drop and unfolding-refusal metrics
+use `domain`, `ingestor`, `physical_node_id` and `instance`; a `Single` source uses `instance="-"`.
+
+A `BranchAggregated` checkpoint belongs to an exact execution unit. Capture includes that unit's
+series with each series' physical-node attribution intact. Installation replaces only that unit's
+namespace, preserving a colocated sibling's live counters. After a move, later checkpoints retain
+both the predecessor's and the new owner's contributions. A final snapshot selects its bytes
+before a departing owner withdraws the unit's live series. Raw Prometheus recorders belong to
+their local assignment lifetime and are not restored from checkpoints; durable summarized
+metrics use the checkpoint store.
+Inspection discovers the current units through a key-only checkpoint listing, including before a
+stopped source is restarted, and never substitutes one sibling's measurements for another's.

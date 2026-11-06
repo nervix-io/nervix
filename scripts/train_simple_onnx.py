@@ -220,6 +220,40 @@ def scalar_graph() -> bytes:
     return bytes(out)
 
 
+def running_sum_graph(*, score_shape_from_features: bool = False) -> bytes:
+    """Expose the previous sum and its successor as explicit model ports."""
+    out = bytearray()
+    out += message_field(
+        1, node("Add", ["state_in", "features"], ["state_out"], "advance_state")
+    )
+    out += message_field(
+        1,
+        node(
+            "ReduceSum",
+            ["state_out"],
+            ["sum" if score_shape_from_features else "score"],
+            "score",
+            [attribute_int("keepdims", 1)],
+        ),
+    )
+    if score_shape_from_features:
+        # A first feature of 1 keeps the one-element score; 2 makes Reshape refuse the run.
+        # The state successor has already been computed, so refusal tests atomic state advance.
+        out += message_field(
+            1, node("Split", ["features"], ["requested_size", "unused"], "read_size")
+        )
+        out += message_field(
+            1, node("Cast", ["requested_size"], ["score_shape"], "score_shape", [attribute_int("to", 7)])
+        )
+        out += message_field(1, node("Reshape", ["sum", "score_shape"], ["score"], "check_size"))
+    out += field_string(2, "nervix_checked_running_sum" if score_shape_from_features else "nervix_running_sum")
+    out += message_field(11, value_info("features", [2]))
+    out += message_field(11, value_info("state_in", [2]))
+    out += message_field(12, value_info("score", [1]))
+    out += message_field(12, value_info("state_out", [2]))
+    return bytes(out)
+
+
 def model_proto(graph: bytes) -> bytes:
     opset_import = field_string(1, "") + field_varint(2, 13)
     return (
@@ -267,6 +301,16 @@ def main() -> None:
         default="tests/fixtures/onnx/scalar_identity.onnx",
         help="path to write the generated scalar identity ONNX model",
     )
+    parser.add_argument(
+        "--running-sum-output",
+        default="tests/fixtures/onnx/running_sum.onnx",
+        help="path to write the generated model with explicit running-sum state",
+    )
+    parser.add_argument(
+        "--checked-running-sum-output",
+        default="tests/fixtures/onnx/checked_running_sum.onnx",
+        help="path to write the running-sum model that can refuse one row's score shape",
+    )
     args = parser.parse_args()
 
     weights, bias = train_linear_regressor()
@@ -299,6 +343,12 @@ def main() -> None:
     scalar_output = Path(args.scalar_output)
     scalar_output.parent.mkdir(parents=True, exist_ok=True)
     scalar_output.write_bytes(model_proto(scalar_graph()))
+    running_sum_output = Path(args.running_sum_output)
+    running_sum_output.parent.mkdir(parents=True, exist_ok=True)
+    running_sum_output.write_bytes(model_proto(running_sum_graph()))
+    checked_running_sum_output = Path(args.checked_running_sum_output)
+    checked_running_sum_output.parent.mkdir(parents=True, exist_ok=True)
+    checked_running_sum_output.write_bytes(model_proto(running_sum_graph(score_shape_from_features=True)))
     print(f"wrote {output} weights={weights!r} bias={bias!r}")
     print(
         f"wrote {alternate_output} weights={ALTERNATE_WEIGHTS!r} bias={ALTERNATE_BIAS!r}"
@@ -308,6 +358,8 @@ def main() -> None:
     print(f"wrote {matrix_output}")
     print(f"wrote {dynamic_batch_output}")
     print(f"wrote {scalar_output}")
+    print(f"wrote {running_sum_output}")
+    print(f"wrote {checked_running_sum_output}")
 
 
 if __name__ == "__main__":

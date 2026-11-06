@@ -19,6 +19,10 @@ use super::{DomainResumeBoundary, StandaloneTransactionBoundary};
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum CommandPausePoint {
+    ExplicitCommitFailure {
+        node: ClusterNodeName,
+        transaction_id: String,
+    },
     TransactionCleanup {
         node: ClusterNodeName,
         domain: DomainName,
@@ -40,6 +44,7 @@ pub(super) enum CommandPausePoint {
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ApplicationRevisionResponse(ClusterNodeName),
+    ApplicationProgressReport(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
     Reconciliation {
@@ -49,6 +54,7 @@ pub(super) enum CommandPausePoint {
     Finalization(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
+    SubscriptionResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
     ResourceSourceDiscovery(ClusterNodeName),
     RestoreStep {

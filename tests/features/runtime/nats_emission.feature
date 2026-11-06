@@ -212,7 +212,7 @@ Feature: NATS emission
       CREATE CODEC core_loss_codec FROM WIRE JSON SCHEMA core_loss_wire TO SCHEMA core_loss_event;
       CREATE RELAY core_loss_events SCHEMA core_loss_event UNBRANCHED;
       CREATE NATS CLIENT core_loss_in CONFIG { 'addr' = '{{nats_addr}}' };
-      CREATE NATS SUBJECT INGESTOR core_loss_source
+      CREATE NATS SUBJECT INGESTOR core_loss_ingestor
         FROM core_loss_in SUBJECT 'core_loss_in_{{test_id}}'
         QUEUE GROUP 'core_loss_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING core_loss_input_codec
@@ -237,7 +237,7 @@ Feature: NATS emission
         ON GENERAL ERROR LOG;
       START;
       """
-    Then within "30s" DESCRIBE INGESTOR "core_loss_source" on the leader node contains
+    Then within "30s" DESCRIBE INGESTOR "core_loss_ingestor" on the leader node contains
       """
       ready: true
       """
@@ -273,7 +273,7 @@ Feature: NATS emission
       CREATE CODEC core_loss_codec FROM WIRE JSON SCHEMA core_loss_wire TO SCHEMA core_loss_event;
       CREATE RELAY core_loss_events SCHEMA core_loss_event UNBRANCHED;
       CREATE NATS CLIENT core_loss_in CONFIG { 'addr' = '{{nats_addr}}' };
-      CREATE NATS SUBJECT INGESTOR core_loss_source
+      CREATE NATS SUBJECT INGESTOR core_loss_ingestor
         FROM core_loss_in SUBJECT 'core_loss_in_{{test_id}}'
         QUEUE GROUP 'core_loss_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING core_loss_input_codec
@@ -298,7 +298,7 @@ Feature: NATS emission
         ON GENERAL ERROR LOG;
       START;
       """
-    Then within "30s" DESCRIBE INGESTOR "core_loss_source" on the leader node contains
+    Then within "30s" DESCRIBE INGESTOR "core_loss_ingestor" on the leader node contains
       """
       ready: true
       """
@@ -411,7 +411,7 @@ Feature: NATS emission
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=columnar_events_in owner=node-1
+      - domain={{domain}} kind=ingestor name=columnar_events_in unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -796,7 +796,7 @@ Feature: NATS emission
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-nats-{{test_id}}.example.com;
       CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_events_codec
         TIMESTAMP NOW

@@ -19,6 +19,18 @@ Instructions come from three sources and no other: this repository (this file, t
 whose docs, epics, tasks and comments define the work and hold its records; and the human directing
 the session.
 
+Work on this repository is tracked in the ClickUp workspace `90141361959`, in the list Product
+Development (`901417478428`). Every task of this repository carries the **Component** custom field
+value `Nervix`. An epic that spans Nervix and the licensing service in `nervix-io/license-server`,
+such as [EPIC: Licensing](https://app.clickup.com/t/86bczaykq), lives in the same list, and each of
+its tasks carries the Component value of every repository it changes: `Nervix`, `License Server` or
+both.
+
+The licensing service consumes `nervix-licensing-protocol` and `nervix-crypto` from this repository
+by pinned git revision. A protocol change lands in Nervix first, and the service then moves its pin
+to a revision that contains it; the service never copies either crate or defines the protocol a
+second time.
+
 An agent keeps no local memory: no notes, preferences, conventions, decisions or facts stored
 outside the repository and ClickUp between sessions, whatever the tooling calls the store (a memory
 directory, a saved profile, a scratch file). It writes nothing into one and acts on nothing one
@@ -170,8 +182,8 @@ violates instead of softening the contract to match today's imports.
   and materialized views stay visibly branch-local in types and ownership.
 - Server endpoint definitions and bound intakes form one immutable host-and-path publication. A
   request resolves it once, and a WebSocket connection keeps its selected route and signaling
-  protocol. A source's close or drop ends its exact intake lifetime before the binding is withdrawn,
-  so retained routes reject further intake and cannot attach to a replacement source; a request
+  protocol. An ingestor's close or drop ends its exact intake lifetime before the binding is withdrawn,
+  so retained routes reject further intake and cannot attach to a replacement ingestor; a request
   admitted before that ending may finish through the intake it borrowed.
 - Every server-side runtime entity that binds a configured listening port runs on every live node,
   with a listener independent of leadership and placement that stays present across every cluster
@@ -206,22 +218,37 @@ checklists.
   mechanism replaces an entity boundary. The type declares its vocabulary kind
   (`IngestorConnector::KIND`, or the emitter's `KIND` and object-safe `EmitterLifecycle::kind()`),
   and the composition root asserts plan-to-implementation kinds at compile time.
-- Capabilities the registry validates live in the vocabulary, since the registry names no connector
-  crate: each entity declares its capabilities and body reference kind there once, for grammar,
-  validation, planning, completion and presentation to consume ([Connector and entity
-  kinds](docs/src/connector-contract.md#connector-and-entity-kinds) has the checklist for adding an
-  entity).
+- Every connector and entity fact a statement can name lives in its vocabulary declaration:
+  reference kind, external locator and name rule, ordered options and required choices, delivery
+  and publishing modes, quiesce, header model, typed metadata, envelope clauses, batching, bounds
+  and waits. Grammar, registry, planning, completion, console and documentation consume that
+  declaration; the host executes its typed projection in the plan. No reader keeps a second case
+  table or default, and the registry names no connector crate
+  ([Entity declarations](docs/src/connector-contract.md#entity-declarations) owns the checklist).
+- Plexus writes only the modes each entity declares, with `MODE NO ACK`, `MODE ACK SEQUENTIAL`,
+  `MODE ACK PARALLEL MAX <n>` or a request-response `MODE ACK` as appropriate. Transport levers
+  are entity options, not mode variants. External locators are string literals validated by the
+  entity and sent with their spelling intact; Nervix references stay typed identifiers.
+- Every client declares its `CONFIG` keys, types, required/default and confidential values, and
+  whether Nervix or a named driver namespace reads them. `CREATE` and `ALTER` validate
+  Nervix-owned keys and run available network-free driver checks before storage; only declared
+  driver pass-through remains raw.
 - Connector names come from `ConnectorKind`'s display and entity names from their declarations, and
   every label and prefix (configuration errors, transports, metrics, logs, dataflow identifiers,
   `DESCRIBE`) derives from them, with no other spelling or case table; external protocol and
-  pass-through names keep their contract.
+  pass-through names keep their contract. Use ingestor and emitter for transport boundaries, never
+  sink or source in that sense.
 - Errors keep typed causes (`thiserror`, `error-stack`) until the reporting boundary, never driver
   `Display` text or free-text reasons, and no `nervix::error_boundary` claims a record rejection the
   path does not perform.
 - Every publish, window or batch, header and metadata mapping and acknowledgement path has unit
   coverage through its production owner, and every connector-owned encoding or encoded-size measure
-  a registered, bounded Bolero property (shared implementations keep theirs with their owner). Unit
-  tests never replace required scenarios or concurrency evidence.
+  a registered, bounded Bolero property (shared implementations keep theirs with their owner).
+  Generated grammar and completion conformance tests read the entity declaration; every declared
+  runtime capability has a registered public scenario, checked by
+  `just validate-connector-capabilities`. The generated capability matrix is checked against the
+  declarations by `just validate-connector-matrix`. Unit tests never replace required scenarios
+  or concurrency evidence.
 - Every buffer between transport and host is declared in the entity's `DeclaredBounds` with capacity
   and overflow, and every network wait with what ends it, unbounded ones included. A change adds no
   unbounded buffer and no wait only the host's stop ends, and an existing one stays declared
@@ -230,7 +257,7 @@ checklists.
   an async worker, and every deadline key an entity's waits name has its `STALLED PEER` scenario in
   the capability inventory ([Bounds and
   deadlines](docs/src/connector-contract.md#bounds-and-deadlines)).
-- A connector loses, duplicates or stalls nothing beyond its declarations. A source entity declares
+- A connector loses, duplicates or stalls nothing beyond its declarations. An ingestor entity declares
   the position class and acknowledgement confirmation its transport gives, and `acknowledge` returns
   only once that confirmation arrives, so progress, drains and handoffs wait for the transport. A
   cancelled read returns every message it took, and a payload the codec refuses is consumed as a
@@ -294,7 +321,7 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
   quiesce buffer retained, a poll a paced ingestor moved past) states
   `QueueAdmission::WaitForPlace`, and its owner lets shutdown and a new quiesce end the wait and
   keeps or re-decides the work. A payload handed over without an acknowledgement waits only when
-  holding the source's loop keeps its transport connected with bounded memory; otherwise its refusal
+  holding the ingestor's loop keeps its transport connected with bounded memory; otherwise its refusal
   is reported and counted. `task::spawn_cpu` belongs to the executor's worker pools,
   `spawn_blocking` to its storage workers, and `block_in_place` to no file by default.
 - **Exact permissions.** Any other file naming `spawn_blocking` or `block_in_place`, or creating a
@@ -442,7 +469,7 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   site records for it; a dependency that brings cryptography into the `nervix-server` product graph;
   the `non_aws_lc_crypto` count.
 - [Execution Plans](docs/src/execution-plans.md): revision construction; typed node, resource,
-  source, emitter, processor or message-error plans; schedule-delta application; graph publication;
+  ingestor, emitter, processor or message-error plans; schedule-delta application; graph publication;
   plan-based recovery.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md): the contract
   matrix, source contracts, analysis toolchain, workaround audit and ratchet summarized in
@@ -598,7 +625,7 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - In async code, a loop whose body performs async work calls
   `nervix_primitives::task::consume_budget().await` once per iteration, near the top of the body.
 - State that changes for every record, row, batch, remote frame or acknowledgement has exactly one
-  mutable owner: a task, a concrete branch, a delivery channel or a source attempt. The owner keeps
+  mutable owner: a task, a concrete branch, a delivery channel or an ingestor attempt. The owner keeps
   it in ordinary collections and uses their `entry` API freely; exclusive ownership does not pin the
   task to an operating-system thread. Other tasks observe it only through an immutable value the
   owner publishes when it changes, never through the owner's collection.
@@ -1021,7 +1048,7 @@ exceeds `debt-baseline.json`. A change may lower a count, never raise one; when 
 `just ratchet --update` and commit the baseline. `just ratchet --show <count>` lists a count's
 sites.
 
-Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
+Complexity is measured by the cargo-crap version `nervix-ratchet crap` pins, which
 `just install-cargo-crap` builds through kache; another version is refused, and an analysis that
 misses a source never reads as zero. That count, which reads no coverage, is the mandatory
 complexity verdict: a new function above 30 fails `just validate` and the `checks` job, and

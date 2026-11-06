@@ -17,6 +17,7 @@
 pub(in crate::registry) mod branching;
 pub(in crate::registry) mod connector;
 pub(in crate::registry) mod expression;
+pub(in crate::registry) mod inferencer_state;
 pub(in crate::registry) mod materialized_state;
 pub(in crate::registry) mod message_error;
 pub(in crate::registry) mod processor;

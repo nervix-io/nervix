@@ -106,7 +106,7 @@ fn unfolding_event_codec(program: &str) -> Arc<CompiledCodec> {
 }
 
 fn grouped_event_ingestor_metrics() -> MessageMetricsHandle {
-    let ingestor: IngestorName = named("grouped_event_source");
+    let ingestor: IngestorName = named("grouped_event_ingestor");
     RuntimeMetrics::default().resolve_global_node_message_metrics(
         &domain("default"),
         ModelKind::Ingestor,
@@ -130,7 +130,7 @@ fn accept_decoded_payloads(
         .collect(IngestGroupContribution {
             handles: &IngestTaskHandles::detached(&domain("default")),
             domain: &domain("default"),
-            ingestor: &named("grouped_event_source"),
+            ingestor: &named("grouped_event_ingestor"),
             timestamp_source: None,
             output_routes: &Arc::new(BoundIngestorRoutes {
                 routes: Vec::new(),
@@ -918,7 +918,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
         .expect("the second fixture payload must decode");
 
     let other_domain = domain("other");
-    let ingestor: IngestorName = named("grouped_event_source");
+    let ingestor: IngestorName = named("grouped_event_ingestor");
     let routes = Arc::new(BoundIngestorRoutes {
         routes: Vec::new(),
         metadata: IngestMetadataProjection::none(),
@@ -946,9 +946,9 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
             received_ingestor,
         } => {
             assert_eq!(existing_domain.as_str(), "default");
-            assert_eq!(existing_ingestor.as_str(), "grouped_event_source");
+            assert_eq!(existing_ingestor.as_str(), "grouped_event_ingestor");
             assert_eq!(received_domain.as_str(), "other");
-            assert_eq!(received_ingestor.as_str(), "grouped_event_source");
+            assert_eq!(received_ingestor.as_str(), "grouped_event_ingestor");
         }
         other => panic!("unexpected collector error: {other}"),
     }
@@ -960,7 +960,7 @@ async fn ingest_collector_flush_reports_missing_route_dependencies() {
     let runtime = Runtime::default();
     let test_domain = domain("default");
     install_unpaced_test_domain(&runtime, &test_domain);
-    let ingestor: IngestorName = named("grouped_event_source");
+    let ingestor: IngestorName = named("grouped_event_ingestor");
     let relay: RelayName = named("grouped_events");
     let senders = HashMap::default();
     let message = || RelayMessage {
@@ -1181,7 +1181,7 @@ async fn branched_root_without_children_acks_success() {
         .spawn_relay_owner_task(
             &root_domain,
             &root_relay,
-            Unit::Single,
+            Unit::SINGLE,
             root_services.clone(),
             RelayRetention::default(),
         )
@@ -1190,14 +1190,15 @@ async fn branched_root_without_children_acks_success() {
         named("tenant"),
         RuntimeValue::String("acme".to_string()),
     )]));
-    let root_source = named("metric_ingestor");
+    let root_ingestor: IngestorName = named("metric_ingestor");
     let root_metrics = runtime
         .inner
         .metrics
         .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+            unit: Unit::SINGLE,
             domain: &root_domain,
             kind: ModelKind::Ingestor,
-            node: &ModelName::from(&root_source),
+            node: &ModelName::from(&root_ingestor),
             relay: &root_relay,
             physical_node_id: None,
             direction: "sent",
@@ -1210,8 +1211,10 @@ async fn branched_root_without_children_acks_success() {
         routing: None,
         routing_snapshot: None,
         domain_clock: test_domain_clock(&root_domain),
-        entity_kind: ModelKind::Ingestor,
-        source: root_source,
+        owner: NodeUnitRef::new(
+            NodeRef::new(ModelKind::Ingestor, root_ingestor),
+            Unit::SINGLE,
+        ),
         root_relay: root_relay.clone(),
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
@@ -1289,7 +1292,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         .spawn_relay_owner_task(
             &domain,
             &root_relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention::default(),
         )
@@ -1301,8 +1304,13 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         named("notifications_ingestor"),
         BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            entity_kind: ModelKind::Ingestor,
-            source: named("notifications_ingestor"),
+            owner: NodeUnitRef::new(
+                NodeRef::new(
+                    ModelKind::Ingestor,
+                    named::<ModelName>("notifications_ingestor"),
+                ),
+                Unit::SINGLE,
+            ),
             root_relay: root_relay.clone(),
             branch: None,
             branch_ttl: None,
@@ -1385,7 +1393,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             .spawn_relay_owner_task(
                 &domain,
                 &root_relay,
-                Unit::Single,
+                Unit::SINGLE,
                 services.clone(),
                 RelayRetention::default(),
             )
@@ -1418,8 +1426,10 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    entity_kind,
-                    source: named(source),
+                    owner: NodeUnitRef::new(
+                        NodeRef::new(entity_kind, named::<ModelName>(source)),
+                        Unit::SINGLE,
+                    ),
                     root_relay: root_relay.clone(),
                     branch: None,
                     branch_ttl: None,

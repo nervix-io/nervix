@@ -48,6 +48,8 @@ use tonic::{
 use url::Url;
 
 use super::cause_beneath;
+
+mod restore_codec;
 #[cfg(feature = "autocomplete")]
 use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit};
 use crate::{
@@ -466,14 +468,31 @@ impl TestServer {
 
     /// Starts a server listening on `address`, a loopback address with a free port or port 0.
     async fn start_at(address: SocketAddr) -> Self {
-        Self::start_with_restore_capture(address, false).await
+        Self::start_service(address, false, |service| service).await
     }
 
     async fn start_recording_restores() -> Self {
-        Self::start_with_restore_capture(SocketAddr::from(([127, 0, 0, 1], 0)), true).await
+        Self::start_service(SocketAddr::from(([127, 0, 0, 1], 0)), true, |service| {
+            service
+        })
+        .await
     }
 
-    async fn start_with_restore_capture(address: SocketAddr, capture: bool) -> Self {
+    /// Installs a call-specific peer around the same session fixture and its exchange owner.
+    async fn start_service<S>(
+        address: SocketAddr,
+        capture: bool,
+        wrap: impl FnOnce(SessionService) -> S,
+    ) -> Self
+    where
+        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
+            + NamedService
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
         let listener = TcpListener::bind(address)
             .await
             .assured("the loopback interface accepts a listener");
@@ -498,6 +517,7 @@ impl TestServer {
 
             restores: capture.then_some(restore_sender),
         };
+        let service = wrap(service);
         let task = nervix_primitives::task::spawn(async move {
             Server::builder()
                 .add_service(service)
@@ -2826,6 +2846,8 @@ async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
         }
     ));
 
+    // A detach outcome cannot answer an attach: the session ends before the client applies it,
+    // and the attach is sent again on the next session.
     let attaching = client.clone();
     let attach = nervix_primitives::task::spawn(async move {
         attaching.attach_domain_clock(domain("tenant")).await
@@ -2841,15 +2863,27 @@ async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
             &limits(),
         )
         .await;
-    let error = within_deadline(attach)
+    let mut replacement = server.next_exchange().await;
+    let repeated = replacement.next_request().await;
+    assert!(
+        matches!(&repeated.request, ClientRequest::AttachDomainClock(attach) if attach.domain == domain("tenant")),
+        "the attach is sent again on the next session: {:?}",
+        repeated.request
+    );
+    replacement
+        .reply(
+            repeated.request_id,
+            attach_reply(clock_in(1, crate::DomainClockObservedState::Unpaced), ""),
+            &limits(),
+        )
+        .await;
+    let attached = within_deadline(attach)
         .await
         .assured("the attach task completes")
-        .expect_err("a reply of another kind is an error");
+        .assured("the attach succeeds on the next session");
     assert!(matches!(
-        error.current_context(),
-        ClientError::UnexpectedReply {
-            request: crate::RequestKind::AttachDomainClock,
-        }
+        attached.disposition,
+        crate::DomainClockAttachDisposition::Attached { .. }
     ));
 }
 

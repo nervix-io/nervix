@@ -38,7 +38,7 @@ Feature: WASM guest-state checkpoint durability
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_checkpoint_local_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_checkpoint_local_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -143,7 +143,7 @@ Feature: WASM guest-state checkpoint durability
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_checkpoint_alive_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_checkpoint_alive_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -232,7 +232,7 @@ Feature: WASM guest-state checkpoint durability
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_checkpoint_replica_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_checkpoint_replica_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -335,7 +335,7 @@ Feature: WASM guest-state checkpoint durability
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_checkpoint_failover_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_checkpoint_failover_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s

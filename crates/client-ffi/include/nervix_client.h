@@ -204,7 +204,8 @@ typedef enum nx_event_kind {
     NX_EVENT_CONSUMER_OVERFLOW = 6,
     /* The session refused for now to open the interrupted subscription again, for the cause
        `nx_event_restoration_cause` reads; the subscription stays interrupted and the session
-       tries again later. */
+       tries again after the reported wait. An unanswered reopening ends the session at its
+       request deadline; the waiting event reader opens the next session instead. */
     NX_EVENT_RESTORATION_FAILED = 7
 } nx_event_kind;
 

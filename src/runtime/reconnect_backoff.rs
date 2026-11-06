@@ -14,7 +14,7 @@ pub(in crate::runtime) trait AcknowledgementKeepalive {
 
     /// Await `future` while reporting these acknowledgements alive every
     /// `REMOTE_ACK_ALIVE_INTERVAL`, as a remote receiver reports the acknowledgements it holds, so
-    /// a source's `ACK TIMEOUT` does not expire while work done on their behalf is still under
+    /// an ingestor's `ACK TIMEOUT` does not expire while work done on their behalf is still under
     /// way.
     async fn keep_alive_while<F>(&self, future: F) -> F::Output
     where

@@ -21,8 +21,8 @@ complete gate passes. No numeric allowance controls a semantic rule.
 | Declared matrix | `tools/nervix-lint/configurations.toml` | The configurations the gate analyzes and the memory admission of their compilations. |
 | Runner | `tools/nervix-lint/ratchet`, `nervix-ratchet analyze` (`just typed-ratchet`) | Runs bounded concurrent Cargo children from one thread, computes the report identity, reuses complete evidence and refuses missing, partial, stale or foreign reports. Aggregation calls the report crate in-process. |
 | Workspace wrapper | `nervix-ratchet wrap` | Runs the driver as a child beneath the compiler wrapper the host configures, records every compilation and admits it against host memory through the shared advisory-lock queue. |
-| Gate | `scripts/ratchet.py` (`just ratchet`) | Requires the complete diagnostic gate, reads the product's dependency graph with `cargo tree` and compares the six structural counts with `debt-baseline.json`. |
-| Complexity analyzer | `scripts/cargo_crap.py` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
+| Gate | `nervix-ratchet gate` (`just ratchet`) | Requires the complete diagnostic gate, reads the product's dependency graph with `cargo tree` and compares the six structural counts with `debt-baseline.json`. |
+| Complexity analyzer | `nervix-ratchet crap` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
 | Audit | `scripts/lint_audit.py` (`just lint-audit`) | Attributes review candidates to the history that produced them. |
 
 Product source owns the policy: the [source contracts](#source-contracts) and the reason-bearing
@@ -30,6 +30,13 @@ expectations at the operations they cover. The tooling owns recognition and evid
 generates is read back as policy. `just validate-typed-errors` is a separate source rule without a
 count: it rejects `Result<_, String>` in product code outright, and
 [Errors And Diagnostics](errors-and-diagnostics.md) owns it.
+
+Connector declaration checks are separate from the Rust source and compiler rules.
+`just validate-connector-matrix` compares generated manual regions with the vocabulary's compiled
+entity and client declarations; `just validate-connector-capabilities` checks each declared runtime
+capability against a named public scenario. Both run in `just validate`, and neither changes the
+six structural counts or treats documentation prose as product policy. [Entity
+declarations](connector-contract.md#entity-declarations) owns their inputs and limits.
 
 ## Rule Contracts
 
@@ -231,7 +238,7 @@ proof that the literal is fixed. No filename or per-site allowance substitutes f
 The baseline is introduced at the measured repository count and may only decrease. The area
 owners classify the counted values while preserving their existing defaults. The settings
 compiler-rule cutover removes this detector and its numeric baseline entry in the same change.
-`scripts/tests/test_ratchet.py` pins eligibility and the gate; compiler fixtures qualify the
+`tools/nervix-lint/ratchet` tests pin eligibility and the gate; compiler fixtures qualify the
 constant contract; the registered `typed-hidden-tunables` property checks complete source/site
 representations and every generated location in ordinary and sanitizer execution.
 
@@ -305,7 +312,7 @@ unit and process tests in `tools/nervix-lint/ratchet`.
 ## Function Complexity
 
 `functions_over_complexity_30` counts the functions whose cyclomatic complexity exceeds 30, as one
-pinned analyzer measures it: cargo-crap at the version `scripts/cargo_crap.py` declares, the same
+pinned analyzer measures it: cargo-crap at the version `nervix-ratchet crap` declares, the same
 build the advisory CRAP report of `just check-coverage` runs. `just install-cargo-crap` builds that
 version with `cargo install --locked` into `target/tools/cargo-crap-<version>/`, through the
 compiler wrapper the host configures, and keeps a build that is already there. `just ratchet`,
@@ -399,9 +406,9 @@ CI runs the complete gate for every pull request: the `checks` job's two shards 
 `just validate-ci 4 1/2` and `just validate-ci 4 2/2` on runners of their own, four recipes at a
 time through kache. The second lints the Shuttle and Loom modes and the compiler tooling and runs
 `just ratchet` after its lints, and the first runs every other source and lint check.
-`ValidationEntrypointTests` in `scripts/tests/test_ratchet.py`, part of `just test-ratchet-units`,
+`ValidationEntrypointTests` in `scripts/tests/test_validation_entrypoint.py`, part of `just test-ratchet-units`,
 hold the job to that split. Through just's own evaluation of the job's shard matrix, exactly one
-shard names the gate itself and runs `python3 -m scripts.ratchet`, with no argument, on the
+shard names the gate itself and runs `nervix-ratchet gate`, with no argument, on the
 checked-out revision once its lints have finished, and the Validate step that runs it is neither
 skipped nor allowed to fail. Together the shards run every check `just validate` runs, with
 formatting checked instead of applied, so a shard that dropped the gate, a lane or a validation
