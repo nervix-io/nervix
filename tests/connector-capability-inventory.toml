@@ -295,7 +295,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/domain_kafka_pacing.feature", scenario = "Domain-owned Kafka offsets rebalance multiple instances when partitions change" },
@@ -468,7 +468,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "MQTT TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT instances use the non-duplicating subscription model" },
@@ -709,7 +709,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "NATS SUBJECT INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS ingestor delivers JSON payloads to a subscribed relay" },
@@ -1069,7 +1069,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/pulsar_ingestion.feature", scenario = "Pulsar ingestor delivers JSON payloads to a subscribed relay" },
@@ -1240,7 +1240,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "RABBITMQ QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ingestor delivers JSON payloads to a subscribed relay" },
@@ -1517,7 +1517,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "SQS QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "SQS ingestor delivers JSON payloads to a subscribed relay" },
@@ -1820,73 +1820,45 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "metadata.subject"
+capability = "INSTANCES PER PARTITION"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "Kafka domain-offset instances follow their constructed partitions on <nodes> nodes" },
+]
+
+[[capability]]
+capability = "INSTANCES PER PARTITION"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes" },
+]
+
+[[capability]]
+capability = "INSTANCES PER PARTITION"
 entity = "NATS SUBJECT INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS wildcard messages project the concrete subject and optional reply" },
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "NATS partition-following instances share their partition owners on <nodes> nodes" },
 ]
 
 [[capability]]
-capability = "metadata.reply"
-entity = "NATS SUBJECT INGESTOR"
+capability = "INSTANCES PER PARTITION"
+entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS wildcard messages project the concrete subject and optional reply" },
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes" },
 ]
 
 [[capability]]
-capability = "metadata.subject"
-entity = "NATS STREAM INGESTOR"
+capability = "INSTANCES PER PARTITION"
+entity = "RABBITMQ QUEUE INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes" },
 ]
 
 [[capability]]
-capability = "metadata.reply"
-entity = "NATS STREAM INGESTOR"
+capability = "INSTANCES PER PARTITION"
+entity = "SQS QUEUE INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
-]
-
-[[capability]]
-capability = "metadata.stream"
-entity = "NATS STREAM INGESTOR"
-scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
-]
-
-[[capability]]
-capability = "metadata.consumer"
-entity = "NATS STREAM INGESTOR"
-scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
-]
-
-[[capability]]
-capability = "metadata.sequence"
-entity = "NATS STREAM INGESTOR"
-scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
-]
-
-[[capability]]
-capability = "metadata.timestamp"
-entity = "NATS STREAM INGESTOR"
-scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
-]
-
-[[capability]]
-capability = "metadata.delivered"
-entity = "NATS STREAM INGESTOR"
-scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
-]
-
-[[capability]]
-capability = "REPLY TO"
-entity = "NATS SUBJECT EMITTER"
-scenarios = [
-  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "A NATS SUBJECT emitter sends a request with its evaluated reply subject" },
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "SQS partition-following instances share their partition owners on <nodes> nodes" },
 ]
 
 [[capability]]
@@ -2090,4 +2062,83 @@ capability = "PROPERTIES correlation_data"
 entity = "MQTT TOPIC EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/mqtt_publish_properties.feature", scenario = "A retained MQTT QOS <qos> publication reaches a late subscriber with its properties" },
+]
+
+[[capability]]
+capability = "metadata.subject"
+entity = "NATS SUBJECT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS wildcard messages project the concrete subject and optional reply" },
+]
+
+
+[[capability]]
+capability = "metadata.reply"
+entity = "NATS SUBJECT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS wildcard messages project the concrete subject and optional reply" },
+]
+
+
+[[capability]]
+capability = "metadata.subject"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+
+[[capability]]
+capability = "metadata.reply"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+
+[[capability]]
+capability = "metadata.stream"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+
+[[capability]]
+capability = "metadata.consumer"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+
+[[capability]]
+capability = "metadata.sequence"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+
+[[capability]]
+capability = "metadata.timestamp"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+
+[[capability]]
+capability = "metadata.delivered"
+entity = "NATS STREAM INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "NATS STREAM metadata carries the server's delivery identity and event time" },
+]
+
+
+[[capability]]
+capability = "REPLY TO"
+entity = "NATS SUBJECT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "A NATS SUBJECT emitter sends a request with its evaluated reply subject" },
 ]

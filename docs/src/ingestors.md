@@ -851,6 +851,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: Application batches carry their declared schema; there is no separate transport metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1082,6 +1083,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -1321,7 +1323,7 @@ polling and emitting alike:
 CREATE KAFKA TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
   (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST | OFFSET BY CONSUMER GROUP 'readers' START AT LATEST)
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1336,8 +1338,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | KAFKA client |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -1532,6 +1535,7 @@ disk staging and transfer chunks, so checkpoint length is independent of the Bul
 Offset recovery details:
 
 - `START AT <timestamp>` and `START AT NOW` apply once per domain start generation across all instances. The first initialization persists the resolved partition positions and the applied generation together before reading. Quiescence, reconnects, rebalances, ownership changes and restarts in that generation resume acknowledged positions; they do not apply the timestamp again. A new partition without a recorded position starts at that generation's original timestamp. A later explicit `START AT` begins a new generation and replaces the positions again.
+- A delayed instance receives the same explicit-start cut after reconnect, placement or a plain `START`; pending positions retain the explicit generation even when the domain's current generation advances. Its own positions become durable before its adoption is confirmed.
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
 - in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts at its earliest retained record, so a plain `START` reads what the topic retains and `START AT NOW` is how an unpaced domain skips it
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
@@ -1554,7 +1558,7 @@ CREATE PULSAR TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
   (SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST | SUBSCRIPTION 'readers' PROVISIONED)
   (TYPE SHARED | TYPE KEY_SHARED | TYPE FAILOVER | TYPE EXCLUSIVE)
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1569,8 +1573,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PULSAR client |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -1666,9 +1671,10 @@ required, and a statement writes it after the subscription's owner:
 | `FAILOVER` | One consumer takes messages while the others stand by. When it leaves, a standby continues from what it has not acknowledged. | One |
 | `EXCLUSIVE` | The broker admits one consumer and refuses any other. | One |
 
-`FAILOVER` and `EXCLUSIVE` read through one consumer, so a statement that declares more instances
-is refused at `CREATE` and `ALTER`, as in `PULSAR subscription TYPE EXCLUSIVE reads through one
-consumer, so it refuses INSTANCES 2`. A `FAILOVER` standby is another ingestor or application that
+`FAILOVER` and `EXCLUSIVE` require one fixed instance. A statement that declares more instances or
+`INSTANCES PER PARTITION` is refused at `CREATE` and `ALTER`, as in
+`PULSAR subscription TYPE EXCLUSIVE reads through one consumer, so it refuses INSTANCES 2`.
+A `FAILOVER` standby is another ingestor or application that
 joins the same subscription.
 
 The broker holds one type per subscription while any consumer is connected. It refuses a consumer
@@ -1811,7 +1817,7 @@ provisions it again.
 ```plexus,ignore
 CREATE RABBITMQ QUEUE INGESTOR <name>
   FROM <client> QUEUE 'orders'
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1826,8 +1832,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | RABBITMQ client |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -1956,6 +1963,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2069,7 +2077,7 @@ frame. Configure both bounds for the expected payload sizes.
 ```plexus,ignore
 CREATE MQTT TOPIC INGESTOR <name>
   FROM <client> TOPIC 'devices/+/orders'
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   (SESSION CLEAN | SESSION PERSISTENT)
   (QOS 0 | QOS 1 | QOS 2)
   MODE <mode>
@@ -2086,8 +2094,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | MQTT client |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
+| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2335,7 +2344,7 @@ to its subject as it receives a Core one, so either entity reads what either
 CREATE NATS SUBJECT INGESTOR <name>
   FROM <client> SUBJECT 'orders.created'
   (QUEUE GROUP 'workers')
-  (INSTANCES 2)
+  (INSTANCES 2 | INSTANCES PER PARTITION)
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -2350,8 +2359,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | NATS client |
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |
+| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); required |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2431,6 +2441,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `CONSUMER 'nervix'` (string literal checked by nats_consumer); required |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2526,6 +2537,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | Not offered: The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -2607,6 +2619,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL |
 | Every live node | yes |
@@ -2639,7 +2652,7 @@ diagnostic. These failures do not acknowledge a message; Syslog has no applicati
 ```plexus,ignore
 CREATE SQS QUEUE INGESTOR <name>
   FROM <client> QUEUE 'orders'
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -2654,8 +2667,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | SQS client |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2804,6 +2818,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |
 | Headers | Not offered: An HTTP response's headers describe a whole answer rather than one of its samples, and each sample's labels travel in its payload under metric, so a query source reads no transport headers. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -3026,6 +3041,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL |
 | Every live node | yes |
@@ -3061,6 +3077,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL |
 | Every live node | yes |
@@ -3259,6 +3276,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `HEADERS { 'authorization' = 'Bearer token' }` (composed clause); optional; omitted when unset |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.frame_type: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -3574,15 +3592,55 @@ decode failure to reject a frame.
 The following entities declare `INSTANCES`; presence and defaults follow the vocabulary.
 
 <!-- connector-matrix:instancing:start -->
-| Entity | INSTANCES |
-| --- | --- |
-| KAFKA TOPIC | optional; default 1 |
-| PULSAR TOPIC | optional; default 1 |
-| MQTT TOPIC | optional; default 1 |
-| NATS SUBJECT | required |
-| RABBITMQ QUEUE | optional; default 1 |
-| SQS QUEUE | optional; default 1 |
+| Entity | Capability | INSTANCES |
+| --- | --- | --- |
+| KAFKA TOPIC | per_partition | optional; default 1 |
+| PULSAR TOPIC | per_partition | optional; default 1 |
+| MQTT TOPIC | per_partition | optional; default 1 |
+| NATS SUBJECT | per_partition | required |
+| RABBITMQ QUEUE | per_partition | optional; default 1 |
+| SQS QUEUE | per_partition | optional; default 1 |
 <!-- connector-matrix:instancing:end -->
+
+`Single`, `Instances`, and `PerPartition` are entity capabilities. A `Single` entity accepts no
+`INSTANCES` clause. `Instances` permits a fixed count; `PerPartition` also permits the partition
+form. The six broker entities in the table declare `PerPartition`. Polling, connection, listener,
+and client-producer entities declare `Single`.
+
+`INSTANCES <n>` uses a positive 64-bit count (1 through 18,446,744,073,709,551,615). Before
+placement, Nervix refuses a count whose execution-unit entries cannot be addressed on the target.
+The declaration and its encodings retain the complete count. Nervix schedules each global index `0..n-1` as an
+independent execution unit with its own primary, replicas, readiness, intake buffer, ACK roots,
+branch lifecycle and metric checkpoints. Eligible nodes share the primary work; when fewer nodes
+are available, several instances can run on one node. A hard whole-entity colocation rule can
+require all its units to share an owner. Connector identities retain the global index when a unit
+moves; an owner never renumbers its local instances. Broker competition retains the transport's
+own subscription and delivery guarantees.
+
+`INSTANCES PER PARTITION` creates one instance per partition of the branch its routes construct.
+Every constructing route must target the same ordered key-field contract and partition count.
+Branch names and retention settings may differ. At least one route must construct a branch;
+additional unbranched routes do not define its partition structure. Instance `p` is colocated with
+partition `p` of every constructed relay. A branch with one partition places instance `0` with the
+relay's `Single` unit. The current form follows direct branch partitions; shard inheritance and
+topology epochs are separate features.
+
+For Kafka, `PER PARTITION` requires `OFFSET BY DOMAIN`. Each unit owns the offsets of the topic
+partitions dealt to its global index, and commits through the originator on that unit's primary.
+Changing a domain-offset ingestor's unit count preserves its recorded positions while running or
+stopped. Nervix drains the affected units and prepares their redistributed state on the new
+primaries and replicas before publishing the layout. A failed preparation retains the preceding
+layout. Changing the broker topic's partition set with a fixed instance count retains its existing
+rebalance and checkpoint contract.
+
+`DESCRIBE INGESTOR <name>` reports every instance with its node, running state and readiness.
+`SHOW INGESTORS` and `SHOW CLUSTER STATUS` list the unit-qualified owners. Generic edge metrics and
+source-specific intake metrics carry the `instance` label; see
+[Metrics And Observability](metrics-and-observability.md#metric-labels). Moving or stopping one
+instance ends its exact source lifetime and leaves sibling source tasks, ACK roots and readiness
+handles installed. A count change retains complete metric histories exactly once, with their
+original instance and physical-node labels. A retired instance's history remains visible while
+one of the current units owns its checkpoint.
 
 The instances of a `KAFKA TOPIC` ingestor under `OFFSET BY CONSUMER GROUP` are members of one group
 and share its `START AT`: whichever instance takes a partition the group holds no usable offset for

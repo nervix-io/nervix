@@ -907,14 +907,19 @@ fn decode_ownership_move(
 ) -> Result<OwnershipMoveImpact, Report<WireDecodeError>> {
     let node = decode_node_coverage(decoder, impact.node())?;
     let unit = match impact.unit_type() {
-        wire::PlacementUnit::SingleUnit => Unit::Single,
+        wire::PlacementUnit::SingleUnit => Unit::SINGLE,
         wire::PlacementUnit::PartitionUnit => {
             let partition = union_member(impact.unit_as_partition_unit());
-            Unit::Partition(partition.partition())
+            Unit::partition(partition.partition())
         }
         wire::PlacementUnit::InstanceUnit => {
             let instance = union_member(impact.unit_as_instance_unit());
-            Unit::Instance(instance.instance())
+            Unit::try_instance(instance.instance()).map_err(|cause| {
+                Report::new(cause).change_context(WireDecodeError::InvalidValue {
+                    field: "OwnershipMoveImpact.unit",
+                    kind: "execution unit",
+                })
+            })?
         }
         undeclared => {
             return Err(decoder.unknown_union("OwnershipMoveImpact.unit", undeclared.0));
@@ -942,16 +947,16 @@ fn encode_placement_unit<'fbb>(
     encoder: &mut Encoder<'fbb>,
     unit: Unit,
 ) -> EncodedUnion<wire::PlacementUnit> {
-    match unit {
-        Unit::Single => EncodedUnion::new(
+    match unit.kind() {
+        nervix_models::UnitKind::Single => EncodedUnion::new(
             wire::PlacementUnit::SingleUnit,
             wire::SingleUnit::create(encoder.fbb(), &wire::SingleUnitArgs {}),
         ),
-        Unit::Partition(partition) => EncodedUnion::new(
+        nervix_models::UnitKind::Partition(partition) => EncodedUnion::new(
             wire::PlacementUnit::PartitionUnit,
             wire::PartitionUnit::create(encoder.fbb(), &wire::PartitionUnitArgs { partition }),
         ),
-        Unit::Instance(instance) => EncodedUnion::new(
+        nervix_models::UnitKind::Instance(instance) => EncodedUnion::new(
             wire::PlacementUnit::InstanceUnit,
             wire::InstanceUnit::create(encoder.fbb(), &wire::InstanceUnitArgs { instance }),
         ),

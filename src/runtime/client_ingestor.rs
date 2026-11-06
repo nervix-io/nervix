@@ -750,11 +750,7 @@ impl Runtime {
             &ModelName::from(&ingestor.name),
             branched_templates,
         );
-        let readiness = self
-            .prepare_ingestor_readiness(domain, &ingestor.name, NonZeroU64::MIN)
-            .into_iter()
-            .next()
-            .assured("the client source has one declared instance");
+        let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, Unit::SINGLE);
         let (shutdown_tx, _) = watch::channel(false);
         let (jobs, job_receiver) = mpsc::channel(1);
         let execution = Arc::new(ClientExecution {
@@ -778,7 +774,7 @@ impl Runtime {
             branched_senders: branched_runtime.senders.clone(),
             metrics,
             quiesce: quiesce.clone(),
-            trackers: self.ingestor_ack_root_trackers(domain, &ingestor.name),
+            trackers: self.ingestor_ack_root_trackers(domain, &ingestor.name, Unit::SINGLE),
             ack_timeout: plan.policy.ack_timeout,
         };
         if commands.send(EndpointCommand::Install(execution)).is_err() {
@@ -905,7 +901,11 @@ impl Runtime {
             .collect::<Vec<_>>();
         for key in keys {
             nervix_primitives::task::consume_budget().await;
-            if self.inner.ingestors.contains_key(&key) {
+            if self
+                .inner
+                .ingestors
+                .contains_key(&DomainNodeUnitRef::single(key.clone()))
+            {
                 continue;
             }
             let Some(reason) = self.client_endpoint_end_reason(&key, local_node_id) else {
@@ -974,7 +974,11 @@ impl Runtime {
             return Some(ClientProducerEndReason::DomainStopped);
         };
         let ingestor = IngestorName::from(key.identifier());
-        let Some(plan) = execution.revision.entrypoints.ingestor(&ingestor) else {
+        let Some(plan) = execution
+            .revision
+            .entrypoints
+            .ingestor(&ingestor, Unit::SINGLE)
+        else {
             return Some(ClientProducerEndReason::EndpointRemoved);
         };
         if let IngestorInputPlan::Transport(_) = plan.input {

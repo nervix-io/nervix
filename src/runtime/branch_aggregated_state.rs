@@ -5,7 +5,7 @@
 
 use error_stack::ResultExt as _;
 use nervix_checkpoint_replication::CheckpointReplication;
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, Unit};
 use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -17,7 +17,8 @@ use crate::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::ModelKind;
+    use meticulous::ResultExt as _;
+    use nervix_models::{ModelKind, ModelName, Unit};
 
     use super::*;
     use crate::{
@@ -29,6 +30,138 @@ mod tests {
     };
 
     #[test]
+    fn a_handed_off_instance_recovers_its_totals_and_keeps_a_local_sibling() {
+        let domain = domain("instances");
+        let source: ModelName = named("source");
+        let relay = named("events");
+        let first_node = ClusterNodeName::parse("node-1").expect("valid node");
+        let next_node = ClusterNodeName::parse("node-2").expect("valid node");
+        let placement = RuntimeStatePlacement {
+            domain: domain.clone(),
+            state: RuntimeState::BranchAggregated,
+            kind: ModelKind::Ingestor,
+            identifier: source.clone(),
+            unit: Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
+            branch_key: None,
+        };
+        let record = |metrics: &RuntimeMetrics, unit, node: &ClusterNodeName, count| {
+            metrics
+                .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                    unit,
+                    domain: &domain,
+                    kind: ModelKind::Ingestor,
+                    node: &source,
+                    relay: &relay,
+                    physical_node_id: Some(node),
+                    direction: "sent",
+                    branch: None,
+                })
+                .observe(count, 64, None);
+        };
+        let previous_metrics = RuntimeMetrics::default();
+        let previous = ReplicatedBranchAggregatedState::new(
+            placement.clone(),
+            Some(first_node.clone()),
+            &previous_metrics,
+            None,
+        )
+        .expect("the first owner installs its instance state");
+        record(
+            &previous_metrics,
+            Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
+            &first_node,
+            2,
+        );
+        previous.mark_metrics_updated();
+        let checkpoint = previous
+            .latest_snapshot(&previous_metrics)
+            .expect("the ending owner captures its final totals");
+
+        let metrics = RuntimeMetrics::default();
+        record(&metrics, Unit::FIRST_INSTANCE, &next_node, 7);
+        record(
+            &metrics,
+            Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
+            &next_node,
+            100,
+        );
+        let successor = ReplicatedBranchAggregatedState::new(
+            placement.clone(),
+            Some(next_node.clone()),
+            &metrics,
+            Some(checkpoint),
+        )
+        .expect("the successor installs exactly the transferred instance");
+        let total = |metrics: &RuntimeMetrics, unit: Unit| {
+            let nervix_models::UnitKind::Instance(index) = unit.kind() else {
+                unreachable!("the test names only instance units")
+            };
+            metrics
+                .describe_global_target(&domain, "INGESTOR", &source)
+                .iter()
+                .map(|line| line.trim_start())
+                .filter(|line| {
+                    line.starts_with("messages_total sent ")
+                        && line.contains(&format!(" instance={index} "))
+                })
+                .map(|line| {
+                    line.split("total=")
+                        .nth(1)
+                        .expect("a counter renders its total")
+                        .split_whitespace()
+                        .next()
+                        .expect("a total has a value")
+                        .parse::<u64>()
+                        .expect("the total is an integer")
+                })
+                .sum::<u64>()
+        };
+        assert_eq!(total(&metrics, Unit::FIRST_INSTANCE), 7);
+        assert_eq!(
+            total(
+                &metrics,
+                Unit::try_instance(1).assured("the fixture index fits the execution-unit range")
+            ),
+            2
+        );
+        record(
+            &metrics,
+            Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
+            &next_node,
+            3,
+        );
+        successor.mark_metrics_updated();
+        let checkpoint = successor
+            .latest_snapshot(&metrics)
+            .expect("the new revision includes both physical contributions");
+        let lines = metrics.describe_global_target(&domain, "INGESTOR", &source);
+        for (node, value) in [("node-1", 2), ("node-2", 3)] {
+            assert!(lines.iter().map(|line| line.trim_start()).any(|line| {
+                line.starts_with("messages_total sent ")
+                    && line.contains(" instance=1 ")
+                    && line.contains(&format!("physical_node={node} total={value} "))
+            }));
+        }
+        let restored_metrics = RuntimeMetrics::default();
+        record(&restored_metrics, Unit::FIRST_INSTANCE, &next_node, 9);
+        ReplicatedBranchAggregatedState::new(
+            placement,
+            Some(next_node),
+            &restored_metrics,
+            Some(checkpoint),
+        )
+        .expect("a restart restores the unit-qualified checkpoint");
+        assert_eq!(total(&restored_metrics, Unit::FIRST_INSTANCE), 9);
+        assert_eq!(
+            total(
+                &restored_metrics,
+                Unit::try_instance(1).assured("the fixture index fits the execution-unit range")
+            ),
+            5
+        );
+    }
+
+    #[test]
     fn a_metrics_revision_keeps_its_exact_bytes_until_the_next_dirty_mark() {
         let metrics = RuntimeMetrics::default();
         let node = ClusterNodeName::parse("node-1").expect("valid node");
@@ -37,19 +170,19 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: named("source"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let state = ReplicatedBranchAggregatedState::new(
             placement.clone(),
             Some(node.clone()),
-            node.clone(),
             &metrics,
             None,
         )
         .expect("the metric placement initializes");
         let relay = named("events");
         let batch = metrics.resolve_node_batch_metrics(NodeBatchMetricsSpec {
+            unit: Unit::SINGLE,
             domain: &placement.domain,
             kind: placement.kind,
             node: &placement.identifier,
@@ -81,7 +214,6 @@ mod tests {
         let restored = ReplicatedBranchAggregatedState::new(
             placement,
             Some(node.clone()),
-            node,
             &restored_metrics,
             Some(next.clone()),
         )
@@ -132,6 +264,12 @@ pub(super) struct BranchAggregatedRuntimeStateSnapshot {
 }
 
 #[derive(Debug)]
+struct BranchAggregatedCheckpoint {
+    captured: Option<PersistedRuntimeStateEntry>,
+    units: std::collections::BTreeSet<Unit>,
+}
+
+#[derive(Debug)]
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -144,19 +282,11 @@ pub(super) struct BranchAggregatedRuntimeStateSnapshot {
 pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) placement: RuntimeStatePlacement,
     roles: nervix_primitives::sync::blocking::RwLock<StateReplicationRoles>,
-    #[cfg_attr(
-        nervix_lint,
-        nervix::identity(
-            node,
-            reason = "materialized branch state belongs to this physical node"
-        )
-    )]
-    pub(super) physical_node_id: ClusterNodeName,
     pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
     /// A revision selects its bytes once. Elapsed metric fields cannot change its descriptor,
     /// stream or persisted payload when another request captures that same revision.
-    snapshot: nervix_primitives::sync::blocking::Mutex<Option<PersistedRuntimeStateEntry>>,
+    snapshot: nervix_primitives::sync::blocking::Mutex<BranchAggregatedCheckpoint>,
     /// What each replica reported holding and the offer of the newest snapshot to them while this
     /// node aggregates the metrics, and the owner's announcements while it replicates them.
     replication: CheckpointReplication,
@@ -174,21 +304,22 @@ impl ReplicatedBranchAggregatedState {
     pub(super) fn new(
         placement: RuntimeStatePlacement,
         primary_node: Option<ClusterNodeName>,
-        physical_node_id: ClusterNodeName,
         metrics: &RuntimeMetrics,
         initial: Option<PersistedRuntimeStateEntry>,
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let mut current_lsm = 0;
         let mut last_persisted_lsm = 0;
+        let mut units = std::collections::BTreeSet::from([placement.unit]);
         if let Some(initial) = initial.as_ref() {
             current_lsm = initial.lsm;
             last_persisted_lsm = initial.lsm;
             let snapshot = decode_branch_aggregated_snapshot(&initial.payload)?;
-            metrics.apply_global_target_snapshot(
+            units.extend(snapshot.metrics.units());
+            metrics.apply_global_unit_snapshot(
                 &placement.domain,
                 placement.kind,
                 &placement.identifier,
-                &physical_node_id,
+                placement.unit,
                 snapshot.metrics,
             );
         }
@@ -197,16 +328,22 @@ impl ReplicatedBranchAggregatedState {
             roles: nervix_primitives::sync::blocking::RwLock::new(StateReplicationRoles::owned_by(
                 primary_node,
             )),
-            physical_node_id,
             current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
-            snapshot: nervix_primitives::sync::blocking::Mutex::new(initial),
+            snapshot: nervix_primitives::sync::blocking::Mutex::new(BranchAggregatedCheckpoint {
+                captured: initial,
+                units,
+            }),
             replication: CheckpointReplication::new(),
         })
     }
 
     pub(super) fn primary_node(&self) -> Option<ClusterNodeName> {
         self.roles.read().primary_node.clone()
+    }
+
+    pub(super) fn metric_units(&self) -> std::collections::BTreeSet<Unit> {
+        self.snapshot.lock().units.clone()
     }
 
     pub(super) fn rebind_roles(&self, roles: StateReplicationRoles) {
@@ -281,24 +418,24 @@ impl ReplicatedBranchAggregatedState {
         // The revision is read first, so an update whose metrics this snapshot misses has a newer
         // revision than the one the snapshot is stamped with.
         let lsm = self.current_lsm.current();
-        if let Some(snapshot) = captured.as_ref()
+        if let Some(snapshot) = captured.captured.as_ref()
             && snapshot.lsm == lsm
         {
             return Ok(snapshot.clone());
         }
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
-            metrics: metrics.snapshot_global_target(
+            metrics: metrics.snapshot_global_units(
                 &self.placement.domain,
                 self.placement.kind,
                 &self.placement.identifier,
-                &self.physical_node_id,
+                &captured.units,
             ),
         };
         let snapshot = PersistedRuntimeStateEntry {
             lsm,
             payload: encode_branch_aggregated_snapshot(&snapshot)?,
         };
-        *captured = Some(snapshot.clone());
+        captured.captured = Some(snapshot.clone());
         Ok(snapshot)
     }
 
@@ -318,15 +455,17 @@ impl ReplicatedBranchAggregatedState {
     ) -> error_stack::Result<(), RuntimePersistenceError> {
         let mut captured = self.snapshot.lock();
         let snapshot = decode_branch_aggregated_snapshot(payload)?;
-        metrics.apply_global_target_snapshot(
+        captured.units = snapshot.metrics.units();
+        captured.units.insert(self.placement.unit);
+        metrics.apply_global_unit_snapshot(
             &self.placement.domain,
             self.placement.kind,
             &self.placement.identifier,
-            &self.physical_node_id,
+            self.placement.unit,
             snapshot.metrics,
         );
         self.current_lsm.adopt(lsm);
-        *captured = Some(PersistedRuntimeStateEntry {
+        captured.captured = Some(PersistedRuntimeStateEntry {
             lsm,
             payload: payload.to_vec(),
         });
@@ -349,26 +488,29 @@ impl ReplicatedBranchAggregatedState {
         let mut captured = self.snapshot.lock();
         let current_lsm = self.current_lsm.current();
         if snapshot.lsm <= current_lsm
-            && metrics.has_global_target_measurements(
+            && metrics.has_global_unit_measurements(
                 &self.placement.domain,
                 self.placement.kind,
                 &self.placement.identifier,
+                self.placement.unit,
             )
         {
             return Ok(());
         }
         let decoded = decode_branch_aggregated_snapshot(&snapshot.payload)?;
-        metrics.apply_global_target_snapshot(
+        captured.units = decoded.metrics.units();
+        captured.units.insert(self.placement.unit);
+        metrics.apply_global_unit_snapshot(
             &self.placement.domain,
             self.placement.kind,
             &self.placement.identifier,
-            &self.physical_node_id,
+            self.placement.unit,
             decoded.metrics,
         );
         self.current_lsm.adopt(snapshot.lsm);
         self.last_persisted_lsm
             .store(snapshot.lsm, Ordering::SeqCst);
-        *captured = Some(snapshot);
+        captured.captured = Some(snapshot);
         Ok(())
     }
 }

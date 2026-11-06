@@ -436,6 +436,12 @@ remains: no relay batch, no runtime-node work item, no emitter buffer or active 
 admitted acknowledgement root. A stopped or extremely slow domain clock cannot hold rows out of the
 drain, because the force flush does not wait for a logical cadence to come due.
 
+An emitter force flush publishes a partial batch without waiting for either batching limit to be
+filled. Prepared attempts keep their original bytes and source members through the drain. A
+batch-policy change drains that work before activating the replacement policy, and a failed
+pre-commit drain leaves the previous task responsible for it. These buffers and member maps are
+volatile; terminal cancellation never treats an unanswered member as delivered.
+
 Window processors are the one exception to that release. A force flush purges timed-out aggregate
 state but emits only windows that have met their declared `WIDTH`. A partially filled window is not
 emitted early by a shutdown, so its rows do not reach the emitter. A row's acknowledgement completes
@@ -1530,6 +1536,26 @@ released claim becomes available again. Task teardown removes its confirmation/s
 and pooled emitter teardown removes its wait registration; cancellation clears a pending borrow's
 wait through its guard. Handoff watches register before reading their unit's retained freeze
 publication, and release publishes thaw before waking them.
+
+## Stopping Spread Intake
+
+A source instance is stopped under its exact `DomainNodeUnitRef`. Node drain suspends intake for
+the units whose primaries it owns, waits for their admitted ACK roots and transport confirmation,
+and transfers their unit-qualified offsets and branch checkpoints. A sibling whose owner remains
+live retains its host task, readiness and ACK roots. Per-partition intake moves with its exact
+relay partition component. Whole-domain shutdown still selects every current unit, including
+retained work from a source whose live registration has already ended.
+
+Kafka initialization shares cold admission with the exact unit's ownership capture and final
+offset write. Stopping refuses new initialization; the final writer waits for an initialization
+already admitted to finish or reach its deadline before capturing the final state. Pending
+canonical positions survive in the same native checkpoint as the explicit-start generation. A
+plain resume transfers a delayed unit's pending positions before it begins polling.
+
+The ending loop closes its transport before its readiness is retired. MQTT input retirement
+compares the logical input once and selects only the global indices ending on this node. Forced
+node loss retains the transport's declared replay and duplicate limits; instance placement does
+not strengthen broker acknowledgement guarantees.
 
 ## Live Domain Policy
 

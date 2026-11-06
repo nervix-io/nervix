@@ -487,7 +487,7 @@ fn materialized_sections(groups: u32) -> Vec<TestSection> {
     let domain = domain("prod");
     let entity = ModelName::parse("state").assured("relay name is valid");
     let descriptor = crate::MaterializedRelayDescriptor {
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         domain: domain.clone(),
         entity: entity.clone(),
         schema: SchemaFingerprint::from_digest([9; 32]),
@@ -505,13 +505,13 @@ fn materialized_sections(groups: u32) -> Vec<TestSection> {
             Vec::new(),
         ),
         record_section(
-            SectionPath::materialized_descriptor(&domain, &entity, nervix_models::Unit::Single),
+            SectionPath::materialized_descriptor(&domain, &entity, nervix_models::Unit::SINGLE),
             &descriptor,
         ),
     ];
     for group in 0..groups {
         let identity = crate::MaterializedIdentitiesRecord {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: domain.clone(),
             entity: entity.clone(),
             group,
@@ -528,7 +528,7 @@ fn materialized_sections(groups: u32) -> Vec<TestSection> {
         };
         // The archive owns opaque column sections. The restore boundary validates their IPC schema.
         sections.push(bytes_section(
-            SectionPath::materialized_columns(&domain, &entity, nervix_models::Unit::Single, group),
+            SectionPath::materialized_columns(&domain, &entity, nervix_models::Unit::SINGLE, group),
             SectionContent::MaterializedColumns,
             vec![1, 3, 5, 7],
         ));
@@ -536,7 +536,7 @@ fn materialized_sections(groups: u32) -> Vec<TestSection> {
             SectionPath::materialized_identities(
                 &domain,
                 &entity,
-                nervix_models::Unit::Single,
+                nervix_models::Unit::SINGLE,
                 group,
             ),
             &identity,
@@ -752,9 +752,9 @@ fn a_domain_archive_holds_no_users() {
 fn unsupported_state_record_headers_are_verified_and_reported_as_skipped() {
     let prod = domain("prod");
     let entity = ModelName::parse("source").assured("the test entity is valid");
-    let path = SectionPath::kafka_offsets(&prod, &entity, nervix_models::Unit::Single);
+    let path = SectionPath::kafka_offsets(&prod, &entity, nervix_models::Unit::SINGLE);
     let record = KafkaOffsetsRecord {
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         domain: prod.clone(),
         entity,
         schema: SchemaFingerprint::from_digest([3; 32]),
@@ -820,7 +820,7 @@ fn an_unsupported_wasm_descriptor_skips_its_guest_blob_together() {
     let prod = domain("prod");
     let entity = ModelName::parse("filter").assured("the test entity is valid");
     let descriptor = WasmStateDescriptor {
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         domain: prod.clone(),
         entity: entity.clone(),
         schema: SchemaFingerprint::from_digest([3; 32]),
@@ -832,7 +832,7 @@ fn an_unsupported_wasm_descriptor_skips_its_guest_blob_together() {
     let mut descriptor_bytes = descriptor.encode().assured("the descriptor encodes");
     descriptor_bytes[10..12].copy_from_slice(&999_u16.to_le_bytes());
     let descriptor_path =
-        SectionPath::wasm_state_descriptor(&prod, &entity, nervix_models::Unit::Single, None);
+        SectionPath::wasm_state_descriptor(&prod, &entity, nervix_models::Unit::SINGLE, None);
     let sections = vec![
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
@@ -846,7 +846,7 @@ fn an_unsupported_wasm_descriptor_skips_its_guest_blob_together() {
             descriptor_bytes,
         ),
         bytes_section(
-            SectionPath::wasm_guest_blob(&prod, &entity, nervix_models::Unit::Single, None),
+            SectionPath::wasm_guest_blob(&prod, &entity, nervix_models::Unit::SINGLE, None),
             SectionContent::WasmGuestBlob,
             vec![7; 32],
         ),
@@ -883,7 +883,7 @@ fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() 
     let deduplicator = ModelName::parse("unique_payments").assured("the test entity is valid");
     let window = ModelName::parse("latency_window").assured("the test entity is valid");
     let keyspace = crate::DeduplicatorStateDescriptor {
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         domain: prod.clone(),
         entity: deduplicator.clone(),
         schema: SchemaFingerprint::from_digest([3; 32]),
@@ -894,7 +894,7 @@ fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() 
         groups: 1,
     };
     let rows = crate::WindowStateDescriptor {
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         domain: prod.clone(),
         entity: window.clone(),
         schema: SchemaFingerprint::from_digest([4; 32]),
@@ -919,11 +919,11 @@ fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() 
     let keyspace_path = SectionPath::deduplicator_descriptor(
         &prod,
         &deduplicator,
-        nervix_models::Unit::Single,
+        nervix_models::Unit::SINGLE,
         None,
     );
     let rows_path =
-        SectionPath::window_descriptor(&prod, &window, nervix_models::Unit::Single, None);
+        SectionPath::window_descriptor(&prod, &window, nervix_models::Unit::SINGLE, None);
     let sections = vec![
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
@@ -940,7 +940,7 @@ fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() 
             SectionPath::deduplicator_keys(
                 &prod,
                 &deduplicator,
-                nervix_models::Unit::Single,
+                nervix_models::Unit::SINGLE,
                 None,
                 0,
             ),
@@ -953,7 +953,7 @@ fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() 
             rows_bytes,
         ),
         bytes_section(
-            SectionPath::window_input_rows(&prod, &window, nervix_models::Unit::Single, None, 0),
+            SectionPath::window_input_rows(&prod, &window, nervix_models::Unit::SINGLE, None, 0),
             SectionContent::WindowInputRows,
             vec![8; 32],
         ),
@@ -961,7 +961,7 @@ fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() 
             SectionPath::window_argument_columns(
                 &prod,
                 &window,
-                nervix_models::Unit::Single,
+                nervix_models::Unit::SINGLE,
                 None,
                 0,
             ),

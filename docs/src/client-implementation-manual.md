@@ -279,6 +279,10 @@ use.
 
 ## Commands And Execution Identity
 
+An instance placement identity carries an unsigned 64-bit index in the `PlacementUnit` union;
+partition indices remain unsigned 32-bit values. Client encoders and decoders preserve the full
+instance index when reporting transaction impact and execution placement.
+
 Treat client CONFIG validation refusals as ordinary failed commands under the rules below.
 Show their client/key diagnostic without retrying invalid input automatically. A refused queued
 statement leaves its transaction usable. `SHOW CREATE CLIENT` and structured-choice previews mask
