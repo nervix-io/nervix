@@ -1456,6 +1456,15 @@ cleanup and delivery interruption; those network effects are outside these in-pr
 [Client Session Protocol](./client-session-protocol.md) and its implementation manual own the
 restoration and application-outcome contract.
 
+Each native restore attempt captures its channel and exchange generation together before sending
+the archive. If its verified reply cannot be decoded or names another transport request, session
+termination checks that generation while holding the client's exchange mutex. It ends only the
+exchange that supplied the stream, interrupts its pending requests and stops its reader; a
+replacement exchange, even on the same channel, remains usable. The real-gRPC `restore_reply`
+owner tests cover both arrival orders and a subsequent reconnect. The public
+`client_restore_reply_validation.feature` scenarios recover a completed restore under the same
+reference after both invalid replies, through the native client and CLI on one and three nodes.
+
 ### Node quiesce accounting
 
 Every entity on a node keeps one set of quiesce counts. A drain reads them to decide whether the
