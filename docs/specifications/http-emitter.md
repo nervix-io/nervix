@@ -25,7 +25,10 @@ provisioning or probe request against the destination.
 The HTTP emitter has this form:
 
 ```plexus,ignore
-CREATE HTTP REQUEST EMITTER <name> FROM <relays> TO <client>
+CREATE HTTP REQUEST EMITTER <name>
+  FROM <relays> [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
+  [ATTACHED | DETACHED]
+  TO <client>
   METHOD <string_expression>
   PATH <string_expression>
   MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>
@@ -40,7 +43,8 @@ referenced client's `timeout_ms` bounds each attempt.
 The ordinary emitter clauses surround this emitter: source relays and their predicates, optional
 `COLLECT FOR` and materialized dependencies, route construction where a codec is used, optional
 route `WHERE`, optional `INVOKE`, required `FLUSH`, and message and general error policies.
-Attachment is selected by the ordinary `CREATE [ATTACHED|DETACHED] EMITTER` form.
+The optional `ATTACHED | DETACHED` input acknowledgement clause follows the complete `FROM`
+inputs and any `COLLECT FOR`, before materialized dependencies and `TO`. Its default is `ATTACHED`.
 
 An expression ends at its following clause outside parentheses, arrays, and quoted literals.
 Qualified fields such as `input.path`, `input.method`, and `input.mode` remain valid references.

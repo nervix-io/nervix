@@ -80,9 +80,10 @@ BATCH MAX MESSAGES <n> MAX SIZE <bytes>
 The clause sits between the complete `TO` emitter clause and the `FLUSH` policy:
 
 ```plexus,ignore
-CREATE [IF NOT EXISTS] [ATTACHED | DETACHED] EMITTER <name>
+CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> EMITTER <name>
   FROM <relay> [WHERE <expr>] [, ...] [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
-  [WITH MATERIALIZED STATE ...]
+  [ATTACHED | DETACHED]
+  [USING MATERIALIZED STATE ...]
   TO <emitter clause, including MODE, ENCODE USING and construction>
   [BATCH MAX MESSAGES <n> MAX SIZE <bytes>]
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
