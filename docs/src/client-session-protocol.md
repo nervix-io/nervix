@@ -1444,6 +1444,12 @@ reassembly; the final part releases its place. Waiting connection-local requests
 connection, while ordered commands retain their issue order and execution references. A request
 past either outstanding bound is not sent, and the control that issued it reports why.
 
+A reply the console cannot decode or reassemble, or whose body does not answer its request kind,
+ends that session as a protocol violation. The unanswered commands retain their complete requests,
+issue order, execution references and uncertain-outcome retry delays. Recovery restores the
+session before sending them again through the same bounded window; an unreadable reply never
+settles a command as failed.
+
 A tab whose generation the server ended with `SubscriptionEnded` turns ended in the web console. It
 keeps its rows and the reason, and it is not restored on a later connection, which would not change
 why the server ended it. The operator resubscribes it under the same name, which opens a new
