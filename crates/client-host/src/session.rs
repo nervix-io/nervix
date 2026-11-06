@@ -124,7 +124,8 @@ impl Session {
         self.shared.block_on(cancel, work)
     }
 
-    /// Captures `query` and a fresh execution identity before anything is sent.
+    /// Captures `query` and a fresh reference before anything is sent. Session-local requests do
+    /// not use it as a durable execution identity.
     pub fn prepare(&self, query: &str, cancel: Option<&Cancel>) -> Result<Execution, Failure> {
         let preparing = async {
             let handle = self.client().prepare_execution(query).await;
@@ -133,8 +134,9 @@ impl Session {
         self.block_on(cancel, preparing)
     }
 
-    /// Runs a prepared command. A failure that leaves the command's outcome open names its
-    /// execution reference, and running the same execution again recovers that outcome.
+    /// Runs a prepared statement. A durable command whose outcome remains open names its
+    /// execution reference, and running the same execution again recovers that outcome. Repeating
+    /// a session-local request may be refused or confirm current state after it took effect.
     pub fn execute(
         &self,
         execution: &Execution,
