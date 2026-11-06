@@ -3004,7 +3004,7 @@ pub fn ingest_quiesce_to_plexus(quiesce: &crate::IngestQuiesceMode) -> String {
 }
 
 impl ClientIngestMode {
-    /// The mode clause of a client source, after its `MODE` keyword.
+    /// The mode clause of a client ingestor, after its `MODE` keyword.
     pub fn to_canonical_plexus(&self) -> String {
         let Self {
             window,

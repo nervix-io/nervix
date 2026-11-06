@@ -110,7 +110,7 @@ Feature: ZeroMQ emission
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR state_source
+        CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO state_notifications
@@ -120,7 +120,7 @@ Feature: ZeroMQ emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR notifications_source
+        CREATE HTTP ENDPOINT INGESTOR notifications_ingestor
         FROM notifications_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications

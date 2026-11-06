@@ -121,7 +121,7 @@ impl MessageErrorPlanContext<'_> {
     }
 
     /// The schema an ingestor's rows carry before route construction: the one its transport's
-    /// codec decodes into, or the input schema a client source's batches carry.
+    /// codec decodes into, or the input schema a client ingestor's batches carry.
     fn ingestor_input_schema(
         &self,
         node: &NodeRef,

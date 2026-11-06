@@ -1557,7 +1557,7 @@ impl RelayBoundaryServices {
     /// The owner reports the batch's records alive to their sources once it has admitted them, and
     /// not before. Until then this node holds them on their sources' behalf, so it reports them
     /// alive itself while the delivery waits for its gates, its channel, the storage of its
-    /// records, a grant or the owner's admission. A source's `ACK TIMEOUT` therefore measures how
+    /// records, a grant or the owner's admission. An ingestor's `ACK TIMEOUT` therefore measures how
     /// long its records make no progress, not how long they take to reach their owner.
     async fn dispatch_to_owner_on(
         &self,

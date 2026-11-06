@@ -13242,7 +13242,7 @@ async fn when_leader_takes_long_to_release_shutdown_drain_cordon(
 }
 
 #[given(expr = "the transport of ingestor {string} takes {string} to confirm its acknowledgements")]
-async fn given_source_confirmation_delay(
+async fn given_ingestor_confirmation_delay(
     world: &mut ScenarioWorld,
     ingestor: String,
     delay: String,
@@ -13251,7 +13251,7 @@ async fn given_source_confirmation_delay(
     let ingestor = world.ingestor_dispatch_ref(&ingestor);
     world
         .fault_injection
-        .delay_source_confirmation(ingestor, delay);
+        .delay_ingestor_confirmation(ingestor, delay);
 }
 
 /// Every read of the junction's materialized dependencies waits this long first, as a read slow to

@@ -134,7 +134,7 @@ Feature: Altering deduplicators and reorderers
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-dedup-dynamic.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -197,7 +197,7 @@ Feature: Altering deduplicators and reorderers
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-dedup-key.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -263,7 +263,7 @@ Feature: Altering deduplicators and reorderers
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reorder-dynamic.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -318,7 +318,7 @@ Feature: Altering deduplicators and reorderers
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reorder-key.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED

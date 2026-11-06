@@ -104,7 +104,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-other-{{test_id}}.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source FROM event_ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
@@ -152,7 +152,7 @@ Feature: Configuration backup into a public archive
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE NATS CLIENT drop_nats CONFIG { 'addr' = '{{nats_addr}}' };
-      CREATE NATS SUBJECT INGESTOR event_source FROM drop_nats
+      CREATE NATS SUBJECT INGESTOR event_ingestor FROM drop_nats
         SUBJECT 'backup_drop_{{test_id}}' QUEUE GROUP 'backup_drop_group_{{test_id}}'
         INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING event_codec
@@ -207,7 +207,7 @@ Feature: Configuration backup into a public archive
       CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR wait_event_source
+      CREATE KAFKA TOPIC INGESTOR wait_event_ingestor
         FROM wait_kafka TOPIC 'backup_wait_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 5m
             RETRY POLICY BACKOFF 200ms MAX 5s
@@ -217,7 +217,7 @@ Feature: Configuration backup into a public archive
         ON GENERAL ERROR LOG;
       CREATE VHOST edge backup-wait-{{test_id}}.example.com;
       CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wait_state_source
+      CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
         TO wait_state INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -287,7 +287,7 @@ Feature: Configuration backup into a public archive
       CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR wait_event_source
+      CREATE KAFKA TOPIC INGESTOR wait_event_ingestor
         FROM wait_kafka TOPIC 'backup_slow_wait_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 5m
             RETRY POLICY BACKOFF 200ms MAX 5s
@@ -297,7 +297,7 @@ Feature: Configuration backup into a public archive
         ON GENERAL ERROR LOG;
       CREATE VHOST edge backup-slow-wait-{{test_id}}.example.com;
       CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wait_state_source
+      CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
         TO wait_state INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -354,7 +354,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY held_output SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge backup-held-installation-{{test_id}}.example.com;
       CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TO held_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -410,7 +410,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-stalled-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -471,7 +471,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-slow-pause-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -632,7 +632,7 @@ Feature: Configuration backup into a public archive
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
@@ -765,7 +765,7 @@ Feature: Configuration backup into a public archive
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
@@ -868,7 +868,7 @@ Feature: Configuration backup into a public archive
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
@@ -925,8 +925,8 @@ Feature: Configuration backup into a public archive
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When the CLI describes backup archive "stateful.nvxb" as text
     Then the CLI output contains "wasm_processor=filter_even_rows"
-    And the CLI output contains "kafka_ingestor=metric_source"
-    And the CLI output contains "branch_lifecycle=metric_source"
+    And the CLI output contains "kafka_ingestor=metric_ingestor"
+    And the CLI output contains "branch_lifecycle=metric_ingestor"
     And the CLI output contains "branch_lifecycle=filter_even_rows"
     Given the active domain is saved as placeholder "source_domain"
     And WASM checkpoint stagings of restoring domain "{{domain}}_incomplete" fail
@@ -984,19 +984,19 @@ Feature: Configuration backup into a public archive
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
-    Then within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    Then within "10s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       kafka observed partitions: 0
       """
-    And within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "10s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       kafka instance 0 partitions: 0
       """
-    And within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "10s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       transient error: -
       """
-    And within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "10s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       ready: true
       """

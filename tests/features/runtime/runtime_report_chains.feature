@@ -31,7 +31,7 @@ Feature: Runtime report chains
       """
     Then within "30s" the active session observes a server error containing
       """
-      could not advance source cadence:
+      could not advance ingestor cadence:
       """
     And the last server error contains
       """

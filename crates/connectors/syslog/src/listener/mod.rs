@@ -59,7 +59,7 @@ pub use listener_faults::SyslogListenerFault;
 #[cfg(feature = "testing")]
 use listener_faults::{ConfiguredListenerFaults, ConfiguredStreamAccept};
 
-/// The listener fault capability has a stable slot in plans and sources. Ordinary builds keep
+/// The listener fault capability has a stable slot in plans and ingestors. Ordinary builds keep
 /// only this zero-sized marker; testing builds own the injector in the testing module.
 #[cfg(not(feature = "testing"))]
 #[derive(Clone, Default)]
@@ -223,7 +223,7 @@ struct SyslogUdpListener {
 
 struct SyslogStreamListener {
     /// An accept failure retires only this socket; established connection tasks and queued
-    /// frames remain owned by the same source until resume rebinds it.
+    /// frames remain owned by the same ingestor until resume rebinds it.
     listener: Option<TcpListener>,
     frame_tx: mpsc::Sender<ReceivedSyslogFrame>,
     frame_rx: mpsc::Receiver<ReceivedSyslogFrame>,

@@ -76,8 +76,8 @@ and [Client Implementation Manual](https://docs.nervix.io/client-implementation-
 S-7 and K-5. Keep an unanswered reopening distinct from a refusal, and account for the live-edge gap.
 
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
-the open session, unreadable replies, replies naming another execution, uncertain restore outcomes,
-and reconnect behavior, read
+the open session, unreadable replies, replies of another kind, replies naming another execution,
+uncertain restore outcomes, and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
 [Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
 directly. Follow the same documentation version as the selected index; these client chapters are
@@ -275,21 +275,14 @@ current connection, retry and deadline limits.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
-- A RabbitMQ queue ingestor uses automatic `MODE NO ACK`, prefetch-one `MODE ACK SEQUENTIAL`,
-  or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
-  Parallel `MAX` is 1 through 65,535 per instance. ACK/NACK follows each delivery's own graph
-  outcome; a rejection requeues that delivery. `NO ACK` disables broker prefetch and cannot
-  recover a delivery already consumed before downstream completion. See
-  [Ingestors → RabbitMQ](../../../../docs/src/ingestors.md#rabbitmq).
-- A RabbitMQ emitter publishes to a queue through the default exchange with
-  `RABBITMQ QUEUE EMITTER … TO <client> QUEUE '<queue>'`, or to a declared exchange with
-  `RABBITMQ EXCHANGE EMITTER … TO <client> EXCHANGE '<exchange>' ROUTING KEY <expression>`, whose
-  expression computes every record's key as an exact, non-null, non-sensitive `STRING`. Nervix never
-  declares the exchange or its bindings, and an emitter whose exchange is missing stays unavailable
-  until it exists. Without `MANDATORY` a message no binding routes is dropped by the broker and its
-  record reported delivered; write `MANDATORY` after the payload, on either entity, to reject such a
-  record through `ON MESSAGE ERROR` instead. See
-  [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq).
+- For RabbitMQ consumer modes, per-instance prefetch, settlement, metadata and sorted headers, read
+  [Ingestors → RabbitMQ](../../../../docs/src/ingestors.md#rabbitmq). For queue/default-exchange
+  shorthand, named-exchange routing, `MANDATORY`, persistence, timestamp and typed properties, read
+  [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq). Keep consumer acknowledgements,
+  publisher confirms, routing and durability distinct when choosing a delivery policy.
+- Both RabbitMQ directions use the shared [client contract](../../../../docs/src/ingestors.md#rabbitmq-client)
+  and [generated CONFIG keys](../../../../docs/src/connector-capabilities.md#rabbitmq-client).
+  Provision queues, exchanges, bindings and any durable destinations explicitly before starting.
 - For Core NATS completion, JetStream PubAck, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).

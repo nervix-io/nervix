@@ -81,14 +81,14 @@ pub(crate) struct IngestorDescribe {
     pub(crate) ready: bool,
     pub(crate) quiesce_state: Option<String>,
     pub(crate) quiesce_counters: IngestorQuiesceCounters,
-    /// Pending acknowledgements and rejections this node's source hosts discarded after a
+    /// Pending acknowledgements and rejections this node's ingestor hosts discarded after a
     /// reconnect, because the broker redelivers them.
     pub(crate) transport_redeliveries_total: u64,
     /// Payloads this node's intake of the ingestor consumed because its codec refused them.
     pub(crate) decode_rejections_total: u64,
     /// The latest of those payloads' decode rejections on this node.
     pub(crate) last_decode_rejection: Option<DecodeRejection>,
-    /// Payloads this node's source hosts of the ingestor dropped because they exceed their
+    /// Payloads this node's ingestor hosts of the ingestor dropped because they exceed their
     /// client's message size bound.
     pub(crate) oversized_payloads_total: u64,
     pub(crate) memory_backpressure_paused: bool,
@@ -496,7 +496,7 @@ impl Runtime {
                 .fault_injection
                 .ingestor_is_failed(&IngestorName::from(&identifier))
             {
-                Some("ingestor fault injector failed source".to_string())
+                Some("ingestor fault injector failed intake".to_string())
             } else {
                 None
             }

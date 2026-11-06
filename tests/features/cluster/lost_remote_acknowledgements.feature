@@ -26,7 +26,7 @@ Feature: Remote record acknowledgements lost between nodes
       CREATE KAFKA CLIENT lost_ack_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR lost_ack_source
+      CREATE KAFKA TOPIC INGESTOR lost_ack_ingestor
         FROM lost_ack_kafka TOPIC 'lost_ack_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'lost_ack_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
@@ -35,7 +35,7 @@ Feature: Remote record acknowledgements lost between nodes
           BRANCHED BY lost_ack_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER lost_ack_sink
+      CREATE KAFKA TOPIC EMITTER lost_ack_emitter
         FROM lost_ack_records
         ATTACHED
         TO lost_ack_kafka TOPIC 'lost_ack_out_{{test_id}}'
@@ -46,14 +46,14 @@ Feature: Remote record acknowledgements lost between nodes
       """
     And these Plexus commands are executed on the leader node
       """
-      RELOCATE INGESTOR lost_ack_source ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR lost_ack_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY lost_ack_records ONTO NODE node-2 IGNORE PREFERENCES;
-      RELOCATE EMITTER lost_ack_sink ONTO NODE node-3 IGNORE PREFERENCES;
+      RELOCATE EMITTER lost_ack_emitter ONTO NODE node-3 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=lost_ack_source unit=instance:0 owner=node-1
+      - domain={{domain}} kind=ingestor name=lost_ack_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -61,7 +61,7 @@ Feature: Remote record acknowledgements lost between nodes
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=emitter name=lost_ack_sink owner=node-3
+      - domain={{domain}} kind=emitter name=lost_ack_emitter owner=node-3
       """
     Given the next record acknowledgement node "node-3" returns to node "node-2" is lost
     When Kafka message is published to topic "lost_ack_in_{{test_id}}"

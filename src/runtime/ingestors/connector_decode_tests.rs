@@ -55,7 +55,7 @@ fn assert_rejected(fixture: &UnfoldingDomain, report: &str, rejections: u64) {
     assert!(report.starts_with(REJECTION), "{report}");
     assert!(
         report.contains(": codec 'event_json' refused the payload: "),
-        "the rejection names the codec and no transport position for a header source: {report}"
+        "the rejection names the codec and no transport position for a header ingestor: {report}"
     );
     let described = fixture
         .runtime

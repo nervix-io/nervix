@@ -26,7 +26,7 @@ Feature: Kafka consumer-group rewinds across a rebalance
       CREATE KAFKA CLIENT rewind_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR rewind_source
+      CREATE KAFKA TOPIC INGESTOR rewind_ingestor
         FROM rewind_kafka TOPIC 'rewind_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'rewind_group_{{test_id}}' START AT EARLIEST
           MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 30s ACK TIMEOUT 5s
@@ -34,7 +34,7 @@ Feature: Kafka consumer-group rewinds across a rebalance
           ON QUIESCE SUSPEND DECODE USING rewind_codec
         TO rewind_records INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER rewind_sink
+      CREATE KAFKA TOPIC EMITTER rewind_emitter
         FROM rewind_records
         ATTACHED
         TO rewind_kafka TOPIC 'rewind_out_{{test_id}}'
@@ -57,7 +57,7 @@ Feature: Kafka consumer-group rewinds across a rebalance
     # The ingestor's batch now holds "moved" for its 30 second window while the external member
     # takes the partition. The faulted emitter then negatively acknowledges it, so the batch is
     # rejected once the partition belongs to the external member.
-    When emitter "rewind_sink" enters fault mode
+    When emitter "rewind_emitter" enters fault mode
     And Kafka message is published to topic "rewind_in_{{test_id}}"
       """
       {"event_id":"moved"}
@@ -68,9 +68,9 @@ Feature: Kafka consumer-group rewinds across a rebalance
     # rejection is of the batch that held it when the partition moved.
     And within "90s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'rewind_source' in domain '{{domain}}'
+      ingestor ACK chain failed for ingestor 'rewind_ingestor' in domain '{{domain}}'
       """
-    When emitter "rewind_sink" leaves fault mode
+    When emitter "rewind_emitter" leaves fault mode
     And the external member leaves Kafka consumer group "rewind_group_{{test_id}}"
     And Kafka message is published to topic "rewind_in_{{test_id}}"
       """
@@ -109,14 +109,14 @@ Feature: Kafka consumer-group rewinds across a rebalance
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE KAFKA TOPIC INGESTOR floor_source
+      CREATE KAFKA TOPIC INGESTOR floor_ingestor
         FROM floor_kafka TOPIC 'floor_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'floor_group_{{test_id}}' START AT LATEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING floor_codec
         TO floor_records INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER floor_sink
+      CREATE KAFKA TOPIC EMITTER floor_emitter
         FROM floor_records
         ATTACHED
         TO floor_kafka TOPIC 'floor_out_{{test_id}}'
@@ -128,21 +128,21 @@ Feature: Kafka consumer-group rewinds across a rebalance
       """
     # The faulted emitter refuses every record, so the ingestor rejects each record it reads and the
     # group commits nothing.
-    And emitter "floor_sink" enters fault mode
+    And emitter "floor_emitter" enters fault mode
     Then within "60s" repeatedly publishing mock Kafka message to topic "floor_in_{{test_id}}" yields a relay subscription payload
       """
       {"event_id":"rejected"}
       """
     And within "60s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'floor_source' in domain '{{domain}}'
+      ingestor ACK chain failed for ingestor 'floor_ingestor' in domain '{{domain}}'
       """
     # The outage outlasts the group session, so the group takes the partition from the ingestor and
     # assigns it again once its broker is back. Resuming from a committed offset there is none of
     # would start at the partition's end, past the rejected record.
     When the mock Kafka broker goes down
     And the mock Kafka broker comes back up after an outage of "15s"
-    And emitter "floor_sink" leaves fault mode
+    And emitter "floor_emitter" leaves fault mode
     Then within "90s" the observed broker receives payloads
       """
       "event_id":"rejected"

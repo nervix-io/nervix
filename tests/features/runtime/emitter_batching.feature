@@ -382,17 +382,17 @@ Feature: Emitter batching configuration
         'addr' = 'mongodb://127.0.0.1:27017',
         'database' = 'nervix'
       };
-      CREATE MONGODB COLLECTION EMITTER row_sink FROM outgoing
+      CREATE MONGODB COLLECTION EMITTER row_emitter FROM outgoing
         TO mongodb_main COLLECTION 'batching_rows'
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE OTEL LOGS EMITTER record_sink FROM outgoing
+      CREATE OTEL LOGS EMITTER record_emitter FROM outgoing
         TO otel_main
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'time' = NOW(), 'body' = 'record' } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "MONGODB COLLECTION emitters require BATCH MAX MESSAGES"
       """
-      ALTER MONGODB COLLECTION EMITTER row_sink DROP BATCH;
+      ALTER MONGODB COLLECTION EMITTER row_emitter DROP BATCH;
       """
     When these Plexus commands fail with "BATCH"
       """
@@ -403,10 +403,10 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER MONGODB COLLECTION EMITTER row_sink SET BATCH MAX MESSAGES 10 MAX SIZE 2MiB;
+      ALTER MONGODB COLLECTION EMITTER row_emitter SET BATCH MAX MESSAGES 10 MAX SIZE 2MiB;
       BEGIN;
-      DROP EMITTER record_sink;
-      CREATE MONGODB COLLECTION EMITTER record_sink FROM outgoing
+      DROP EMITTER record_emitter;
+      CREATE MONGODB COLLECTION EMITTER record_emitter FROM outgoing
         TO mongodb_main COLLECTION 'records'
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'seq' = input.seq }
         BATCH MAX MESSAGES 25 MAX SIZE 4MiB
@@ -414,9 +414,9 @@ Feature: Emitter batching configuration
       COMMIT;
       """
     Then SHOW CREATE EMITTER on the leader node renders these clauses
-      | emitter     | clause                              |
-      | row_sink    | BATCH MAX MESSAGES 10 MAX SIZE 2MiB |
-      | record_sink | BATCH MAX MESSAGES 25 MAX SIZE 4MiB |
+      | emitter        | clause                              |
+      | row_emitter    | BATCH MAX MESSAGES 10 MAX SIZE 2MiB |
+      | record_emitter | BATCH MAX MESSAGES 25 MAX SIZE 4MiB |
 
     Examples:
       | cluster_size |

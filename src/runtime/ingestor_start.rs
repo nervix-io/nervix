@@ -16,7 +16,7 @@
     nervix_lint,
     nervix::context(
         lifecycle,
-        reason = "source task installation resolves retained branch, clock and acknowledgement \
+        reason = "ingestor task installation resolves retained branch, clock and acknowledgement \
                   owners"
     )
 )]
@@ -161,7 +161,7 @@ impl Runtime {
     }
 
     /// Snapshots obsolete local inputs before the installed execution is withdrawn. A stopped
-    /// domain retains its plans, so retirement also works when no source task is running.
+    /// domain retains its plans, so retirement also works when no ingestor task is running.
     pub(super) fn retiring_ingestor_inputs(
         &self,
         domain: &DomainName,
@@ -440,7 +440,7 @@ impl Runtime {
     /// Binds what every execution of `ingestor` dispatches through: its compiled node filter and
     /// routes over its input schema, and the branched entrypoints its routes feed. The input
     /// schema is what a transport's codec decodes its payloads into, as the staged routing
-    /// revision installed that codec, or the schema a client source's batches carry.
+    /// revision installed that codec, or the schema a client ingestor's batches carry.
     pub(in crate::runtime) async fn ingestor_dependencies(
         &self,
         ingestor: &IngestorSpec,

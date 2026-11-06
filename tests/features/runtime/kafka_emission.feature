@@ -20,7 +20,7 @@ Feature: Kafka emission
       CREATE RELAY queue_events SCHEMA queue_event UNBRANCHED;
       CREATE VHOST edge small-queue-{{test_id}}.example.com;
       CREATE ENDPOINT queue_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR queue_source
+      CREATE HTTP ENDPOINT INGESTOR queue_ingestor
         FROM queue_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING queue_ingest_codec
         TO queue_events INHERIT ALL UNBRANCHED
@@ -563,7 +563,7 @@ Feature: Kafka emission
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-stop-{{test_id}}.example.com;
       CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TIMESTAMP NOW
@@ -649,7 +649,7 @@ Feature: Kafka emission
       CREATE RELAY unsent_events SCHEMA unsent_event UNBRANCHED;
       CREATE VHOST edge unsent-stop-{{test_id}}.example.com;
       CREATE ENDPOINT unsent_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR unsent_source
+      CREATE HTTP ENDPOINT INGESTOR unsent_ingestor
         FROM unsent_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING unsent_event_codec
         TIMESTAMP NOW
@@ -731,7 +731,7 @@ Feature: Kafka emission
       CREATE RELAY swap_events SCHEMA swap_event UNBRANCHED;
       CREATE VHOST edge swap-{{test_id}}.example.com;
       CREATE ENDPOINT swap_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR swap_source
+      CREATE HTTP ENDPOINT INGESTOR swap_ingestor
         FROM swap_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING swap_codec
         TIMESTAMP NOW
@@ -813,7 +813,7 @@ Feature: Kafka emission
       CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
       CREATE VHOST edge retire-out-{{test_id}}.example.com;
       CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR healthy_source
+      CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
         FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
         TO retired_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

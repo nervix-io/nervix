@@ -1,5 +1,5 @@
 [package]
-description = "The Redis source and sink connector for Nervix"
+description = "The Redis ingestor and emitter connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-redis"

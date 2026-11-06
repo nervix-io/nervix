@@ -15,7 +15,7 @@ Feature: Client emitters
       CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY orders SCHEMA incoming BRANCHED BY tenants;
       CREATE RELAY invoices SCHEMA incoming BRANCHED BY tenants;
-      CREATE CLIENT PRODUCER INGESTOR source_in
+      CREATE CLIENT PRODUCER INGESTOR ingestor_in
         FROM SCHEMA incoming
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
@@ -35,7 +35,7 @@ Feature: Client emitters
       """
     And client "app" is connected to the leader node
     When client "app" opens consumer "output" on emitter "app_output" expecting fields "id STRING, cents I64"
-    And client "app" opens producer "input" on ingestor "source_in" expecting fields "id STRING, amount I64, tenant STRING"
+    And client "app" opens producer "input" on ingestor "ingestor_in" expecting fields "id STRING, amount I64, tenant STRING"
     And producer "input" submits batch "two tenants" with rows
       | id  | amount | tenant |
       | o-1 | 1      | acme   |

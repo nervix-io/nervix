@@ -30,7 +30,7 @@ use crate::topic::retirement_tests::{
     FullConnectorQueue, connector_workers_reach, single_connector_worker,
 };
 
-/// The plan of a ingestor in the test group that runs its driver jobs on `executor`.
+/// The plan of an ingestor in the test group that runs its driver jobs on `executor`.
 fn plan_on(
     broker: &MockCluster<'static, DefaultProducerContext>,
     executor: &Executor,
@@ -40,7 +40,7 @@ fn plan_on(
     plan
 }
 
-/// A ingestor's own drop, at the end of its host's loop, lets the last handle go. Its consumer joined
+/// An ingestor's own drop, at the end of its host's loop, lets the last handle go. Its consumer joined
 /// the group, so destroying it waits for the coordinator to answer its LeaveGroup request, which
 /// the held broker never does: that wait occupies a connector worker, not the dropping task.
 #[nervix_primitives::test]
@@ -48,24 +48,24 @@ async fn a_dropped_ingestor_destroys_its_joined_consumer_on_a_connector_worker()
     let broker = cluster();
     publish(&broker).await;
     let executor = Executor::default();
-    let mut source = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let mut ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
         .await
-        .assured("the source accepts its group and broker configuration");
-    source
+        .assured("the ingestor accepts its group and broker configuration");
+    ingestor
         .resume()
         .await
-        .assured("the source subscribes to its topic");
-    read_positions(&mut source).await;
-    source
+        .assured("the ingestor subscribes to its topic");
+    read_positions(&mut ingestor).await;
+    ingestor
         .close()
         .await
-        .assured("the source unsubscribes before its host drops it");
+        .assured("the ingestor unsubscribes before its host drops it");
     broker
         .broker_round_trip_time(1, HELD_ROUND_TRIP)
         .assured("the test broker can hold its replies");
     let before = executor.snapshot().connector_storage;
 
-    drop(source);
+    drop(ingestor);
 
     connector_workers_reach(
         &executor,
@@ -123,13 +123,13 @@ async fn a_dropped_partition_inspector_destroys_its_consumer_on_a_connector_work
 async fn a_destruction_waits_for_a_place_in_a_full_connector_queue() {
     let broker = cluster();
     let executor = single_connector_worker();
-    let source = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
         .await
-        .assured("the source accepts its group and broker configuration");
+        .assured("the ingestor accepts its group and broker configuration");
     let full = FullConnectorQueue::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
 
-    drop(source);
+    drop(ingestor);
     full.release().await;
 
     connector_workers_reach(
@@ -151,9 +151,9 @@ async fn a_commit_refused_after_its_ingestor_was_dropped_destroys_the_consumer_o
  {
     let broker = cluster();
     let executor = single_connector_worker();
-    let mut source = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let mut ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
         .await
-        .assured("the source accepts its group and broker configuration");
+        .assured("the ingestor accepts its group and broker configuration");
     let full = FullConnectorQueue::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
     let request = GroupCommitRequest::acknowledged(&[KafkaOffsetPosition {
@@ -162,9 +162,9 @@ async fn a_commit_refused_after_its_ingestor_was_dropped_destroys_the_consumer_o
         offset: 1,
     }])
     .assured("the position has a valid next offset");
-    let mut commit = Box::pin(source.commits.commit(
-        &source.control,
-        &source.consumer,
+    let mut commit = Box::pin(ingestor.commits.commit(
+        &ingestor.control,
+        &ingestor.consumer,
         GROUP,
         request,
     ));
@@ -175,7 +175,7 @@ async fn a_commit_refused_after_its_ingestor_was_dropped_destroys_the_consumer_o
     );
     drop(commit);
 
-    drop(source);
+    drop(ingestor);
 
     connector_workers_reach(
         &executor,
@@ -202,23 +202,23 @@ async fn a_commit_answered_after_its_ingestor_was_dropped_keeps_the_consumer_unt
     let broker = cluster();
     publish(&broker).await;
     let executor = Executor::default();
-    let mut source = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let mut ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
         .await
-        .assured("the source accepts its group and broker configuration");
-    source
+        .assured("the ingestor accepts its group and broker configuration");
+    ingestor
         .resume()
         .await
-        .assured("the source subscribes to its topic");
-    let positions = read_positions(&mut source).await;
+        .assured("the ingestor subscribes to its topic");
+    let positions = read_positions(&mut ingestor).await;
     broker
         .broker_round_trip_time(1, HELD_ROUND_TRIP)
         .assured("the test broker can hold its replies");
     let before = executor.snapshot().connector_storage;
     let request = GroupCommitRequest::acknowledged(&positions)
         .assured("the delivered record has a valid next offset");
-    let mut commit = Box::pin(source.commits.commit(
-        &source.control,
-        &source.consumer,
+    let mut commit = Box::pin(ingestor.commits.commit(
+        &ingestor.control,
+        &ingestor.consumer,
         GROUP,
         request,
     ));
@@ -232,7 +232,7 @@ async fn a_commit_answered_after_its_ingestor_was_dropped_keeps_the_consumer_unt
     .await;
     drop(commit);
 
-    drop(source);
+    drop(ingestor);
     // The commit's job now holds the last handle. Closing the broker's connections ends the held
     // request, and the broker answers whatever librdkafka sends it next at once.
     broker
@@ -263,13 +263,13 @@ async fn a_commit_answered_after_its_ingestor_was_dropped_keeps_the_consumer_unt
 async fn a_control_job_that_outlives_its_ingestor_destroys_the_consumer_on_a_connector_worker() {
     let broker = cluster();
     let executor = Executor::default();
-    let source = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
         .await
-        .assured("the source accepts its group and broker configuration");
+        .assured("the ingestor accepts its group and broker configuration");
     let before = executor.snapshot().connector_storage;
     let (started, has_started) = oneshot::channel();
     let (release, released) = oneshot::channel::<()>();
-    let mut running = Box::pin(source.control.run(&source.consumer, move |_, _| {
+    let mut running = Box::pin(ingestor.control.run(&ingestor.consumer, move |_, _| {
         started
             .send(())
             .assured("the test awaits the native operation");
@@ -285,7 +285,7 @@ async fn a_control_job_that_outlives_its_ingestor_destroys_the_consumer_on_a_con
         .assured("the control job runs on a connector worker");
     drop(running);
 
-    drop(source);
+    drop(ingestor);
     release
         .send(())
         .assured("the control job waits for its release");
@@ -328,15 +328,15 @@ async fn a_consumer_holds_the_charge_of_its_retirement_from_its_creation() {
         })
     ));
     drop(occupied);
-    let source = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
         .await
-        .assured("the source opens once the budget has room");
+        .assured("the ingestor opens once the budget has room");
     let charge = u64::try_from(std::mem::size_of::<KafkaConsumer>())
         .assured("a consumer handle's size fits in u64");
     assert_eq!(executor.snapshot().commands_memory.reserved_bytes, charge);
     let before = executor.snapshot().connector_storage;
 
-    drop(source);
+    drop(ingestor);
 
     connector_workers_reach(
         &executor,

@@ -174,7 +174,7 @@ Feature: RabbitMQ emission
       CREATE RELAY returned_events SCHEMA returned_event UNBRANCHED;
       CREATE VHOST edge returned-{{test_id}}.example.com;
       CREATE ENDPOINT returned_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR returned_source
+      CREATE HTTP ENDPOINT INGESTOR returned_ingestor
         FROM returned_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING returned_event_codec
         TIMESTAMP NOW
