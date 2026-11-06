@@ -933,6 +933,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 )?,
                 topic: topic.clone(),
                 mode: decide_kafka_publication(mode)?,
+                partition_from_branch: emitter.envelope.partition_from_branch,
             })),
             (
                 EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
@@ -952,6 +953,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 )?,
                 topic: topic.clone(),
                 mode: decide_pulsar_publication(mode)?,
+                partition_from_branch: emitter.envelope.partition_from_branch,
             })),
             (
                 EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {

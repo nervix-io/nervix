@@ -214,14 +214,14 @@ impl PreparedContent for EncodedPayload {
         let emitter_record = match &self.envelope.headers {
             EmitterHeaders::Text(headers) => EmitterRecord::new(
                 record,
-                self.envelope.key.clone(),
+                self.envelope.destination.clone(),
                 self.payload.clone(),
                 headers.clone(),
                 occurred_at,
             ),
             EmitterHeaders::Typed(headers) => EmitterRecord::new(
                 record,
-                self.envelope.key.clone(),
+                self.envelope.destination.clone(),
                 self.payload.clone(),
                 Vec::new(),
                 occurred_at,
@@ -673,7 +673,10 @@ mod tests {
             occurred_at: Timestamp::from_unix_nanos(1),
             content: EncodedPayload {
                 envelope: BatchEnvelope {
-                    key: Some("key".to_string()),
+                    destination: Some(Arc::new(nervix_connector::RecordDestination {
+                        key: Some(nervix_connector::RecordKey::String("key".to_string())),
+                        source_partition: None,
+                    })),
                     headers: EmitterHeaders::Text(vec![("source".to_string(), "a".to_string())]),
                     message_group: Some("group".to_string()),
                     clauses: None,
@@ -733,7 +736,14 @@ mod tests {
             .records
             .first()
             .expect("the write carries three records");
-        assert_eq!(first_record.key.as_deref(), Some("key"));
+        assert_eq!(
+            first_record
+                .destination
+                .as_ref()
+                .and_then(|destination| destination.key.as_ref())
+                .map(nervix_connector::RecordKey::as_bytes),
+            Some(b"key".as_slice())
+        );
         assert_eq!(first_record.message_group.as_deref(), Some("group"));
         assert_eq!(
             first_record.headers,
@@ -1524,27 +1534,32 @@ mod tests {
     }
 
     fn envelope_variant(variant: u8) -> BatchEnvelope {
-        match variant % 5 {
+        match variant % 8 {
             0 => BatchEnvelope {
-                key: None,
+                destination: None,
                 headers: EmitterHeaders::Text(Vec::new()),
                 message_group: None,
                 clauses: None,
             },
             1 => BatchEnvelope {
-                key: Some(format!("key-{variant}")),
+                destination: Some(Arc::new(nervix_connector::RecordDestination {
+                    key: Some(nervix_connector::RecordKey::String(format!(
+                        "key-{variant}"
+                    ))),
+                    source_partition: None,
+                })),
                 headers: EmitterHeaders::Text(vec![("trace".to_string(), variant.to_string())]),
                 message_group: None,
                 clauses: None,
             },
             2 => BatchEnvelope {
-                key: None,
+                destination: None,
                 headers: EmitterHeaders::Text(Vec::new()),
                 message_group: Some(format!("group-{variant}")),
                 clauses: None,
             },
             3 => BatchEnvelope {
-                key: None,
+                destination: None,
                 headers: EmitterHeaders::Typed(vec![
                     nervix_connector::TypedRecordHeader {
                         name: "attempt".to_string(),
@@ -1558,8 +1573,21 @@ mod tests {
                 message_group: None,
                 clauses: None,
             },
+            5 | 6 | 7 => BatchEnvelope {
+                destination: Some(Arc::new(nervix_connector::RecordDestination {
+                    key: match variant % 8 {
+                        5 => Some(nervix_connector::RecordKey::Bytes(vec![0, 255, variant])),
+                        6 => Some(nervix_connector::RecordKey::String(String::new())),
+                        _ => None,
+                    },
+                    source_partition: Some(u64::from(variant)),
+                })),
+                headers: EmitterHeaders::Text(Vec::new()),
+                message_group: None,
+                clauses: None,
+            },
             _ => BatchEnvelope {
-                key: None,
+                destination: None,
                 headers: EmitterHeaders::Text(vec![
                     ("trace".to_owned(), "first".to_owned()),
                     ("trace".to_owned(), "second".to_owned()),
@@ -1775,7 +1803,7 @@ mod tests {
             {
                 assert_eq!(record.id, EmitterRecordId::new(index));
                 assert_eq!(record.payload, model.payload);
-                assert_eq!(record.key, model.envelope.key);
+                assert_eq!(record.destination, model.envelope.destination);
                 match &model.envelope.headers {
                     EmitterHeaders::Text(headers) => {
                         assert_eq!(&record.headers, headers);

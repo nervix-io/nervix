@@ -506,7 +506,7 @@ pub struct SqsQueueEmitter {
     pub mode: SqsQueuePublishingMode,
     pub client: ClientName,
     pub queue: SqsQueueName,
-    pub fifo_group: Option<SqsFifoGroup>,
+    pub fifo_group: Option<Expression>,
     pub send: SqsSend,
 }
 
@@ -533,14 +533,6 @@ pub enum SqsSend {
     Batch,
 }
 
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum SqsFifoGroup {
-    FromBranch,
-    Expression(Expression),
-}
-
 impl EmitterDeclaration for SqsQueueEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         // An SQS message's attributes: one value per name, the last written, in no order, each a
@@ -564,18 +556,10 @@ impl EmitterDeclaration for SqsQueueEmitter {
             OptionDeclaration {
                 keywords: "FIFO GROUP",
                 presence: OptionPresence::Optional { default: None },
-                form: OptionForm::Choice(&[
-                    OptionChoice {
-                        name: "<expression>",
-                        value: Some(OptionValue::Expression),
-                        example: "FIFO GROUP tenant",
-                    },
-                    OptionChoice {
-                        name: "FROM BRANCH",
-                        value: None,
-                        example: "FIFO GROUP FROM BRANCH",
-                    },
-                ]),
+                form: OptionForm::Value {
+                    value: OptionValue::Expression,
+                    example: "FIFO GROUP branch.tenant",
+                },
             },
             OptionDeclaration {
                 keywords: "SEND",
@@ -626,7 +610,7 @@ pub enum SqsQueueEmitterChange {
     /// `SET QUEUE '<queue>'`.
     Queue(SqsQueueName),
     /// `SET FIFO GROUP <expression> | FROM BRANCH`.
-    FifoGroup(SqsFifoGroup),
+    FifoGroup(Expression),
     /// `DROP FIFO GROUP`: the emitter sends no message group.
     DropFifoGroup,
     /// `SET SEND SINGLE|BATCH`.
@@ -664,7 +648,10 @@ impl crate::EmitterEntityChange for SqsQueueEmitterChange {
     fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
         let text = match self {
             Self::Queue(queue) => format!("SET QUEUE {}", crate::string_literal(queue.as_str())),
-            Self::FifoGroup(group) => format!("SET FIFO GROUP {}", group.to_canonical_plexus()?),
+            Self::FifoGroup(group) => format!(
+                "SET FIFO GROUP {}",
+                crate::canonical::expression_to_plexus(group)?
+            ),
             Self::DropFifoGroup => "DROP FIFO GROUP".to_owned(),
             Self::Send(send) => format!("SET SEND {}", send.keyword()),
             Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),

@@ -474,7 +474,7 @@ impl Arbitrary<'_> {
         let change = match self.entropy.byte() % 5 {
             0 => SqsQueueEmitterChange::Queue(entity.queue),
             1 => SqsQueueEmitterChange::FifoGroup(
-                entity.fifo_group.unwrap_or(SqsFifoGroup::FromBranch),
+                entity.fifo_group.unwrap_or_else(|| self.expression()),
             ),
             2 => SqsQueueEmitterChange::DropFifoGroup,
             3 => SqsQueueEmitterChange::Send(entity.send),
@@ -574,6 +574,8 @@ impl Arbitrary<'_> {
     ) -> Option<EnvelopeClauseValue> {
         let clause = self.envelope_clause_kind(kind)?;
         let value = match clause {
+            EnvelopeClauseKind::Key => EnvelopeClauseValue::Key(self.expression()),
+            EnvelopeClauseKind::PartitionFromBranch => EnvelopeClauseValue::PartitionFromBranch,
             EnvelopeClauseKind::Persistent => EnvelopeClauseValue::Persistent,
             EnvelopeClauseKind::Mandatory => EnvelopeClauseValue::Mandatory,
             EnvelopeClauseKind::Retain => EnvelopeClauseValue::Retain,

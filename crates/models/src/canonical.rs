@@ -3168,13 +3168,15 @@ fn envelope_clause_to_plexus(
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     let keywords = clause.kind().keywords();
     let text = match clause {
-        EnvelopeClause::Persistent | EnvelopeClause::Mandatory | EnvelopeClause::Retain => {
-            keywords.to_string()
-        }
+        EnvelopeClause::PartitionFromBranch
+        | EnvelopeClause::Persistent
+        | EnvelopeClause::Mandatory
+        | EnvelopeClause::Retain => keywords.to_string(),
         EnvelopeClause::DeliverAfter(duration) | EnvelopeClause::Delay(duration) => {
             format!("{keywords} {duration}")
         }
-        EnvelopeClause::Timestamp(expression)
+        EnvelopeClause::Key(expression)
+        | EnvelopeClause::Timestamp(expression)
         | EnvelopeClause::ReplyTo(expression)
         | EnvelopeClause::MessageId(expression)
         | EnvelopeClause::DeduplicationId(expression) => {
@@ -4667,20 +4669,10 @@ mod tests {
             }))
         };
         assert_eq!(
-            sqs(Some(crate::SqsFifoGroup::FromBranch))
+            sqs(Some(scoped_field(FieldScope::Input, "tenant")))
                 .entity_presentation()
-                .assured("the branch group has no fallible expression")
+                .assured("the scoped field has a canonical representation")
                 .reference_to_plexus(),
-            "sqs_main QUEUE 'orders_queue' FIFO GROUP FROM BRANCH SEND BATCH"
-        );
-        assert_eq!(
-            sqs(Some(crate::SqsFifoGroup::Expression(scoped_field(
-                FieldScope::Input,
-                "tenant"
-            ))))
-            .entity_presentation()
-            .assured("the scoped field has a canonical representation")
-            .reference_to_plexus(),
             "sqs_main QUEUE 'orders_queue' FIFO GROUP input.tenant SEND BATCH"
         );
 

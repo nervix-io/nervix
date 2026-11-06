@@ -44,7 +44,7 @@ ingestor operations. The Model, registry and consensus properties preserve those
 Wire-schema generators carry each format's declared types, and codec generators carry explicit
 `BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
 own wire type enums. The Model/archive, registry and consensus properties preserve those complete
-values. The `NERVIX MODEL NJS` registry signature and `raft_jetstream_` consensus namespace identify
+values. The `NERVIX EMIT KEYS` registry signature and `raft_emitter_keys_` consensus namespace identify
 the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -53,7 +53,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_jetstream_` consensus namespace identifies the statement layout the transactions it
+and the `raft_emitter_keys_` consensus namespace identifies the statement layout the transactions it
 keeps are stored in before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
@@ -216,4 +216,11 @@ consensus Model targets carry them through their Model storage boundaries with t
 `models-emitter-envelopes` compares the envelope alone through JSON and the archive, and
 `plexus-emitter-envelopes` reads its canonical section back through the shared envelope grammar.
 The Plexus domain draws only what an entity declares, so canonical statement round trips carry the
-envelopes connector entities declare: SQS QUEUE's `DELAY` and `DEDUPLICATION ID`.
+envelopes connector entities declare, including Kafka/Pulsar `KEY` and `PARTITION FROM BRANCH`, and SQS QUEUE's `DELAY` and `DEDUPLICATION ID`.
+
+The current emitter envelope domains include explicit STRING/BYTES `KEY` expressions and
+`PARTITION FROM BRANCH`. SQS FIFO groups are expressions. Complete Model and statement
+round trips cover these fields, their SET/DROP operations, and each connector declaration.
+The registry and consensus current-shape signatures and the interconnect fingerprint advance
+with this archived Model layout. Textual backup documents continue to use the current Plexus
+reader under the existing archive-format contract.

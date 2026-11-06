@@ -10,6 +10,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use meticulous::ResultExt as _;
 use nervix_models::{
     ClickHouseEmitter, ClickHouseTableEmitter, FlushPolicy, HttpEmitter, HttpRequestEmitter,
     IcebergEmitter, IcebergTableEmitter, KafkaEmitter, MongoDbCollectionEmitter, MongoDbEmitter,
@@ -20,6 +21,90 @@ use nervix_models::{
 
 use super::*;
 use crate::lexer::lex;
+
+#[rstest::rstest]
+#[case("KAFKA")]
+#[case("PULSAR")]
+fn explicit_key_and_partition_clauses_round_trip(#[case] connector: &str) {
+    for clauses in [
+        "KEY branch.tenant",
+        "KEY hex_decode('00ff10') PARTITION FROM BRANCH",
+        "PARTITION FROM BRANCH",
+        "key branch.tenant partition from branch timestamp message.occurred_at",
+    ] {
+        let text = format!(
+            "CREATE {connector} TOPIC EMITTER keyed FROM events TO broker TOPIC 'events' MODE NO \
+             ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec {clauses} INHERIT \
+             ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        );
+        let statement = crate::statement::parse_statement(&text)
+            .assured("the entity declares the explicit key and partition clauses");
+        let rendered = statement
+            .to_canonical_plexus()
+            .assured("the statement renders");
+        assert_eq!(
+            crate::statement::parse_statement(&rendered).assured("canonical Plexus reparses"),
+            statement
+        );
+        for operation in [
+            "SET KEY message.tenant",
+            "DROP KEY",
+            "SET PARTITION FROM BRANCH",
+            "DROP PARTITION FROM BRANCH",
+        ] {
+            let text = format!("ALTER {connector} TOPIC EMITTER keyed {operation};");
+            let statement = crate::statement::parse_statement(&text)
+                .assured("the targeted envelope change parses");
+            let rendered = statement
+                .to_canonical_plexus()
+                .assured("the change renders");
+            assert_eq!(
+                crate::statement::parse_statement(&rendered).assured("the change reparses"),
+                statement
+            );
+        }
+    }
+}
+
+#[rstest::rstest]
+#[case("KAFKA")]
+#[case("PULSAR")]
+fn explicit_key_completion_follows_the_composed_grammar(#[case] connector: &str) {
+    let text = format!(
+        "CREATE {connector} TOPIC EMITTER keyed FROM events TO broker TOPIC 'events' MODE NO ACK \
+         RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec "
+    );
+    let offered = crate::statement::suggest_statement(&text, text.len());
+    assert!(offered.contains(&"KEY".to_owned()), "{offered:?}");
+    assert!(
+        offered.contains(&"PARTITION FROM BRANCH".to_owned()),
+        "{offered:?}"
+    );
+    let after_key = format!("{text}KEY message.tenant ");
+    let offered = crate::statement::suggest_statement(&after_key, after_key.len());
+    assert!(!offered.contains(&"KEY".to_owned()), "{offered:?}");
+    assert!(
+        offered.contains(&"PARTITION FROM BRANCH".to_owned()),
+        "{offered:?}"
+    );
+}
+
+#[test]
+fn explicit_key_clauses_keep_their_entity_and_order() {
+    let base = "CREATE KAFKA TOPIC EMITTER keyed FROM events TO broker TOPIC 'events' MODE NO ACK \
+                RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec";
+    for clauses in ["KEY 'a' KEY 'b'", "PARTITION FROM BRANCH KEY 'a'", "KEY"] {
+        let text = format!(
+            "{base} {clauses} INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
+             LOG;"
+        );
+        assert!(crate::statement::parse_statement(&text).is_err(), "{text}");
+    }
+    let text = "CREATE MQTT TOPIC EMITTER keyed FROM events TO broker TOPIC 'events' QOS 0 MODE \
+                NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec KEY 'a' \
+                INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+    assert!(crate::statement::parse_statement(text).is_err());
+}
 
 #[test]
 fn http_emitter_body_modes_roundtrip_with_qualified_request_fields() {
@@ -80,7 +165,7 @@ fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
     ))
     .expect("a bare mode completes the group before MODE");
     let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-        fifo_group: Some(nervix_models::SqsFifoGroup::Expression(group)),
+        fifo_group: Some(group),
         ..
     })) = parsed.connector.as_ref()
     else {
@@ -642,7 +727,7 @@ fn every_publishing_mode_body_parses_and_canonical_round_trips() {
          POLICY BACKOFF 250ms MAX 30s",
         "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' SEND BATCH MODE ACK RETRY \
          POLICY BACKOFF 250ms MAX 30s",
-        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP FROM BRANCH \
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP branch.tenant \
          SEND BATCH MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
         "SENTRY EVENT EMITTER emit FROM p99 TO broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ] {
@@ -786,26 +871,6 @@ fn direct_emitter_completion_only_offers_where_construction() {
 
 #[test]
 fn parses_sqs_fifo_group_forms() {
-    let from_branch = parse_create_emitter(&complete_codec_emitter(
-        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP FROM BRANCH \
-         SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-    ))
-    .expect("SQS FIFO FROM BRANCH mode should parse");
-    assert!(matches!(
-        from_branch.connector.as_ref(),
-        EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-            queue,
-            fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
-            ..
-        })) if queue.as_str() == "events.fifo"
-    ));
-    let canonical = from_branch
-        .to_canonical_plexus()
-        .expect("SQS FIFO emitter should render canonically");
-    let round_tripped =
-        parse_create_emitter(&canonical).expect("canonical SQS FIFO emitter should parse again");
-    assert_eq!(round_tripped, from_branch);
-
     let expression = parse_create_emitter(&complete_codec_emitter(
         "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP \
          concat(input.tenant, '-', input.region) SEND BATCH MODE ACK RETRY POLICY BACKOFF 250ms \
@@ -815,7 +880,7 @@ fn parses_sqs_fifo_group_forms() {
     assert!(matches!(
         expression.connector.as_ref(),
         EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-            fifo_group: Some(nervix_models::SqsFifoGroup::Expression(_)),
+            fifo_group: Some(_),
             ..
         }))
     ));
@@ -824,7 +889,7 @@ fn parses_sqs_fifo_group_forms() {
 #[test]
 fn rejects_fifo_group_on_non_sqs_emitter() {
     let source = complete_codec_emitter(
-        "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' FIFO GROUP FROM BRANCH MODE \
+        "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' FIFO GROUP branch.tenant MODE \
          NO ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     );
     assert!(parse_create_emitter(&source).is_err());

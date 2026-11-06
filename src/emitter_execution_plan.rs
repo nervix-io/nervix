@@ -21,10 +21,10 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::RecordEnvelope;
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, CodecName, CreateEmitter, CreateSchema, EmitterName,
-    EnvelopeClauseForm, EnvelopeClauseKind, ErrorPolicies, Expression, FieldName, FlushPolicy,
-    HeaderValues, InputCollectPolicy, MaterializedStateDependency, Model, ModelKind, ModelName,
-    NodeRef, PropertyDeclaration, RelayName, RouteConstruction, ScheduledNodes, SchemaField,
-    SchemaName, SqsFifoGroup, parse_duration_text,
+    EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType, ErrorPolicies, Expression,
+    FieldName, FlushPolicy, HeaderValues, InputCollectPolicy, MaterializedStateDependency, Model,
+    ModelKind, ModelName, NodeRef, PropertyDeclaration, RelayName, ResolvedBranching,
+    RouteConstruction, ScheduledNodes, SchemaField, SchemaName, parse_duration_text,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_vm::{
@@ -111,8 +111,10 @@ pub(crate) struct EmitterRoutePlan {
 /// The source-row group that the host evaluates before handing an SQS record to its emitter.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EmitterOrderingGroupPlan {
-    FromBranch,
-    Expression(SpannedNode<Program>),
+    Expression {
+        program: SpannedNode<Program>,
+        sources: BTreeMap<RelayName, ResolvedBranching>,
+    },
 }
 
 /// What the value one field of an envelope program computes sets on a record: the routing key its
@@ -134,8 +136,15 @@ pub(crate) struct ComputedEnvelopePlan {
     /// `output`.
     pub(crate) reads_output: bool,
     /// The fields the program writes, one for each target: a non-null value of its exact type.
-    pub(crate) schema: CreateSchema,
+    pub(crate) schema: EnvelopeSchemaPlan,
     pub(crate) program: SpannedNode<Program>,
+}
+
+/// Exact declarations keep their schema; only KEY requires inference of a STRING/BYTES field.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EnvelopeSchemaPlan {
+    Exact(CreateSchema),
+    Inferred(Vec<(FieldName, EnvelopeValueType)>),
 }
 
 /// What the host evaluates for the envelope of every record an emitter publishes.
@@ -145,6 +154,8 @@ pub(crate) struct EmitterEnvelopePlan {
     pub(crate) fixed: RecordEnvelope,
     /// The values each record computes, absent where the envelope computes none.
     pub(crate) computed: Option<ComputedEnvelopePlan>,
+    pub(crate) sources: BTreeMap<RelayName, ResolvedBranching>,
+    pub(crate) partition_from_branch: bool,
 }
 
 /// One emitter's complete in-memory decision. The host binds resource mounts and VM programs
@@ -273,8 +284,23 @@ impl EmitterExecutionPlan {
         };
         let route = Self::route(emitter, &input_schema, &output_schema.arrow_schema())?;
         let http_request = Self::http_request(emitter)?;
-        let ordering_group = Self::ordering_group(emitter, &input_schema)?;
-        let envelope = EmitterEnvelopePlan::decide(emitter, Self::constructs_output(emitter))?;
+        let mut ordering_group = Self::ordering_group(emitter, &input_schema)?;
+        if let Some(EmitterOrderingGroupPlan::Expression { sources, .. }) = &mut ordering_group
+            && let nervix_models::EmitterEntity::Sqs(nervix_models::SqsEmitter::Queue(entity)) =
+                emitter.connector.as_ref()
+            && entity
+                .fifo_group
+                .as_ref()
+                .is_some_and(Expression::reads_branch_fields)
+        {
+            *sources = Self::sources(emitter, activation);
+        }
+        let mut envelope = EmitterEnvelopePlan::decide(emitter, Self::constructs_output(emitter))?;
+        if let Some(plan) = &mut envelope
+            && (emitter.envelope.partition_from_branch || emitter.envelope.key.is_some())
+        {
+            plan.sources = Self::sources(emitter, activation);
+        }
         Ok(Self {
             name: emitter.name.clone(),
             mode: emitter.mode,
@@ -307,6 +333,21 @@ impl EmitterExecutionPlan {
                 nervix_models::EmitterEntity::Http(_)
             );
         output_body && runs_route
+    }
+
+    fn sources(
+        emitter: &CreateEmitter,
+        activation: &DomainActivationPlan,
+    ) -> BTreeMap<RelayName, ResolvedBranching> {
+        let mut sources = BTreeMap::new();
+        for relay in emitter.from.relays() {
+            let planned = activation
+                .relays
+                .get(relay)
+                .verified("all emitter sources were resolved");
+            sources.insert(relay.clone(), planned.branching.clone());
+        }
+        sources
     }
 
     pub(crate) fn route(
@@ -434,10 +475,7 @@ impl EmitterExecutionPlan {
         else {
             return Ok(None);
         };
-        let expression = match group {
-            SqsFifoGroup::FromBranch => return Ok(Some(EmitterOrderingGroupPlan::FromBranch)),
-            SqsFifoGroup::Expression(expression) => expression,
-        };
+        let expression = group;
         let plan = EmitterOrderingGroupPlan::expression(&emitter.name, expression, input)?;
         Ok(Some(plan))
     }
@@ -467,7 +505,10 @@ impl EmitterOrderingGroupPlan {
             .change_context(EmitterExecutionPlanError::OrderingGroup {
                 emitter: emitter.clone(),
             })?;
-        Ok(Self::Expression(program))
+        Ok(Self::Expression {
+            program,
+            sources: BTreeMap::new(),
+        })
     }
 }
 
@@ -476,7 +517,7 @@ impl EmitterOrderingGroupPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EnvelopeValue {
     pub(crate) target: EnvelopeTarget,
-    pub(crate) ty: nervix_models::ParseAsType,
+    pub(crate) ty: EnvelopeValueType,
     pub(crate) expression: Expression,
 }
 
@@ -522,7 +563,7 @@ impl EmitterEnvelopePlan {
         if let Some(expression) = routing_key {
             values.push(EnvelopeValue {
                 target: EnvelopeTarget::RoutingKey,
-                ty: nervix_models::ParseAsType::String,
+                ty: nervix_models::PropertyType::String.into(),
                 expression: expression.clone(),
             });
         }
@@ -553,7 +594,8 @@ impl EmitterEnvelopePlan {
                 expression: property.expression.clone(),
             });
         }
-        let plan = Self::computing(fixed, values, reads_output).change_context_lazy(invalid)?;
+        let mut plan = Self::computing(fixed, values, reads_output).change_context_lazy(invalid)?;
+        plan.partition_from_branch = envelope.partition_from_branch;
         Ok(Some(plan))
     }
 
@@ -569,20 +611,41 @@ impl EmitterEnvelopePlan {
             return Ok(Self {
                 fixed,
                 computed: None,
+                sources: BTreeMap::new(),
+                partition_from_branch: false,
             });
         }
         let mut targets = Vec::with_capacity(values.len());
-        let mut fields = Vec::with_capacity(values.len());
+        let mut schema = if values
+            .iter()
+            .any(|value| value.ty == EnvelopeValueType::Key)
+        {
+            EnvelopeSchemaPlan::Inferred(Vec::with_capacity(values.len()))
+        } else {
+            EnvelopeSchemaPlan::Exact(CreateSchema {
+                name: SchemaName::parse(ENVELOPE_NAMESPACE)
+                    .assured("the envelope namespace is a schema name"),
+                fields: Vec::with_capacity(values.len()),
+            })
+        };
         let mut assignments = Vec::with_capacity(values.len());
-        for value in values {
-            let name = FieldName::parse(&format!("value_{}", fields.len()))
+        for (index, value) in values.into_iter().enumerate() {
+            let name = FieldName::parse(&format!("value_{index}"))
                 .assured("value_ followed by a position is a valid field literal");
-            fields.push(SchemaField {
-                name: name.clone(),
-                ty: value.ty,
-                optional: false,
-                sensitive: false,
-            });
+            match &mut schema {
+                EnvelopeSchemaPlan::Exact(schema) => {
+                    let EnvelopeValueType::Exact(ty) = value.ty else {
+                        unreachable!("only exact declarations choose the exact schema")
+                    };
+                    schema.fields.push(SchemaField {
+                        name: name.clone(),
+                        ty: ty.into(),
+                        optional: false,
+                        sensitive: false,
+                    });
+                }
+                EnvelopeSchemaPlan::Inferred(fields) => fields.push((name.clone(), value.ty)),
+            }
             assignments.push(Assignment {
                 target: AssignmentTarget::bare(name),
                 value: value.expression,
@@ -596,11 +659,6 @@ impl EmitterEnvelopePlan {
             },
             SemanticScopePolicy::read_write("message", ENVELOPE_NAMESPACE),
         )?;
-        let schema = CreateSchema {
-            name: SchemaName::parse(ENVELOPE_NAMESPACE)
-                .assured("the envelope namespace is a valid schema name"),
-            fields,
-        };
         Ok(Self {
             fixed,
             computed: Some(ComputedEnvelopePlan {
@@ -609,6 +667,8 @@ impl EmitterEnvelopePlan {
                 schema,
                 program,
             }),
+            sources: BTreeMap::new(),
+            partition_from_branch: false,
         })
     }
 }
@@ -772,15 +832,15 @@ mod tests {
     }
 
     #[test]
-    fn sqs_ordering_group_is_lowered_or_reads_the_branch() {
-        let mut sqs = emitter(
+    fn sqs_ordering_group_is_lowered() {
+        let sqs = emitter(
             EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                 mode: nervix_models::SqsQueuePublishingMode::Ack {
                     retry_policy: retry_policy(),
                 },
                 client: named("queue_client"),
                 queue: named("events.fifo"),
-                fifo_group: Some(SqsFifoGroup::Expression(expression("'group'"))),
+                fifo_group: Some(expression("'group'")),
                 send: nervix_models::SqsSend::Single,
             })),
             EmitterBody::Codec {
@@ -790,21 +850,8 @@ mod tests {
         let group = EmitterExecutionPlan::ordering_group(&sqs, &input_schema())
             .expect("the group expression should lower")
             .expect("SQS has a group");
-        let EmitterOrderingGroupPlan::Expression(program) = group else {
-            panic!("the group is an expression");
-        };
+        let EmitterOrderingGroupPlan::Expression { program, .. } = group;
         assert_eq!(program.inner.set[0].0.field, ORDERING_GROUP_FIELD);
-        let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
-            sqs.connector.as_mut()
-        else {
-            panic!("the fixture emitter is SQS");
-        };
-        *fifo_group = Some(SqsFifoGroup::FromBranch);
-        assert_eq!(
-            EmitterExecutionPlan::ordering_group(&sqs, &input_schema())
-                .expect("the branch group should plan"),
-            Some(EmitterOrderingGroupPlan::FromBranch),
-        );
     }
 
     fn zero_mq(body: EmitterBody) -> CreateEmitter {
@@ -856,8 +903,10 @@ mod tests {
                 EnvelopeTarget::Clause(EnvelopeClauseKind::MessageId),
             ]
         );
-        let fields = computed
-            .schema
+        let EnvelopeSchemaPlan::Exact(schema) = &computed.schema else {
+            panic!("these clauses have exact declared types")
+        };
+        let fields = schema
             .fields
             .iter()
             .map(|field| (field.name.as_str(), field.ty.clone(), field.optional))
@@ -907,10 +956,10 @@ mod tests {
             .computed
             .expect("the routing key is a computed value");
         assert_eq!(computed.targets, vec![EnvelopeTarget::RoutingKey]);
-        assert_eq!(
-            computed.schema.fields[0].ty,
-            nervix_models::ParseAsType::String
-        );
+        let EnvelopeSchemaPlan::Exact(schema) = &computed.schema else {
+            panic!("routing keys are STRING")
+        };
+        assert_eq!(schema.fields[0].ty, nervix_models::ParseAsType::String);
 
         let mandatory = EmitterEnvelopePlan::decide(
             &exchange(nervix_models::EmitterEnvelope {

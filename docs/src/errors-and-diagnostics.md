@@ -1438,7 +1438,13 @@ An envelope clause or `PROPERTIES` key the entity does not declare is
 `EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
 reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
 not an exact, non-null, non-sensitive value of its type is `EnvelopeValue`, naming the clause or
-key and the expected type with the VM's compile failure beneath it. An `SQS QUEUE` emitter that
+key and the expected type with its typed inference or admission failure beneath it. `KEY` admits
+exactly `STRING` or `BYTES`; it neither casts another type nor turns a nullable expression into an
+absent transport key. Its `branch` binding retains the branch schema's sensitivity, including
+during `ALTER`. Omitting `KEY` carries no key. A per-record evaluation failure instead rejects
+that record through the emitter's message error policy, retaining the same outcome as other
+computed envelope values. `PARTITION FROM BRANCH` requires a named source branch before the
+emitter can become active. An `SQS QUEUE` emitter that
 writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, or a
 `DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
 `SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command

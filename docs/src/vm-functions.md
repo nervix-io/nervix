@@ -364,12 +364,17 @@ revision and its publication.
 | `DEDUPLICATE ON`, reorderer `BY`, and `CORRELATE WHERE` | Once when the installed typed processor revision is bound, then shared by every concrete branch |
 | Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound when the ingestor starts, before its source opens. Every source instance and ingest group shares the bound programs. |
 | Reingestor `FROM ... WHERE`, `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound for each input relay before that input's task starts |
-| Emitter `FROM ... WHERE`, routes, HTTP request fields, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | Lowered once into the domain's typed emitter execution plans, then bound against installed schemas and UDFs when the task starts or swaps. Reconnects reuse the bound programs. |
+| Emitter `FROM ... WHERE`, routes, computed envelope values, HTTP request fields, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | Lowered once into the domain's typed emitter execution plans, then bound against installed schemas and UDFs when the task starts or swaps. Reconnects reuse the bound programs. |
 | Window aggregate argument and output programs, inferencer `INPUTS`, and inferencer output routes | Once when the installed typed processor revision is bound, then shared by every concrete branch |
 | Generator routes | Lowered into typed ordered route plans from the committed schedule, then compiled once when the domain's execution is built or the generator is swapped; each concrete branch task retains those compiled programs and the exact materialized source branch. |
 | Materialized-state `DEFAULT` | Compiled and executed in one step when the default binds |
 | `ON MESSAGE ERROR SEND TO ... SET` | The registry lowers the ordered assignments before installation. The domain execution or its replacement binds the lowered program once. It reads the original eligible input, the exact captured state, the optional partial output and structured error fields for each failed record. A route update installs a new prepared program; delivery never compiles one. |
 | Subscription `WHERE` | When the subscription is created |
+
+Emitter `KEY` programs and branch-dependent SQS `FIFO GROUP` programs bind separately for each
+input relay against its resolved branch contract. Those source contracts belong to the typed
+emitter revision, so a source schema or partition-count change binds fresh programs.
+`PARTITION FROM BRANCH` alone carries that resolved partition contract and needs no value program.
 
 An HTTP emitter's route compiles without its `write_header` invocations, which are request fields.
 The emitter compiles its `METHOD`, `PATH` and header writes as one more program: `METHOD` and `PATH`

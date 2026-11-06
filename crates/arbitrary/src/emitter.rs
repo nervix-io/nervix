@@ -111,6 +111,8 @@ impl Arbitrary<'_> {
                 continue;
             }
             match kind {
+                EnvelopeClauseKind::Key => envelope.key = Some(self.expression()),
+                EnvelopeClauseKind::PartitionFromBranch => envelope.partition_from_branch = true,
                 EnvelopeClauseKind::Persistent => envelope.persistent = true,
                 EnvelopeClauseKind::Mandatory => envelope.mandatory = true,
                 EnvelopeClauseKind::Retain => envelope.retain = true,
@@ -267,10 +269,10 @@ impl Arbitrary<'_> {
                     mode: self.sqs_queue_publication(),
                     client: self.name(),
                     queue: self.sqs_queue_name(),
-                    fifo_group: match self.entropy.byte() % 3 {
-                        0 => None,
-                        1 => Some(SqsFifoGroup::FromBranch),
-                        _ => Some(SqsFifoGroup::Expression(self.expression())),
+                    fifo_group: if self.entropy.flag() {
+                        Some(self.expression())
+                    } else {
+                        None
                     },
                     send: self.entropy.pick([SqsSend::Single, SqsSend::Batch]),
                 }))

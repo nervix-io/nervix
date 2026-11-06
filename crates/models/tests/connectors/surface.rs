@@ -717,8 +717,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
         ),
         [
             "MODE ACK",
-            "FIFO GROUP <expression>",
-            "FIFO GROUP FROM BRANCH",
+            "FIFO GROUP",
             "SEND SINGLE",
             "SEND BATCH",
             "BATCH",

@@ -477,6 +477,10 @@ native decoding; an unrepresentable count fails decoding. Window processor state
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
 
+Emitter statements exchanged through the control plane use explicit `KEY` expressions and
+`PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
+`WIRE_CONTRACT` fingerprint identifies that archived Model layout; peers must match it exactly.
+
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed

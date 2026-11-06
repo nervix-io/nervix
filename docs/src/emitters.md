@@ -799,7 +799,7 @@ one message through the connector's own driver: one Kafka record value, one Puls
 payload, one AMQP message body, one `PUBLISH` to a Redis channel, one MQTT `PUBLISH` packet, one
 NATS message on the subject, one single-frame ZeroMQ message or one SQS message body. The message
 carries once what its members share. The Kafka record key and the Pulsar partition key are the
-members' concrete branch key; the written headers become Kafka and NATS headers, Pulsar
+bytes their `KEY` expression produced, or absent when no `KEY` is declared; the written headers become Kafka and NATS headers, Pulsar
 properties, AMQP headers or SQS message attributes; and an SQS FIFO message carries the members'
 message group. Without the clause every record stays its own message, carried the same way.
 
@@ -1174,8 +1174,8 @@ does not declare is refused where it is written, with the entity and the clause 
 the registry refuses it again in a Model that reaches it another way. The
 [capability matrix](connector-capabilities.md) lists the clauses and properties each entity
 declares, and each entity's section below says what its transport does with them. `KAFKA TOPIC`
-declares `TIMESTAMP`, which [Kafka](#kafka) writes as each record's create time, `PULSAR TOPIC`
-declares `TIMESTAMP` and `DELIVER AFTER`, which [Pulsar](#pulsar) writes as each message's event
+declares `KEY`, `PARTITION FROM BRANCH` and `TIMESTAMP`, which [Kafka](#kafka) writes as each record's key, destination partition and create time, `PULSAR TOPIC`
+declares `KEY`, `PARTITION FROM BRANCH`, `TIMESTAMP` and `DELIVER AFTER`, which [Pulsar](#pulsar) writes as each message's key, destination partition, event
 time and delivery time, `SQS QUEUE`
 declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each message, and the two
 [RabbitMQ](#rabbitmq) entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP
@@ -1191,7 +1191,8 @@ declared keys that have not yet been written.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
-| `PERSISTENT`, `MANDATORY`, `RETAIN` | nothing | the flag, set |
+| `PERSISTENT`, `MANDATORY`, `RETAIN`, `PARTITION FROM BRANCH` | nothing | the declared flag or destination-partition rule |
+| `KEY` | an expression | its non-null `STRING` encoded as UTF-8, or its exact `BYTES` |
 | `TIMESTAMP` | an expression | its non-null `DATETIME` |
 | `DELIVER AFTER`, `DELAY` | a duration literal | the duration, greater than zero |
 | `REPLY TO`, `MESSAGE ID`, `DEDUPLICATION ID` | an expression | its non-null `STRING` |
@@ -1205,6 +1206,24 @@ emitter without a construction publishes its source records, so its `message` is
 and it has no `output`. Every value has the clause's or key's exact type and is statically non-null,
 and a sensitive value requires `leak_sensitive`, as `CREATE` and `ALTER` check with a message such
 as `envelope TIMESTAMP requires an exact, non-null, non-sensitive DATETIME value`.
+
+`KEY <expression>` on `KAFKA TOPIC` and `PULSAR TOPIC` writes the external message key. It also
+reads `branch.*` in the source's exact named branch, before external delivery collapses that
+identity. For example, `KEY branch.tenant` writes the tenant string's UTF-8 bytes, while
+`KEY hex_decode('00ff10')` writes those three bytes. No other type is converted: a numeric key
+needs an explicit conversion to `STRING` or `BYTES`. Nullability and sensitivity are checked
+at `CREATE` and `ALTER`, including the sensitivity of branch fields. An empty value is a present,
+empty key; an omitted `KEY` is a null key. Change it with `SET KEY <expression>` or `DROP KEY`.
+
+`PARTITION FROM BRANCH`, written after `KEY` and before `TIMESTAMP`, sends source branch
+partition `p` to destination partition `p mod P`, where `P` is the broker topic's partition count.
+A branch with one partition supplies `p = 0`. The source must declare a named branch. Kafka
+writes an explicit record partition and Pulsar writes to the selected partition topic; the key
+bytes remain exactly the declared key and do not select another partition. Provision the external
+topic and its partitions before starting the domain. Without this clause, Kafka and Pulsar use
+their producers' key routing and distribute messages without a key across partitions. The
+evaluated key and source partition remain with the retained payload through retries and batching;
+records with different keys or destination-partition selections never share a batch payload.
 
 Nervix evaluates the envelope once for every batch it admits, after the route kept and finalized
 its rows, with the execution time and materialized-state snapshot the route used. A record whose
@@ -1334,6 +1353,8 @@ CREATE KAFKA TOPIC EMITTER <name>
   TO <client> TOPIC 'orders'
     MODE <mode>
     ENCODE USING <codec>
+    [KEY 'record-key']
+    [PARTITION FROM BRANCH]
     [TIMESTAMP occurred_at]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
@@ -1355,10 +1376,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | TIMESTAMP occurred_at |
+| Envelope | KEY 'record-key'<br>PARTITION FROM BRANCH<br>TIMESTAMP occurred_at |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
-| Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
-| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
+| Buffers | PARTITION FROM BRANCH native topic metadata response: driver default, receive.message.max.bytes 100000000; when full, fails the publish for the host to retry<br>records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
+| Network waits | PARTITION FROM BRANCH topic metadata, including connector executor admission: driver default, socket.timeout.ms, 60 s; maximum 300 s<br>a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
 | Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets delivery.timeout.ms from ACK TIMEOUT.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1368,7 +1389,7 @@ See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#
 `TOPIC` uses the same rule as [Kafka ingestion](ingestors.md#kafka): 1 to 249 ASCII letters,
 digits, `.`, `_` and `-`, other than `.` and `..`, produced to exactly as written. `write_header`
 writes the record's headers in the order the program writes them. The emitter declares the
-`TIMESTAMP` envelope clause, no other envelope clause and no `PROPERTIES` block. The `KAFKA CLIENT`
+`KEY`, `PARTITION FROM BRANCH` and `TIMESTAMP` envelope clauses and no `PROPERTIES` block. The `KAFKA CLIENT`
 it names requires `bootstrap.servers` and refuses the Nervix-owned keys the
 [Kafka ingestion section](ingestors.md#kafka) lists.
 
@@ -1441,6 +1462,7 @@ producer when the emitter starts reports the emitter's transient error and start
 after its retry delay; see
 [Kafka client retirement](./connector-contract.md#kafka-client-retirement).
 
+
 ### Pulsar
 
 <!-- connector-matrix:emit-pulsar-topic:start -->
@@ -1450,6 +1472,8 @@ CREATE PULSAR TOPIC EMITTER <name>
   TO <client> TOPIC 'orders'
     MODE <mode>
     ENCODE USING <codec>
+    [KEY 'record-key']
+    [PARTITION FROM BRANCH]
     [TIMESTAMP occurred_at]
     [DELIVER AFTER 5s]
   <construction>
@@ -1472,7 +1496,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | TIMESTAMP occurred_at<br>DELIVER AFTER 5s |
+| Envelope | KEY 'record-key'<br>PARTITION FROM BRANCH<br>TIMESTAMP occurred_at<br>DELIVER AFTER 5s |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | receipts held under NO ACK: at most 100 receipts; when full, holds back what fills it<br>messages the driver queues for its connection: driver default, 100 messages; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
 | Network waits | name resolution: unbounded<br>connection: driver default, 10 s per address<br>topic lookup, producer creation and receipts: driver default, the operation timeout: ACK TIMEOUT under ACK, 30 s under NO ACK |
@@ -1501,7 +1525,7 @@ every message in flight on it. With `ACK`, a message the broker receives and ref
 `NotAllowedError`, such as one above the topic's own `maxMessageSize` policy, follows
 `ON MESSAGE ERROR` too, while any other broker error is retried.
 
-The emitter declares the `TIMESTAMP` and `DELIVER AFTER` envelope clauses, no other envelope clause
+The emitter declares the `KEY`, `PARTITION FROM BRANCH`, `TIMESTAMP` and `DELIVER AFTER` envelope clauses
 and no `PROPERTIES` block: its header writes are a message's properties. A message's ordering key is
 a key rather than an envelope clause, and no statement writes one.
 
@@ -2241,7 +2265,7 @@ octet-counted TCP/TLS frame, or one non-transparent TCP frame when it contains n
 CREATE SQS QUEUE EMITTER <name>
   FROM <relay>
   TO <client> QUEUE 'orders'
-  [FIFO GROUP tenant | FIFO GROUP FROM BRANCH]
+  [FIFO GROUP branch.tenant]
   (SEND SINGLE | SEND BATCH)
     MODE <mode>
     ENCODE USING <codec>
@@ -2261,7 +2285,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | SQS client |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset<br>`SEND SINGLE` (keyword choice); `SEND BATCH` (keyword choice); required |
+| Options in statement order | `FIFO GROUP branch.tenant` (expression); optional; omitted when unset<br>`SEND SINGLE` (keyword choice); `SEND BATCH` (keyword choice); required |
 | Headers | `write_header`; `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
@@ -2350,9 +2374,10 @@ batch failure therefore cannot deliver a later record from a group ahead of the 
 other groups may still make progress independently.
 
 A queue name ending in `.fifo` requires `FIFO GROUP`, and `FIFO GROUP` is rejected for a queue
-without that suffix. `FROM BRANCH` requires branched input and uses the record's branch key as its
-message group. Otherwise the expression must have exact `STRING` type for every record and obey
-normal external-sensitivity leakage rules. A FIFO queue deduplicates every message either by its
+without that suffix. Its expression reads `input.*`, `message.*` and the source's exact `branch.*`
+fields, and must produce a non-null `STRING` for every record while obeying normal
+external-sensitivity leakage rules. For example, `FIFO GROUP branch.tenant` writes that tenant
+string as the group. A FIFO queue deduplicates every message either by its
 `DEDUPLICATION ID` or by the content-based deduplication the operator enables while provisioning the
 queue. Sends to a FIFO queue with neither fail as publish errors; Nervix never creates or
 reconfigures the queue.
@@ -2360,7 +2385,7 @@ reconfigures the queue.
 `FIFO GROUP` is the emitter's ordering group. Nervix evaluates it against each record's input
 row after any `FROM ... WHERE` filter, and every record the emitter sends carries the group its own
 input row produced, whatever the emitter's `WHERE` and construction keep or build. A record whose
-group expression fails for its row, or that reaches `FROM BRANCH` without a branch key, is not sent.
+group expression fails for its row is not sent.
 It follows `ON MESSAGE ERROR` as an `external` error of the `publish` operation whose message begins
 `ordering group`, and the emitter's other records are still sent under their own groups. A record
 the emitter's `WHERE` drops is never sent, so a failure of its group is never reported.

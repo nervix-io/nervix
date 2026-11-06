@@ -92,6 +92,14 @@ both use the same schedule-to-revision planning boundary.
 | Emitters | Typed emitter and optional connector client or codec, ordered source relays and predicates, construction, request, ordering and envelope expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the emitter |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
 
+Emitter key plans retain the admitted `STRING` or `BYTES` expression constraint and the source's
+resolved branch contract. Binding preserves the exact inferred type and branch sensitivity;
+execution encodes only a string key's UTF-8 bytes. `PARTITION FROM BRANCH` retains the source
+partition rule separately from the external key, so a connector applies the source ordinal modulo
+the broker topic's partition count without deriving a key from branch identity. SQS FIFO group
+plans always hold an expression. The evaluated key, partition and group remain with the retained
+payload through packing and retries.
+
 Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT, NATS and
 SQS alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only
 entities need no mode-admission recheck. Shared retry and acknowledgement-duration validation

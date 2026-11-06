@@ -1786,6 +1786,7 @@ impl EmitterBatchContext<'_> {
                 let evaluated = ordering_group
                     .evaluate(
                         self.runtime.executor(),
+                        input_relay,
                         &batch,
                         execution_now,
                         &materialized_values,

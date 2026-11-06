@@ -519,8 +519,9 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - Junctions, deduplicators, reorderers, window processors, inferencers, WASM processors, correlators
   and generators preserve branch identity. Their branch declaration is node-wide, and every input
   and output uses that exact named branch.
-- Emitters collapse branch identity only at the successful external boundary. They consume every
-  concrete source branch but do not expose branch fields as expression values.
+- Emitters collapse branch identity only at the successful external boundary. Their envelope and
+  ordering-group expressions may read each source branch's typed fields before that boundary;
+  every input retains its own branch schema and partition count through evaluation and publication.
 - Normal processors never subscribe to a mixed logical relay, combine branch keys, share mutable
   processing state across branches, or publish through a fallback that bypasses concrete branch
   routing.

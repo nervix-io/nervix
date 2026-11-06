@@ -34,9 +34,9 @@ use crate::{
     PulsarEmitter, PulsarIngestor, PulsarSubscription, PulsarSubscriptionName,
     PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor,
     RabbitMqQueueIngestor, RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter,
-    SqsEmitter, SqsFifoGroup, SqsIngestor, SqsQueueIngestor, SyslogIngestor,
-    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
-    WebsocketsIngestor, WebsocketsUpgradeHeader, ZeroMqIngestor, ZeroMqPullIngestor,
+    SqsEmitter, SqsIngestor, SqsQueueIngestor, SyslogIngestor, SyslogListenerIngestor,
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestor,
+    WebsocketsUpgradeHeader, ZeroMqIngestor, ZeroMqPullIngestor,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -675,7 +675,7 @@ impl EmitterEntity {
             Self::Sqs(SqsEmitter::Queue(entity)) => {
                 presentation.external_locator(entity.queue.as_str());
                 let group = match &entity.fifo_group {
-                    Some(group) => Some(group.to_canonical_plexus()?),
+                    Some(group) => Some(expression_to_plexus(group)?),
                     None => None,
                 };
                 presentation.optional_option("FIFO GROUP", group);
@@ -734,16 +734,6 @@ impl EntityPresentation {
             self.payload_option("SCOPE", PayloadOption::Text(scope.value_to_plexus()));
         }
         Ok(())
-    }
-}
-
-impl SqsFifoGroup {
-    /// What `FIFO GROUP` writes for this group.
-    pub(crate) fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        match self {
-            Self::FromBranch => Ok("FROM BRANCH".to_owned()),
-            Self::Expression(expression) => expression_to_plexus(expression),
-        }
     }
 }
 

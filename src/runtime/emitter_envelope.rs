@@ -20,11 +20,16 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector::{PropertyValue, RecordEnvelope, RecordProperty};
-use nervix_models::{EnvelopeClauseKind, PropertyType};
+use nervix_connector::{
+    PropertyValue, RecordDestination, RecordEnvelope, RecordKey, RecordProperty,
+};
+use nervix_models::{EnvelopeClauseKind, EnvelopeValueType, PropertyType, Unit};
+use nervix_vm::infer_set_expr_types_for_bindings_with_udfs;
 
 use super::*;
-use crate::emitter_execution_plan::{ENVELOPE_NAMESPACE, EmitterEnvelopePlan, EnvelopeTarget};
+use crate::emitter_execution_plan::{
+    ENVELOPE_NAMESPACE, EmitterEnvelopePlan, EnvelopeSchemaPlan, EnvelopeTarget,
+};
 
 /// Why an emitter's envelope cannot be compiled, or why a batch's evaluated envelope cannot be
 /// read, which fails the whole batch rather than one record.
@@ -43,6 +48,10 @@ pub(in crate::runtime) enum EmitterEnvelopeError {
     },
     #[error("failed to select the source records of the published rows")]
     SelectSourceRecords,
+    #[error("source relay '{relay}' has no envelope program")]
+    MissingSource { relay: RelayName },
+    #[error("cannot resolve the envelope source partition")]
+    SourcePartition,
 }
 
 /// Where an envelope computes a value, named as a statement writes it.
@@ -119,15 +128,27 @@ pub(in crate::runtime) struct CompiledEnvelope {
     /// every batch shares it where the envelope computes no value.
     fixed: Arc<RecordEnvelope>,
     /// The values each record computes, absent where the envelope computes none.
-    computed: Option<CompiledEnvelopeValues>,
+    computed: Option<EnvelopePrograms>,
 }
 
 struct CompiledEnvelopeValues {
     program: CompiledProgramWithMaterializedInterest,
     /// What the value of each field the program writes sets, in the order it writes them.
-    targets: Vec<EnvelopeTarget>,
+    targets: Box<[EnvelopeTarget]>,
     /// The position in `targets` of the value whose evaluation reports each VM span.
     positions: BTreeMap<VmSpan, usize>,
+}
+
+/// The common program stays inline; branch-dependent programs are selected by their source relay.
+/// Boxed slices retain the exact-capacity target allocation while leaving room for this dispatch.
+enum EnvelopePrograms {
+    Common(CompiledEnvelopeValues),
+    Sources(Box<BTreeMap<RelayName, SourceEnvelope>>),
+}
+
+struct SourceEnvelope {
+    computed: Option<CompiledEnvelopeValues>,
+    partitioning: Option<RelayPartitioning>,
 }
 
 impl CompiledEnvelope {
@@ -159,8 +180,42 @@ impl CompiledEnvelope {
             },
             output,
         };
-        let compiled = Self::compile(emitter, plan, schemas, context)?;
-        Ok(Some(compiled))
+        if plan.sources.is_empty() {
+            return Self::compile(emitter, plan, schemas, context).map(Some);
+        }
+        let mut sources = BTreeMap::new();
+        for (relay, branching) in &plan.sources {
+            let compiled = Self::compile(
+                emitter,
+                plan,
+                EnvelopeSchemas {
+                    input: schemas.input.clone(),
+                    output: schemas.output.clone(),
+                },
+                RuntimeVmCompileContext {
+                    current_branching: branching,
+                    ..context
+                },
+            )?;
+            let computed = match compiled.computed {
+                Some(EnvelopePrograms::Common(values)) => Some(values),
+                None => None,
+                Some(EnvelopePrograms::Sources(_)) => unreachable!("compile binds one source"),
+            };
+            sources.insert(
+                relay.clone(),
+                SourceEnvelope {
+                    computed,
+                    partitioning: plan
+                        .partition_from_branch
+                        .then(|| RelayPartitioning::of(Some(branching))),
+                },
+            );
+        }
+        Ok(Some(Self {
+            fixed: Arc::new(plan.fixed.clone()),
+            computed: Some(EnvelopePrograms::Sources(Box::new(sources))),
+        }))
     }
 
     /// Compiles the envelope `plan` describes for the emitter `emitter` against `schemas`.
@@ -180,14 +235,22 @@ impl CompiledEnvelope {
         for (position, (_, expression)) in computed.program.inner.set.iter().enumerate() {
             positions.insert(expression.span, position);
         }
-        let value_schema = compile_schema(&computed.schema);
+        let exact_schema = match &computed.schema {
+            EnvelopeSchemaPlan::Exact(schema) => Some(compile_schema(schema)),
+            EnvelopeSchemaPlan::Inferred(_) => None,
+        };
         let EnvelopeSchemas { input, output } = schemas;
-        let mut bindings = vec![
-            VmCompileBinding::readonly("input", input.schema.clone())
-                .with_sensitivity(input.sensitivity.clone()),
-            // The values are only written, so none of them is an input of the program.
-            VmCompileBinding::writeonly(ENVELOPE_NAMESPACE, value_schema.arrow_schema()),
-        ];
+        let mut bindings = match &exact_schema {
+            Some(schema) => vec![
+                VmCompileBinding::readonly("input", input.schema.clone())
+                    .with_sensitivity(input.sensitivity.clone()),
+                VmCompileBinding::writeonly(ENVELOPE_NAMESPACE, schema.arrow_schema()),
+            ],
+            None => vec![
+                VmCompileBinding::readonly("input", input.schema.clone())
+                    .with_sensitivity(input.sensitivity.clone()),
+            ],
+        };
         let message = match &output {
             Some(output) => {
                 bindings.push(
@@ -202,12 +265,20 @@ impl CompiledEnvelope {
             VmCompileBinding::readonly("message", message.schema.clone())
                 .with_sensitivity(message.sensitivity.clone()),
         );
-        let local_namespaces = HashSet::from_iter([
+        if exact_schema.is_none()
+            && let Some(branch) = context.branch_binding()
+        {
+            bindings.push(branch);
+        }
+        let mut local_namespaces = HashSet::from_iter([
             "input".to_string(),
             "message".to_string(),
             "output".to_string(),
             ENVELOPE_NAMESPACE.to_string(),
         ]);
+        if exact_schema.is_none() {
+            local_namespaces.insert("branch".to_string());
+        }
         let (materialized_bindings, materialized_interest) =
             referenced_materialized_stream_bindings(
                 &computed.program,
@@ -236,6 +307,64 @@ impl CompiledEnvelope {
         if let Some(lookup_binding) = lookup_binding {
             bindings.push(lookup_binding);
         }
+        let value_schema = match (&computed.schema, exact_schema) {
+            (EnvelopeSchemaPlan::Exact(_), Some(schema)) => schema,
+            (EnvelopeSchemaPlan::Inferred(declarations), None) => {
+                let mut inference_bindings = bindings.clone();
+                inference_bindings.push(VmCompileBinding::writeonly(
+                    ENVELOPE_NAMESPACE,
+                    StdArc::new(arrow_schema::Schema::empty()),
+                ));
+                let inferred = infer_set_expr_types_for_bindings_with_udfs(
+                    &parsed,
+                    inference_bindings,
+                    runtime_udf_signatures(context.udfs),
+                )
+                .change_context_lazy(|| EmitterEnvelopeError::Compile {
+                    emitter: emitter.clone(),
+                })?;
+                let mut fields = Vec::with_capacity(declarations.len());
+                for (index, (name, constraint)) in declarations.iter().enumerate() {
+                    let ty = match constraint {
+                        EnvelopeValueType::Exact(ty) => (*ty).into(),
+                        EnvelopeValueType::Key => {
+                            let field = &inferred[index];
+                            if field.nullable || field.sensitive {
+                                return Err(Report::new(EmitterEnvelopeError::Compile {
+                                    emitter: emitter.clone(),
+                                }));
+                            }
+                            match field.data_type {
+                                ArrowDataType::Utf8 => ParseAsType::String,
+                                ArrowDataType::Binary => ParseAsType::Bytes,
+                                _ => {
+                                    return Err(Report::new(EmitterEnvelopeError::Compile {
+                                        emitter: emitter.clone(),
+                                    }));
+                                }
+                            }
+                        }
+                    };
+                    fields.push(nervix_models::SchemaField {
+                        name: name.clone(),
+                        ty,
+                        optional: false,
+                        sensitive: false,
+                    });
+                }
+                let schema = compile_schema(&nervix_models::CreateSchema {
+                    name: nervix_models::SchemaName::parse(ENVELOPE_NAMESPACE)
+                        .assured("the envelope namespace is a schema name"),
+                    fields,
+                });
+                bindings.push(VmCompileBinding::writeonly(
+                    ENVELOPE_NAMESPACE,
+                    schema.arrow_schema(),
+                ));
+                schema
+            }
+            _ => unreachable!("exact declarations have their precompiled schema"),
+        };
         let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
             &parsed,
             value_schema.arrow_schema(),
@@ -252,7 +381,7 @@ impl CompiledEnvelope {
         })?;
         Ok(Self {
             fixed: Arc::new(plan.fixed.clone()),
-            computed: Some(CompiledEnvelopeValues {
+            computed: Some(EnvelopePrograms::Common(CompiledEnvelopeValues {
                 program: CompiledProgramWithMaterializedInterest {
                     compiled: Arc::new(compiled),
                     materialized_interest,
@@ -260,9 +389,9 @@ impl CompiledEnvelope {
                     lookup_hash_maps,
                     error_sites: CompiledMessageErrorSites::new(),
                 },
-                targets: computed.targets.clone(),
+                targets: computed.targets.clone().into_boxed_slice(),
                 positions,
-            }),
+            })),
         })
     }
 
@@ -275,13 +404,58 @@ impl CompiledEnvelope {
     pub(in crate::runtime) async fn evaluate(
         &self,
         executor: &Executor,
+        source_relay: &RelayName,
         published: &mut RelayRecordBatch,
         input: EnvelopeInput<'_>,
         side_inputs: &HashMap<String, RuntimeValue>,
         execution_now: Timestamp,
     ) -> Result<RowEnvelopes, PlannedGeneralFailure> {
-        let Some(computed) = &self.computed else {
-            return Ok(RowEnvelopes::Fixed(Arc::clone(&self.fixed)));
+        let (computed, partitioning) = match &self.computed {
+            None => (None, None),
+            Some(EnvelopePrograms::Common(computed)) => (Some(computed), None),
+            Some(EnvelopePrograms::Sources(sources)) => {
+                let Some(source) = sources.get(source_relay) else {
+                    let error = Report::new(EmitterEnvelopeError::MissingSource {
+                        relay: source_relay.clone(),
+                    })
+                    .change_context(PlannedGeneralError::Envelope);
+                    return Err(PlannedGeneralFailure::new(
+                        error,
+                        std::mem::take(&mut published.acks),
+                    ));
+                };
+                (source.computed.as_ref(), source.partitioning)
+            }
+        };
+        let source_partition = match partitioning {
+            Some(partitioning) => match partitioning.unit_of(&published.key) {
+                Ok(Unit::Single) => Some(0),
+                Ok(Unit::Partition(partition)) => Some(u64::from(partition)),
+                Ok(Unit::Instance(_)) => {
+                    unreachable!("relay partitioning never selects an instance")
+                }
+                Err(error) => {
+                    return Err(PlannedGeneralFailure::new(
+                        error
+                            .change_context(EmitterEnvelopeError::SourcePartition)
+                            .change_context(PlannedGeneralError::Envelope),
+                        std::mem::take(&mut published.acks),
+                    ));
+                }
+            },
+            None => None,
+        };
+        let Some(computed) = computed else {
+            let destination = source_partition.map(|partition| {
+                Arc::new(RecordDestination {
+                    key: None,
+                    source_partition: Some(partition),
+                })
+            });
+            return Ok(RowEnvelopes::Fixed(RowEnvelope {
+                clauses: Arc::clone(&self.fixed),
+                destination,
+            }));
         };
         let acks = std::mem::take(&mut published.acks);
         let source = match input {
@@ -331,7 +505,13 @@ impl CompiledEnvelope {
             selected_rows,
             ..
         } = executed;
-        let rows = match computed.rows(&self.fixed, &evaluated, &selected_rows, row_count) {
+        let rows = match computed.rows(
+            &self.fixed,
+            source_partition,
+            &evaluated,
+            &selected_rows,
+            row_count,
+        ) {
             Ok(rows) => rows,
             Err(error) => {
                 let error = error.change_context(PlannedGeneralError::Envelope);
@@ -339,7 +519,7 @@ impl CompiledEnvelope {
             }
         };
         published.acks = acks;
-        Ok(RowEnvelopes::Evaluated(rows))
+        Ok(RowEnvelopes::Evaluated(rows.into_boxed_slice()))
     }
 }
 
@@ -359,11 +539,11 @@ impl CompiledEnvelopeValues {
     fn rows(
         &self,
         fixed: &RecordEnvelope,
+        source_partition: Option<u64>,
         evaluated: &VmTypedBatch,
         selected_rows: &nervix_vm::RowSelection,
         row_count: usize,
-    ) -> error_stack::Result<Vec<Result<Arc<RecordEnvelope>, EnvelopeError>>, EmitterEnvelopeError>
-    {
+    ) -> error_stack::Result<Vec<Result<RowEnvelope, EnvelopeError>>, EmitterEnvelopeError> {
         let mut output_rows = vec![None; row_count];
         for (output_row, input_row) in selected_rows.iter().enumerate() {
             if let Some(slot) = output_rows.get_mut(input_row) {
@@ -382,9 +562,13 @@ impl CompiledEnvelopeValues {
                 continue;
             }
             let mut envelope = fixed.clone();
+            let mut destination = RecordDestination {
+                key: None,
+                source_partition,
+            };
             let mut missing = None;
             for (target, column) in self.targets.iter().zip(columns) {
-                if !target.read(column, output_row, &mut envelope)? {
+                if !target.read(column, output_row, &mut envelope, &mut destination)? {
                     missing = Some(EnvelopeError::Null {
                         site: EnvelopeSite::from(*target),
                     });
@@ -393,7 +577,15 @@ impl CompiledEnvelopeValues {
             }
             match missing {
                 Some(failure) => rows.push(Err(failure)),
-                None => rows.push(Ok(Arc::new(envelope))),
+                None => {
+                    let destination = (destination.key.is_some()
+                        || destination.source_partition.is_some())
+                    .then(|| Arc::new(destination));
+                    rows.push(Ok(RowEnvelope {
+                        clauses: Arc::new(envelope),
+                        destination,
+                    }));
+                }
             }
         }
         Ok(rows)
@@ -438,6 +630,7 @@ impl EnvelopeTarget {
         column: &VmTypedArray,
         row: usize,
         envelope: &mut RecordEnvelope,
+        destination: &mut RecordDestination,
     ) -> error_stack::Result<bool, EmitterEnvelopeError> {
         let wrong_column = |expected: &'static str| {
             Report::new(EmitterEnvelopeError::ValueColumn {
@@ -459,6 +652,13 @@ impl EnvelopeTarget {
             }};
         }
         match self {
+            Self::Clause(EnvelopeClauseKind::Key) => {
+                destination.key = Some(if column.as_utf8().is_some() {
+                    RecordKey::String(value!(as_utf8, "STRING").to_string())
+                } else {
+                    RecordKey::Bytes(value!(as_binary, "BYTES").to_vec())
+                });
+            }
             Self::RoutingKey => {
                 envelope.routing_key = Some(value!(as_utf8, "STRING").to_string());
             }
@@ -476,7 +676,8 @@ impl EnvelopeTarget {
                 envelope.deduplication_id = Some(value!(as_utf8, "STRING").to_string());
             }
             Self::Clause(
-                EnvelopeClauseKind::Persistent
+                EnvelopeClauseKind::PartitionFromBranch
+                | EnvelopeClauseKind::Persistent
                 | EnvelopeClauseKind::Mandatory
                 | EnvelopeClauseKind::Retain
                 | EnvelopeClauseKind::DeliverAfter
@@ -513,14 +714,42 @@ impl EnvelopeTarget {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(in crate::runtime) struct RowEnvelope {
+    clauses: Arc<RecordEnvelope>,
+    destination: Option<Arc<RecordDestination>>,
+}
+
+impl From<Arc<RecordEnvelope>> for RowEnvelope {
+    fn from(clauses: Arc<RecordEnvelope>) -> Self {
+        Self {
+            clauses,
+            destination: None,
+        }
+    }
+}
+
+impl RowEnvelope {
+    fn held_bytes(&self) -> u64 {
+        let destination = match &self.destination {
+            Some(destination) => destination.held_bytes(),
+            None => 0,
+        };
+        self.clauses
+            .held_bytes()
+            .checked_add(destination)
+            .assured("both values are held in memory")
+    }
+}
+
 /// The envelope of every row of one emitter batch, as the host evaluated it. Each envelope is held
 /// once: the payloads that publish a row share its envelope rather than copying it.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) enum RowEnvelopes {
     /// Every row carries this one envelope, which computes no value.
-    Fixed(Arc<RecordEnvelope>),
+    Fixed(RowEnvelope),
     /// Each row's own envelope, or why it has none.
-    Evaluated(Vec<Result<Arc<RecordEnvelope>, EnvelopeError>>),
+    Evaluated(Box<[Result<RowEnvelope, EnvelopeError>]>),
 }
 
 impl RowEnvelopes {
@@ -540,11 +769,18 @@ impl RowEnvelopes {
         row: usize,
     ) -> Option<Result<&Arc<RecordEnvelope>, &EnvelopeError>> {
         match self {
-            Self::Fixed(envelope) => Some(Ok(envelope)),
+            Self::Fixed(envelope) => Some(Ok(&envelope.clauses)),
             Self::Evaluated(rows) => match rows.get(row)? {
-                Ok(envelope) => Some(Ok(envelope)),
+                Ok(envelope) => Some(Ok(&envelope.clauses)),
                 Err(failure) => Some(Err(failure)),
             },
+        }
+    }
+
+    pub(in crate::runtime) fn destination(&self, row: usize) -> Option<&Arc<RecordDestination>> {
+        match self {
+            Self::Fixed(envelope) => envelope.destination.as_ref(),
+            Self::Evaluated(rows) => rows.get(row)?.as_ref().ok()?.destination.as_ref(),
         }
     }
 
