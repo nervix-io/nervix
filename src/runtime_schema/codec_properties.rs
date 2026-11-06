@@ -191,7 +191,8 @@ impl CodecCase {
                 for index in &order {
                     let field = &schema.model.fields[*index];
                     let ty = json_wire_type(&field.ty);
-                    let encoding = match field.ty {
+                    // A rule on a list field governs its innermost elements, as on a scalar.
+                    let encoding = match field.ty.innermost_element() {
                         ParseAsType::Datetime => Some(CodecEncoding::Rfc3339),
                         ParseAsType::Bytes => Some(CodecEncoding::Base64),
                         _ => None,
@@ -219,7 +220,7 @@ impl CodecCase {
                 for index in &order {
                     let field = &schema.model.fields[*index];
                     let ty = cbor_wire_type(&field.ty);
-                    if field.ty == ParseAsType::Datetime {
+                    if *field.ty.innermost_element() == ParseAsType::Datetime {
                         encoding_rules.push(CodecEncodingRule {
                             field: field.name.clone(),
                             encoding: CodecEncoding::Rfc3339,
@@ -242,18 +243,17 @@ impl CodecCase {
                 let mut fields = Vec::with_capacity(order.len());
                 for index in &order {
                     let field = &schema.model.fields[*index];
-                    let ty = if field.ty == ParseAsType::Bytes && arbitrary.entropy().flag() {
-                        AvroType::String
-                    } else {
-                        avro_wire_type(&field.ty)
-                    };
-                    if field.ty == ParseAsType::Bytes && ty == AvroType::String {
+                    let innermost = field.ty.innermost_element();
+                    let bytes_as_text =
+                        *innermost == ParseAsType::Bytes && arbitrary.entropy().flag();
+                    let ty = avro_wire_type(&field.ty, bytes_as_text);
+                    if bytes_as_text {
                         encoding_rules.push(CodecEncodingRule {
                             field: field.name.clone(),
                             encoding: CodecEncoding::Base64,
                         });
                     }
-                    if field.ty == ParseAsType::Datetime {
+                    if *innermost == ParseAsType::Datetime {
                         encoding_rules.push(CodecEncodingRule {
                             field: field.name.clone(),
                             encoding: CodecEncoding::Rfc3339,
@@ -464,25 +464,29 @@ fn assert_schemaful_batch(
     );
 }
 
-/// The Avro wire type the registry binds to an internal field of type `ty`, which the Avro domain
-/// generates only at the top level.
-fn avro_wire_type(ty: &ParseAsType) -> AvroType {
+/// The Avro wire type the registry binds to an internal field of type `ty`: an array for each list
+/// level, around the item its innermost element binds, a `BYTES` element written as `string`
+/// under `BASE64` when `bytes_as_text`.
+fn avro_wire_type(ty: &ParseAsType, bytes_as_text: bool) -> AvroType {
     match ty {
+        ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => {
+            AvroType::array_of(avro_wire_type(element, bytes_as_text))
+        }
         ParseAsType::Bool => AvroType::Boolean,
         ParseAsType::I32 => AvroType::Int,
         ParseAsType::I64 => AvroType::Long,
         ParseAsType::F32 => AvroType::Float,
         ParseAsType::F64 => AvroType::Double,
         ParseAsType::String | ParseAsType::Datetime => AvroType::String,
+        ParseAsType::Bytes if bytes_as_text => AvroType::String,
         ParseAsType::Bytes => AvroType::Bytes,
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => AvroType::Array,
         ParseAsType::U8
         | ParseAsType::I8
         | ParseAsType::U16
         | ParseAsType::I16
         | ParseAsType::U32
         | ParseAsType::U64 => {
-            unreachable!("the Avro domain declares no narrow or unsigned top-level integer")
+            unreachable!("the Avro domain declares no narrow or unsigned integer at any depth")
         }
     }
 }
@@ -957,41 +961,94 @@ fn a_payload_refused_inside_a_nested_list_leaves_the_next_row_exact() {
 
     use super::generated_batches::LogicalValue as Value;
 
+    /// A nested list's element type, a payload refused at the second element of its second list,
+    /// a payload accepted after it, and the accepted row's lists.
+    struct NestedCase {
+        element: ParseAsType,
+        refused: JsonValue,
+        accepted: JsonValue,
+        lists: [Vec<Value>; 2],
+    }
+
+    /// JSON and CBOR range-check an integer element. An Avro array writes the item its schema
+    /// declares, so an Avro element is refused by its codec rule: a datetime that is no RFC 3339
+    /// text.
+    fn nested_case(format: SchemafulFormat) -> NestedCase {
+        match format {
+            SchemafulFormat::Json | SchemafulFormat::Cbor => NestedCase {
+                element: ParseAsType::U8,
+                refused: json!({"tenant": "acme", "matrix": [[1], [2, 300]]}),
+                accepted: json!({"tenant": "beta", "matrix": [[3], [4, 5]]}),
+                lists: [vec![Value::U8(3)], vec![Value::U8(4), Value::U8(5)]],
+            },
+            SchemafulFormat::Avro => NestedCase {
+                element: ParseAsType::Datetime,
+                refused: json!({
+                    "tenant": "acme",
+                    "matrix": [["2024-01-01T00:00:00Z"], ["2024-01-02T00:00:00Z", "January 2"]],
+                }),
+                accepted: json!({
+                    "tenant": "beta",
+                    "matrix": [
+                        ["2024-01-03T00:00:00Z"],
+                        ["2024-01-04T00:00:00Z", "2024-01-05T00:00:00Z"],
+                    ],
+                }),
+                lists: [
+                    vec![Value::Datetime(1_704_240_000_000_000_000)],
+                    vec![
+                        Value::Datetime(1_704_326_400_000_000_000),
+                        Value::Datetime(1_704_412_800_000_000_000),
+                    ],
+                ],
+            },
+        }
+    }
+
     let field = |name: &str, ty: ParseAsType| SchemaField {
         name: FieldName::parse(name).assured("a literal field name"),
         ty,
         optional: false,
         sensitive: false,
     };
-    let matrix = ParseAsType::Vec {
-        element: Box::new(ParseAsType::Vec {
-            element: Box::new(ParseAsType::U8),
-        }),
-    };
     for format in SchemafulFormat::ALL {
+        let NestedCase {
+            element,
+            refused,
+            accepted,
+            lists,
+        } = nested_case(format);
+        let matrix = ParseAsType::Vec {
+            element: Box::new(ParseAsType::Vec {
+                element: Box::new(element),
+            }),
+        };
         let schema = GeneratedSchema::new(CreateSchema {
             name: SchemaName::parse("nested").assured("a literal schema name"),
             fields: vec![
                 field("tenant", ParseAsType::String),
-                field("matrix", matrix.clone()),
+                field("matrix", matrix),
             ],
         });
         let case =
             CodecCase::with_schema(&mut Arbitrary::new(&[], Domain::Vocabulary), format, schema);
-        let refused = foreign_payload(&case, &json!({"tenant": "acme", "matrix": [[1], [2, 300]]}));
-        let accepted = foreign_payload(&case, &json!({"tenant": "beta", "matrix": [[3], [4, 5]]}));
+        let refused = foreign_payload(&case, &refused);
+        let accepted = foreign_payload(&case, &accepted);
         let group = case.decode_group(&[refused, accepted]);
-        assert_eq!(group.accepted, [false, true], "{format:?}: 300 is not a U8");
-        let elements = |values: &[u8]| {
-            Some(Value::Vec(
-                values.iter().map(|value| Some(Value::U8(*value))).collect(),
-            ))
-        };
+        assert_eq!(
+            group.accepted,
+            [false, true],
+            "{format:?}: the second element of the second list does not decode"
+        );
+        let mut matrix = Vec::with_capacity(lists.len());
+        for list in lists {
+            matrix.push(Some(Value::Vec(list.into_iter().map(Some).collect())));
+        }
         assert_eq!(
             Value::rows(group.batch.batch()),
             vec![vec![
                 Some(Value::String("beta".to_string())),
-                Some(Value::Vec(vec![elements(&[3]), elements(&[4, 5])])),
+                Some(Value::Vec(matrix)),
             ]],
             "{format:?}: the row after a refused payload holds only its own elements"
         );
