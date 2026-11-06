@@ -22,14 +22,14 @@ use super::{
 };
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ProcessCounters {
-    pub(crate) user_cpu_ticks: u64,
-    pub(crate) system_cpu_ticks: u64,
+struct ProcessCounters {
+    user_cpu_ticks: u64,
+    system_cpu_ticks: u64,
     resident_bytes: u64,
     peak_resident_bytes: u64,
 }
 
-pub(crate) fn read_process_counters(pid: u32) -> Result<ProcessCounters> {
+fn read_process_counters(pid: u32) -> Result<ProcessCounters> {
     let stat_path = format!("/proc/{pid}/stat");
     let stat =
         fs::read_to_string(&stat_path).with_context(|| format!("failed to read {stat_path}"))?;
@@ -65,7 +65,7 @@ fn parse_process_stat_field(fields: &[&str], index: usize, name: &str) -> Result
         .with_context(|| format!("process stat has invalid {name}"))
 }
 
-pub(crate) fn status_kib(status: &str, name: &str) -> Result<u64> {
+fn status_kib(status: &str, name: &str) -> Result<u64> {
     let prefix = format!("{name}:");
     let line = status
         .lines()

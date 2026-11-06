@@ -2251,6 +2251,10 @@ reproduction commands, tested revisions and regression alarms, and
 with its paired samples. Measurements qualify their recorded workload, build profile and host; they
 do not establish throughput guarantees for another revision.
 
+The broad baseline instrument used by those reports is retired. Its archived commands reproduce
+only the recorded revisions; current measurements use the focused instruments below. The original
+measurements, budgets and conclusions remain on their ClickUp tasks.
+
 Before it sends a command, a native client classifies the statements by parsing them with the
 client statement grammar. Building that grammar constructs the parser of every Plexus statement
 and allocates about a megabyte and a half, which costs far more than parsing a command with it,

@@ -72,7 +72,6 @@ flatbuffers = { workspace = true }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
 h2 = { workspace = true }
-hdrhistogram = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 httparse = { workspace = true }
