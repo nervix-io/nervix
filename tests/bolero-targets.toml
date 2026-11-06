@@ -2322,7 +2322,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 26
+domain_version = 27
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -2682,10 +2682,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_schemaful_codecs_decode_every_row_they_encode/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "codec-schemaful-rows"
-invariant = "Every row a generated WIRE JSON, WIRE CBOR or WIRE AVRO codec of an accepted shape encodes decodes, in one group builder, back to the exact schema, values and nulls, floats by their bits, datetimes to the nanosecond, bytes, text and nested lists, whatever order the wire schema lists the fields in."
+invariant = "Every row a generated WIRE JSON, WIRE CBOR or WIRE AVRO codec of an accepted shape encodes decodes, in one group builder, back to the exact schema, values and nulls, floats by their bits, datetimes to the nanosecond, native CBOR bytes, text and nested lists, whatever order the wire schema lists the fields in."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-server"
@@ -2697,7 +2697,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "codec-schemaful-payload-groups"
 invariant = "Damaged payloads interleaved with a codec's own payloads are each accepted or refused in a group exactly as alone, with a typed failure of their own bytes, and the group's batch holds exactly the rows its accepted payloads decode to alone, in order."
@@ -2877,10 +2877,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_non_finite_floats_follow_the_json_projection/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "codec-json-non-finite-floats"
-invariant = "Over every float bit pattern a WIRE JSON or WIRE CBOR row reads back with each non-finite float of an optional top-level field as a null and every other value intact, and a row holding one in a required field or a list element is refused with a typed failure of its own payload."
+invariant = "Over every float bit pattern a WIRE JSON row reads back with each non-finite float of an optional top-level field as a null and every other value intact, and a row holding one in a required field or a list element is refused with a typed failure of its own payload."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-server"

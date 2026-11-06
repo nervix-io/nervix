@@ -158,7 +158,7 @@ Feature: HTTP codec ingestion
       | 1            | VEC<ARRAY<I16, 2>> |
       | 3            | VEC<ARRAY<I16, 2>> |
 
-  Scenario Outline: A CBOR codec binds every exact wire type to the internal type of its name
+  Scenario Outline: A CBOR codec binds each representation to its declared internal type
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -181,21 +181,21 @@ Feature: HTTP codec ingestion
         occurred_at DATETIME
       );
       CREATE WIRE CBOR SCHEMA exact_value_wire MODE STRICT (
-        u8_max U8,
-        i8_min I8,
-        u16_max U16,
-        i16_min I16,
-        u32_max U32,
-        i32_min I32,
-        u64_max U64,
-        i64_min I64,
-        f32_value F32,
-        f64_value F64,
-        occurred_at DATETIME
+        u8_max integer,
+        i8_min integer,
+        u16_max integer,
+        i16_min integer,
+        u32_max integer,
+        i32_min integer,
+        u64_max integer,
+        i64_min integer,
+        f32_value float,
+        f64_value float,
+        occurred_at text
       );
       CREATE CODEC exact_value_codec
         FROM WIRE CBOR SCHEMA exact_value_wire
-        TO SCHEMA exact_value;
+        TO SCHEMA exact_value ENCODE occurred_at AS RFC3339;
       CREATE RELAY exact_values SCHEMA exact_value UNBRANCHED;
       CREATE VHOST edge exact-values-{{test_id}}.example.com;
       CREATE ENDPOINT exact_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
@@ -330,13 +330,13 @@ Feature: HTTP codec ingestion
     Examples:
       | cluster_size | replica_count | wire_format | tenant_wire_type | user_id_wire_type |
       | 1            | 0             | JSON        | string           | integer           |
-      | 1            | 0             | CBOR        | string           | integer           |
+      | 1            | 0             | CBOR        | text             | integer           |
       | 1            | 0             | AVRO        | STRING           | LONG              |
       | 3            | 0             | JSON        | string           | integer           |
-      | 3            | 0             | CBOR        | string           | integer           |
+      | 3            | 0             | CBOR        | text             | integer           |
       | 3            | 0             | AVRO        | STRING           | LONG              |
       | 3            | 1             | JSON        | string           | integer           |
-      | 3            | 1             | CBOR        | string           | integer           |
+      | 3            | 1             | CBOR        | text             | integer           |
       | 3            | 1             | AVRO        | STRING           | LONG              |
 
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a schemaful codec
@@ -543,8 +543,8 @@ Feature: HTTP codec ingestion
       | cluster_size | wire_format | tenant_wire_type | user_id_wire_type |
       | 1            | JSON        | string           | integer           |
       | 3            | JSON        | string           | integer           |
-      | 1            | CBOR        | string           | integer           |
-      | 3            | CBOR        | string           | integer           |
+      | 1            | CBOR        | text             | integer           |
+      | 3            | CBOR        | text             | integer           |
 
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a JAQ-native codec
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

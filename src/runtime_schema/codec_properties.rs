@@ -20,6 +20,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use ciborium::value::Value as CborValue;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_models::{
@@ -61,7 +62,8 @@ impl SchemafulFormat {
     /// The values this format's codecs promise to preserve.
     pub(crate) fn domain(self) -> GeneratedDomain {
         match self {
-            Self::Json | Self::Cbor => GeneratedDomain::Json,
+            Self::Json => GeneratedDomain::Json,
+            Self::Cbor => GeneratedDomain::Arrow,
             Self::Avro => GeneratedDomain::Avro,
         }
     }
@@ -216,8 +218,8 @@ impl CodecCase {
                 let mut fields = Vec::with_capacity(order.len());
                 for index in &order {
                     let field = &schema.model.fields[*index];
-                    let ty = cbor_wire_type(arbitrary.entropy(), &field.ty);
-                    if field.ty == ParseAsType::Datetime && ty == CborType::String {
+                    let ty = cbor_wire_type(&field.ty);
+                    if field.ty == ParseAsType::Datetime {
                         encoding_rules.push(CodecEncodingRule {
                             field: field.name.clone(),
                             encoding: CodecEncoding::Rfc3339,
@@ -381,19 +383,9 @@ fn json_wire_type(ty: &ParseAsType) -> JsonType {
     }
 }
 
-/// A CBOR wire type the registry binds to an internal field of type `ty`: the generic JSON
-/// type of its kind, or the exact wire type of the same name.
-fn cbor_wire_type(entropy: &mut Entropy<'_>, ty: &ParseAsType) -> CborType {
-    let exact = entropy.flag();
+/// The CBOR wire type the registry binds to an internal field of type `ty`.
+fn cbor_wire_type(ty: &ParseAsType) -> CborType {
     match ty {
-        ParseAsType::U8 if exact => CborType::U8,
-        ParseAsType::I8 if exact => CborType::I8,
-        ParseAsType::U16 if exact => CborType::U16,
-        ParseAsType::I16 if exact => CborType::I16,
-        ParseAsType::U32 if exact => CborType::U32,
-        ParseAsType::I32 if exact => CborType::I32,
-        ParseAsType::U64 if exact => CborType::U64,
-        ParseAsType::I64 if exact => CborType::I64,
         ParseAsType::U8
         | ParseAsType::I8
         | ParseAsType::U16
@@ -402,15 +394,74 @@ fn cbor_wire_type(entropy: &mut Entropy<'_>, ty: &ParseAsType) -> CborType {
         | ParseAsType::I32
         | ParseAsType::U64
         | ParseAsType::I64 => CborType::Integer,
-        ParseAsType::F32 if exact => CborType::F32,
-        ParseAsType::F64 if exact => CborType::F64,
-        ParseAsType::F32 | ParseAsType::F64 => CborType::Number,
-        ParseAsType::Datetime if exact => CborType::Datetime,
-        ParseAsType::Datetime | ParseAsType::String => CborType::String,
+        ParseAsType::F32 | ParseAsType::F64 => CborType::Float,
+        ParseAsType::Datetime | ParseAsType::String => CborType::Text,
         ParseAsType::Bool => CborType::Boolean,
         ParseAsType::Bytes => CborType::Bytes,
         ParseAsType::Array { .. } | ParseAsType::Vec { .. } => CborType::Array,
     }
+}
+
+/// Ciborium widens an `F32` before writing it, which quiets a signaling NaN while retaining its
+/// sign and payload. The CBOR codec preserves every other float bit, including signed zero, so
+/// only that one conversion belongs in the expected value of a generated row.
+fn cbor_value_as_written(value: LogicalValue) -> LogicalValue {
+    match value {
+        LogicalValue::F32(bits)
+            if bits & 0x7f80_0000 == 0x7f80_0000
+                && bits & 0x007f_ffff != 0
+                && bits & 0x0040_0000 == 0 =>
+        {
+            LogicalValue::F32(bits | 0x0040_0000)
+        }
+        LogicalValue::Array(values) => LogicalValue::Array(
+            values
+                .into_iter()
+                .map(|value| value.map(cbor_value_as_written))
+                .collect(),
+        ),
+        LogicalValue::Vec(values) => LogicalValue::Vec(
+            values
+                .into_iter()
+                .map(|value| value.map(cbor_value_as_written))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn assert_schemaful_batch(
+    actual: &arrow_array::RecordBatch,
+    expected: &arrow_array::RecordBatch,
+    format: SchemafulFormat,
+) {
+    if format != SchemafulFormat::Cbor {
+        assert_same_batch(actual, expected);
+        return;
+    }
+    assert_eq!(
+        actual.schema(),
+        expected.schema(),
+        "the schema is preserved"
+    );
+    assert_eq!(
+        actual.num_rows(),
+        expected.num_rows(),
+        "every row is preserved"
+    );
+    let expected_rows: Vec<Vec<Option<LogicalValue>>> = LogicalValue::rows(expected)
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|value| value.map(cbor_value_as_written))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        LogicalValue::rows(actual),
+        expected_rows,
+        "every CBOR value and null is preserved after signaling F32 NaNs are quieted"
+    );
 }
 
 /// The Avro wire type the registry binds to an internal field of type `ty`, which the Avro domain
@@ -438,9 +489,9 @@ fn avro_wire_type(ty: &ParseAsType) -> AvroType {
 
 /// Every row a schemaful codec encodes decodes back into exactly that row: the payloads of a whole
 /// batch, decoded in order into one builder as an ingest group decodes them, form a batch of the
-/// codec's schema holding every value and null of the original, floats by their bits, datetimes to
-/// the nanosecond, bytes, Unicode text and nested lists, whatever order the wire schema lists the
-/// fields in.
+/// codec's schema holding every value and null of the original, floats by their bits except for
+/// ciborium's signaling `F32` NaN quieting, datetimes to the nanosecond, bytes, Unicode text and
+/// nested lists, whatever order the wire schema lists the fields in.
 #[test]
 fn bolero_schemaful_codecs_decode_every_row_they_encode() {
     bolero::check!()
@@ -457,7 +508,7 @@ fn bolero_schemaful_codecs_decode_every_row_they_encode() {
                 decoded.accepted.iter().all(|accepted| *accepted),
                 "every encoded row decodes"
             );
-            assert_same_batch(decoded.batch.batch(), &rows);
+            assert_schemaful_batch(decoded.batch.batch(), &rows, case.format);
         });
 }
 
@@ -466,19 +517,24 @@ fn bolero_schemaful_codecs_decode_every_row_they_encode() {
 enum PayloadDamage {
     /// The bytes are damaged the way any encoding can be.
     Bytes(Damage),
-    /// The JSON model a JSON or CBOR payload is read through is damaged, so the payload still
-    /// parses and fails, if at all, while its row is being appended.
+    /// The format's value model is damaged, so the payload still parses and fails, if at all,
+    /// while its row is being appended.
     Model(ModelDamage),
 }
 
 impl PayloadDamage {
-    /// One damage of a payload in `format`, read from the front of `entropy`. An Avro payload has
-    /// no JSON model, so it is damaged as bytes.
+    /// One damage of a payload in `format`, read from the front of `entropy`. An Avro payload is
+    /// damaged as bytes.
     fn draw(entropy: &mut Entropy<'_>, format: SchemafulFormat) -> Self {
         if format == SchemafulFormat::Avro {
             return Self::Bytes(Damage::draw(entropy));
         }
-        match entropy.byte() % 4 {
+        let choices = if format == SchemafulFormat::Cbor {
+            7
+        } else {
+            4
+        };
+        match entropy.byte() % choices {
             0 => Self::Bytes(Damage::draw(entropy)),
             1 => Self::Model(ModelDamage::Value {
                 leaf: Place::draw(entropy),
@@ -487,12 +543,15 @@ impl PayloadDamage {
             2 => Self::Model(ModelDamage::KeyRemoved {
                 key: Place::draw(entropy),
             }),
-            _ => Self::Model(ModelDamage::KeyAdded),
+            3 => Self::Model(ModelDamage::KeyAdded),
+            4 => Self::Model(ModelDamage::CborTag),
+            5 => Self::Model(ModelDamage::CborNonTextKey),
+            _ => Self::Model(ModelDamage::CborDuplicateKey),
         }
     }
 }
 
-/// What a damage does to the JSON model of a payload.
+/// What a damage does to the JSON or CBOR value model of a payload.
 #[derive(Debug, Clone)]
 enum ModelDamage {
     /// One scalar value holds a value of another kind or out of range.
@@ -508,6 +567,12 @@ enum ModelDamage {
     },
     /// The object gains a key the wire schema does not declare.
     KeyAdded,
+    /// A CBOR field contains a tagged item.
+    CborTag,
+    /// A CBOR field contains a map with a non-text key.
+    CborNonTextKey,
+    /// A CBOR map repeats a field key.
+    CborDuplicateKey,
 }
 
 impl ModelDamage {
@@ -533,6 +598,59 @@ impl ModelDamage {
                     members.insert("undeclared field".to_string(), JsonValue::Bool(true));
                 }
             }
+            Self::CborTag | Self::CborNonTextKey | Self::CborDuplicateKey => {
+                unreachable!("CBOR structural damage is never applied to JSON")
+            }
+        }
+    }
+
+    fn apply_cbor(&self, value: &mut CborValue) {
+        match self {
+            Self::Value { leaf, replacement } => {
+                let leaves = count_cbor_leaves(value);
+                if leaves > 0 {
+                    let replacement = CborValue::serialized(replacement)
+                        .assured("a generated JSON scalar has a CBOR value");
+                    replace_cbor_leaf(value, leaf.among(leaves), &mut 0, &mut Some(replacement));
+                }
+            }
+            Self::KeyRemoved { key } => {
+                if let CborValue::Map(members) = value
+                    && !members.is_empty()
+                {
+                    members.remove(key.among(members.len()));
+                }
+            }
+            Self::KeyAdded => {
+                if let CborValue::Map(members) = value {
+                    members.push((
+                        CborValue::Text("undeclared field".to_string()),
+                        CborValue::Bool(true),
+                    ));
+                }
+            }
+            Self::CborTag => {
+                if let CborValue::Map(members) = value
+                    && let Some((_, field)) = members.first_mut()
+                {
+                    *field = CborValue::Tag(42, Box::new(field.clone()));
+                }
+            }
+            Self::CborNonTextKey => {
+                if let CborValue::Map(members) = value
+                    && let Some((_, field)) = members.first_mut()
+                {
+                    *field =
+                        CborValue::Map(vec![(CborValue::Integer(7.into()), CborValue::Bool(true))]);
+                }
+            }
+            Self::CborDuplicateKey => {
+                if let CborValue::Map(members) = value
+                    && let Some(field) = members.first().cloned()
+                {
+                    members.push(field);
+                }
+            }
         }
     }
 }
@@ -556,42 +674,75 @@ impl DamagedMember {
         }
     }
 
-    /// `payload`, a payload the codec wrote in `format`, with this member's damage. A payload
-    /// without the JSON model a model damage needs stays as it is.
+    /// `payload`, a payload the codec wrote in `format`, with this member's damage.
     fn apply(&self, format: SchemafulFormat, payload: Vec<u8>) -> Vec<u8> {
         let damage = match &self.damage {
             PayloadDamage::Bytes(damage) => return damage.apply(payload),
             PayloadDamage::Model(damage) => damage,
         };
-        let Some(mut value) = read_json_model(format, &payload) else {
-            return payload;
-        };
-        damage.apply(&mut value);
-        write_json_model(format, &value)
+        match format {
+            SchemafulFormat::Json => {
+                let Some(mut value) = serde_json::from_slice::<JsonValue>(&payload).ok() else {
+                    return payload;
+                };
+                damage.apply(&mut value);
+                serde_json::to_vec(&value).assured("a generated JSON value writes into memory")
+            }
+            SchemafulFormat::Cbor => {
+                let Some(mut value) = ciborium::from_reader::<CborValue, _>(&payload[..]).ok()
+                else {
+                    return payload;
+                };
+                damage.apply_cbor(&mut value);
+                let mut bytes = Vec::new();
+                ciborium::into_writer(&value, &mut bytes)
+                    .assured("a generated CBOR value writes into memory");
+                bytes
+            }
+            SchemafulFormat::Avro => unreachable!("an Avro payload is damaged as bytes"),
+        }
     }
 }
 
-/// A JSON or CBOR payload as the JSON model both formats are read through.
-fn read_json_model(format: SchemafulFormat, payload: &[u8]) -> Option<JsonValue> {
-    match format {
-        SchemafulFormat::Json => serde_json::from_slice(payload).ok(),
-        SchemafulFormat::Cbor => ciborium::from_reader(payload).ok(),
-        SchemafulFormat::Avro => None,
+fn count_cbor_leaves(value: &CborValue) -> usize {
+    match value {
+        CborValue::Array(items) => items.iter().map(count_cbor_leaves).sum(),
+        CborValue::Map(members) => members
+            .iter()
+            .map(|(_, value)| count_cbor_leaves(value))
+            .sum(),
+        _ => 1,
     }
 }
 
-fn write_json_model(format: SchemafulFormat, value: &JsonValue) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    match format {
-        SchemafulFormat::Json => {
-            serde_json::to_writer(&mut bytes, value).assured("a JSON value writes into memory");
+fn replace_cbor_leaf(
+    value: &mut CborValue,
+    target: usize,
+    seen: &mut usize,
+    replacement: &mut Option<CborValue>,
+) {
+    match value {
+        CborValue::Array(items) => {
+            for item in items {
+                replace_cbor_leaf(item, target, seen, replacement);
+            }
         }
-        SchemafulFormat::Cbor => {
-            ciborium::into_writer(value, &mut bytes).assured("a JSON value writes as CBOR");
+        CborValue::Map(members) => {
+            for (_, item) in members {
+                replace_cbor_leaf(item, target, seen, replacement);
+            }
         }
-        SchemafulFormat::Avro => unreachable!("an Avro payload is damaged as bytes"),
+        _ => {
+            if *seen == target
+                && let Some(next) = replacement.take()
+            {
+                *value = next;
+            }
+            *seen = seen
+                .checked_add(1)
+                .verified("a bounded payload has few leaves");
+        }
     }
-    bytes
 }
 
 /// How many scalar values `value` holds at any depth.
@@ -718,7 +869,7 @@ fn bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone() {
                 );
                 if let Some(row) = original {
                     assert!(alone.accepted[0], "a payload the codec wrote decodes");
-                    assert_same_batch(alone.batch.batch(), &rows.slice(*row, 1));
+                    assert_schemaful_batch(alone.batch.batch(), &rows.slice(*row, 1), case.format);
                 }
                 if alone.accepted[0] {
                     expected_rows.extend(LogicalValue::rows(alone.batch.batch()));
@@ -736,7 +887,7 @@ fn bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone() {
 /// may hold values the codec itself never writes for the schema.
 fn foreign_payload(case: &CodecCase, value: &JsonValue) -> Vec<u8> {
     match case.format {
-        SchemafulFormat::Json | SchemafulFormat::Cbor => write_json_model(case.format, value),
+        SchemafulFormat::Json | SchemafulFormat::Cbor => encode_foreign_value(case.format, value),
         SchemafulFormat::Avro => {
             let super::CompiledWireSchema::Avro(wire) = &case.codec.wire_schema else {
                 unreachable!("an Avro case compiles an Avro wire schema")
@@ -763,6 +914,23 @@ fn foreign_payload(case: &CodecCase, value: &JsonValue) -> Vec<u8> {
             apache_avro::to_avro_datum(&wire.schema, apache_avro::types::Value::Record(ordered))
                 .assured("the value matches the codec's Avro schema")
         }
+    }
+}
+
+fn encode_foreign_value(format: SchemafulFormat, value: &JsonValue) -> Vec<u8> {
+    match format {
+        SchemafulFormat::Json => {
+            serde_json::to_vec(value).assured("a generated JSON value writes into memory")
+        }
+        SchemafulFormat::Cbor => {
+            let value =
+                CborValue::serialized(value).assured("a generated foreign scalar has a CBOR value");
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&value, &mut bytes)
+                .assured("a generated CBOR value writes into memory");
+            bytes
+        }
+        SchemafulFormat::Avro => unreachable!("an Avro foreign value uses its schema"),
     }
 }
 
@@ -830,18 +998,16 @@ fn a_payload_refused_inside_a_nested_list_leaves_the_next_row_exact() {
     }
 }
 
-/// A JSON or CBOR number for an `F32` field reads as the `F32` whose shortest decimal it is. The
-/// decoder reads the number as an `f64` first; for `7.038531e-26` that `f64` lies exactly halfway
-/// between two `F32` values, and rounding it half to even names the wrong one.
+/// A JSON number for an `F32` field reads as the `F32` whose shortest decimal it is. The decoder
+/// reads the number as an `f64` first; for `7.038531e-26` that `f64` lies exactly halfway between
+/// two `F32` values, and rounding it half to even names the wrong one.
 #[test]
 fn a_number_reads_as_the_f32_whose_shortest_decimal_it_is() {
     use nervix_models::{CreateSchema, FieldName, SchemaField, SchemaName};
 
     let written = f32::from_bits(0x15ae_43fd);
-    let wide: f64 = "7.038531e-26"
-        .parse()
-        .assured("the literal is a decimal number");
-    for format in [SchemafulFormat::Json, SchemafulFormat::Cbor] {
+    let format = SchemafulFormat::Json;
+    {
         let schema = GeneratedSchema::new(CreateSchema {
             name: SchemaName::parse("single").assured("a literal schema name"),
             fields: vec![SchemaField {
@@ -853,14 +1019,7 @@ fn a_number_reads_as_the_f32_whose_shortest_decimal_it_is() {
         });
         let case =
             CodecCase::with_schema(&mut Arbitrary::new(&[], Domain::Vocabulary), format, schema);
-        let payload = match format {
-            SchemafulFormat::Json => br#"{"value":7.038531e-26}"#.to_vec(),
-            _ => {
-                let mut members = serde_json::Map::new();
-                members.insert("value".to_string(), JsonValue::from(wide));
-                write_json_model(format, &JsonValue::Object(members))
-            }
-        };
+        let payload = br#"{"value":7.038531e-26}"#.to_vec();
         let group = case.decode_group(&[payload]);
         assert_eq!(group.accepted, [true]);
         assert_eq!(
@@ -894,7 +1053,7 @@ fn holds_non_finite_float(value: &LogicalValue) -> bool {
     }
 }
 
-/// What a `WIRE JSON` or `WIRE CBOR` payload of a row decodes to, given the floats JSON has no
+/// What a `WIRE JSON` payload of a row decodes to, given the floats JSON has no
 /// number for.
 #[derive(Debug, PartialEq)]
 enum Projected {
@@ -927,8 +1086,8 @@ impl Projected {
     }
 }
 
-/// JSON has no number for a NaN or an infinity, so over every float bit pattern a `WIRE JSON` or
-/// `WIRE CBOR` codec follows its projection rather than a round trip: a row whose non-finite floats
+/// JSON has no number for a NaN or an infinity, so over every float bit pattern a `WIRE JSON`
+/// codec follows its projection rather than a round trip: a row whose non-finite floats
 /// all sit in optional top-level fields reads back with those fields null and every other value
 /// intact, and a row holding one in a required field or a list element is refused with a typed
 /// failure of its own payload.
@@ -939,9 +1098,7 @@ fn bolero_non_finite_floats_follow_the_json_projection() {
         .with_max_len(CASE_BYTES)
         .for_each(|input| {
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            let format = arbitrary
-                .entropy()
-                .pick([SchemafulFormat::Json, SchemafulFormat::Cbor]);
+            let format = SchemafulFormat::Json;
             let schema = GeneratedDomain::Arrow.schema(&mut arbitrary);
             let case = CodecCase::with_schema(&mut arbitrary, format, schema);
             let rows = GeneratedDomain::Arrow.batch(&mut arbitrary, &case.schema);
@@ -965,7 +1122,7 @@ fn bolero_non_finite_floats_follow_the_json_projection() {
         });
 }
 
-/// A JSON or CBOR number beyond the range of an `F32` field rounds to the infinity of its sign, the
+/// A JSON or CBOR float beyond the range of an `F32` field rounds to the infinity of its sign, the
 /// nearest float, as reading it as an `F32` does.
 #[test]
 fn a_number_beyond_the_f32_range_reads_as_an_infinity() {
@@ -986,7 +1143,7 @@ fn a_number_beyond_the_f32_range_reads_as_an_infinity() {
         for (number, expected) in [(1e39_f64, f32::INFINITY), (-1e39_f64, f32::NEG_INFINITY)] {
             let mut members = serde_json::Map::new();
             members.insert("value".to_string(), JsonValue::from(number));
-            let payload = write_json_model(format, &JsonValue::Object(members));
+            let payload = encode_foreign_value(format, &JsonValue::Object(members));
             let group = case.decode_group(&[payload]);
             assert_eq!(group.accepted, [true]);
             assert_eq!(
