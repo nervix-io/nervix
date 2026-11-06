@@ -348,6 +348,25 @@ mod call_cancellation_tests {
     }
 
     #[test]
+    fn a_foreign_execution_is_reported_as_uncertain_under_the_own_reference() {
+        let expected = CommandExecutionReference::parse("own-command").assured("a valid reference");
+        let received =
+            CommandExecutionReference::parse("foreign-command").assured("a valid reference");
+        let failure = Failure::from(
+            Report::new(ClientError::ExecutionReferenceMismatch {
+                expected: expected.clone(),
+                received,
+            })
+            .change_context(ClientError::UncertainCommand {
+                reference: expected.clone(),
+            }),
+        );
+        assert_eq!(failure.kind(), FailureKind::Uncertain);
+        assert_eq!(failure.execution_reference(), Some(&expected));
+        assert!(failure.message().contains("foreign-command"));
+    }
+
+    #[test]
     fn an_unresolved_answer_stays_beneath_an_uncertain_host_failure() {
         let reference = CommandExecutionReference::parse("command-1")
             .assured("the test execution reference is valid");

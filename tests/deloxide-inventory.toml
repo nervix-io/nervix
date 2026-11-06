@@ -455,6 +455,7 @@ tags = [
   "@remote_ack_owners",
   "@backup_wait",
   "@client_wire_backup_outage",
+  "@client_foreign_execution",
   "@stopped_checkpoint_writes",
   "@backup_cut_diagnostics",
   "@backup_parked_wait",
@@ -3595,6 +3596,8 @@ workloads = [
 [[owner]]
 path = "crates/client-core/src/client.rs"
 workloads = [
+  "scenario.client-foreign-execution",
+  "stress.client-foreign-execution",
   "paced.reopen-generation",
   "paced.delayed-refusal",
   "scenario.backup-lease-release-recovery",
@@ -3642,6 +3645,8 @@ path = "crates/client-core/src/exchange.rs"
 workloads = [
   "scenario.client-subscription-timeout",
   "stress.client-subscription-timeout",
+  "scenario.client-foreign-execution",
+  "stress.client-foreign-execution",
   "scenario.client-alter-drain",
   "paced.reopen-generation",
   "scenario.backup-lease-release-recovery",
@@ -5185,4 +5190,25 @@ id = "stress.nats-client-authentication-refusal"
 invariant = "An authentication-refused boundary reports its connection error and remains safe to stop."
 invocation = "stress-scenarios"
 scenario = "A NATS broker refuses a client without its required <method> identity"
+selections = ["deloxide-stress"]
+
+
+[[workload]]
+coverage = "Native-client command registration, foreign-reference validation, exchange termination and reconnect through the client's tracked pending-reply lock on one and three nodes. Async command and reconnect locks, network waits and reference comparisons remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-foreign-execution"
+invariant = "A foreign command outcome ends its session and the client recovers the original command under its own execution reference, without adopting the foreign failure."
+invocation = "scenarios"
+scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: native-client registration, validation, exchange close and reconnect through the tracked pending-reply lock. Async locks and network waits remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-foreign-execution"
+invariant = "A foreign command outcome ends its session and the client recovers the original command under its own execution reference, without adopting the foreign failure."
+invocation = "stress-scenarios"
+scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
 selections = ["deloxide-stress"]

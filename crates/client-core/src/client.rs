@@ -1104,15 +1104,7 @@ impl Client {
                     .request_until(request, None, wait, cancellation)
                     .await?
                 {
-                    ReplyBody::Command(outcome) => {
-                        if outcome.execution_reference != execution.reference {
-                            return Err(Report::new(ClientError::ExecutionReferenceMismatch {
-                                expected: execution.reference.clone(),
-                                received: outcome.execution_reference,
-                            }));
-                        }
-                        Ok(CommandOutcome::from(*outcome))
-                    }
+                    ReplyBody::Command(outcome) => Ok(CommandOutcome::from(*outcome)),
                     other => Err(Report::new(ClientError::unexpected_reply(
                         RequestKind::Command,
                         other,
@@ -1355,7 +1347,7 @@ impl Client {
                 timeout.unwrap_or(self.inner.connector.request_timeout()),
                 async {
                     // Register before sending so a prompt reply always finds its waiter.
-                    let Some(mut registered) = exchange.register() else {
+                    let Some(mut registered) = exchange.register_for(&request) else {
                         return Err(Report::new(exchange.pending.lock().failure()));
                     };
                     let message = ClientMessage {
@@ -1387,6 +1379,11 @@ impl Client {
                                 Err(Report::new(ClientError::RequestInterrupted {
                                     request: kind,
                                 }))
+                            }
+                            failure @ ClientError::ExecutionReferenceMismatch { .. } => {
+                                Err(Report::new(failure).change_context(
+                                    ClientError::RequestInterrupted { request: kind },
+                                ))
                             }
                             failure => Err(Report::new(failure)),
                         },

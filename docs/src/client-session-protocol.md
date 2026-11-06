@@ -593,6 +593,14 @@ session is bound to while the command was served, the operation admission when t
 one operation into the transaction, the typed inspection, WASM state, or resource description a
 describing statement produced, and the summary of a backup's archive or the report of a restore.
 
+Before interpreting any outcome, the client checks that its execution reference equals the
+request's. A matching transport request identity alone does not establish that the outcome belongs
+to the command. A mismatch is a protocol violation: the client stops reading that session,
+interrupts every request still waiting on it, and keeps each command uncertain under its own
+reference. The Rust client uses its ordinary lost-session recovery to repeat the whole command on
+a restored session, or reports `UncertainCommand` with that reference if recovery cannot finish.
+No disposition, redirect or transaction carried by the foreign outcome is adopted.
+
 The disposition is the one field a client decides from; the message is for a person. Each
 disposition belongs to one phase of the command and makes one statement about its effect:
 
@@ -1957,6 +1965,12 @@ hold it, or a `RestoreUploadFailed` that refuses the stream itself and leaves no
 | `DigestMismatch` | The archive's bytes do not have the digest the start declared. |
 | `QuotaExceeded` | The archive is larger than one staged artifact may be, or the leader's staging area cannot hold it now. |
 | `StagingFailed` | The leader could not write the archive to its staging area. |
+
+A command outcome that names another execution reference is a protocol violation, even when the
+reply has the correct request identity. It cannot establish that the restore was refused or
+completed. The Rust client ends the session used for that attempt and reports `UncertainCommand`
+under the restore's own reference, with the typed reference mismatch beneath it. Recovering the
+restore streams the same statement and archive again under that reference.
 
 A refusal of the stream is not recorded; sending the stream again stages the archive again. Every
 other answer is a `CommandOutcome` under the start's execution reference:

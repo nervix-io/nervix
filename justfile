@@ -330,6 +330,26 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Run the native-client and CLI foreign-reference witnesses with only the tools they start.
+test-client-foreign-execution: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    mkdir -p {{ quote(cargo_target_dir + "/client-foreign-execution") }}
+    output="$(mktemp {{ quote(cargo_target_dir + "/client-foreign-execution/run.XXXXXXXX.log") }})"
+    result=0
+    cargo test --package nervix-scenarios --test scenarios -- --name '(A native command|The CLI) recovers its own execution after a foreign command reply' --retry 0 | tee "$output" || result=$?
+    python3 - "$output" <<'PY'
+    import re
+    import sys
+    from pathlib import Path
+    output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
+    counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
+    if counts != ["4"]:
+        raise SystemExit(f"foreign execution witnesses must execute four scenarios; reported counts: {counts}")
+    PY
+    exit "$result"
+
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
 test-backup-cut-cleanup: build-deps build-test-cli
@@ -1212,6 +1232,18 @@ test-websockets *args:
 # inventory, completion and nondeterminism gate for qualification.
 test-websockets-shuttle check:
     SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-websockets/" + check) }} cargo test --package nervix-connector-websockets --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
+
+# Explore one client owner and its nondeterminism check without unrelated server test roots.
+# The inventory and complete package selection remain qualified by test-shuttle in CI.
+test-client-shuttle check:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/shuttle") }} python3 -m scripts.client_recovery_checks shuttle --filter {{ quote(check) }} --target-dir {{ quote(cargo_target_dir + "/shuttle") }}
+
+# Qualify the complete registered client feature scope, with canonical process supervision.
+test-client-recovery-diagnostic selection: tests-deps
+    NERVIX_PREPARED_TARGET_DIR={{ quote(cargo_target_dir) }} python3 -m scripts.client_recovery_checks {{ quote(selection) }} --target-dir {{ quote(cargo_target_dir + "/client-recovery") }}
+
+test-client-recovery-runner:
+    python3 -m unittest --quiet scripts.tests.test_client_recovery_checks
 
 # Run the session wire codec tests and the gRPC and WebSocket sessions that carry its frames.
 test-client-wire *args:
@@ -2311,8 +2343,9 @@ test-turmoil-coverage-runner:
 
 # Exercise the Deloxide lane runner: its inventory, discovery, supervision of real processes,
 # accounting, record, replay, qualification classes, applicability check and CI contract.
-test-deloxide-lane-runner:
-    python3 -m unittest --quiet scripts.tests.test_deloxide_lane
+# A unittest target selects a focused class or method; the default keeps the complete module.
+test-deloxide-lane-runner target="scripts.tests.test_deloxide_lane":
+    python3 -m unittest --quiet {{ quote(target) }}
 
 # Verify interruption, timeout and process-group cleanup through real child processes.
 test-deloxide-supervision:

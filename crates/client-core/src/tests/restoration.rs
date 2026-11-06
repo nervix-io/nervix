@@ -327,17 +327,6 @@ async fn an_unanswered_subscription_restoration_wakes_the_waiting_reader() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback.open("live", 1).await;
     loopback.replace_exchange().await;
-    {
-        let mut exchange = loopback.client.inner.exchange.lock().await;
-        let reader = crate::exchange::ExchangeReader::new(
-            loopback.pending.clone(),
-            exchange.emitters.clone(),
-            exchange.generation.clone(),
-        );
-        exchange.reader.abort();
-        exchange.reader =
-            nervix_primitives::task::spawn(reader.run(nervix_primitives::stream::pending()));
-    }
     let interrupted = loopback
         .client
         .next_subscription()
