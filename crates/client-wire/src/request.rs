@@ -18,6 +18,7 @@ use crate::{
     frame::{ClientFrame, EncodedFrame, VerifiedFrame},
     limits::SessionLimits,
     producer::{CloseIngestorRequest, OpenIngestorRequest, SubmitBatchRequest},
+    server::ReplyBodyKind,
     subscription::SubscriptionType,
     transaction::{
         decode_inspection_target, decode_operation_number, decode_preview_identity,
@@ -192,6 +193,71 @@ pub enum ClientRequest {
     ReadEmitterBatch(ReadEmitterBatchRequest),
     SettleEmitterBatch(SettleEmitterBatchRequest),
     CloseEmitter(CloseEmitterRequest),
+}
+
+impl ClientRequestKind {
+    /// Whether a reply of kind `reply` answers a request of this kind: the request's own
+    /// outcome, a rejection, which can refuse any request, or a cancellation, which ends a request
+    /// a cancellation can reach. Every other reply under the request's identity breaks the
+    /// session contract.
+    pub fn is_answered_by(self, reply: ReplyBodyKind) -> bool {
+        match reply {
+            ReplyBodyKind::Rejected => true,
+            ReplyBodyKind::Cancelled => self.is_cancellable(),
+            outcome => outcome == self.outcome(),
+        }
+    }
+
+    /// The kind of the outcome a request of this kind is answered with once it is served.
+    pub fn outcome(self) -> ReplyBodyKind {
+        match self {
+            Self::Command => ReplyBodyKind::Command,
+            Self::Suggest => ReplyBodyKind::Suggest,
+            Self::Choice => ReplyBodyKind::Choice,
+            Self::ListDomains => ReplyBodyKind::DomainList,
+            Self::SelectDomain => ReplyBodyKind::DomainSelection,
+            Self::AttachTransaction => ReplyBodyKind::Attach,
+            Self::InspectTransaction => ReplyBodyKind::Inspection,
+            Self::Subscribe => ReplyBodyKind::Subscribe,
+            Self::Unsubscribe => ReplyBodyKind::Unsubscribe,
+            Self::Cancel => ReplyBodyKind::Cancel,
+            Self::AttachDomainClock => ReplyBodyKind::DomainClockAttach,
+            Self::DetachDomainClock => ReplyBodyKind::DomainClockDetach,
+            Self::OpenIngestor => ReplyBodyKind::OpenIngestor,
+            Self::SubmitBatch => ReplyBodyKind::Submission,
+            Self::CloseIngestor => ReplyBodyKind::CloseIngestor,
+            Self::OpenEmitter => ReplyBodyKind::OpenEmitter,
+            Self::ReadEmitterBatch => ReplyBodyKind::ReadEmitterBatch,
+            Self::SettleEmitterBatch => ReplyBodyKind::SettleEmitterBatch,
+            Self::CloseEmitter => ReplyBodyKind::CloseEmitter,
+        }
+    }
+
+    /// Whether a cancellation can end a request of this kind with `RequestCancelled`. A
+    /// cancellation is answered at once, so nothing cancels it, and a submitted batch cannot be
+    /// withdrawn: a cancellation naming it is refused and the batch's outcome always follows.
+    pub fn is_cancellable(self) -> bool {
+        match self {
+            Self::Cancel | Self::SubmitBatch => false,
+            Self::Command
+            | Self::Suggest
+            | Self::Choice
+            | Self::ListDomains
+            | Self::SelectDomain
+            | Self::AttachTransaction
+            | Self::InspectTransaction
+            | Self::Subscribe
+            | Self::Unsubscribe
+            | Self::AttachDomainClock
+            | Self::DetachDomainClock
+            | Self::OpenIngestor
+            | Self::CloseIngestor
+            | Self::OpenEmitter
+            | Self::ReadEmitterBatch
+            | Self::SettleEmitterBatch
+            | Self::CloseEmitter => true,
+        }
+    }
 }
 
 /// One request of a session.

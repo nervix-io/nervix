@@ -1,5 +1,6 @@
 //! Current-shape tests of the session schema and its codec.
 
+mod answers;
 mod backups;
 mod conformance;
 mod consumers;

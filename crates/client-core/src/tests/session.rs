@@ -2846,6 +2846,8 @@ async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
         }
     ));
 
+    // A detach outcome cannot answer an attach: the session ends before the client applies it,
+    // and the attach is sent again on the next session.
     let attaching = client.clone();
     let attach = nervix_primitives::task::spawn(async move {
         attaching.attach_domain_clock(domain("tenant")).await
@@ -2861,15 +2863,27 @@ async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
             &limits(),
         )
         .await;
-    let error = within_deadline(attach)
+    let mut replacement = server.next_exchange().await;
+    let repeated = replacement.next_request().await;
+    assert!(
+        matches!(&repeated.request, ClientRequest::AttachDomainClock(attach) if attach.domain == domain("tenant")),
+        "the attach is sent again on the next session: {:?}",
+        repeated.request
+    );
+    replacement
+        .reply(
+            repeated.request_id,
+            attach_reply(clock_in(1, crate::DomainClockObservedState::Unpaced), ""),
+            &limits(),
+        )
+        .await;
+    let attached = within_deadline(attach)
         .await
         .assured("the attach task completes")
-        .expect_err("a reply of another kind is an error");
+        .assured("the attach succeeds on the next session");
     assert!(matches!(
-        error.current_context(),
-        ClientError::UnexpectedReply {
-            request: crate::RequestKind::AttachDomainClock,
-        }
+        attached.disposition,
+        crate::DomainClockAttachDisposition::Attached { .. }
     ));
 }
 
