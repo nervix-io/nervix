@@ -13655,6 +13655,39 @@ async fn given_command_finalization_pause(world: &mut ScenarioWorld, node_id: St
     );
 }
 
+#[given(expr = "command reconciliation of execution reference {string} pauses on node {string}")]
+fn given_command_reconciliation_pause(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let reference = command_execution_reference(world, &execution_reference);
+    let reference = nervix_models::CommandExecutionReference::parse(reference)
+        .assured("scenario execution references are UUIDv7 values");
+    world
+        .fault_injection
+        .defer_command_reconciliation_on(crate::common::cluster::node_name(&node_id), reference);
+}
+
+#[when(
+    expr = "the command reconciliation pause for execution reference {string} on node {string} is \
+            released"
+)]
+fn when_command_reconciliation_pause_is_released(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let reference = command_execution_reference(world, &execution_reference);
+    let reference = nervix_models::CommandExecutionReference::parse(reference)
+        .assured("scenario execution references are UUIDv7 values");
+    world
+        .fault_injection
+        .resume_command_reconciliation_on(&crate::common::cluster::node_name(&node_id), &reference);
+}
+
 #[then(expr = "the command finalization pause on node {string} is reached")]
 async fn then_command_finalization_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -16580,7 +16613,10 @@ async fn background_command_outcome(
     ));
     let outcome = match &mut probe {
         Some(probe) => match probe
-            .observe(prepared.run(session.held_command_session(&query)))
+            .observe(
+                node.as_deref(),
+                prepared.run(session.held_command_session(&query)),
+            )
             .await?
         {
             ProbeReply::AfterBoundary(outcome) => {
@@ -19255,6 +19291,27 @@ async fn then_only_transaction_id_is_saved_as_placeholder(
     placeholder: String,
 ) {
     save_only_transaction_id(world, placeholder, None);
+}
+
+#[then(expr = "placeholder {string} equals placeholder {string}")]
+fn then_placeholder_equals(
+    world: &mut ScenarioWorld,
+    actual_placeholder: String,
+    expected_placeholder: String,
+) {
+    let actual = world
+        .placeholders
+        .get(&actual_placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{actual_placeholder}' is not defined"));
+    let expected = world
+        .placeholders
+        .get(&expected_placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{expected_placeholder}' is not defined"));
+    assert_eq!(
+        actual, expected,
+        "placeholders '{actual_placeholder}' and '{expected_placeholder}' must identify the same \
+         value"
+    );
 }
 
 #[then(expr = "the only open transaction id is saved as placeholder {string}")]

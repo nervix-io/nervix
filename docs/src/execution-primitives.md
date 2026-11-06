@@ -134,6 +134,20 @@ the actual selected atomic cell, without reading a clock. Relative generations a
 conversions take explicit anchors and perform no clock reads. The public engine scenarios test
 elapsed waits on the ordinary boundary timer; they do not qualify a cluster or host integration.
 
+### Authentication clock adapter
+
+The node's failed-name admission owner samples the selected monotonic instant under its map
+guard. It gives governor a snapshot clock at zero and the bucket's remaining arrival mark,
+then reanchors the complete updated mark at that selected instant. The per-second quota bounds
+the remaining mark by one burst, so the conversion does not depend on node uptime. Its exclusive
+state-store cell uses no backend clock or atomic store, and quota waits use boundary timers after
+the map guard ends. This adds no primitive or mode selection.
+
+The authentication owner's paused-clock tests qualify elapsed refill and concurrent refusal
+ordering. Its `authentication-quota-clock` property compares every decision, exact wait and complete
+arrival mark with a persistent governor limiter. Public authentication scenarios qualify the real
+transport waits separately; these asynchronous mutex and timer paths are untracked by Deloxide.
+
 ### Executor and clock permissions
 
 The boundary supplies mechanisms and decides no policy. `net` never decides what a name means: a
