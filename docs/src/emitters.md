@@ -601,7 +601,7 @@ invocations along with the destination. The complete candidate is
 validated before the transaction commits and has the same effective drain obligation as an
 `ALTER` replacement. A destination that remains unavailable can prevent that drain. The operator
 can repair it, or `STOP` the domain, change the emitter while stopped, and `START` again. Stopping
-discards prepared requests and retry state; attached work depends on its source's redelivery
+discards prepared requests and retry state; attached work depends on its ingestor's redelivery
 contract, and an endpoint that applied a request before losing its response may see a duplicate.
 
 While confirmations or infrastructure retries are pending, the emitter stops consuming from its
@@ -1817,7 +1817,7 @@ left out; the broker certificate must name the host `addr` names. A connection t
 out of that deadline, including a name that does not resolve, leaves the emitter unavailable with
 the failure as its transient error; it confirms nothing, so its input stays unacknowledged, and it
 reopens on its `RETRY POLICY` backoff. The emitter reads the client's `addr`, trusts its
-`tls_ca_file` and presents its `tls_cert_file` and `tls_key_file` as a RabbitMQ source does; see
+`tls_ca_file` and presents its `tls_cert_file` and `tls_key_file` as a RabbitMQ ingestor does; see
 [RabbitMQ](./ingestors.md#rabbitmq). A broker that refuses the TLS session leaves the emitter
 unavailable with that refusal as its transient error. The client's `tls_ca_file`, `tls_cert_file`
 and `tls_key_file` require an `amqps` address; combining them with `amqp` is refused before commit.
@@ -4132,7 +4132,7 @@ everything staged, and acknowledges only rows a catalog commit holds.
 Each commit names its append with an identity it records in the snapshot it adds. A commit whose
 catalog answer fails or is lost reloads the table, and the commit and every retry of it look for
 that identity in the current snapshot's history before appending, so a retry never appends the
-same staged rows twice. Rows are still appended again when their source redelivers them: after a
+same staged rows twice. Rows are still appended again when their ingestor redelivers them: after a
 lost upstream ACK, after an attached sibling emitter fails, or after the emitter ends before a
 retry learns whether the catalog applied its commit, because it ended without acknowledging the
 rows it still held staged. Iceberg appends are not idempotent.
@@ -4159,8 +4159,8 @@ That lets the emitter publish a different JSON envelope for each outbound row wi
 
 ## ACK Semantics And Effective Delivery
 
-Nervix composes per-hop ACKs. The effective delivery semantics of a source-to-emitter path are the
-observable duplicate and loss behavior produced by the source delivery mode, the emitter's
+Nervix composes per-hop ACKs. The effective delivery semantics of an ingestor-to-emitter path are the
+observable duplicate and loss behavior produced by the ingestor delivery mode, the emitter's
 publishing `MODE`, its attachment, and the external service. They are not the ACK mechanics of any
 one hop.
 
@@ -4171,7 +4171,7 @@ delivered. Attachment determines whether that outcome participates in the upstre
   upstream ACK chain.
 - `DETACHED`: relay fan-out acknowledges upstream immediately. The emitter still waits for its
   declared confirmations, applies its retry policy, error-routes record failures, and exerts local
-  backpressure, but that outcome cannot delay, retry, or fail the source ACK.
+  backpressure, but that outcome cannot delay, retry, or fail the ingestor ACK.
 
 Confirming broker modes and request/response `ACK` modes are at least once. A confirmation timeout
 or lost response is not proof that the service rejected a record, so retry can duplicate it. The
@@ -4189,18 +4189,18 @@ idempotence settings remain the user's client and service configuration.
 
 When one source record reaches multiple emitters or multiple attached routes, the upstream ACK
 completes only after every attached emitter reaches its emitter completion point. A failure on any
-attached path reopens source retry for the record on all paths. A emitter that already published
+attached path reopens ingestor retry for the record on all paths. An emitter that already published
 successfully may therefore receive the record again because a sibling emitter failed. This applies to
 every emitter without idempotent writes. Iceberg is the canonical case: rows can be appended to the
 table again after a sibling emitter fails.
 
-This sibling-retry case assumes a source mode that retries when an attached ACK fails or is lost. A
-no-ACK source cannot create that retry duplicate, but it can lose the record instead.
+This sibling-retry case assumes an ingestor mode that retries when an attached ACK fails or is lost. A
+no-ACK ingestor cannot create that retry duplicate, but it can lose the record instead.
 
 A WASM processor on the path adds one more retry of the same kind. It dispatches a guest callback's
-output before the checkpoint of the guest's state completes and holds back only the source ACK, so
+output before the checkpoint of the guest's state completes and holds back only the ingestor ACK, so
 a checkpoint that fails negatively acknowledges records whose output an emitter may already have
-published, and the source redelivers them. See
+published, and the ingestor redelivers them. See
 [Recovery, Replay And Duplicates](wasm-processor-guests.md#recovery-replay-and-duplicates).
 
 Every `DETACHED` path has a common loss window: a process can fail after relay fan-out acknowledges
@@ -4224,7 +4224,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Postgres | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
 | MySQL | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
 | MongoDB | Retry after a write the server never answered, lost ACK, or attached sibling failure; a failed write concern adds none, since its retry carries only the documents the write left unresolved | Any failure after detached relay acceptance; a committed write can survive a crash before Nervix observes success; a document the server applied under a write concern it could not satisfy is delivered, and lost if the deployment later rolls the write back | `ON CONFLICT` |
-| Iceberg | Redelivery after a lost ACK, an attached sibling failure, or an emitter that ended before a retry learned whether the catalog applied its commit; appends repeat rows | Crash before catalog commit loses staged work unless the attached source redelivers; detached mode accepts that loss | None; appends are not idempotent |
+| Iceberg | Redelivery after a lost ACK, an attached sibling failure, or an emitter that ended before a retry learned whether the catalog applied its commit; appends repeat rows | Crash before catalog commit loses staged work unless the attached ingestor redelivers; detached mode accepts that loss | None; appends are not idempotent |
 
 The [publishing-mode table](#publishing-modes) names each transport's exact completion point.
 `ATTACHED` waits only for that declared point and cannot make an earlier `NO ACK` boundary durable.
@@ -4258,7 +4258,7 @@ When the same records feed a non-idempotent emitter and other emitters, consider
 non-critical path or separate relays with separate ACK boundaries per emitter so one emitter's failure
 does not drive duplicates into another. `DETACHED` makes that path at-most-once relative to the
 upstream ACK: the emitter still confirms and retries according to `MODE`, but a crash after the
-detached ACK can lose its in-memory work without causing source redelivery.
+detached ACK can lose its in-memory work without causing ingestor redelivery.
 
 See [Data Plane](data-plane.md#ack-composition) for the relay fan-out mechanics and
 [What It Is Not](what-it-is-not.md) for the persistence boundary.

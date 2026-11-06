@@ -291,7 +291,7 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
          supplies group.id, auto.offset.reset and enable.auto.commit, and disables \
          enable.partition.eof and allow.auto.create.topics.",
         "Connector control execution has two workers per node by default. A commit still \
-         unanswered after its caller's 30 s deadline retains its worker and the source's one \
+         unanswered after its caller's 30 s deadline retains its worker and the ingestor's one \
          in-flight commit until the native call ends. Native subscribe, assign and unsubscribe \
          have no cancellable deadline; their caller waits socket.timeout.ms at most.",
         "A consumer whose last handle is gone is destroyed by one connector control job, which \

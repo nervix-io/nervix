@@ -299,7 +299,7 @@ receiver-owned identity, adds no pause attempt and extends no lease. Preparation
 participant.
 
 The step changes from `UNATTEMPTED` to `APPLYING` when its authoritative effect transition is
-recorded. It becomes `APPLIED` only after required activation, source readiness, handoff, and
+recorded. It becomes `APPLIED` only after required activation, ingestor readiness, handoff, and
 gate release complete. A failure records a diagnostic and the transaction's completed prefix;
 it does not erase a pause already observed. A committed model effect can remain visible despite a
 later activation failure. The special case is a model step that took no pause and whose HTTPS
@@ -451,7 +451,7 @@ what this transaction required and actually engaged.
 
 Persisted gate plans retain `EntityGateTargets`. A model mutation selects complete entities and
 expands every current instance, including retained work during publication. A schedule handoff
-selects the exact moved units and expands their exact placement component. Source instance `p`
+selects the exact moved units and expands their exact placement component. Ingestor instance `p`
 and relay partition `p` can therefore share one gate without selecting a sibling instance.
 Engagement, drain counters, ACK roots, capture authorization and release all preserve that unit
 selection. Logical entity names remain the inspection projection; they do not replace the stored

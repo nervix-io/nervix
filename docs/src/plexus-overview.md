@@ -416,7 +416,7 @@ TO <relay>
 ```
 
 `COLLECT FOR` is optional on graph nodes that consume relay input through `FROM`. It is unavailable
-to ingestors, which read external sources rather than relays. When omitted, each incoming Arrow
+to ingestors, which read external systems rather than relays. When omitted, each incoming Arrow
 batch proceeds directly to node execution. When present, Nervix maintains an input batch
 independently for each source relay and concrete branch, then executes the node when the duration
 expires or the optional size boundary is reached. Correlators configure the clause independently
@@ -478,7 +478,7 @@ illustrative, not recommended defaults. Two measured facts decide what a `FLUSH`
 `MAX BATCH SIZE` only clamps a batch; it never grows one. The batch a route emits is roughly its
 arrival rate multiplied by the `FLUSH EACH` interval, cut off at the byte cap, so raising a cap
 that never fires changes nothing and the only way to grow batches is a longer interval, paid in
-latency. Upstream of every route, ingestors build their first Arrow batches from source groups that
+latency. Upstream of every route, ingestors build their first Arrow batches from ingest groups that
 close at 1,024 messages, or earlier after a 5 ms idle gap, independent of any `FLUSH` policy; a
 payload a JAQ-backed codec unfolds is never split, so its group may close above 1,024. Larger
 batches downstream come only from route buffering across an interval. Read actual batch sizes
@@ -606,7 +606,7 @@ General expression rules:
 - generated routes allow bare reads from immutable generated state until the same-named output is
   initialized; `message` and `input` are unavailable
 - `branch.field` must be explicit and is unavailable in successful emitter expressions
-- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; each source
+- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; each ingestor
   entity declares its typed, optional `metadata.<field>` set, such as Kafka's `metadata.topic`,
   `metadata.partition`, and `metadata.offset` or Syslog's `metadata.peer_addr`, and a route may read
   only a declared field
@@ -693,14 +693,14 @@ SET error_reference = error.reference,
     attempted_total = partial_output.total
 ```
 
-An ingestor additionally declares its node-level general policy after the source configuration:
+An ingestor additionally declares its node-level general policy after the ingestor configuration:
 
 ```plexus,ignore
 ON GENERAL ERROR IGNORE | LOG
 ```
 
 An ingestor's general policy also reports the decode rejection that replaces every payload its
-codec refuses. Either form consumes the payload rather than having its source present it again:
+codec refuses. Either form consumes the payload rather than having its ingestor present it again:
 `LOG` reports the rejection and `IGNORE` does not. See
 [When The Codec Refuses A Payload](ingestors.md#when-the-codec-refuses-a-payload).
 

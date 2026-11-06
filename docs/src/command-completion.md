@@ -9,7 +9,7 @@ another session or node. Runtime data flow, subscription delivery, connector ack
 timer-driven work continue asynchronously under their own contracts.
 
 A command can therefore remain pending while Nervix validates configuration, replicates control
-state, distributes resources, prepares runtimes, starts sources, drains old ownership, releases
+state, distributes resources, prepares runtimes, starts ingestors, drains old ownership, releases
 entity gates, and makes the final outcome visible. Transport loss only detaches the waiter after
 admission. The cluster continues the work and retains its terminal result for the command retry
 validity, 15 minutes by default.
@@ -217,9 +217,9 @@ deadline.
 
 Runtime activation has two explicit phases. First, every required node applies the authoritative
 models, schedules, clocks, resource bindings, and stopped or running lifecycle state and reports
-`prepared` for that revision. Only after the preparation barrier may running-domain sources and
+`prepared` for that revision. Only after the preparation barrier may running-domain ingestors and
 listeners start. Each node then reports `ready`, and success waits for the readiness barrier. This
-prevents a source from publishing into a peer that still has the preceding graph.
+prevents an ingestor from publishing into a peer that still has the preceding graph.
 
 These barriers belong to commands. The ownership move a stopping node asks for during graceful
 shutdown is not a command, and the stopping node's drain budget bounds it. Each unit it moves
@@ -249,7 +249,7 @@ sequenceDiagram
     end
     A-->>L: prepared(revision, incarnation)
     B-->>L: prepared(revision, incarnation)
-    par activate sources/listeners
+    par activate ingestors/listeners
         L->>A: activate
         L->>B: activate
     end
@@ -296,7 +296,7 @@ returning a retained result, and it completes as soon as the report is read. Con
 lifecycle, domain, and resource statements each end a model run and form their own step. Durable
 effect progress changes the retained step from unattempted to applying, while completed application
 records applied or failed separately. A step whose authoritative write is committed remains applying
-until activation, handoff, drain, source readiness, lifecycle work, and command-owned gate release
+until activation, handoff, drain, ingestor readiness, lifecycle work, and command-owned gate release
 are complete. Only then can the next step advance. The transaction becomes `COMMITTED` after the
 final application record and terminal visibility barrier.
 
@@ -359,8 +359,8 @@ Dynamic changes preserve live execution, entity changes drain only affected enti
 changes pause and drain the domain. Success follows schedule application, ownership handoff, runtime
 readiness, and gate release. A no-op reapplies the current required state before returning.
 
-`START` waits until every listener and assigned source has completed its startup boundary. `STOP`
-waits for remote source and listener teardown, including when it stops the cluster's last running
+`START` waits until every listener and assigned ingestor has completed its startup boundary. `STOP`
+waits for remote ingestor and listener teardown, including when it stops the cluster's last running
 domain, for the last state write of every deduplicator and window branch it ends, and for the last
 checkpoint of every materialized relay and Kafka domain offset, written once the tasks that change
 it have ended.

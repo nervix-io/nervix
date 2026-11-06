@@ -498,9 +498,9 @@ JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference 
 fields; a domain and codec reference select that codec's output schema fields; a domain and resource
 reference select completed resource versions. Wire-schema targets have separate discriminants, so
 a codec cannot mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A
-visual ingestor uses a distinct source-reference target for each of the 14 connector and entity
+visual ingestor uses a distinct ingestor-reference target for each of the 14 connector and entity
 pairs that read an external system; a client producer ingestor selects its schema through the
-schema target instead. Each source-reference target requires a domain and offers clients of its
+schema target instead. Each ingestor-reference target requires a domain and offers clients of its
 pair's connector, except the HTTP endpoint and WebSocket endpoint targets, which offer endpoints of
 that `TYPE`. Its decoding-codec target offers codecs that can decode. An unbranched-relay
 target needs a domain; a branched-relay target also needs the selected branch and offers relays
@@ -1350,7 +1350,7 @@ also hosts a runtime consumer of the relay receives the batch once, for that con
 subscriptions piggyback on that delivery. Each batch reaches a subscription at most once. Delivery
 to a node is ordered per branch; batches of different branches may arrive in a different order than
 the owner published them. The subscription copy carries no acknowledgements, so a subscriber never
-holds back a source's acknowledgement beyond the time its `BLOCKING` backpressure takes.
+holds back an ingestor's acknowledgement beyond the time its `BLOCKING` backpressure takes.
 
 ### Generations, Endings, And Cleanup
 
@@ -1636,7 +1636,7 @@ message. The four outcomes keep the boundary's four facts apart:
 - **`NotAdmitted`.** No row entered the graph. The cause is an `InvalidBatch` defect, `Suspended`,
   `Busy`, `Draining`, `ProducerEnded`, or `CreditExceeded`. Only `Suspended` and `Busy` are
   temporary.
-- **`Completed`.** The batch's source acknowledgement root resolved successfully.
+- **`Completed`.** The batch's ingestor acknowledgement root resolved successfully.
 - **`ProcessingFailed`.** The batch was admitted and its acknowledgement failed, with `AckTimedOut`
   or `Rejected`. Some effects may have happened.
 - **`OutcomeUnknown`.** The batch may have been admitted, and no terminal result can be established:
@@ -1794,7 +1794,7 @@ authenticated relay-class duplex stream and reserves their granted bytes on both
 executing nodes. Loss of the stream or either endpoint revokes outstanding attempts. There is no
 durable cursor or consumer result history across an owner loss; upstream replay may be needed.
 [Emitters](./emitters.md#client-emitters)
-owns the source acknowledgement guarantee and [Cluster
+owns the ingestor acknowledgement guarantee and [Cluster
 Interconnect](./interconnect.md#client-consumer-streams) owns the forwarding form.
 
 The executing node exports active consumer and forwarding credit gauges, retained IPC work
@@ -2403,7 +2403,7 @@ It does not provide:
   nothing replays or deduplicates it. The application keeps its source data and decides.
 - **Exactly-once delivery.** A subscription is a live view with at-most-once delivery per admitted
   batch. Rows in transit can be lost without a report while relay ownership moves or a node-to-node
-  delivery fails, and a source may redeliver a record that the graph then passes again.
+  delivery fails, and an ingestor may redeliver a record that the graph then passes again.
 - **Automatic rollback.** A failed transaction keeps the applied prefix of its execution steps, and
   a cancelled waiter keeps its admitted effect. Undoing either is a new command.
 - **Durable subscription replay.** Subscriptions keep no offsets and are not persisted. A restored

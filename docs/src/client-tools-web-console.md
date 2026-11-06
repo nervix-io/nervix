@@ -282,7 +282,7 @@ on quiesce. Buttons whose declared option requirements are unmet stay disabled, 
 ACK or SUSPEND without `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. A required option, such as an
 MQTT topic's `SESSION` and `QOS`, starts unchosen and has no default: the draft refuses to build
 until each is chosen, and validates the declared requirements too.
-Switching sources refreshes the option controls and quiesce choices from the selected entity.
+Switching ingestors refreshes the option controls and quiesce choices from the selected entity.
 A WebSocket connection edits literal upgrade headers as
 ordered name/value rows. An `HTTP REQUEST` edits its request headers as ordered rows too: a row
 holds a literal value, or, with **Client secret** checked, the client key it reads, and the preview
@@ -678,7 +678,7 @@ owner can read it.
 
 The **Restore** form restores one domain of an archive, under its archived name or a new one, or a
 whole cluster archive with its policy for users the cluster already has. It can resume the restored
-domains at their archived lifecycle, and leave out source offsets or all runtime state.
+domains at their archived lifecycle, and leave out ingestor offsets or all runtime state.
 
 Choose the archive file, set the options, and select **Dry run**. The console reads the file once to
 measure its size and BLAKE3 digest, then streams it to the leader with the statement's `DRY RUN`

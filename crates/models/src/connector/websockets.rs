@@ -100,7 +100,7 @@ pub struct WebsocketsConnectionIngestor {
 const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
-            holds: "accepted signaling frames retained for source reads",
+            holds: "accepted signaling frames retained for ingestor reads",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(
                     "handshake_buffer_capacity messages (default 16), each at most \

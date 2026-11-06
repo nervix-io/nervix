@@ -76,9 +76,9 @@ fails. [Errors And Diagnostics](errors-and-diagnostics.md) owns those compiler c
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
 builtin spellings, including datetime names and accepted aliases. That list excludes injected
 calls and `write_header`; it is a candidate catalog, while VM lowering and registry validation
-still decide whether a call is valid for its arguments. The parser carries the source or emitter kind
+still decide whether a call is valid for its arguments. The parser carries the ingestor or emitter kind
 with header-function expectations. The resolver adds `read_header` and `read_headers` only for a
-source that can read headers, and `write_header` only for an emitter that can write them. UDF candidates
+ingestor that can read headers, and `write_header` only for an emitter that can write them. UDF candidates
 come from the selected domain's Models after the session's queued transaction changes.
 
 Registry planning converts the validated scheduled Models into typed processor specifications.
@@ -362,7 +362,7 @@ revision and its publication.
 | --- | --- |
 | Routes of junctions, deduplicators, reorderers, inferencers, correlators, window processors and WASM processors, and processor `FROM ... WHERE` and `FILTER WHERE` | Once when the installed typed processor revision is bound, before its domain routing snapshot is published. Every concrete branch shares the plan's programs and prepared artifacts. A valid route that needs no VM program records that prepared absence and uses direct Arrow projection. |
 | `DEDUPLICATE ON`, reorderer `BY`, and `CORRELATE WHERE` | Once when the installed typed processor revision is bound, then shared by every concrete branch |
-| Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound when the ingestor starts, before its source opens. Each source unit binds its programs once; that unit's ingest groups share the bound programs. |
+| Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound when the ingestor starts, before its connector opens. Each ingestor unit binds its programs once; that unit's ingest groups share the bound programs. |
 | Reingestor `FROM ... WHERE`, `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound for each input relay before that input's task starts |
 | Emitter `FROM ... WHERE`, routes, HTTP request fields, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | Lowered once into the domain's typed emitter execution plans, then bound against installed schemas and UDFs when the task starts or swaps. Reconnects reuse the bound programs. |
 | Window aggregate argument and output programs, inferencer `INPUTS`, and inferencer output routes | Once when the installed typed processor revision is bound, then shared by every concrete branch |

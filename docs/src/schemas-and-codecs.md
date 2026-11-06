@@ -427,7 +427,7 @@ Semantics:
 - `ON INGESTION` runs on every value the parsed native or protobuf payload holds and may yield zero or more JSON objects, each of which becomes one message compatible with the internal schema ([Unfolding Payloads](#unfolding-payloads))
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value
 
-JAQ-backed encode/decode runs on the node's extension workers, so an expensive or non-terminating transform never stalls an async ingestor or emitter task and never holds the workers that relay bodies are encoded and decoded on. A node whose extension workers cannot take a payload now refuses it without judging it: an ingested payload fails its dispatch rather than its decode, and an emitter keeps the rows and retries them. A payload no sender can present again is not refused when its source can wait: a payload an ingestor's quiesce buffer retained waits in the buffer, and a paced poll, or a payload a source that survives a held loop handed over without an acknowledgement, waits until the extension workers take it ([When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full)).
+JAQ-backed encode/decode runs on the node's extension workers, so an expensive or non-terminating transform never stalls an async ingestor or emitter task and never holds the workers that relay bodies are encoded and decoded on. A node whose extension workers cannot take a payload now refuses it without judging it: an ingested payload fails its dispatch rather than its decode, and an emitter keeps the rows and retries them. A payload no sender can present again is not refused when its ingestor can wait: a payload an ingestor's quiesce buffer retained waits in the buffer, and a paced poll, or a payload an ingestor that survives a held loop handed over without an acknowledgement, waits until the extension workers take it ([When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full)).
 JAQ JSON output intentionally preserves object member declaration order. The serde JSON
 `preserve_order` feature exists for that public JAQ behavior; schemaful `WIRE JSON` ingestion does
 not depend on serde JSON object storage.
@@ -547,10 +547,10 @@ is at fault. It never quotes payload values, so a mismatched field is described 
 and a program evaluation error omits the evaluator's message, which is logged at `trace` level
 instead.
 
-The messages of one payload join one [source ingest group](ingestors.md) together, so they share its
-domain execution snapshot, and every one of them sees the payload's source metadata and headers.
+The messages of one payload join one [ingest group](ingestors.md) together, so they share its
+domain execution snapshot, and every one of them sees the payload's ingestor metadata and headers.
 Each message is filtered, constructed, branched, routed, and error-handled on its own, and ingestor
-metrics count messages. Source acknowledgement stays per payload: a payload is acknowledged once
+metrics count messages. Ingestor acknowledgement stays per payload: a payload is acknowledged once
 every message it unfolded into has been acknowledged, a negative acknowledgement of any of them
 negatively acknowledges the whole payload so that its already acknowledged messages are delivered
 again with it, and a payload that unfolds into no messages is acknowledged as soon as it decodes.

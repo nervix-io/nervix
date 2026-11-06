@@ -230,7 +230,7 @@ exposing an invalid intermediate graph.
 
 Other eligible statements apply individually. `COMMIT` records authoritative effect progress and
 completed application separately and stops at the first definitive failure. A transaction remains
-`COMMITTING` after a step's authoritative state is durable while runtime activation, source
+`COMMITTING` after a step's authoritative state is durable while runtime activation, ingestor
 readiness, remote stopping, ownership handoff, or gate release is outstanding. It becomes
 `COMMITTED` only after the final step is usable on the current live-node set and its outcome is
 authoritatively visible. Its successful output is only the highest quiesce level actually executed
@@ -402,7 +402,7 @@ and leaves the prior models and schedule active.
 
 Schedule publication preserves the existing primary and replicas of every single-owner ingestor,
 client ingestors included, while all cluster nodes in that assignment are live.
-`WEBSOCKETS CONNECTION` ingestors follow this rule along with the other client sources, so
+`WEBSOCKETS CONNECTION` ingestors follow this rule along with the other client ingestors, so
 unrelated graph changes, cluster-node joins or uncordons, and soft placement changes do not restart
 their external sessions. `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors
 are the only ingestors whose assignments follow live membership, because their listeners execute
@@ -435,7 +435,7 @@ that produced it. The batch uses the highest level contributed by any changed en
 
 Quiesce level and ingestor quiesce mode are separate contracts. `DYNAMIC`, `ENTITY_PAUSE`, and
 `DOMAIN_PAUSE` determine which graph work must pause before a change commits. The required `ON
-QUIESCE` clause on each ingestor determines what that ingestor's external source experiences while
+QUIESCE` clause on each ingestor determines what that ingestor's external system experiences while
 an entity or domain pause is active. Memory-pressure shedding consults the same mode. There is no
 operator `PAUSE` or `RESUME` statement.
 
@@ -461,8 +461,8 @@ operator `PAUSE` or `RESUME` statement.
   timeout, or retry-policy variable), client, codec, envelope, construction, input-collection,
   attachment and general error policy changes drain and replace only the affected emitter task,
   whether `SET TO` restates the destination or an operation changes one part of it in place. Every ingestor alteration quiesces and drains
-  only the affected ingestor instances under their declared source mode, then starts their desired
-  source configuration from the published schedule. A `SET QUIESCE` operation still uses this
+  only the affected ingestor instances under their declared ingestor mode, then starts their desired
+  ingestor configuration from the published schedule. A `SET QUIESCE` operation still uses this
   level; the mode active when the hold began governs that hold. A client ingestor suspends
   admission for the hold, and its producers stay attached across the swap unless the alteration
   changed their endpoint contract; see [Client Ingestors](./ingestors.md#client-ingestors).
@@ -788,7 +788,7 @@ their `FLUSH EACH` cadence, until no relay batch, node work item, emitter buffer
 admitted acknowledgement root remains. One more force flush then confirms that nothing is still
 moving, so work an upstream flush publishes after a downstream node finished its own flush is not
 left behind.
-Source acknowledgements and commits, such as Kafka consumer-group offsets, complete before the source
+Ingestor acknowledgements and commits, such as Kafka consumer-group offsets, complete before the ingestor
 session stops.
 
 Terminal teardown stops the node's tasks only after that drain completes or its timeout passes. It
@@ -796,8 +796,8 @@ gives each background task at most two seconds to stop, waits for work that sess
 started until the shutdown deadline and cancels whatever still runs then, and finally stops the
 runtime, consensus, cluster membership, and the interconnect and releases the node's storage. A
 timeout reports the drain as abandoned, and teardown negatively acknowledges the remaining work: a
-source with external acknowledgements redelivers it after restart, and a `MODE NO ACK` source loses
-it. A emitter that stays unavailable therefore holds the drain until its timeout. Pending
+ingestor with external acknowledgements redelivers it after restart, and a `MODE NO ACK` ingestor loses
+it. An emitter that stays unavailable therefore holds the drain until its timeout. Pending
 `REQUIRED WAIT` records do not hold the drain open; every force flush retries them against the
 state that is present, and teardown negatively acknowledges whatever still waits. Payloads that
 other live nodes publish into this node's relays are admitted work as well, so an owner that keeps
