@@ -292,6 +292,10 @@ kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`.
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 
+`CREATE INFERENCER` may declare model-carried `STATE` between `INPUTS` and `OUTPUT SCHEMA`.
+The [Inferencer](processors.md#state-tensors) section defines its port pairs, fixed tensor shapes,
+initial expressions, per-branch invocation order and reset behavior.
+
 Domain creation may declare a placement default, and named placement rules may overlay paths in
 the active domain. Omission means `NEUTRAL`, which preserves ordinary scheduler heuristics. See
 [Placement Policies](placement.md) for the four policy levels and lifecycle commands.

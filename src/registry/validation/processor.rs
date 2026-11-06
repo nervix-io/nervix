@@ -1419,7 +1419,7 @@ pub(in crate::registry) fn ensure_inferencer_input_mappings(
     models: &ModelIndex,
     processor: &CreateInferencer,
     input_schemas: &[(&RelayName, &CreateSchema)],
-) -> Result<(), Report<RegistryError>> {
+) -> Result<bool, Report<RegistryError>> {
     let Some((_relay, input_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -1427,6 +1427,7 @@ pub(in crate::registry) fn ensure_inferencer_input_mappings(
             reason: "inferencer requires at least one input relay".to_string(),
         }));
     };
+    let mut sensitive = false;
     for mapping in &processor.inputs {
         let target = FieldName::parse("mapped_tensor").map_err(|error| {
             Report::new(RegistryError::InvalidModel {
@@ -1481,6 +1482,7 @@ pub(in crate::registry) fn ensure_inferencer_input_mappings(
             }));
         };
         let expected_type = mapping.schema.message_type().arrow_data_type();
+        sensitive |= inferred.sensitive;
         if inferred.data_type != expected_type || inferred.nullable {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
@@ -1500,7 +1502,7 @@ pub(in crate::registry) fn ensure_inferencer_input_mappings(
         }
     }
 
-    Ok(())
+    Ok(sensitive)
 }
 
 pub(in crate::registry) fn validate_inferencer_output_filter_map(
@@ -1510,11 +1512,10 @@ pub(in crate::registry) fn validate_inferencer_output_filter_map(
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
-    processor: &CreateInferencer,
+    generated_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
-    let inner_output_schema = processor.inner_output_schema(domain, identifier)?;
     let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
-    let generated_arrow_schema = arrow_schema_for_internal_schema(&inner_output_schema);
+    let generated_arrow_schema = arrow_schema_for_internal_schema(generated_schema);
     let parsed = lower_generated_route(
         &output.construction,
         output_arrow_schema.as_ref(),
@@ -1533,7 +1534,7 @@ pub(in crate::registry) fn validate_inferencer_output_filter_map(
         fields: lookup_fields,
     } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![
-        readonly_binding_for_internal_schema("generated", &inner_output_schema),
+        readonly_binding_for_internal_schema("generated", generated_schema),
         writable_binding_for_internal_schema("output", output_schema),
     ];
     if let Some(branch_schema) = branch_schema {
@@ -1586,11 +1587,12 @@ pub(in crate::registry) fn validate_inferencer_output_filter_map(
     Ok(())
 }
 
-trait InferencerRegistrySchema {
+pub(in crate::registry) trait InferencerRegistrySchema {
     fn inner_output_schema(
         &self,
         domain: &DomainName,
         identifier: &ModelName,
+        sensitive: bool,
     ) -> Result<CreateSchema, Report<RegistryError>>;
 }
 
@@ -1599,6 +1601,7 @@ impl InferencerRegistrySchema for CreateInferencer {
         &self,
         domain: &DomainName,
         identifier: &ModelName,
+        sensitive: bool,
     ) -> Result<CreateSchema, Report<RegistryError>> {
         let fields = self
             .output_schema
@@ -1618,7 +1621,7 @@ impl InferencerRegistrySchema for CreateInferencer {
                     name,
                     ty: declaration.schema.message_type(),
                     optional: false,
-                    sensitive: false,
+                    sensitive,
                 })
             })
             .collect::<Result<Vec<_>, Report<RegistryError>>>()?;

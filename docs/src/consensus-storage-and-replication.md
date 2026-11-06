@@ -492,9 +492,9 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_unit_avro_logs`,
-`raft_unit_avro_meta`, `raft_unit_avro_state`, and
-`raft_unit_avro_snapshots`. Opening it validates the complete keyspace namespace before
+The dedicated database owns exactly four current keyspaces: `raft_inference_avro_logs`,
+`raft_inference_avro_meta`, `raft_inference_avro_state`, and
+`raft_inference_avro_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
@@ -512,7 +512,8 @@ changes one part of its entity's body, an envelope clause or the properties, or 
 construction where it stands. Its state metadata requires the current `ClusterState` encoding, 14,
 including committed cluster parameters, the durable restore installation gate and the unit-keyed
 committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
-The current shape also requires typed ingestor instancing, exact-unit placement-group members
+The current shape also requires inferencer state bindings and their initial expressions,
+typed ingestor instancing, exact-unit placement-group members
 and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions,
 progress, outcomes, and plan, report and topology
 headers are archived as fixed-width 64-bit values with checked native decoding. Log replay, state
