@@ -2658,6 +2658,12 @@ cases emits an early tick or silently clamps the interval.
 
 ### Rust Client, CLI And C Binding
 
+A native request deadline ends the exchange's request registry and wakes its frame reader. An
+unanswered subscription reopening therefore ends that session, with its normal interruption and
+recovery behavior; it does not report `RestorationFailed` on that ended session. A waiting event
+reader that knows no server for recovery returns `ClientError::SessionClosed`. Clock readers follow
+the same exchange ending even when another restoration's retry delay is still pending.
+
 Every call of the Rust client returns an `error_stack::Report<ClientError>`. Its current context is
 the failure a caller acts on, and the frames beneath keep the cause: a call's transport status, the
 wire codec's report beneath `EncodeRequest`, `InvalidUploadReply` or `InvalidRestoreReply`, the
@@ -2917,8 +2923,14 @@ completed backup's archive was not downloaded, never as a failure of the backup.
 failure names an archive file the browser could not read or that is empty, a transport failure, a
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
-execution reference. A refusal of the stream is shown as `restore refused (<failure>): <message>`,
-and the restore's own outcome as the dispatcher renders any command's. A session reply whose
+execution reference. Once an attempt has sent the whole archive without learning the outcome, or
+the leader has answered that the outcome is unknown, the restore may have been admitted. A failure
+that then ends it, a refusal of a later stream, and an execution reference the leader no longer
+holds all sit beneath `the console stopped before learning the outcome of a restore the leader may
+have admitted`, and the dialog reports the outcome as unknown naming the execution reference. The
+dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
+could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
+restore's own outcome as the dispatcher renders any command's. A session reply whose
 command outcome names another execution reference than its command's is a protocol violation: the
 dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
 '<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the

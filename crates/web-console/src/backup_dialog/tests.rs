@@ -993,7 +993,7 @@ fn a_restore_reply_ends_the_restore_redirects_it_or_repeats_it() {
             &reference()
         )
         .assured("an unknown outcome is a reply"),
-        ReplyStep::Retry
+        ReplyStep::AwaitOutcome
     );
     let no_leader = outcome(CommandDisposition::NotLeader(LeaderRedirect {
         leader: None,
@@ -1004,7 +1004,16 @@ fn a_restore_reply_ends_the_restore_redirects_it_or_repeats_it() {
             &reference()
         )
         .assured("a redirect naming no leader is a reply"),
-        ReplyStep::Retry
+        ReplyStep::AwaitElection
+    );
+    let expired = outcome(CommandDisposition::ExecutionReferenceExpired);
+    assert_eq!(
+        reply_step(
+            reply(RestoreDisposition::Outcome(Box::new(expired.clone()))),
+            &reference()
+        )
+        .assured("an expired reference is a reply"),
+        ReplyStep::ReferenceExpired(Box::new(expired))
     );
 }
 

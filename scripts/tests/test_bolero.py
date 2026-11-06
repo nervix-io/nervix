@@ -657,6 +657,9 @@ class DiscoveryTests(unittest.TestCase):
                               [] if ignored else
                               [item["test_name"] for item in self.compiled(package, test_target)]),
             mock.patch.object(bolero, "compiled_targets", side_effect=self.compiled),
+            mock.patch.object(bolero, "command", side_effect=AssertionError(
+                "discovery unit tests must not run Cargo"
+            )),
         ):
             with self.assertRaisesRegex(bolero.BoleroError, "differ from inventory"):
                 bolero.discover(self.inventory)

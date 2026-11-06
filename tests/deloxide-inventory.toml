@@ -452,6 +452,7 @@ tags = [
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
   "@client_io_03_generation",
+  "@client_wire_subscription_timeout",
   "@remote_ack_owners",
   "@backup_wait",
   "@client_wire_backup_outage",
@@ -1797,6 +1798,26 @@ invariant = "An HTTP ingestor started above the memory high watermark on one and
 invocation = "scenarios"
 scenario = "Memory high watermark pauses scheduled ingestors"
 selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The real Rust client's tracked request registry and event queues end a silent exchange after one held reopening reply exceeds its request timeout, on one and three nodes. Async watch and transport waits are untracked and have a production-owner Shuttle check."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-subscription-timeout"
+invariant = "A waiting reader reopens its acknowledged subscription in another session and receives exactly one row from one post while the first reopening reply remains held."
+invocation = "scenarios"
+scenario = "An unanswered subscription reopening lets a waiting native reader open another session"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the real Rust client's tracked request registry and event queues end a silent exchange after one unanswered reopening, on one and three nodes. Async watch and transport waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-subscription-timeout"
+invariant = "A waiting reader reopens its acknowledged subscription in another session and receives exactly one row from one post while the first reopening reply remains held."
+invocation = "stress-scenarios"
+scenario = "An unanswered subscription reopening lets a waiting native reader open another session"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Rust client consumers, producers and the attached domain clock resuming across a cluster restart."
@@ -3627,6 +3648,8 @@ workloads = [
 gap = "The listed workloads reach the pending-replies lock through every request's registration, the replies its reader routes and the close of an exchange. None cancels a command through the Rust client: its only caller, nervix-cli, has no diagnostic form, and the lane starts an ordinary CLI binary, so ExchangeRequests::cancel, which registers a CancelRequest under the same single unnested acquisition every request takes and closes the registry when the frame cannot be sent, is exercised only by the client-core unit tests and the CLI scenarios, outside the lane."
 path = "crates/client-core/src/exchange.rs"
 workloads = [
+  "scenario.client-subscription-timeout",
+  "stress.client-subscription-timeout",
   "scenario.client-restore-reply-validation",
   "stress.client-restore-reply-validation",
   "stress.client-restore-reply-validation-restore",
