@@ -81,7 +81,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
         PATH '/enrich'
         TYPE HTTP;
 
-      CREATE HTTP ENDPOINT INGESTOR source_logs
+      CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs
@@ -360,7 +360,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
         PATH '/lookup-routes'
         TYPE HTTP;
 
-      CREATE HTTP ENDPOINT INGESTOR source_logs
+      CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs
@@ -501,7 +501,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
         PATH '/lookup-failure'
         TYPE HTTP;
 
-      CREATE HTTP ENDPOINT INGESTOR source_logs
+      CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs

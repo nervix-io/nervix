@@ -70,7 +70,7 @@ Feature: Cross-language client conformance
       CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant;
       CREATE VHOST edge conformance-{{test_id}}.example.com;
       CREATE ENDPOINT typed_ingress ON edge PATH '/typed' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR typed_source
+      CREATE HTTP ENDPOINT INGESTOR typed_ingestor
         FROM typed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING typed_row_codec
         TO typed_rows

@@ -1,5 +1,5 @@
 [package]
-description = "The Syslog source and sink transports and their shared client configuration for Nervix"
+description = "The Syslog ingestor and emitter transports and their shared client configuration for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-syslog"

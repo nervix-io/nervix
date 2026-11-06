@@ -3590,6 +3590,22 @@ impl Cluster {
             .release_application_revision_responses_from(&node_name(node_id));
     }
 
+    pub(crate) fn pause_application_progress_reports_from(&self, node_id: &str) {
+        self.fault_injection
+            .pause_application_progress_reports_from(node_name(node_id));
+    }
+
+    pub(crate) async fn wait_for_application_progress_report_pause(&self, node_id: &str) {
+        self.fault_injection
+            .wait_for_application_progress_report_pause(&node_name(node_id))
+            .await;
+    }
+
+    pub(crate) fn release_application_progress_reports_from(&self, node_id: &str) {
+        self.fault_injection
+            .release_application_progress_reports_from(&node_name(node_id));
+    }
+
     pub(crate) fn fail_health_responses_from(&self, responding_node_id: &str) {
         self.fault_injection
             .fail_health_responses_from(node_name(responding_node_id));

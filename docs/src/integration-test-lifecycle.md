@@ -5,6 +5,9 @@
 `just test-cluster-duration-scenarios` selects the one- and three-node multi-span cluster
 duration regression. It prepares the console assets, WASM processor guests and ONNX runtime
 that the in-process server loads, and needs no external transport or client-tool build.
+`just test-cluster-parameter-completion-scenarios` selects, with the same preparation, the one-
+and three-node cases where completion offers only unassigned cluster parameters and a repeated
+parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
@@ -1702,9 +1705,10 @@ The harness keeps these boundaries explicit.
   grows with every node's wait for CPU, its control-class queue included, whether or not a peer is
   silent.
   Its completion regression also holds every application-revision reply from the two followers
-  after sampling the reply. Local revision publication and gossip continue, so the same prepared
-  client's user creation, relay creation and cluster-status query must finish in order while
-  those replies remain held. This batch has one twenty-second harness budget. On 25 October
+  after sampling the reply. The followers keep reporting their progress to the leader, so the same
+  prepared client's user creation, relay creation and cluster-status query must finish in order,
+  through those reports, while the replies remain held. This batch has one twenty-second harness
+  budget. On 25 October
   2026, with 16 runtime workers, 48 slots, six large materialized workloads and 192 distinct
   health cases, 88 original requests exceeded nine seconds but all succeeded before fault
   release in 9.016 to 11.998 seconds. Every pre-release status still reported node-3 connected.
@@ -4427,3 +4431,10 @@ Stopping the domain before restarting the broker rules out replay by
 Nervix as the explanation for the surviving message. This broker is separate from the suite's
 shared RabbitMQ service, so the restart cannot disrupt another scenario. The after hook removes it
 explicitly after node teardown, including when the scenario fails before its restart step.
+
+### NATS authentication selection
+
+`just test-nats-authentication [arguments]` prepares the existing in-process scenario dependencies
+and selects only `tests/features/runtime/nats_authentication.feature`. It retains the ordinary
+harness, broker Testcontainers, one-/three-node examples and argument forwarding; it omits unrelated
+CLI, formatter and paced-simulation tool builds. The full scenario entry point remains unchanged.

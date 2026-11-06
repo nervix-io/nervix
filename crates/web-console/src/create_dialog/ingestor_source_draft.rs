@@ -1,4 +1,4 @@
-//! Incomplete source settings for a visual ingestor.
+//! Incomplete entity settings for a visual ingestor.
 //!
 //! Layer: edges.
 //!
@@ -329,7 +329,7 @@ impl IngestorEntityDraft {
         let kind = self
             .kind
             .ok_or_else(|| Report::new(IngestorEntityDraftError::Kind))?;
-        // The form offers transport sources only; a client source names no client or endpoint.
+        // The form offers transport ingestors only; a client input names no client or endpoint.
         if let IngestorEntityKind::Client(ClientIngestorEntity::Producer) = kind {
             return Err(Report::new(IngestorEntityDraftError::ClientInput));
         }
@@ -577,7 +577,7 @@ impl IngestorEntityDraft {
             .map_err(|_| Report::new(IngestorEntityDraftError::Every))
     }
 
-    /// The subscription a Pulsar source reads through, who the draft says owns it, and the type it
+    /// The subscription a Pulsar ingestor reads through, who the draft says owns it, and the type it
     /// reads it as, which every statement declares.
     fn pulsar_subscription(
         &self,
@@ -896,7 +896,7 @@ pub(super) enum IngestorEntityDraftError {
     Offset,
     #[error("Enter a valid consumer group")]
     ConsumerGroup,
-    #[error("Choose a supported source delivery mode")]
+    #[error("Choose a supported ingestor delivery mode")]
     Mode,
     #[error("ACK MAX must be a positive integer")]
     AckMax,
@@ -916,7 +916,7 @@ pub(super) enum IngestorEntityDraftError {
     OptionRequirement { requirement: ChoiceRequirement },
     #[error("Choose an ON QUIESCE mode")]
     Quiesce,
-    #[error("This source cannot use the selected ON QUIESCE mode")]
+    #[error("This ingestor cannot use the selected ON QUIESCE mode")]
     UnsupportedQuiesce,
     #[error("BUFFER MAX SIZE must be positive")]
     BufferSize,

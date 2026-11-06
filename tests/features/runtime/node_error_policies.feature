@@ -178,7 +178,7 @@ Feature: Runtime node error policies
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge filter-operation-{{test_id}}.example.com;
       CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR calculation_source
+      CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations

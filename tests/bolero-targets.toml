@@ -1122,6 +1122,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/request/__fuzz__/request__progress_properties__bolero_application_progress_messages_round_trip/corpus"
+domain_version = 1
+features = []
+id = "application-progress-wire"
+invariant = "Every current application progress query answer, progress report with its addressed leader and term, report receipt and completion-peers answer with its held progress survives the production typed-request payload encoder and decoder."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/request/progress_properties.rs"
+test = "request::progress_properties::bolero_application_progress_messages_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/node_drain__wire_properties__bolero_stopping_node_drain_messages_round_trip/corpus"
 domain_version = 1
 features = []
@@ -4092,10 +4107,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/connectors/nats/src/client/authentication/__fuzz__/client__authentication__tests__bolero_nkey_authentication_preserves_identity_and_nonce/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "nats-user-authentication"
-invariant = "Every 32-byte user seed decodes from the independent SDK's nkey to the same public key; AWS-LC signatures of bounded nonces verify through that SDK, both directly and through complete JWT credentials whose user token is preserved."
+invariant = "Every 32-byte user seed encodes exactly as the independent SDK and decodes to every original byte and the same public key; AWS-LC signatures of bounded nonces verify through that SDK, both directly and through complete JWT credentials whose user token is preserved."
 manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-connector-nats"
@@ -4208,4 +4223,19 @@ package = "nervix-models"
 random_iterations = 256
 source = "crates/models/src/connector/nats_tests.rs"
 test = "connector::nats::tests::bolero_nats_subjects_preserve_subscription_and_publication_bounds"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 30
+corpus = "crates/connectors/nats/src/client/authentication/__fuzz__/client__authentication__tests__bolero_malformed_authentication_keeps_typed_value_free_refusals/corpus"
+domain_version = 1
+features = []
+id = "nats-authentication-malformed"
+invariant = "Bounded length, base32, checksum, identity-kind and reserved-prefix corruptions are refused with the precise value-free typed seed outcome; incomplete, empty and malformed credentials sections retain the driver's typed parser cause without rendering JWTs or seeds."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-connector-nats"
+random_iterations = 256
+source = "crates/connectors/nats/src/client/authentication/tests.rs"
+test = "client::authentication::tests::bolero_malformed_authentication_keeps_typed_value_free_refusals"
 test_target = "lib"

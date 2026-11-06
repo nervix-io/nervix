@@ -163,7 +163,7 @@ impl PrometheusQueryIngestor {
         HttpClientConfig::new(config, "Prometheus", dns).build()
     }
 
-    /// The values of the fields a query source declares, in their declared order, for one poll:
+    /// The values of the fields a query ingestor declares, in their declared order, for one poll:
     /// the same for every sample of it, so its messages share one copy however many there are.
     fn poll_metadata(query: &str, evaluated_at: Timestamp) -> RetainedIngestMetadata {
         RetainedIngestMetadata::from_values(vec![
@@ -287,7 +287,7 @@ mod tests {
     use super::*;
 
     #[nervix_primitives::test]
-    async fn prometheus_source_opens_only_with_a_config_its_client_declares()
+    async fn prometheus_ingestor_opens_only_with_a_config_its_client_declares()
     -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
         let dns = DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
         let plan = |config: Vec<ClientConfigEntry>| PrometheusQueryIngestorPlan {
@@ -301,7 +301,7 @@ mod tests {
             value: value.to_string(),
         };
 
-        let source = PrometheusQueryIngestor::open(
+        let ingestor = PrometheusQueryIngestor::open(
             &plan(vec![
                 entry("addr", "http://prometheus:9090/base"),
                 entry("timeout_ms", "5000"),
@@ -311,7 +311,7 @@ mod tests {
         .await
         .expect("a declared configuration opens");
         assert_eq!(
-            source.api_root.url().as_str(),
+            ingestor.api_root.url().as_str(),
             "http://prometheus:9090/base"
         );
 
@@ -485,8 +485,8 @@ mod tests {
             .local_addr()
             .expect("test Prometheus listener should have an address");
         let server = answer_once(listener, framing.response(status, body));
-        let source = ingestor_of(address, "up", max_body_size);
-        let result = source.query_at(Timestamp::from_unix_nanos(0)).await;
+        let ingestor = ingestor_of(address, "up", max_body_size);
+        let result = ingestor.query_at(Timestamp::from_unix_nanos(0)).await;
         server
             .await
             .expect("test Prometheus response task should finish");
@@ -636,14 +636,14 @@ mod tests {
             .local_addr()
             .expect("test Prometheus listener should have an address");
         let server = answer_once(listener, Framing::Announced.response("200 OK", body));
-        let mut source = ingestor_of(
+        let mut ingestor = ingestor_of(
             address,
             "vector(1)",
             nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
         );
         let evaluated_at = Timestamp::from_unix_nanos(1_775_520_000_123_456_789);
 
-        let poll = source
+        let poll = ingestor
             .poll(evaluated_at)
             .await
             .expect("the answer is a vector");

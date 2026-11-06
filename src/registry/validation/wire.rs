@@ -189,7 +189,7 @@ pub(in crate::registry) fn schema_for_codec_model<'a>(
 }
 
 /// The input schema of an ingestor: what its codec decodes a transport's payloads into, or the
-/// schema a client source's batches carry. Filters, routes and timestamps read this schema.
+/// schema a client ingestor's batches carry. Filters, routes and timestamps read this schema.
 pub(in crate::registry) fn ingestor_input_schema<'a>(
     domain: &DomainName,
     identifier: &ModelName,

@@ -26,7 +26,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR spread_source
+      CREATE KAFKA TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'instance_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'instance_group_{{test_id}}' START AT EARLIEST INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
@@ -39,10 +39,10 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 3 instances of ingestor "spread_source" on <owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then the last cluster status lists 3 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     And Kafka consumer group "instance_group_{{test_id}}" eventually has 3 consumers
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -88,7 +88,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'addr' = '{{mqtt_addr}}'
         };
-      CREATE MQTT TOPIC INGESTOR spread_source
+      CREATE MQTT TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'instance_input_{{test_id}}' INSTANCES 3 SESSION CLEAN QOS 0
         MODE NO ACK
         ON QUIESCE DROP DECODE USING event_codec
@@ -96,7 +96,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -104,9 +104,9 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 3 instances of ingestor "spread_source" on <owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    Then the last cluster status lists 3 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -153,7 +153,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-      CREATE RABBITMQ QUEUE INGESTOR spread_source
+      CREATE RABBITMQ QUEUE INGESTOR spread_ingestor
         FROM broker QUEUE 'instance_input_{{test_id}}' INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -161,7 +161,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -169,10 +169,10 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 3 instances of ingestor "spread_source" on <owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then the last cluster status lists 3 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     And RabbitMQ queue "instance_input_{{test_id}}" eventually has 3 consumers
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -222,7 +222,7 @@ Feature: Ingestor instances are independent placement units
           'access_key_id' = 'scenario-key',
           'secret_access_key' = 'scenario-secret'
         };
-      CREATE SQS QUEUE INGESTOR spread_source
+      CREATE SQS QUEUE INGESTOR spread_ingestor
         FROM broker QUEUE 'instance_input_{{test_id}}' INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -230,7 +230,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -238,9 +238,9 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 3 instances of ingestor "spread_source" on <owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    Then the last cluster status lists 3 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -286,7 +286,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
-      CREATE NATS SUBJECT INGESTOR spread_source
+      CREATE NATS SUBJECT INGESTOR spread_ingestor
         FROM broker SUBJECT 'instance_input_{{test_id}}' QUEUE GROUP 'instance_group_{{test_id}}' INSTANCES 3
         MODE NO ACK
         ON QUIESCE DROP DECODE USING event_codec
@@ -294,7 +294,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -302,9 +302,9 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 3 instances of ingestor "spread_source" on <owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    Then the last cluster status lists 3 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -347,7 +347,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'addr' = '{{pulsar_addr}}'
         };
-      CREATE PULSAR TOPIC INGESTOR spread_source
+      CREATE PULSAR TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'instance_input_{{test_id}}' SUBSCRIPTION 'instance_group_{{test_id}}' PROVISIONED TYPE SHARED INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -355,7 +355,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -364,9 +364,9 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 3 instances of ingestor "spread_source" on <owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    Then the last cluster status lists 3 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -414,7 +414,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR spread_source
+      CREATE KAFKA TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'instance_input_{{test_id}}'
         OFFSET BY DOMAIN INSTANCES PER PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
@@ -423,7 +423,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -431,10 +431,10 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 4 instances of ingestor "spread_source" on <owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
-    And the last cluster status colocates every instance of ingestor "spread_source" with the corresponding partition of relay "events"
+    Then the last cluster status lists 4 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
+    And the last cluster status colocates every instance of ingestor "spread_ingestor" with the corresponding partition of relay "events"
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -481,7 +481,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR spread_source
+      CREATE KAFKA TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'instance_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'instance_group_{{test_id}}' START AT EARLIEST INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
@@ -494,18 +494,18 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 3 instances of ingestor "spread_source" on 3 distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then the last cluster status lists 3 instances of ingestor "spread_ingestor" on 3 distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     And Kafka consumer group "instance_group_{{test_id}}" eventually has 3 consumers
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     And the current leader node is saved as placeholder "leader"
-    And the owner of every instance of ingestor "spread_source" is saved with placeholder prefix "owner_before"
-    And an instance owner of ingestor "spread_source" other than placeholder "leader" is saved as placeholder "affected_owner"
+    And the owner of every instance of ingestor "spread_ingestor" is saved with placeholder prefix "owner_before"
+    And an instance owner of ingestor "spread_ingestor" other than placeholder "leader" is saved as placeholder "affected_owner"
     When these Plexus commands are executed through the client on node "{{leader}}"
       """
       DRAIN NODE {{affected_owner}};
       """
-    Then within "90s" node "{{leader}}" eventually reports ingestor "spread_source" instances moved from node "{{affected_owner}}" and all other owners unchanged from placeholder prefix "owner_before"
+    Then within "90s" node "{{leader}}" eventually reports ingestor "spread_ingestor" instances moved from node "{{affected_owner}}" and all other owners unchanged from placeholder prefix "owner_before"
     And Kafka consumer group "instance_group_{{test_id}}" eventually has 3 consumers
     When these Plexus commands are executed on node "{{leader}}"
       """
@@ -548,7 +548,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR spread_source
+      CREATE KAFKA TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'instance_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'instance_group_{{test_id}}' START AT EARLIEST INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
@@ -561,15 +561,15 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 3 instances of ingestor "spread_source" on 3 distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then the last cluster status lists 3 instances of ingestor "spread_ingestor" on 3 distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     And Kafka consumer group "instance_group_{{test_id}}" eventually has 3 consumers
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     And the current leader node is saved as placeholder "leader"
-    And the owner of every instance of ingestor "spread_source" is saved with placeholder prefix "owner_before"
-    And an instance owner of ingestor "spread_source" other than placeholder "leader" is saved as placeholder "affected_owner"
+    And the owner of every instance of ingestor "spread_ingestor" is saved with placeholder prefix "owner_before"
+    And an instance owner of ingestor "spread_ingestor" other than placeholder "leader" is saved as placeholder "affected_owner"
     When node "{{affected_owner}}" is stopped
-    Then within "90s" node "{{leader}}" eventually reports ingestor "spread_source" instances moved from node "{{affected_owner}}" and all other owners unchanged from placeholder prefix "owner_before"
+    Then within "90s" node "{{leader}}" eventually reports ingestor "spread_ingestor" instances moved from node "{{affected_owner}}" and all other owners unchanged from placeholder prefix "owner_before"
     And Kafka consumer group "instance_group_{{test_id}}" eventually has 3 consumers
     When these Plexus commands are executed on node "{{leader}}"
       """
@@ -639,7 +639,7 @@ Feature: Ingestor instances are independent placement units
       """
     When these Plexus statements fail with "reads through one consumer, so it refuses INSTANCES"
       """
-      CREATE PULSAR TOPIC INGESTOR spread_source
+      CREATE PULSAR TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'events' SUBSCRIPTION 'readers' PROVISIONED
         TYPE <kind> INSTANCES <instances> MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
@@ -672,7 +672,7 @@ Feature: Ingestor instances are independent placement units
       """
     When these Plexus statements fail with "INSTANCES PER PARTITION requires constructing routes to one branch"
       """
-      CREATE NATS SUBJECT INGESTOR bad_source
+      CREATE NATS SUBJECT INGESTOR bad_ingestor
         FROM broker SUBJECT 'events' QUEUE GROUP 'readers' INSTANCES PER PARTITION
         MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         <routes> FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -700,7 +700,7 @@ Feature: Ingestor instances are independent placement units
       """
     When these Plexus statements fail with "KAFKA TOPIC INSTANCES PER PARTITION requires OFFSET BY DOMAIN"
       """
-      CREATE KAFKA TOPIC INGESTOR bad_source FROM broker TOPIC 'events'
+      CREATE KAFKA TOPIC INGESTOR bad_ingestor FROM broker TOPIC 'events'
         OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST INSTANCES PER PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -735,7 +735,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'addr' = '{{mqtt_addr}}'
         };
-      CREATE MQTT TOPIC INGESTOR spread_source
+      CREATE MQTT TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'instance_input_{{test_id}}' INSTANCES PER PARTITION SESSION CLEAN QOS 0
         MODE NO ACK
         ON QUIESCE DROP DECODE USING event_codec
@@ -743,7 +743,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -751,10 +751,10 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 4 instances of ingestor "spread_source" on <owners> distinct owners
-    And the last cluster status colocates every instance of ingestor "spread_source" with the corresponding partition of relay "events"
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    Then the last cluster status lists 4 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And the last cluster status colocates every instance of ingestor "spread_ingestor" with the corresponding partition of relay "events"
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -801,7 +801,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-      CREATE RABBITMQ QUEUE INGESTOR spread_source
+      CREATE RABBITMQ QUEUE INGESTOR spread_ingestor
         FROM broker QUEUE 'instance_input_{{test_id}}' INSTANCES PER PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -809,7 +809,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -818,10 +818,10 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 4 instances of ingestor "spread_source" on <owners> distinct owners
-    And the last cluster status colocates every instance of ingestor "spread_source" with the corresponding partition of relay "events"
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    Then the last cluster status lists 4 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And the last cluster status colocates every instance of ingestor "spread_ingestor" with the corresponding partition of relay "events"
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -871,7 +871,7 @@ Feature: Ingestor instances are independent placement units
           'access_key_id' = 'scenario-key',
           'secret_access_key' = 'scenario-secret'
         };
-      CREATE SQS QUEUE INGESTOR spread_source
+      CREATE SQS QUEUE INGESTOR spread_ingestor
         FROM broker QUEUE 'instance_input_{{test_id}}' INSTANCES PER PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -879,7 +879,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -887,10 +887,10 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 4 instances of ingestor "spread_source" on <owners> distinct owners
-    And the last cluster status colocates every instance of ingestor "spread_source" with the corresponding partition of relay "events"
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    Then the last cluster status lists 4 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And the last cluster status colocates every instance of ingestor "spread_ingestor" with the corresponding partition of relay "events"
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -936,7 +936,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
-      CREATE NATS SUBJECT INGESTOR spread_source
+      CREATE NATS SUBJECT INGESTOR spread_ingestor
         FROM broker SUBJECT 'instance_input_{{test_id}}' QUEUE GROUP 'instance_group_{{test_id}}' INSTANCES PER PARTITION
         MODE NO ACK
         ON QUIESCE DROP DECODE USING event_codec
@@ -944,7 +944,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -952,10 +952,10 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 4 instances of ingestor "spread_source" on <owners> distinct owners
-    And the last cluster status colocates every instance of ingestor "spread_source" with the corresponding partition of relay "events"
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    Then the last cluster status lists 4 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And the last cluster status colocates every instance of ingestor "spread_ingestor" with the corresponding partition of relay "events"
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;
@@ -998,7 +998,7 @@ Feature: Ingestor instances are independent placement units
         CONFIG {
           'addr' = '{{pulsar_addr}}'
         };
-      CREATE PULSAR TOPIC INGESTOR spread_source
+      CREATE PULSAR TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'instance_input_{{test_id}}' SUBSCRIPTION 'instance_group_{{test_id}}' PROVISIONED TYPE SHARED INSTANCES PER PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -1006,7 +1006,7 @@ Feature: Ingestor instances are independent placement units
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "spread_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "spread_ingestor" on the leader node contains
       """
       status: running
       """
@@ -1015,10 +1015,10 @@ Feature: Ingestor instances are independent placement units
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 4 instances of ingestor "spread_source" on <owners> distinct owners
-    And the last cluster status colocates every instance of ingestor "spread_source" with the corresponding partition of relay "events"
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
-    And every scheduled instance of ingestor "spread_source" exposes its instance label in Prometheus
+    Then the last cluster status lists 4 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And the last cluster status colocates every instance of ingestor "spread_ingestor" with the corresponding partition of relay "events"
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
+    And every scheduled instance of ingestor "spread_ingestor" exposes its instance label in Prometheus
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION observing TO events;

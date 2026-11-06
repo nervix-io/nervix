@@ -38,7 +38,7 @@ Feature: Forwarded record acknowledgements across a gap in the receiver's live v
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'live_view_gap_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'live_view_gap_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -65,7 +65,7 @@ Feature: Forwarded record acknowledgements across a gap in the receiver's live v
       """
     And these Plexus commands are executed on the leader node
       """
-      RELOCATE INGESTOR metric_source ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR metric_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY raw_metrics ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE WASM PROCESSOR filter_even_rows ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;

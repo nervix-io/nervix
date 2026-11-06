@@ -29,7 +29,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, per-connection versus total buffer bounds, clients, sources, and emitters | `Common` → `Syslog`, and `Connector Capabilities` |
-| Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| Ingestor transports, delivery modes, headers, and routes | `Ingestors` |
 | HTTP polling requests and client secrets, responses, failed polls, the response bound, and the `HTTP CLIENT` keys, redirects and proxy both directions share | `Ingestors` → `HTTP REQUEST`, then `Emitters` → `HTTP client transport` |
 | Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
@@ -75,8 +75,8 @@ and [Client Implementation Manual](https://docs.nervix.io/client-implementation-
 S-7 and K-5. Keep an unanswered reopening distinct from a refusal, and account for the live-edge gap.
 
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
-the open session, unreadable replies, replies naming another execution, uncertain restore outcomes,
-and reconnect behavior, read
+the open session, unreadable replies, replies of another kind, replies naming another execution,
+uncertain restore outcomes, and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
 [Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
 directly. Follow the same documentation version as the selected index; these client chapters are
@@ -101,7 +101,7 @@ Capture these decisions before choosing syntax:
 | Input contract | What sample payload and wire format arrive? Which fields are optional or sensitive? |
 | Runtime record | What exact internal type and nullability does each field have? |
 | Isolation | Which fields form the branch key? How long should inactive branches live? Is an instance cap required? |
-| Source | Which connector/client, external entity, offset policy, delivery mode, ordering, timestamp source, and headers are required? Or does an application publish typed batches through a client ingestor, and with which acknowledgement window, ACK timeout, and retry backoff? |
+| Ingest | Which connector/client, external entity, offset policy, delivery mode, ordering, timestamp source, and headers are required? Or does an application publish typed batches through a client ingestor, and with which acknowledgement window, ACK timeout, and retry backoff? |
 | Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, enriched, or handled by a trusted Roto UDF? |
 | State | Which relays are materialized? Should missing state wait, skip, or use a typed default? |
 | Output | Which connector or native client emitter, publishing mode, confirmation window/timeout, retry pacing, payload shape and size, codec or direct mapping, headers, sensitivity leaks, and application ACK boundary are required? |
@@ -259,9 +259,9 @@ current connection, retry and deadline limits.
   On native 64-bit targets, its positive integer range ends at `18446744073709551615`, and stored,
   replicated, and restarted definitions retain the exact accepted capacity.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
-- Every multi-input emitter source declares the same payload schema. Its sources may use different
-  branch names, but each source retains its own branch through collection and external publish;
-  node-wide materialized dependencies and message-error relays match every source branch exactly.
+- Every multi-input emitter relay declares the same payload schema. Its inputs may use different
+  branch names, but each input retains its own branch through collection and external publish;
+  node-wide materialized dependencies and message-error relays match every input branch exactly.
 - Every emitter declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
@@ -274,21 +274,14 @@ current connection, retry and deadline limits.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
-- A RabbitMQ queue ingestor uses automatic `MODE NO ACK`, prefetch-one `MODE ACK SEQUENTIAL`,
-  or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
-  Parallel `MAX` is 1 through 65,535 per instance. ACK/NACK follows each delivery's own graph
-  outcome; a rejection requeues that delivery. `NO ACK` disables broker prefetch and cannot
-  recover a delivery already consumed before downstream completion. See
-  [Ingestors → RabbitMQ](../../../../docs/src/ingestors.md#rabbitmq).
-- A RabbitMQ emitter publishes to a queue through the default exchange with
-  `RABBITMQ QUEUE EMITTER … TO <client> QUEUE '<queue>'`, or to a declared exchange with
-  `RABBITMQ EXCHANGE EMITTER … TO <client> EXCHANGE '<exchange>' ROUTING KEY <expression>`, whose
-  expression computes every record's key as an exact, non-null, non-sensitive `STRING`. Nervix never
-  declares the exchange or its bindings, and an emitter whose exchange is missing stays unavailable
-  until it exists. Without `MANDATORY` a message no binding routes is dropped by the broker and its
-  record reported delivered; write `MANDATORY` after the payload, on either entity, to reject such a
-  record through `ON MESSAGE ERROR` instead. See
-  [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq).
+- For RabbitMQ consumer modes, per-instance prefetch, settlement, metadata and sorted headers, read
+  [Ingestors → RabbitMQ](../../../../docs/src/ingestors.md#rabbitmq). For queue/default-exchange
+  shorthand, named-exchange routing, `MANDATORY`, persistence, timestamp and typed properties, read
+  [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq). Keep consumer acknowledgements,
+  publisher confirms, routing and durability distinct when choosing a delivery policy.
+- Both RabbitMQ directions use the shared [client contract](../../../../docs/src/ingestors.md#rabbitmq-client)
+  and [generated CONFIG keys](../../../../docs/src/connector-capabilities.md#rabbitmq-client).
+  Provision queues, exchanges, bindings and any durable destinations explicitly before starting.
 - For Core NATS completion, JetStream PubAck, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
@@ -431,12 +424,12 @@ current connection, retry and deadline limits.
   `topic.metadata.*` and `topic.blacklist`. `CREATE KAFKA CLIENT` refuses librdkafka's other
   name for a property, even alone, and a `topic.` prefixed key. Read `Connector Capabilities` →
   `KAFKA client` for each refused name and the name to write.
-- For Kafka source control-call deadlines and bounded execution, follow `Ingestors` → `Client
+- For Kafka ingestor control-call deadlines and bounded execution, follow `Ingestors` → `Client
   Deadlines`. Keep `socket.timeout.ms` distinct from the consumer-group commit caller deadline;
   an unanswered commit is retained before another can start.
 - Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
   operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
-  follows the source's existing rejection and retry policy; this mode remains at least once.
+  follows the ingestor's existing rejection and retry policy; this mode remains at least once.
 - A Kafka `OFFSET BY CONSUMER GROUP` ingestor in an `ACK` mode waits for the broker to answer each
   batch's commit before it reports progress, one round trip per batch, so prefer `ACK PARALLEL`
   where throughput matters. A refused or unanswered commit is the ingestor's transient status and
@@ -444,7 +437,7 @@ current connection, retry and deadline limits.
 - Every ingestor head names its connector and entity, such as `CREATE KAFKA TOPIC INGESTOR`, and
   its body after `FROM` names no connector. Its client belongs to the head's connector, and an
   `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT` reads an endpoint of `TYPE HTTP` or `TYPE WEBSOCKETS`.
-  Every source body declares `MODE`, with `MODE NO ACK` where nothing waits on an acknowledgement,
+  Every ingestor body declares `MODE`, with `MODE NO ACK` where nothing waits on an acknowledgement,
   and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
 - Delivery-policy durations and direct-value keys and types are checked at `CREATE` and `ALTER`.
@@ -474,14 +467,14 @@ current connection, retry and deadline limits.
 - Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
   channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
   external system names it and within the rules of `Ingestors` → `External Names`.
-- Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
+- Every transport ingestor body ends with its documented `ON QUIESCE` body immediately before
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
   `RETRY AFTER` wherever that mode requires it. An `MQTT TOPIC` ingestor writes its `SESSION` and
   then its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`; its `ACK` modes and `SUSPEND` also declare
   `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not mix mode bodies between entities or infer a
   default.
-- MQTT source client identities default to the domain and ingestor, with an instance suffix for
-  multiple instances. A `client_id` is a template whose `{{instance}}` renders each source
+- MQTT ingestor client identities default to the domain and ingestor, with an instance suffix for
+  multiple instances. A `client_id` is a template whose `{{instance}}` renders each ingestor
   instance's index, and every instance must render its own identity; an emitter connects as
   instance 0. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
@@ -498,14 +491,14 @@ current connection, retry and deadline limits.
   `PROPERTIES` and ordered, repeated user properties written with `write_header`.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` as
-  milliseconds representing whole seconds and the source admission bound `max_packet_size` as
+  milliseconds representing whole seconds and the ingestor admission bound `max_packet_size` as
   their own keys, checked against the client key table in `Ingestors` → `MQTT`; its `tls_*` files
   belong only with `mqtts`. Write
   MQTT wildcards only in an ingestor's `TOPIC`, as whole levels with `#` last and never a leading
   `$share` level, which Nervix forms itself; an emitter's `TOPIC` is one literal topic. Check both
   against the MQTT sections of `Ingestors` and `Emitters`.
 - Redis Pub/Sub separates message read-ahead from the byte-bound quiesce buffer. Check the client
-  required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
+  required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the ingestor's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
   name. An ingestor writes exactly one of `CHANNEL` and `PATTERN`; use `PATTERN` only for a Redis
@@ -531,7 +524,7 @@ current connection, retry and deadline limits.
   `DEDUPLICATION ID <string_expression>` for a `.fifo` queue. Its `write_header` values may be
   `STRING`, an integer type or `BYTES`, sent as `String`, `Number` and `Binary` attributes; read
   `Emitters` → `SQS`.
-  For source identity, redelivery routing and event time, read the metadata table in `Ingestors` →
+  For message identity, redelivery routing and event time, read the metadata table in `Ingestors` →
   `SQS`; use its exact field types and `TIMESTAMP AT metadata.sent_at` where appropriate. User
   message attributes remain transport headers, which an ingestor reads as text, so a `Binary`
   attribute that is not UTF-8 does not survive the read.
@@ -575,7 +568,7 @@ current connection, retry and deadline limits.
 - Both directions use the [Pulsar client reference](../../../../docs/src/ingestors.md#pulsar-client).
   Verify the topic's qualification, namespace, TLS scheme, credential pairing and secret redaction
   there. Check the generated capability mirror for options that belong to only one direction.
-- Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
+- Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose body is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The
   schema is the exact contract producers declare, including optionality and sensitivity, and a
@@ -590,8 +583,8 @@ current connection, retry and deadline limits.
   byte limit, and an explicit `FLUSH` policy. It constructs exactly that schema as native Arrow;
   a sensitive input needs explicit leakage, and a row whose encoded IPC cannot fit alone follows
   `ON MESSAGE ERROR`. There is no external client, codec, header operation, or direct `VALUES`
-  body. An attached emitter holds source acknowledgement until the application ACKs; a detached
-  emitter releases the source earlier. Consumers compete for output and are volatile across
+  body. An attached emitter holds ingestor acknowledgement until the application ACKs; a detached
+  emitter releases it earlier. Consumers compete for output and are volatile across
   session or owner loss. The Rust client may restore a matching consumer handle with a fresh
   attachment, but reports the gap before new output and never sends an old delivery reference to
   the replacement. Applications must handle a repeated delivery identity with a fresh ACK
@@ -679,7 +672,7 @@ current connection, retry and deadline limits.
   they stop new intake only for moved ingestors, drain already admitted ACK work, then switch
   ownership. Graceful shutdown ignores it too: after moving what it can, the terminating node stops
   intake on all of its ingestors and completes already admitted work in place, even when no
-  replacement node exists. Stop and drop terminate the source session; unexpected owner loss uses
+  replacement node exists. Stop and drop terminate the ingestor session; unexpected owner loss uses
   immediate failover. Do not emit `PAUSE` or `RESUME` syntax.
 - `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES [FOR <kind>
   <name> ...];` moves a selected subgraph onto a named cluster node as one atomic gated handoff.
@@ -759,7 +752,7 @@ Choose checks relevant to the configured graph:
   materialized rows, deduplicator keys and windows. Paced mappings project downtime; normal `START`
   establishes a new generation and clears materialized state. Restored deduplicator keys expire at
   their archived first sighting plus `MAX TIME`; a window whose model or branch incarnation changed
-  starts empty and the restore warns about it. A Kafka source restored with its offsets reads again
+  starts empty and the restore warns about it. A Kafka ingestor restored with its offsets reads again
   the rows its windows retained at the cut. `START` remains blocked until the complete state installation
   succeeds, including after a failed restore or restart. A domain name that exists is
   refused, so copy a domain with `AS`. An archived branch key that is not a key of the branch its

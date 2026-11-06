@@ -2506,7 +2506,7 @@ fn with_large_native_metadata(source: &Path, target: &Path) {
     let copy = copy_of_archive(source);
     let mut replaced = BTreeMap::new();
     for (path, bytes) in &copy.sections {
-        if path.contains("/state/branch_lifecycle/ingestor/metric_source/") {
+        if path.contains("/state/branch_lifecycle/ingestor/metric_ingestor/") {
             let mut record = BranchLifecycleRecord::decode(path, bytes)
                 .assured("the fixture lifecycle is current");
             let last_ingestion = record

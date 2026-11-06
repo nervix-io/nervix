@@ -875,7 +875,7 @@ a nearby instant: a program or `TIMESTAMP AT` that reads the field refuses the m
 `validation` message error naming the field, and a field nothing reads costs nothing. The retained
 copy a quiesce buffer replays keeps the unrepresentable state with its description.
 
-The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
+The MongoDB emitter also distinguishes each failed write's document answers: delivered, rejected with
 the server's definitive refusal code, or unresolved. An insert's implicit applied-document account
 and a verbose bulk write's explicit applied indexes are separate request variants. The unsatisfied
 write concern remains an optional failure beside those answers; it never replaces the documents'

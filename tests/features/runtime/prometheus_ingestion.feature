@@ -97,7 +97,7 @@ Feature: Prometheus ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "prom_samples" leaves fault mode
     Then the relay subscription receives a payload

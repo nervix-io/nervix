@@ -1,5 +1,5 @@
 [package]
-description = "The HTTP source and sink connectors for Nervix"
+description = "The HTTP ingestor and emitter connectors for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-http"

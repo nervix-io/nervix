@@ -75,7 +75,7 @@ pub(crate) struct ScriptedBroker {
     listener: TcpListener,
 }
 
-/// The connection a emitter's client opened to a scripted broker.
+/// The connection an emitter's client opened to a scripted broker.
 pub(crate) struct ScriptedConnection {
     stream: TcpStream,
 }
@@ -95,7 +95,7 @@ impl ScriptedBroker {
         Self { listener }
     }
 
-    /// The address a emitter's client dials to reach this broker.
+    /// The address an emitter's client dials to reach this broker.
     pub(crate) fn addr(&self) -> String {
         let address = self
             .listener
@@ -162,7 +162,7 @@ impl ScriptedBroker {
             .listener
             .accept()
             .await
-            .expect("the sink's client connects to the scripted broker");
+            .expect("the emitter's client connects to the scripted broker");
         let mut connection = ScriptedConnection { stream };
         let (packet_type, connect) = connection.read_packet().await;
         assert_eq!(packet_type, CONNECT, "the client opens with a CONNECT");
