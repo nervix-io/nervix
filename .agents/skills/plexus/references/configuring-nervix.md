@@ -527,7 +527,9 @@ current connection, retry and deadline limits.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; a `NATS SUBJECT` emitter uses `MODE NO ACK` and one literal subject.
-  Check both against the NATS sections of `Ingestors` and `Emitters`.
+  Subject names are at most 1,024 UTF-8 bytes and have no whitespace, controls, empty tokens or
+  embedded wildcards; these limits are Nervix's declared contract. Check both against the NATS
+  sections of `Ingestors` and `Emitters`.
 - A `NATS STREAM` ingestor reads a durable pull consumer an operator provisioned:
   `STREAM '<stream>' CONSUMER '<consumer>'` with `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL`, and
   `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it

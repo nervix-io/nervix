@@ -3986,6 +3986,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/src/connector/__fuzz__/connector__nats__tests__bolero_nats_subjects_preserve_subscription_and_publication_bounds/corpus"
+domain_version = 1
+features = []
+id = "nats-subject-grammar"
+invariant = "Malformed bounded NATS subject text never yields a typed subscription name outside Nervix's byte, character and token bounds; every accepted publication name is an accepted literal subscription name."
+manifest = "Cargo.toml"
+max_input_bytes = 1152
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/nats_tests.rs"
+test = "connector::nats::tests::bolero_nats_subjects_preserve_subscription_and_publication_bounds"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/nats/src/client/authentication/__fuzz__/client__authentication__tests__bolero_nkey_authentication_preserves_identity_and_nonce/corpus"
 domain_version = 1
 features = []
