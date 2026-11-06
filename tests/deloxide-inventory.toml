@@ -510,6 +510,7 @@ tags = [
   "@session_shutdown_ending",
   "@session_shutdown_unread",
   "@nats_envelope_metadata",
+  "@client_foreign_execution",
 ]
 target = "test:scenarios"
 
@@ -3575,6 +3576,8 @@ workloads = [
 [[owner]]
 path = "crates/client-core/src/client.rs"
 workloads = [
+  "scenario.client-foreign-execution",
+  "stress.client-foreign-execution",
   "paced.reopen-generation",
   "paced.delayed-refusal",
   "scenario.backup-lease-release-recovery",
@@ -3620,6 +3623,8 @@ workloads = [
 gap = "The listed workloads reach the pending-replies lock through every request's registration, the replies its reader routes and the close of an exchange. None cancels a command through the Rust client: its only caller, nervix-cli, has no diagnostic form, and the lane starts an ordinary CLI binary, so ExchangeRequests::cancel, which registers a CancelRequest under the same single unnested acquisition every request takes and closes the registry when the frame cannot be sent, is exercised only by the client-core unit tests and the CLI scenarios, outside the lane."
 path = "crates/client-core/src/exchange.rs"
 workloads = [
+  "scenario.client-foreign-execution",
+  "stress.client-foreign-execution",
   "scenario.client-alter-drain",
   "paced.reopen-generation",
   "scenario.backup-lease-release-recovery",
@@ -5721,4 +5726,25 @@ id = "stress.nats-header-order"
 invariant = "NATS publication preserves interleaved repeated header names."
 invocation = "stress-scenarios"
 scenario = "NATS publication preserves interleaved repeated header names"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Native-client command registration, foreign-reference validation, exchange termination and reconnect through the client's tracked pending-reply lock on one and three nodes. Async command and reconnect locks, network waits and reference comparisons remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-foreign-execution"
+invariant = "A foreign command outcome ends its session and the client recovers the original command under its own execution reference, without adopting the foreign failure."
+invocation = "scenarios"
+scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: native-client registration, validation, exchange close and reconnect through the tracked pending-reply lock. Async locks and network waits remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-foreign-execution"
+invariant = "A foreign command outcome ends its session and the client recovers the original command under its own execution reference, without adopting the foreign failure."
+invocation = "stress-scenarios"
+scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
 selections = ["deloxide-stress"]
