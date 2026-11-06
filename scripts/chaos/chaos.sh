@@ -78,7 +78,7 @@ backup-cycles  Eight quiesced backups during acknowledged Kafka traffic, each ve
                restored as a new domain and compared, with archived offsets that never move back
                topologies: one-node (--nodes 1), three-node (--nodes 3, default)
 backup-fault  One fault against a quiesced backup under acknowledged Kafka traffic: a SIGKILL of the
-              state owner or the leader, or an isolation of the state owner, while a delayed sink
+              state owner or the leader, or an isolation of the state owner, while a delayed emitter
               link holds the cut, or a rolling restart while the archive streams, then the domain's
               recovery and a fresh backup restored and compared (three-node)
               faults: owner-crash, leader-crash, owner-partition, rolling-restart (--fault, required)

@@ -122,7 +122,7 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
 /// A batch another node routed here reaches this node's attached consumers while one more attached
 /// consumer of the relay registers here. Every consumer the batch is delivered to must hold a share
 /// of its acknowledgement, so the source is acknowledged only once each of them acknowledged it: a
-/// consumer that joins in time and fails the batch fails the source acknowledgement.
+/// consumer that joins in time and fails the batch fails the ingestor acknowledgement.
 #[test]
 fn shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery() {
     check_random(

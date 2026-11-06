@@ -37,7 +37,7 @@ Feature: Process shutdown deadline
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-{{test_id}}.example.com;
       CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TIMESTAMP NOW

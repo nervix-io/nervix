@@ -244,7 +244,7 @@ fn validate_transport_delivery(
     Ok(())
 }
 
-/// A client source's ACK timeout and retry policy are positive durations, and its retry ceiling
+/// A client ingestor's ACK timeout and retry policy are positive durations, and its retry ceiling
 /// is at least its first backoff, so the plan and every producer read one valid policy.
 fn validate_client_ingest_mode(
     mode: &ClientIngestMode,

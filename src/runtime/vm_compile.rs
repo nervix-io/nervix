@@ -1531,7 +1531,7 @@ pub(super) fn compile_reorderer_program(
     })
 }
 
-/// Binds a lowered ingestor route, which reads the decoded message and the source's metadata, to
+/// Binds a lowered ingestor route, which reads the decoded message and the ingestor's metadata, to
 /// this node's schemas, state, lookups and UDFs.
 pub(super) fn bind_ingestor_filter_map_program(
     node: &ModelName,

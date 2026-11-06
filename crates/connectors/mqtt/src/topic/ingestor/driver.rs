@@ -105,7 +105,7 @@ impl ConnectionEvents for EventLoop {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "a source requests the acknowledgement of every publish the host accepted"
+        reason = "an ingestor requests the acknowledgement of every publish the host accepted"
     )
 )]
 pub(super) trait AcknowledgementRequests: Send + Sync + 'static {
@@ -153,7 +153,7 @@ impl IngestorPacket {
     }
 }
 
-/// A queued QoS 0 outcome retains its capacity until the source takes it, including a compact
+/// A queued QoS 0 outcome retains its capacity until the ingestor takes it, including a compact
 /// oversized outcome. The same ordered queue reserves separate capacity for acknowledged packets.
 struct ReadAheadPacket {
     packet: IngestorPacket,
@@ -707,7 +707,7 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
             .taken
             .checked_add(1)
             .assured("a connection cannot read 2^64 publishes in the lifetime of a node");
-        // Moving the packet out releases its QoS 0 permit before any following source wait.
+        // Moving the packet out releases its QoS 0 permit before any following ingestor wait.
         Ok(packet.packet)
     }
 }

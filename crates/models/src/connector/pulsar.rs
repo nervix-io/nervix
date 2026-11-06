@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Pulsar client Model, the topic source and emitter Models with their delivery
-//!   modes, the topic and subscription names a source reads with the rules Pulsar holds them to,
-//!   the namespace that qualifies a local topic name, who owns a source's subscription and the
+//! - **Owns.** The Pulsar client Model, the topic ingestor and emitter Models with their delivery
+//!   modes, the topic and subscription names an ingestor reads with the rules Pulsar holds them to,
+//!   the namespace that qualifies a local topic name, who owns an ingestor's subscription and the
 //!   type it reads as, and what each entity declares.
 //!   Client declarations also own public configuration keys, types, defaults and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The Pulsar driver, or how a topic is consumed or
 //!   produced to.
 
@@ -158,7 +158,7 @@ impl PulsarTopicIngestor {
     }
 }
 
-/// The durable subscription a Pulsar source reads through, who owns it on the broker, and the type
+/// The durable subscription a Pulsar ingestor reads through, who owns it on the broker, and the type
 /// its consumers read it as.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -214,7 +214,7 @@ impl PulsarSubscriptionType {
     }
 }
 
-/// Who owns a Pulsar source's subscription, which its statement declares after the
+/// Who owns a Pulsar ingestor's subscription, which its statement declares after the
 /// subscription's name.
 ///
 /// The broker cannot say later who created a subscription, so the statement states it rather than
@@ -347,7 +347,7 @@ impl crate::IngestorEntityChange for PulsarTopicIngestorChange {
     }
 }
 
-/// How a Pulsar source acknowledges what its subscription delivers.
+/// How a Pulsar ingestor acknowledges what its subscription delivers.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -593,11 +593,11 @@ impl IngestorEntityBody for PulsarTopicIngestor {
 
 connector_ingestors! {
     connector Pulsar = "PULSAR";
-    /// What a Pulsar source reads.
+    /// What a Pulsar ingestor reads.
     pub enum PulsarIngestor;
     /// The alterations of the ingestors that read a Pulsar entity.
     pub enum PulsarTopicIngestorAlteration;
-    /// The entities a Pulsar source reads.
+    /// The entities a Pulsar ingestor reads.
     pub enum PulsarIngestorEntity {
         Topic(PulsarTopicIngestor => PulsarTopicIngestorChange) = "TOPIC", "Pulsar";
     }

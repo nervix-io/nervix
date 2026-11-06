@@ -3698,7 +3698,7 @@ impl RuntimeMetrics {
 
     /// The count of `ingestor`'s unacknowledged payloads that `physical_node_id` did not deliver
     /// because its extension workers had no room to unfold them. The series exists from the first
-    /// time a source host of the ingestor asks for it.
+    /// time an ingestor host of the ingestor asks for it.
     pub(crate) fn ingestor_unfolding_refused(
         &self,
         domain: &DomainName,
@@ -3717,9 +3717,9 @@ impl RuntimeMetrics {
             ])
     }
 
-    /// The count of positions a source host of `ingestor` on `physical_node_id` discarded after a
+    /// The count of positions an ingestor host of `ingestor` on `physical_node_id` discarded after a
     /// reconnect because the broker redelivers them. The series exists from the first time a
-    /// source host or a describe of the ingestor asks for it.
+    /// ingestor host or a describe of the ingestor asks for it.
     pub(crate) fn ingestor_transport_redeliveries(
         &self,
         domain: &DomainName,
@@ -3738,7 +3738,7 @@ impl RuntimeMetrics {
             ])
     }
 
-    /// The count of payloads a source host or endpoint binding of `ingestor` on `physical_node_id`
+    /// The count of payloads an ingestor host or endpoint binding of `ingestor` on `physical_node_id`
     /// consumed because the ingestor's codec refused them. The series exists from the first time an
     /// intake or a describe of the ingestor asks for it.
     pub(crate) fn ingestor_decode_rejections(
@@ -3759,9 +3759,9 @@ impl RuntimeMetrics {
             ])
     }
 
-    /// The count of payloads the source of a source host of `ingestor` on `physical_node_id`
+    /// The count of payloads the source of an ingestor host of `ingestor` on `physical_node_id`
     /// dropped because they exceed its client's message size bound. The series exists from the
-    /// first time a source host or a describe of the ingestor asks for it.
+    /// first time an ingestor host or a describe of the ingestor asks for it.
     pub(crate) fn ingestor_oversized_payloads(
         &self,
         domain: &DomainName,
@@ -3802,7 +3802,7 @@ impl RuntimeMetrics {
     }
 
     /// Resolve once when composing a connector. The driver retains this handle and counts drops
-    /// without reaching the registry, including while the source host waits on acknowledgement.
+    /// without reaching the registry, including while the ingestor host waits on acknowledgement.
     pub(crate) fn ingestor_read_ahead_dropped_payloads(
         &self,
         domain: &DomainName,

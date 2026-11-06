@@ -500,7 +500,7 @@ Feature: HTTP codec ingestion
         PATH '/loose'
         TYPE HTTP;
 
-      CREATE HTTP ENDPOINT INGESTOR strict_notifications_source
+      CREATE HTTP ENDPOINT INGESTOR strict_notifications_ingestor
         FROM strict_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING strict_notification_codec
         TO strict_notifications
@@ -510,7 +510,7 @@ Feature: HTTP codec ingestion
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE HTTP ENDPOINT INGESTOR loose_notifications_source
+      CREATE HTTP ENDPOINT INGESTOR loose_notifications_ingestor
         FROM loose_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING loose_notification_codec
         TO loose_notifications

@@ -1,5 +1,5 @@
 [package]
-description = "The Pulsar source and sink connector for Nervix"
+description = "The Pulsar ingestor and emitter connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-pulsar"
@@ -29,7 +29,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
-# The test hosts hand a sink the node's executor, as the server's host does.
+# The test hosts hand an emitter the node's executor, as the server's host does.
 nervix-execution = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 tokio-util = { workspace = true, features = ["codec"] }

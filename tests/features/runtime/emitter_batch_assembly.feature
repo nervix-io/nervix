@@ -29,14 +29,14 @@ Feature: Emitter payload assembly across Arrow carriers
       CREATE VHOST edge assembled-{{test_id}}.example.com;
       CREATE ENDPOINT source_a_ingress ON edge PATH '/a' TYPE HTTP;
       CREATE ENDPOINT source_b_ingress ON edge PATH '/b' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_a
+      CREATE HTTP ENDPOINT INGESTOR ingestor_a
         FROM source_a_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO source_a_events
           INHERIT ALL BRANCHED BY by_source_a SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR source_b
+      CREATE HTTP ENDPOINT INGESTOR ingestor_b
         FROM source_b_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO source_b_events

@@ -47,7 +47,7 @@ pub trait IngestMessageHeaders: Send + Sync {
     fn visit(&self, visit: &mut dyn FnMut(&str, &str));
 }
 
-/// A ingestor message that carries no transport headers.
+/// An ingestor message that carries no transport headers.
 pub struct NoIngestHeaders;
 
 impl IngestMessageHeaders for NoIngestHeaders {
@@ -277,7 +277,7 @@ impl RetainedIngestMetadataValue {
 
 /// The metadata values of a message copied out of it, in its entity's declared order, so they
 /// outlive it: the quiesce buffer replays them long after the message was dropped, and a paced
-/// source returns its poll's messages owned.
+/// ingestor returns its poll's messages owned.
 ///
 /// A clone shares the values rather than copying them, so messages that carry the same values, such
 /// as the samples of one poll, hold them once however many there are. A declaration without fields

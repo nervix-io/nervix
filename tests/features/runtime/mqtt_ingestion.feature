@@ -102,7 +102,7 @@ Feature: MQTT ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       reconnect backoff: 250ms
       """
     When ingestor "mqtt_notifications" leaves fault mode

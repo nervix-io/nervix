@@ -96,7 +96,7 @@ Feature: ZeroMQ ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "zeromq_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "zeromq_notifications" leaves fault mode
     And ZeroMQ message is published

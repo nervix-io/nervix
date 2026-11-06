@@ -887,7 +887,7 @@ fn bodyless_post(origin: &str) -> EmitterHttpRequest {
     }
 }
 
-/// A emitter whose requests resolve through a resolver that reads `hosts` and asks only `server`.
+/// An emitter whose requests resolve through a resolver that reads `hosts` and asks only `server`.
 ///
 /// Each try of the resolver outlasts every budget below, so a lookup against a server that never
 /// answers ends exactly when the emitter's budget for it does. The returned directory holds the

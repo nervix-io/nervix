@@ -2,11 +2,11 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The syslog client Model, the listener source Model with its delivery mode, the
+//! - **Owns.** The syslog client Model, the listener ingestor Model with its delivery mode, the
 //!   collector emitter Model, and what each entity declares.
 //!   Client declarations also own public configuration keys, types, confidentiality and the side
 //!   that reads each key, and the frame limits both sides of the wire share.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** How Syslog frames are decoded or encoded, how a listener is bound or how
 //!   a collector is written to.
 
@@ -360,11 +360,11 @@ impl crate::IngestorEntityChange for SyslogListenerIngestorChange {
 
 connector_ingestors! {
     connector Syslog = "SYSLOG";
-    /// What a syslog source reads.
+    /// What a syslog ingestor reads.
     pub enum SyslogIngestor;
     /// The alterations of the ingestors that read a syslog entity.
     pub enum SyslogListenerIngestorAlteration;
-    /// The entities a syslog source reads.
+    /// The entities a syslog ingestor reads.
     pub enum SyslogIngestorEntity {
         Listener(SyslogListenerIngestor => SyslogListenerIngestorChange) = "LISTENER", "Syslog";
     }

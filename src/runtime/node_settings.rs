@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_acknowledgements_parse_into_the_policy_a_source_loop_runs() {
+    fn declared_acknowledgements_parse_into_the_policy_an_ingestor_loop_runs() {
         let domain = domain("default");
         let ingestor = named("orders_ingestor");
         let retry = RetryPolicy {

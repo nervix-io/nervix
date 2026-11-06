@@ -160,12 +160,12 @@ mod tests {
         if let Some(policy) = emitter.batch {
             assert_eq!(policy.to_string(), "MAX MESSAGES 10 MAX SIZE 64KiB");
         }
-        let EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(sink)) = *emitter.connector else {
+        let EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(emitter)) = *emitter.connector else {
             panic!("the composed head selects the RabbitMQ queue emitter");
         };
-        assert_eq!(sink.queue.as_str(), queue);
-        assert_eq!(sink.client.as_str(), "broker");
-        match (sink.mode, window) {
+        assert_eq!(emitter.queue.as_str(), queue);
+        assert_eq!(emitter.client.as_str(), "broker");
+        match (emitter.mode, window) {
             (RabbitMqQueuePublishingMode::NoAck { retry_policy }, None) => {
                 assert_eq!(retry_policy.backoff, "200ms");
                 assert_eq!(retry_policy.max_backoff, "3s");
@@ -240,12 +240,12 @@ mod tests {
         };
         assert_eq!(emitter.envelope.mandatory, !envelope.is_empty());
         assert_eq!(emitter.batch.is_some(), !batch.is_empty());
-        let EmitterEntity::RabbitMq(RabbitMqEmitter::Exchange(sink)) = *emitter.connector else {
+        let EmitterEntity::RabbitMq(RabbitMqEmitter::Exchange(emitter)) = *emitter.connector else {
             panic!("the composed head selects the RabbitMQ exchange emitter");
         };
-        assert_eq!(sink.exchange.as_str(), exchange);
-        assert_eq!(sink.client.as_str(), "broker");
-        match (sink.mode, window) {
+        assert_eq!(emitter.exchange.as_str(), exchange);
+        assert_eq!(emitter.client.as_str(), "broker");
+        match (emitter.mode, window) {
             (RabbitMqExchangePublishingMode::NoAck { retry_policy }, None) => {
                 assert_eq!(retry_policy.backoff, "200ms");
                 assert_eq!(retry_policy.max_backoff, "3s");

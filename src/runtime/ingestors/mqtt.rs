@@ -53,7 +53,7 @@ impl PreparedMqttIngestorClient {
     ) -> bool {
         revision.entrypoints.ingestor(name, Unit::FIRST_INSTANCE).is_some_and(|plan|
             matches!(&plan.input, IngestorInputPlan::Transport(input)
-                if matches!(&input.source, IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) if source == &self.declaration)))
+                if matches!(&input.source, IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(entity)) if entity == &self.declaration)))
     }
 }
 
@@ -108,7 +108,7 @@ impl MqttTopicIngestorStartPlan {
             client_mounts: client_mounts
                 .get(
                     usize::try_from(ingestor.instance_index())
-                        .assured("a source unit index fits usize"),
+                        .assured("an ingestor unit index fits usize"),
                 )
                 .assured("rendering retains one mount slot per global instance")
                 .clone()

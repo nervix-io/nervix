@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The SQS client Model, the queue source and emitter Models with their delivery mode,
-//!   request shape and FIFO grouping, the queue name a source receives with and the rule SQS holds
+//! - **Owns.** The SQS client Model, the queue ingestor and emitter Models with their delivery mode,
+//!   request shape and FIFO grouping, the queue name an ingestor receives with and the rule SQS holds
 //!   it to, the message size and delay SQS itself admits, the attribute types it carries, the most
 //!   messages one receive returns, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations, expressions and the names a body
+//! - **Depends on.** The shared ingestor and emitter declarations, expressions and the names a body
 //!   references.
 //! - **Must not know.** The SQS driver, or how a queue is received from or
 //!   sent to.
@@ -207,7 +207,7 @@ impl IngestorDeclaration for SqsQueueIngestor {
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
         delivery: &[DeclaredDelivery::ACK_SEQUENTIAL, SQS_ACK_PARALLEL],
-        // The queue keeps each message until the source deletes it, so suspending loses nothing.
+        // The queue keeps each message until the ingestor deletes it, so suspending loses nothing.
         quiesce: &[DeclaredQuiesce::SUSPEND],
         locator: Some(LocatorDeclaration {
             keywords: "QUEUE",
@@ -425,11 +425,11 @@ impl fmt::Display for SqsReceiveMax {
 
 connector_ingestors! {
     connector Sqs = "SQS";
-    /// What an SQS source reads.
+    /// What an SQS ingestor reads.
     pub enum SqsIngestor;
     /// The alterations of the ingestors that read an SQS entity.
     pub enum SqsQueueIngestorAlteration;
-    /// The entities an SQS source reads.
+    /// The entities an SQS ingestor reads.
     pub enum SqsIngestorEntity {
         Queue(SqsQueueIngestor => SqsQueueIngestorChange) = "QUEUE", "SQS";
     }

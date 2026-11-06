@@ -9,7 +9,7 @@
 //! - **Must not know.** How a session or the interconnect carries these values, how a batch is
 //!   decoded or admitted, or which node serves a producer.
 //!
-//! One submitted batch is one source acknowledgement unit, so every outcome describes a whole
+//! One submitted batch is one ingestor acknowledgement unit, so every outcome describes a whole
 //! batch. Transport receipt is never an outcome: a batch is either not admitted, completed, failed
 //! after admission, or of unknown outcome.
 
@@ -325,9 +325,9 @@ pub enum ClientProducerRefusal {
 pub enum ClientSubmissionOutcome {
     /// No row of the batch entered the graph.
     NotAdmitted(ClientSubmissionRefusal),
-    /// The batch's source acknowledgement root resolved successfully under the graph's policies.
+    /// The batch's ingestor acknowledgement root resolved successfully under the graph's policies.
     Completed,
-    /// The batch's source acknowledgement root failed. Some routes or external effects may already
+    /// The batch's ingestor acknowledgement root failed. Some routes or external effects may already
     /// have completed, and admitted work may still complete after a timeout.
     ProcessingFailed(ClientProcessingFailure),
     /// The batch may have been admitted and processed, but no terminal result can be established.

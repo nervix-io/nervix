@@ -176,7 +176,7 @@ run_former_owner_restart() {
     wait_for "Kafka ingestion runs on ${owner_host}" 90 ingestion_on "${case_dir}/owned" "${owner_node}"
     local output_owned
     output_owned="$(topic_end_offset chaos_output)"
-    wait_for "sink output advanced through ${owner_host}" 60 topic_progressed chaos_output "${output_owned}" \
+    wait_for "emitter output advanced through ${owner_host}" 60 topic_progressed chaos_output "${output_owned}" \
         || recovery_fail product "${owner_host} did not deliver output after owning the graph"
     capture_all_metrics "${case_dir}/owned"
     metric_is_positive "${case_dir}/owned/metrics-${owner_host}.txt" \
@@ -294,7 +294,7 @@ run_former_owner_restart() {
         || recovery_fail product "the source consumer group kept a member at ${owner_address} or did not converge on the scheduled owner"
     local output_scheduled
     output_scheduled="$(topic_end_offset chaos_output)"
-    wait_for 'sink output advanced on the changed schedule' 60 \
+    wait_for 'emitter output advanced on the changed schedule' 60 \
         topic_progressed chaos_output "${output_scheduled}" \
         || recovery_fail product 'the survivors did not deliver output on the changed schedule'
 
@@ -410,9 +410,9 @@ run_former_owner_restart() {
         || recovery_finding "${case_dir}" "Kafka ingestion did not follow the changed schedule after healing"
     local output_healed
     output_healed="$(topic_end_offset chaos_output)"
-    wait_for 'sink output advanced after healing' "${former_owner_delivery_bound}" \
+    wait_for 'emitter output advanced after healing' "${former_owner_delivery_bound}" \
         topic_progressed chaos_output "${output_healed}" \
-        || recovery_fail product 'sink output did not advance after healing'
+        || recovery_fail product 'emitter output did not advance after healing'
     local delivery_ms="$(( $(epoch_ms) - heal_completed_ms ))"
     outcome="$(configuration_change "${case_dir}" chaos_owner_after "${owner_host}" chaos_baseline \
         'CREATE RESOURCE chaos_owner_after;' "created resource 'chaos_owner_after'")"

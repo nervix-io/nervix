@@ -117,10 +117,10 @@ peer_status_during_pause() {
     printf '%s\n' "${status}" >"${output}.exit-code"
 }
 
-# Requires sink progress on the surviving owners after a failover-length pause relocated them, while
+# Requires emitter progress on the surviving owners after a failover-length pause relocated them, while
 # the target stays paused. When the paused node ran the ingestor, its consumer remains a member of
 # the source group, and the group coordinator gives the partition to the relocated ingestor's
-# consumer only when that member's session expires. The sink's window then opens at this handoff
+# consumer only when that member's session expires. The emitter's window then opens at this handoff
 # rather than at the relocation. Sets pause_group_handoff_ms, pause_output_during and
 # pause_delivery_ms for the round's result.
 pause_delivery_during_pause() {
@@ -158,14 +158,14 @@ pause_delivery_during_pause() {
     fi
     local output_before_progress
     output_before_progress="$(topic_end_offset chaos_output)"
-    if ! wait_for 'sink traffic progressed with target paused' 20 \
+    if ! wait_for 'emitter traffic progressed with target paused' 20 \
         pause_topic_progressed chaos_output "${output_before_progress}"; then
-        pause_fail product 'sink did not progress on surviving nodes during pause'
+        pause_fail product 'emitter did not progress on surviving nodes during pause'
         return 1
     fi
     pause_output_during="${pause_observed_offset}"
     if ! pause_target_is "${container_id}" true; then
-        pause_fail controller 'sink progress was sampled after the pause window'
+        pause_fail controller 'emitter progress was sampled after the pause window'
         return 1
     fi
     pause_delivery_ms="$(( $(epoch_ms) - requested_ms ))"
@@ -424,7 +424,7 @@ pause_one_node() {
         --arg during_effect "${during_effect}" \
         '{before:$before[0],during:($during[0]+{observed_effect:$during_effect}),after:$after[0],acknowledged_effects_present:true}' \
         >"${round_dir}/control-results.json"
-    wait_for 'sink output advanced after resume' 90 \
+    wait_for 'emitter output advanced after resume' 90 \
         topic_progressed chaos_output "${output_at_resume}"
     docker_event_window "${fault_since_ns}" "${round_dir}/all-node-events.ndjson" --role node \
         || pause_fail controller 'the live Docker event recording does not cover the pause through recovery'
@@ -480,7 +480,7 @@ run_pause_resume() {
     compose up --detach --no-deps load observer
     wait_for 'independent load, observer and broker' 30 check_support_containers
     wait_for 'source traffic started' 30 topic_progressed chaos_input 0
-    wait_for 'sink traffic started' 60 topic_progressed chaos_output 0
+    wait_for 'emitter traffic started' 60 topic_progressed chaos_output 0
     wait_for 'initial cross-node traffic metrics' 60 initial_remote_path_ready
     local host
     for host in "${node_hosts[@]}"; do

@@ -102,7 +102,7 @@ Feature: NATS ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "nats_notifications" leaves fault mode
     Then within "10s" repeatedly publishing NATS message to subject "notifications_reconnect_{{test_id}}" yields a relay subscription payload

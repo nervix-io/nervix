@@ -896,7 +896,7 @@ pub(super) enum IngestorEntityDraftError {
     Offset,
     #[error("Enter a valid consumer group")]
     ConsumerGroup,
-    #[error("Choose a supported source delivery mode")]
+    #[error("Choose a supported ingestor delivery mode")]
     Mode,
     #[error("ACK MAX must be a positive integer")]
     AckMax,
@@ -916,7 +916,7 @@ pub(super) enum IngestorEntityDraftError {
     OptionRequirement { requirement: ChoiceRequirement },
     #[error("Choose an ON QUIESCE mode")]
     Quiesce,
-    #[error("This source cannot use the selected ON QUIESCE mode")]
+    #[error("This ingestor cannot use the selected ON QUIESCE mode")]
     UnsupportedQuiesce,
     #[error("BUFFER MAX SIZE must be positive")]
     BufferSize,

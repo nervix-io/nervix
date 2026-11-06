@@ -2401,7 +2401,7 @@ pub enum AlterIngestorOperation<Source: crate::IngestorEntityModel> {
     Change {
         change: Source::Change,
     },
-    /// `SET CLIENT <client>`: the client the source reads through.
+    /// `SET CLIENT <client>`: the client the ingestor reads through.
     SetClient {
         client: ClientName,
     },

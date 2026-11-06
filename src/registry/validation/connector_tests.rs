@@ -1075,7 +1075,7 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
     .expect("Kafka emitters must accept write_header");
 }
 
-/// A emitter that keeps one value per header name refuses an `INVOKE` clause that writes one literal
+/// An emitter that keeps one value per header name refuses an `INVOKE` clause that writes one literal
 /// name twice, naming the header as the emitter records it and both calls, because the later write
 /// would replace the earlier one on every record. Names compare as the emitter's header model records
 /// them, an emitter that keeps every value accepts the repeat, and a name an expression computes is
@@ -1235,7 +1235,7 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     }));
     validate(&emitter).expect("X-Route and x-route are two Pulsar property names");
 
-    // A emitter that keeps every value of a name publishes both writes.
+    // An emitter that keeps every value of a name publishes both writes.
     emitter.construction = nervix_plexus::parse_route_construction(
         "INHERIT ALL INVOKE write_header('route', 'a'), write_header('route', 'b')",
     )

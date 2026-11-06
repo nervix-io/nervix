@@ -3704,12 +3704,12 @@ test-chaos-rate-probe:
 test-chaos-hold-quorum:
     exec bash scripts/chaos/tests/hold-quorum-self-test.sh
 
-# Judge a failover-length pause's sink progress and source consumer-group handoff from retained
+# Judge a failover-length pause's emitter progress and source consumer-group handoff from retained
 # pause timelines without a product image.
 test-chaos-pause-delivery:
     exec bash scripts/chaos/tests/pause-delivery-self-test.sh
 
-# Retain shell coverage of the failover-length pause's sink progress and consumer-group handoff controls.
+# Retain shell coverage of the failover-length pause's emitter progress and consumer-group handoff controls.
 coverage-chaos-pause-delivery:
     #!/usr/bin/env bash
     set -euo pipefail
