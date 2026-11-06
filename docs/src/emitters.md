@@ -1262,7 +1262,7 @@ Transport-specific expectations:
   certificate. A plaintext `redis://` address reads none of the three files; see
   [Redis Pub/Sub](#redis-pubsub).
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
-- `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `NATS`: use `tls://...` in `addr`; Nervix trusts the platform's native roots, or only `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client certificate; a `nats://` address uses TLS only when the server requires it. See [NATS](./ingestors.md#nats).
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](./ingestors.md#pulsar).
 - `SQS`: use an `https://...` `endpoint`; Nervix trusts the platform's native roots, or only
   `tls_ca_file` when it is set, and honors optional `timeout_ms`. `CREATE SQS CLIENT` refuses a
@@ -2047,6 +2047,20 @@ QoS 1 or 2 record stays unacknowledged until the broker acknowledges it.
 
 ### NATS
 
+NATS has two emitter entities, one for each way a NATS server takes messages. Both publish through
+a `NATS CLIENT` with the same optional token, user NKey or mounted credentials-file authentication
+as ingestors, and the [NATS client authentication rules](ingestors.md#nats) define mutual
+exclusion, confidential inspection and TLS configuration for both directions. `NATS SUBJECT`
+publishes through Core NATS in `MODE NO ACK`: the server answers nothing and hands each message
+only to the subscriptions it has when the message arrives, so a write completes once the client
+has flushed it to its socket. `NATS STREAM` publishes to a subject a JetStream stream captures, in
+`MODE ACK`: the stream answers each message with a `PubAck` once it stored it, and keeps it for as
+long as its operator's retention policy and limits allow. A stream also stores what a
+`NATS SUBJECT` emitter publishes to one of its subjects, although that emitter waits for no
+answer, and a subscription receives what a `NATS STREAM` emitter publishes to its subject, so
+either [NATS ingestor](ingestors.md#nats) reads what either emitter publishes to a subject it
+reads.
+
 <!-- connector-matrix:emit-nats-subject:start -->
 ```plexus,ignore
 CREATE NATS SUBJECT EMITTER <name>
@@ -2121,12 +2135,6 @@ waits `BACKOFF` before its first attempt and doubles the wait for each further a
 When the emitter stops, its finish flushes what the client still holds by the finish deadline; see
 [Finishing an emitter](./connector-contract.md#finishing-an-emitter).
 
-NATS emitters use the same optional token, user NKey or mounted credentials-file authentication
-as ingestors. The [NATS client authentication rules](ingestors.md#nats) define mutual exclusion,
-confidential inspection and TLS configuration for both directions.
-
-### NATS STREAM
-
 <!-- connector-matrix:emit-nats-stream:start -->
 ```plexus,ignore
 CREATE NATS STREAM EMITTER <name>
@@ -2166,12 +2174,27 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [NATS STREAM capability and mirror reference](connector-capabilities.md#nats-stream-emit).
 <!-- connector-matrix:emit-nats-stream:end -->
 
-`STREAM` names a stream that must exist before the emitter opens; the connector looks it up and
-reports a missing external entity at open if it is absent. `SUBJECT` names one literal publication
-subject, and every publish carries the expected-stream header. A subject the named stream does not
-capture is rejected for that record through `ON MESSAGE ERROR`. `MESSAGE ID <expr>` writes
-`Nats-Msg-Id` for server-side deduplication. The host evaluates the ID once for the record, so a
-retry after a lost `PubAck` sends the same ID.
+`STREAM` names a stream an operator provisioned; Nervix never creates one. The emitter looks the
+stream up when it opens, within `ACK TIMEOUT`. While the stream does not exist the emitter stays
+unavailable and its records wait: `DESCRIBE EMITTER` shows `NATS stream '<stream>' does not exist`
+with the reconnect backoff, and the host opens the emitter again on its `RETRY POLICY` until the
+stream is provisioned. Once open, its client connects again after it loses its server as a
+`NATS SUBJECT` emitter's client does, and a stopping emitter has nothing to finish, since every
+publish ends with each record answered or retained for the retry. `SUBJECT` names one literal
+publication subject, under the rule of a
+`NATS SUBJECT` emitter's subject. Every message carries the expected-stream header,
+`Nats-Expected-Stream` with the stream's name, so JetStream stores it only in that stream: a record
+whose subject the named stream does not capture, because no stream or another stream captures it,
+is rejected through `ON MESSAGE ERROR`, as is one above the server's `max_payload`.
+
+`MESSAGE ID <expr>` writes `Nats-Msg-Id`. JetStream drops a message whose ID the stream already
+stored within its duplicate window, an interval the stream's operator configures. The host
+evaluates the ID once for the record, so a retry after a lost `PubAck` sends the same ID, and the
+`PubAck` JetStream returns for the dropped copy delivers the record. A message carries the written
+headers in their order, then the `Nats-Msg-Id` of `MESSAGE ID` where the emitter declares it, and
+last `Nats-Expected-Stream`. A written header spelled exactly `Nats-Expected-Stream` gives way to
+the emitter's own, and under `MESSAGE ID` so does one spelled exactly `Nats-Msg-Id`; without
+`MESSAGE ID`, a written `Nats-Msg-Id` travels as written and JetStream deduplicates by it.
 
 `ACK` hands records to the client one after another, with at most `MAX <n>` of them awaiting
 their `PubAck` at once, or one under `ACK SEQUENTIAL`, each until `ACK TIMEOUT` after its
@@ -2179,7 +2202,9 @@ hand-over. A publish that fails, because a `PubAck` failed or did not arrive in 
 client did not take a record within `ACK TIMEOUT` while its connection stopped draining, first
 settles every `PubAck` JetStream already returned: a confirmed record is delivered and never sent
 again. The retry sends the records whose `PubAck` never arrived, which JetStream may already hold,
-so delivery is at least once.
+so delivery is at least once; with `MESSAGE ID`, the stream drops such a copy within its duplicate
+window. A `PubAck` that fails because the stream's limits refuse new messages is such a failure,
+not a record rejection, so the emitter retries the record on its policy.
 
 ### ZeroMQ
 
@@ -4160,7 +4185,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | --- | --- | --- | --- |
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
-| NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
+| NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | On a `NATS STREAM` emitter, `MESSAGE ID`: JetStream does not store again a message whose `Nats-Msg-Id` its stream stored within the stream's duplicate window, which the stream's operator configures. A retry carries the ID its first attempt carried, and an ID computed from the record's own fields also covers its redelivery within that window. Core `NO ACK` offers none |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; persistence requires PERSISTENT and a provisioned durable queue | None |
 | SQS | Retry after an ambiguous `SendMessage` or `SendMessageBatch` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | On a FIFO queue, `DEDUPLICATION ID` or the queue's content-based deduplication: SQS does not deliver again a message whose id, or body, it accepted within the previous five minutes. A retry carries the id and body its first attempt carried, and an id computed from the record's own fields also covers its redelivery within that interval |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
