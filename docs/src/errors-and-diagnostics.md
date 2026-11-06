@@ -2605,7 +2605,7 @@ On the serving node, a state, tick or end frame that does not fit the session's 
 sent and is logged as a warning: delivery waits for the next state or tick, and an end it could not
 send still ends the attachment. Accepting clock progress fails only for a domain the node does not
 hold, and a report that does not match the committed fence, or is not newer than the accepted tick,
-is ignored without an error. That failure reaches the node's sessions as the error notice
+is ignored without an error. That failure reaches the node's sessions as the `ControlPlane` error notice
 `failed to apply domain clock progress for '<domain>'` with its whole chain, and its log as a
 warning.
 
