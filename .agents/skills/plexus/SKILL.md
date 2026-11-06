@@ -131,6 +131,9 @@ completed, `1` failed, `3` outcome not known, `130` cancelled before admission. 
 same command again with the `--execution-reference` or `--upload-identity` the CLI printed, which
 recovers the outcome; a fresh submission could apply it twice. The CLI guide's Exit Status section
 defines each status.
+For `RESTORE`, retain the same archive bytes as well as the statement and execution reference after
+status `3`, including an invalid reply after upload. Follow the Rust client guide's
+[Restoring](https://docs.nervix.io/client-library.html#restoring) contract when recovering it.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
 URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
