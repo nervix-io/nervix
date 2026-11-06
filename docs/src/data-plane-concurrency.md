@@ -2662,6 +2662,17 @@ leader-change and recovery outcomes directly. The bounded native-client case run
 diagnostic harness and reaches expiry and recovery with tracked client locks. The CLI scenarios
 exercise diagnostic nodes around ordinary subprocesses, whose own locks remain untracked.
 
+The native restore codec rejection workload reaches the pending registry when a bounded gRPC peer
+replaces a real completed restore's reply with a malformed or oversized message. Its four native
+one-/three-node examples are registered for active, order, stress and restore-stress selections and name
+the existing client and exchange owners. The stream captures its channel and generation together;
+interruption uses the existing exchange lifetime owner and is fenced by that generation. A reply
+from it cannot end a subsequently installed exchange. Ordinary owner tests hold
+the reply across installation and require a real request on the replacement or a later session.
+The detector observes pending-registry locking and generation cleanup, while the reply-reading
+phase, async reconnect mutexes and transport buffering remain untracked. The ordinary CLI
+examples separately verify status 3 and original-reference recovery.
+
 The lane's state-store owner test starts its detector in a fresh process before constructing store
 or executor locks and runs the current generation regressions: cancellation before and after pointer publication, snapshot
 readers, queued checkpoint writers, corrupt and incomplete chunks, exact retry after reopen,
