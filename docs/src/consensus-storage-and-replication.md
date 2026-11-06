@@ -491,11 +491,11 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_intake_stream_logs`,
-`raft_intake_stream_meta`, `raft_intake_stream_state`, and
-`raft_intake_stream_snapshots`. Opening it validates the complete keyspace namespace before
+The dedicated database owns exactly four current keyspaces: `raft_intake_cbor_logs`,
+`raft_intake_cbor_meta`, `raft_intake_cbor_state`, and
+`raft_intake_cbor_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including the separate JSON
-and CBOR wire type enums, AVRO representation types, explicit `BASE64` codec encoding, a Pulsar
+and CBOR wire type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the serialized Sentry platform field, an ingestor's
 `TIMESTAMP AT metadata.<field>` source, the separate `NATS STREAM` ingestor and emitter entities, an SQS QUEUE emitter's `SEND` request shape, the receive

@@ -724,7 +724,7 @@ mod tests {
                 wire_schema: named("event_wire"),
             },
         );
-        let wire = event_wire(CborType::Integer, CborType::String);
+        let wire = event_wire(CborType::Integer, CborType::Text);
         let codec = compile(&codec, ResolvedCodecWireFormat::Cbor(&wire), None);
 
         let payload = container(&codec).expect("the container should encode");
