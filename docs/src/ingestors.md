@@ -1589,6 +1589,22 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-ingest).
 <!-- connector-matrix:ingest-pulsar-topic:end -->
 
+#### Pulsar topic names
+
+Both ingestion and emission write a quoted, case-preserving `TOPIC` name. A local name such as
+`TOPIC 'orders'` selects `persistent://<namespace>/orders`, using the client's `namespace`,
+`public/default` when omitted. A fully qualified name such as
+`TOPIC 'persistent://tenant-a/events/Orders'` or
+`TOPIC 'non-persistent://tenant-a/events/Orders'` is sent as written and does not use that default.
+
+A topic name is 1 to 1,024 UTF-8 bytes, without whitespace or control characters. A local name has
+no slash; a qualified name has exactly three nonempty levels after `persistent://` or
+`non-persistent://`: tenant, namespace and topic. `CREATE` and `ALTER` refuse other shapes.
+Provision the topic before starting the ingestor or emitter, and choose its subscription ownership
+separately as described below.
+
+#### Received message metadata
+
 A Pulsar message exposes these nullable metadata fields to routing expressions:
 
 | Field | Type | Value |
@@ -1620,6 +1636,8 @@ range and sequence ids above `I64::MAX` produce a typed read error identifying t
 and field. A valid prefix already gathered is delivered before that error. Pulsar's protocol defines
 an omitted redelivery count as zero, so the first delivery reports zero and a broker redelivery can
 report one. Every protocol `u32` count fits the declared `I64`.
+
+#### Subscriptions and consumers
 
 Pulsar ingestors read through a durable subscription. Every statement declares who owns the
 subscription, because the broker cannot say later who created one, and the type the ingestor reads
@@ -1712,7 +1730,9 @@ on drop; a failure does not prevent starting the replacement. `DESCRIBE INGESTOR
 shows the subscription name, its ownership and declared start position, `TYPE` and `INSTANCES`
 together in the declared `options:` row.
 
-Client config currently supports:
+#### Pulsar client
+
+The same `PULSAR CLIENT` keys configure ingestion and emission:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
 - optional `'auth_token'`: the token the client authenticates with. `DESCRIBE CLIENT` and
@@ -1743,6 +1763,8 @@ A client authenticates with what its keys hold, and both directions connect the 
 handshake. With both, the token names the role and the certificate satisfies a broker that requires
 one on connect. A client with neither presents no credential.
 
+#### Acknowledgements and recovery
+
 The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry.
 An ingestor that loses its broker shows the failure as its transient error and reconnects on its
 `RETRY POLICY`, or on the reconnect policy under `MODE NO ACK`. A consumer of one partition of a
@@ -1768,6 +1790,12 @@ broker does not answer it; a request the consumer cannot send, such as while it 
 broker it cannot reach, shows `the Pulsar consumer did not confirm sending a redelivery request`,
 and the broker redelivers the messages once the consumer reconnects. `MODE NO ACK` acknowledges
 each message without waiting for the broker's answer.
+
+In `MODE NO ACK`, a payload its codec refuses is consumed through the ingestor's `ON GENERAL ERROR`
+policy and counted as a decode rejection. The source queues its acknowledgement without waiting
+for the broker's answer. See
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload) for reporting and the separate
+contract of a message that decoded but failed in a route.
 
 Under `FAILOVER` and `EXCLUSIVE` the broker does not take one message back: a rejection rewinds the
 consumer to everything it has not acknowledged. The messages behind a rejected one arrive again,

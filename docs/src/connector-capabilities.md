@@ -98,7 +98,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, ingest metadata. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, ingest metadata. SUBSCRIPTION, TYPE and INSTANCES configure ingestion only: subscription ownership and an owned subscription's EARLIEST or LATEST position govern creation, while existing cursors prevail. TIMESTAMP and DELIVER AFTER are emitter envelope clauses; an ingestor selects a received time with TIMESTAMP AT. Ingestion reads ordered, repeated properties, while publication keeps the last value written for each property name and uses a producer receipt. Both directions use the same quoted, case-preserving local or fully qualified Pulsar topic names and the same client configuration. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -415,7 +415,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, emit envelope/properties. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, emit envelope/properties. SUBSCRIPTION, TYPE and INSTANCES configure ingestion only: subscription ownership and an owned subscription's EARLIEST or LATEST position govern creation, while existing cursors prevail. TIMESTAMP and DELIVER AFTER are emitter envelope clauses; an ingestor selects a received time with TIMESTAMP AT. Ingestion reads ordered, repeated properties, while publication keeps the last value written for each property name and uses a producer receipt. Both directions use the same quoted, case-preserving local or fully qualified Pulsar topic names and the same client configuration. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
