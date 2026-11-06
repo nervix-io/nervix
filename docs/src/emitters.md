@@ -3216,6 +3216,14 @@ mapped column when the table itself is missing. A failure no retry cures until t
 statement changes is retried the same way, such as a conflict target no unique index matches
 (`42P10`), a missing privilege (`42501`) or a value mapped to a generated column (`428C9`).
 
+If a transient failure interrupts row-by-row isolation, the rows already acknowledged or rejected
+keep their outcomes. The interrupted row and every later unanswered row remain unresolved. The
+next attempt reads the catalog again and packs those unresolved rows into bounded inserts; it does
+not retain the interrupted pass's single-row request boundaries. An interrupted INSERT may already
+have stored its row, so that row can be written again in a multi-row insert. A flush and its
+isolation pass are not one database transaction; use a stable conflict key where retries must be
+idempotent.
+
 Postgres clients declare their connection-pool bounds and connect with a `postgres://` or
 `postgresql://` URL. Nervix owns the URL's scheme and its TLS policy: the URL sets `sslmode`
 exactly once, under that name or the driver's `ssl-mode`, to one of two policies: `sslmode=disable`

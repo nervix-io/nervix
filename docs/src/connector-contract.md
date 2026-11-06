@@ -2674,8 +2674,8 @@ the byte limit halved and measured again with the rest returned to the front, an
 still exceeds it rejected alone. A row over `MAX SIZE` is a `validation` error of the `encode`
 operation; a row within it that the destination could never take is the destination's `external`
 rejection of the row. Every request answers for the rows it carried, and a failed request leaves its
-rows and every later request's unresolved for the host to retry, so a retry packs the same rows into
-the same requests again.
+rows and every later request's unresolved for the host to retry. The host retains per-row outcomes,
+while the connector divides the unresolved rows on the next attempt.
 
 The database emitters divide the whole run. ClickHouse measures the `JSONEachRow` body of an insert,
 each row's line encoded once and sent as a slice of one buffer, before its driver compresses the body
@@ -2696,6 +2696,13 @@ waits for the shared pool again during isolation. Postgres also runs a write's m
 its first insert's connection, and the lookup and the insert quote each declared table part as one
 identifier, so they name the same relation. Both release the connection before the next bounded
 insert or retry backoff. MongoDB answers per document, so it needs no isolation pass.
+
+An infrastructure failure during SQL row isolation preserves the outcomes already returned for
+individual rows. The interrupted row and the unanswered suffix are divided again on retry, so an
+unanswered single-row INSERT can be retried inside a new multi-row INSERT. The interrupted
+isolation pass's request boundaries are not retained. A destination can already have applied the
+unanswered row; its conflict policy must account for that uncertainty. The
+[Postgres manual](emitters.md#postgres) describes the resulting retry behavior.
 
 A Postgres client's optional `timeout_ms` is validated as positive whole milliseconds within the
 server's `statement_timeout` range, at most `2147483647`. Its connection options and typed statement
