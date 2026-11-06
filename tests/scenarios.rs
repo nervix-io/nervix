@@ -212,6 +212,7 @@ mod clickhouse_connections;
 mod client_consumers;
 mod client_foreign_execution;
 mod client_producers;
+mod client_reply_kind;
 mod client_traffic;
 mod common;
 mod database_batches;
@@ -14122,6 +14123,73 @@ async fn given_transaction_commit_pause(
         crate::common::cluster::node_name(&node_id),
         world.domain.clone(),
         completed_statements,
+    );
+}
+
+#[given(
+    expr = "explicit COMMIT for transaction {string} on node {string} pauses after an execution \
+            error"
+)]
+async fn given_explicit_commit_failure_pause(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    node_id: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_explicit_commit_failure(crate::common::cluster::node_name(&node_id), transaction_id);
+}
+
+#[then(
+    expr = "the explicit COMMIT failure pause for transaction {string} on node {string} is reached"
+)]
+async fn then_explicit_commit_failure_pause_is_reached(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    node_id: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        TRANSACTION_COMMIT_PAUSE_TIMEOUT,
+        world.fault_injection.wait_for_explicit_commit_failure(
+            &crate::common::cluster::node_name(&node_id),
+            &transaction_id,
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "explicit COMMIT for transaction '{transaction_id}' did not reach its failed attempt \
+             boundary on '{node_id}': {error}"
+        )
+    });
+    let background = world
+        .background_plexus
+        .as_ref()
+        .verified("the preceding step started the COMMIT in the background");
+    assert!(
+        !background.is_finished(),
+        "the held COMMIT returned before its failed attempt was released"
+    );
+}
+
+#[when(
+    expr = "the explicit COMMIT failure pause for transaction {string} on node {string} is \
+            released"
+)]
+async fn when_explicit_commit_failure_pause_is_released(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    node_id: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let node_id = expand_placeholders(world, &node_id);
+    world.fault_injection.release_explicit_commit_failure(
+        &crate::common::cluster::node_name(&node_id),
+        &transaction_id,
     );
 }
 

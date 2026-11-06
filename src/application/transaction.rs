@@ -45,7 +45,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use super::{
-    command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
+    command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::{current_timestamp, subtract_timestamp_duration},
     domain_lifecycle::DomainAlterError,
     model_mutation::{
@@ -1698,6 +1698,13 @@ impl SessionServiceImpl {
                 }
             }
         };
+        #[cfg(feature = "testing")]
+        if finished.is_err() {
+            self.inner
+                .runtime
+                .pause_explicit_commit_failure_if_armed(self.inner.consensus.local_node_id(), &id)
+                .await;
+        }
         match finished {
             Ok(transaction) => transaction_commit_result(&transaction),
             Err(error) => {
@@ -1713,6 +1720,18 @@ impl SessionServiceImpl {
                         ))
                     };
                 if let Some(transaction) = self.inner.consensus.current_transaction(&id).await {
+                    if matches!(transaction.state, TransactionState::Finished(_)) {
+                        // Another coordinator's recorded outcome owns the reply after this
+                        // attempt has released its execution lock, including a recorded failure.
+                        drop(result);
+                        return transaction_commit_result(&transaction);
+                    }
+                    if matches!(transaction.state, TransactionState::Committing(_))
+                        && !matches!(proposal_error, Some(ConsensusError::LeadershipLost { .. }))
+                    {
+                        result.disposition =
+                            CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying);
+                    }
                     result.transaction = Some(transaction_status(&transaction));
                 }
                 result
