@@ -1193,6 +1193,16 @@ async fn serve_subscribe(
         message,
         diagnostics: Vec::new(),
     };
+    #[cfg(feature = "testing")]
+    shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .pause_subscription_response_delivery_if_armed(
+            shared.service.inner.consensus.local_node_id(),
+        )
+        .await;
     // The rows follow the reply that announces their schema. A subscription whose reply was not
     // queued, because the request was cancelled, the session ended or the reply could not be
     // encoded, was never announced, so it is abandoned before it delivers anything.
