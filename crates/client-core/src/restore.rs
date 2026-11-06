@@ -229,15 +229,9 @@ impl Client {
                         }));
                 }
             };
-            let reply = RestoreReply::decode(response.get_ref())
-                .change_context(ClientError::InvalidRestoreReply)?;
-            if let Some(request_id) = reply.request_id
-                && request_id != RESTORE_REQUEST_ID
-            {
-                return Err(Report::new(ClientError::UnexpectedReply {
-                    request: RequestKind::Restore,
-                }));
-            }
+            let reply = self
+                .validate_restore_reply(response.get_ref(), &generation, reference)
+                .await?;
             let outcome = match reply.disposition {
                 RestoreDisposition::Outcome(outcome) => {
                     if outcome.execution_reference != *reference {
@@ -275,6 +269,42 @@ impl Client {
             CommandOutcome::failed_locally("restore redirect loop exceeded".to_string());
         exhausted.execution_reference = Some(reference.clone());
         Ok(exhausted)
+    }
+
+    /// An invalid reply cannot establish whether the restore was applied. End its session,
+    /// preserving a replacement installed while the archive was streaming.
+    async fn validate_restore_reply(
+        &self,
+        frame: &VerifiedFrame<RestoreReplyFrame>,
+        generation: &Arc<()>,
+        reference: &CommandExecutionReference,
+    ) -> error_stack::Result<RestoreReply, ClientError> {
+        let validated = RestoreReply::decode(frame)
+            .change_context(ClientError::InvalidRestoreReply)
+            .and_then(|reply| {
+                if reply
+                    .request_id
+                    .is_some_and(|request_id| request_id != RESTORE_REQUEST_ID)
+                {
+                    Err(Report::new(ClientError::UnexpectedReply {
+                        request: RequestKind::Restore,
+                    }))
+                } else {
+                    Ok(reply)
+                }
+            });
+        match validated {
+            Ok(reply) => Ok(reply),
+            Err(report) => {
+                let mut exchange = self.inner.exchange.lock().await;
+                if Arc::ptr_eq(&exchange.generation, generation) {
+                    exchange.interrupt(ExchangeEnd::Closed).await;
+                }
+                Err(report.change_context(ClientError::UncertainCommand {
+                    reference: reference.clone(),
+                }))
+            }
+        }
     }
 }
 

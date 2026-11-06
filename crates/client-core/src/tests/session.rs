@@ -8,6 +8,8 @@
 
 mod foreign_restore;
 
+mod restore_reply;
+
 use std::{
     convert::Infallible,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -200,6 +202,8 @@ struct SessionService {
     fail_upload_replies: Arc<AtomicU64>,
     upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
     restore_reply_gate: Arc<Mutex<Option<foreign_restore::RestoreReplyGate>>>,
+
+    restores: Option<mpsc::Sender<restore_reply::ReceivedRestore>>,
 }
 
 enum UploadReplyMode {
@@ -236,15 +240,24 @@ impl Service<http::Request<Body>> for SessionService {
                 Ok(grpc.streaming(exchange, request).await)
             }),
             crate::wire::grpc::RESTORE_BACKUP_PATH => Box::pin(async move {
-                let mut grpc = Grpc::new(crate::wire::grpc::ServerRestoreCodec::new(limits()));
-                Ok(grpc
-                    .client_streaming(
-                        foreign_restore::RestoreWithForeignReference {
-                            gate: service.restore_reply_gate,
-                        },
-                        request,
-                    )
-                    .await)
+                if let Some(restores) = service.restores {
+                    let mut grpc = Grpc::new(restore_reply::frames::RawCodec::<
+                        crate::wire::RestoreFrame,
+                    >::new());
+                    Ok(grpc
+                        .client_streaming(restore_reply::ReceiveRestore { restores }, request)
+                        .await)
+                } else {
+                    let mut grpc = Grpc::new(crate::wire::grpc::ServerRestoreCodec::new(limits()));
+                    Ok(grpc
+                        .client_streaming(
+                            foreign_restore::RestoreWithForeignReference {
+                                gate: service.restore_reply_gate,
+                            },
+                            request,
+                        )
+                        .await)
+                }
             }),
             UPLOAD_RESOURCE_PATH => Box::pin(async move {
                 let mut grpc = Grpc::new(ServerUploadCodec::new(limits()));
@@ -437,6 +450,8 @@ struct TestServer {
     fail_upload_replies: Arc<AtomicU64>,
     upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
     restore_reply_gate: Arc<Mutex<Option<foreign_restore::RestoreReplyGate>>>,
+
+    restores: mpsc::Receiver<restore_reply::ReceivedRestore>,
     task: JoinHandle<()>,
 }
 
@@ -453,11 +468,22 @@ impl TestServer {
 
     /// Starts a server listening on `address`, a loopback address with a free port or port 0.
     async fn start_at(address: SocketAddr) -> Self {
-        Self::start_service(address, |service| service).await
+        Self::start_service(address, false, |service| service).await
+    }
+
+    async fn start_recording_restores() -> Self {
+        Self::start_service(SocketAddr::from(([127, 0, 0, 1], 0)), true, |service| {
+            service
+        })
+        .await
     }
 
     /// Installs a call-specific peer around the same session fixture and its exchange owner.
-    async fn start_service<S>(address: SocketAddr, wrap: impl FnOnce(SessionService) -> S) -> Self
+    async fn start_service<S>(
+        address: SocketAddr,
+        capture: bool,
+        wrap: impl FnOnce(SessionService) -> S,
+    ) -> Self
     where
         S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
             + NamedService
@@ -479,6 +505,8 @@ impl TestServer {
         let fail_upload_replies = Arc::new(AtomicU64::new(0));
         let upload_reply_mode = Arc::new(Mutex::new(None));
         let restore_reply_gate = Arc::new(Mutex::new(None));
+
+        let (restore_sender, restores) = mpsc::channel(4);
         let service = SessionService {
             exchanges: exchange_sender,
             exchange_hold: exchange_hold.clone(),
@@ -486,6 +514,8 @@ impl TestServer {
             fail_upload_replies: fail_upload_replies.clone(),
             upload_reply_mode: upload_reply_mode.clone(),
             restore_reply_gate: restore_reply_gate.clone(),
+
+            restores: capture.then_some(restore_sender),
         };
         let service = wrap(service);
         let task = nervix_primitives::task::spawn(async move {
@@ -503,6 +533,8 @@ impl TestServer {
             fail_upload_replies,
             upload_reply_mode,
             restore_reply_gate,
+
+            restores,
             task,
         }
     }
@@ -3476,13 +3508,7 @@ async fn a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_r
         retry_timeout: Duration::from_secs(1),
         ..ConnectOptions::default()
     };
-    let client = within_deadline(Client::connect_with_options(
-        format!("http://{}", primary.address),
-        Some(domain("tenant")),
-        options,
-    ))
-    .await
-    .assured("the primary accepts the session");
+    let client = primary.connect_with(options).await;
     let mut exchange = primary.next_exchange().await;
     let attaching = client.clone();
     let attach = nervix_primitives::task::spawn(async move {

@@ -41,6 +41,7 @@ pub(crate) mod memory;
 mod native_metadata;
 pub(crate) mod restore;
 pub(crate) mod restore_codec;
+pub(crate) mod restore_reply_validation;
 mod snapshot_receive;
 mod staging;
 mod wait;

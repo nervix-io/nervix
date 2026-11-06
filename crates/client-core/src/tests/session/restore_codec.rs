@@ -195,9 +195,8 @@ impl Codec for RawRestoreCodec {
 impl TestServer {
     async fn with_restore_codec() -> (Self, mpsc::Receiver<ReceivedRestore>) {
         let (restores, received) = mpsc::channel(4);
-        let server = Self::start_service(([127, 0, 0, 1], 0).into(), |session| RestoreService {
-            session,
-            restores,
+        let server = Self::start_service(([127, 0, 0, 1], 0).into(), false, |session| {
+            RestoreService { session, restores }
         })
         .await;
         (server, received)

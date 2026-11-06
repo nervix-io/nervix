@@ -369,6 +369,16 @@ test-restore-codec-replies *args: build-deps build-test-cli build-deadlock-repor
         raise SystemExit(f"restore reply witnesses must execute eight scenarios; reported counts: {counts}")
     PY
 
+# Exercise restore reply validation through the native client and CLI on one and three nodes.
+# These cases start no paced driver or diagnostic report subprocess.
+test-client-restore-reply: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/client_restore_reply_validation.feature \
+        --concurrency 2 --retry 0
+
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
 test-backup-cut-cleanup: build-deps build-test-cli

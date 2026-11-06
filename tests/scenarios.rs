@@ -508,6 +508,8 @@ struct ScenarioWorld {
     last_restore_end: Option<crate::backup::restore::RestoreStreamEnd>,
     /// The real restore whose reply a bounded gRPC peer made unreadable to its client.
     restore_codec_result: Option<crate::backup::restore_codec::Observation>,
+    /// A real restore whose test peer substituted its reply, and its exact-reference recovery.
+    restore_reply_validation: Option<Box<backup::restore_reply_validation::RestoreValidation>>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<crate::backup::restore::BackgroundRestore>,
     /// Real filesystem capacity held while an accepted restore tries its client inspection.
