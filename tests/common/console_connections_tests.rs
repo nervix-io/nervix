@@ -16,8 +16,8 @@ use std::num::NonZeroU64;
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     BackupDownloadMessage, CommandDisposition, CommandOutcome, LeaderRedirect, Leadership,
-    LeadershipObserved, NodeEndpoints, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery,
-    RequestId, RestoreDisposition, RestoreReply, RestoreUploadFailure, ServerNotice,
+    LeadershipObserved, NodeEndpoints, NoticeKind, NoticeLevel, OutcomeOrigin, Reply, ReplyBody,
+    ReplyDelivery, RequestId, RestoreDisposition, RestoreReply, RestoreUploadFailure, ServerNotice,
     SessionEndReason, SessionEnding, SessionLimits,
     websocket::{
         CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH,
@@ -209,6 +209,7 @@ fn no_known_leader() -> Vec<u8> {
 fn notice() -> Vec<u8> {
     let notice = ServerNotice {
         level: NoticeLevel::Info,
+        kind: NoticeKind::Membership,
         message: "a notice for every session".to_string(),
     };
     let frame = notice

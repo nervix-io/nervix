@@ -34,13 +34,13 @@ use nervix_client_wire::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
     DomainClockDetachOutcome, DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved,
     InspectTransactionRequest, InspectionOutcome, LeaderRedirect, Leadership,
-    MAX_IN_FLIGHT_REQUESTS, NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView,
-    RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
-    SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition,
-    SubscribeOutcome, SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
-    SubscriptionRows, SubscriptionType, SuggestRequest, Suggestion as WireSuggestion,
-    SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly, TransferPart,
-    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
+    MAX_IN_FLIGHT_REQUESTS, NoticeKind, NoticeLevel, ReplyBody, RequestCancelled, RequestId,
+    RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage,
+    ServerNotice, SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome,
+    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
+    Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
+    TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
     websocket::{CONSOLE_SESSION_PATH, ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -73,6 +73,7 @@ mod backup_dialog;
 mod clock_display;
 mod command_retry;
 mod create_dialog;
+mod node_panel;
 mod request_handoff;
 mod resource_upload;
 mod transaction_inspector;
@@ -87,6 +88,7 @@ use create_dialog::{
     ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
     CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission, SubscriptionDispatch,
 };
+use node_panel::{ClusterEventLog, NodePanel};
 use request_handoff::{RequestReceiver, RequestSender, request_handoff};
 use resource_upload::UploadAnswer;
 use transaction_inspector::{InspectorSignals, TransactionInspector};
@@ -185,6 +187,9 @@ struct WebConsoleSignals {
     /// once when that domain is selected.
     domain_snapshot: RwSignal<Option<DomainSnapshotView>>,
     cluster_counters: RwSignal<ClusterCounters>,
+    /// The membership and leadership notices of the node each session reached, which the node
+    /// panel lists beside the connection state instead of the REPL transcript.
+    cluster_events: RwSignal<ClusterEventLog>,
     active_domain: RwSignal<Option<DomainName>>,
     clock_display: RwSignal<ClockDisplay>,
     /// The clock attachment each connection asked for. The session loop records the one a
@@ -1507,6 +1512,7 @@ fn App() -> impl IntoView {
     let suggestion_continuation = RwSignal::new(None::<String>);
     let domain_snapshot = RwSignal::new(None::<DomainSnapshotView>);
     let cluster_counters = RwSignal::new(ClusterCounters::default());
+    let cluster_events = RwSignal::new(ClusterEventLog::default());
     let resource_details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
     let domains_loaded = RwSignal::new(false);
     let auth_token = RwSignal::new(web_console_auth_token_from_location());
@@ -1533,6 +1539,7 @@ fn App() -> impl IntoView {
         suggestion_continuation,
         domain_snapshot,
         cluster_counters,
+        cluster_events,
         active_domain,
         clock_display,
         clock_selection,
@@ -2029,6 +2036,7 @@ fn App() -> impl IntoView {
                 <Header
                     active_theme=active_theme
                     websocket_state=web_console_session.state
+                    cluster_events=cluster_events
                     active_domain=active_domain
                     clock_display=clock_display
                     domains=domains
@@ -2966,8 +2974,18 @@ fn apply_event(
             Leadership::Unknown => redirect_step(signals, &LeaderRedirect { leader: None }),
         },
         ServerEvent::Notice(notice) => {
-            let line = notice_line(notice);
-            signals.terminal_lines.update(|lines| lines.push(line));
+            match notice.kind {
+                NoticeKind::Membership | NoticeKind::Leadership => {
+                    let session = signals.session_generation.get_untracked();
+                    signals
+                        .cluster_events
+                        .update(|events| events.record(session, notice));
+                }
+                NoticeKind::ClusterParameters | NoticeKind::Runtime | NoticeKind::ControlPlane => {
+                    let line = notice_line(notice);
+                    signals.terminal_lines.update(|lines| lines.push(line));
+                }
+            }
             SessionStep::Continue
         }
         ServerEvent::Domains(observed) => {
@@ -4261,6 +4279,7 @@ fn notice_line(notice: ServerNotice) -> TermLine {
 fn Header(
     active_theme: RwSignal<usize>,
     websocket_state: RwSignal<ConsoleConnectionState>,
+    cluster_events: RwSignal<ClusterEventLog>,
     active_domain: RwSignal<Option<DomainName>>,
     clock_display: RwSignal<ClockDisplay>,
     domains: RwSignal<Vec<DomainView>>,
@@ -4299,6 +4318,7 @@ fn Header(
                 <span class=move || websocket_state.get().pill_class()>
                     {move || websocket_state.get().label()}
                 </span>
+                <NodePanel events=cluster_events />
                 <Show
                     when=move || selected_domain()
                         .is_some_and(|domain| domain.state_command().is_some())
@@ -8406,6 +8426,7 @@ mod tests {
             suggestion_continuation: RwSignal::new(None),
             domain_snapshot: RwSignal::new(None),
             cluster_counters: RwSignal::new(ClusterCounters::default()),
+            cluster_events: RwSignal::new(ClusterEventLog::default()),
             active_domain: RwSignal::new(Some(domain.clone())),
             clock_display: RwSignal::new(ClockDisplay::selected(Some(domain.clone()), true)),
             clock_selection: RwSignal::new(ClockSelection::default()),
@@ -9836,6 +9857,71 @@ mod tests {
                 .text
                 .is_char_boundary(lines[1].line.text.len())
         );
+    }
+
+    fn server_notice(level: NoticeLevel, kind: NoticeKind, message: &str) -> ServerEvent {
+        ServerEvent::Notice(ServerNotice {
+            level,
+            kind,
+            message: message.to_string(),
+        })
+    }
+
+    #[test]
+    fn membership_and_leadership_notices_go_to_the_node_panel_and_the_rest_to_the_transcript() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
+            let state = RwSignal::new(ConsoleConnectionState::Connected);
+            let mut requests = SessionRequests::new();
+            let notices = [
+                server_notice(
+                    NoticeLevel::Info,
+                    NoticeKind::Membership,
+                    "node 'node-3' left",
+                ),
+                server_notice(
+                    NoticeLevel::Info,
+                    NoticeKind::Leadership,
+                    "raft transition: state=Follower leader=node-2 term=3",
+                ),
+                server_notice(
+                    NoticeLevel::Info,
+                    NoticeKind::ClusterParameters,
+                    "cluster parameters committed at revision 4",
+                ),
+                server_notice(
+                    NoticeLevel::Error,
+                    NoticeKind::Runtime,
+                    "emitter 'redis_orders' publish failed",
+                ),
+                server_notice(
+                    NoticeLevel::Error,
+                    NoticeKind::ControlPlane,
+                    "resource 'model' failed to load",
+                ),
+            ];
+            for notice in notices {
+                let step = apply_event(signals, state, &mut requests, notice);
+                assert!(matches!(step, SessionStep::Continue));
+            }
+
+            assert_eq!(signals.cluster_events.with(ClusterEventLog::received), 2);
+            let transcript = signals.terminal_lines.with(|lines| {
+                lines
+                    .lines
+                    .iter()
+                    .map(|entry| entry.line.text.clone())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                transcript,
+                vec![
+                    "cluster parameters committed at revision 4".to_string(),
+                    "error: emitter 'redis_orders' publish failed".to_string(),
+                    "error: resource 'model' failed to load".to_string(),
+                ]
+            );
+        });
     }
 
     /// The notice with which the server ends the generation `subscription`.

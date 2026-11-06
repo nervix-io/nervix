@@ -45,16 +45,16 @@ use crate::{
     DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
     DomainPaceChoice, EmitterBatchReceived, EmitterCloseDisposition, EmitterOpened,
-    EmitterSettlement, LeaderRedirect, NodeEndpoints, OpenEmitterDisposition, OpenEmitterOutcome,
-    OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged, ProducerEnded,
-    ProducerOpened, ReadEmitterBatchOutcome, ReadEmitterDisposition, Reply, ReplyBody,
-    ReplyDelivery, RequestRejected, RequestRejection, RestoreDisposition, RestoreFrame,
-    RestoreMessage, RestoreReply, RestoreReplyFrame, RestoreStart, RestoreUploadFailure,
-    ServerEvent, ServerFrame, ServerMessage, SettleEmitterBatchOutcome, SubmissionOutcome,
-    SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded,
-    SubscriptionOpened, SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind,
-    SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame, producer::wire_refusal,
-    restore::RestoreChunk, wire,
+    EmitterSettlement, LeaderRedirect, NodeEndpoints, NoticeKind, NoticeLevel,
+    OpenEmitterDisposition, OpenEmitterOutcome, OpenIngestorDisposition, OpenIngestorOutcome,
+    ProducerAdmissionChanged, ProducerEnded, ProducerOpened, ReadEmitterBatchOutcome,
+    ReadEmitterDisposition, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
+    RestoreDisposition, RestoreFrame, RestoreMessage, RestoreReply, RestoreReplyFrame,
+    RestoreStart, RestoreUploadFailure, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
+    SettleEmitterBatchOutcome, SubmissionOutcome, SubscribeDisposition, SubscribeOutcome,
+    SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome,
+    Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame,
+    producer::wire_refusal, restore::RestoreChunk, wire,
 };
 
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
@@ -169,6 +169,16 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     }
     .encode(&limits())
     .assured("a corpus producer frame fits the default limits");
+    let notice = |level: NoticeLevel, kind: NoticeKind, message: &str| {
+        ServerNotice {
+            level,
+            kind,
+            message: message.to_string(),
+        }
+        .encode(&limits())
+        .assured("a corpus notice fits the default limits")
+        .into_bytes()
+    };
     let download = |frame: crate::EncodedFrame<BackupDownloadFrame>| frame.into_bytes();
     let backup = CommandOutcome {
         backup: Some(Box::new(backup_archive())),
@@ -603,6 +613,47 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                     ),
                     message: "field 'card' differs in sensitivity".to_string(),
                 }),
+            ),
+        ),
+        (
+            "server_notice_cluster_parameters.nxsm",
+            notice(
+                NoticeLevel::Info,
+                NoticeKind::ClusterParameters,
+                "cluster parameters committed at revision 3",
+            ),
+        ),
+        (
+            "server_notice_control_plane.nxsm",
+            notice(
+                NoticeLevel::Error,
+                NoticeKind::ControlPlane,
+                "failed to apply domain clock progress for 'tenant'",
+            ),
+        ),
+        (
+            "server_notice_leadership.nxsm",
+            notice(
+                NoticeLevel::Info,
+                NoticeKind::Leadership,
+                "raft transition: state=Leader leader=node-1 term=2 last_log_index=7 \
+                 last_applied=7",
+            ),
+        ),
+        (
+            "server_notice_membership.nxsm",
+            notice(
+                NoticeLevel::Info,
+                NoticeKind::Membership,
+                "node 'node-2' restarted (incarnation 1793845627114630656)",
+            ),
+        ),
+        (
+            "server_notice_runtime.nxsm",
+            notice(
+                NoticeLevel::Warning,
+                NoticeKind::Runtime,
+                "ingestor 'orders_in' general error in domain 'tenant': decode rejection",
             ),
         ),
         (
@@ -1244,6 +1295,14 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                 "EVENT PRODUCER_ADMISSION producer={} admission={}",
                 changed.producer,
                 schema_name(wire::ProducerAdmission::from(changed.admission).variant_name())
+            ));
+        }
+        ServerMessage::Event(ServerEvent::Notice(notice)) => {
+            lines.push(format!(
+                "EVENT NOTICE level={} kind={} message={}",
+                schema_name(wire::NoticeLevel::from(notice.level).variant_name()),
+                schema_name(wire::NoticeKind::from(notice.kind).variant_name()),
+                text(&notice.message)
             ));
         }
         ServerMessage::Event(ServerEvent::ProducerEnded(ended)) => {

@@ -64,8 +64,8 @@ pub(crate) enum GeneratedDomain {
     /// Every value an Arrow batch of the current schema types holds: Arrow IPC bodies, producer
     /// batches and remote relay payloads.
     Arrow,
-    /// The values the schemaful `JSON` and `CBOR` codecs promise to preserve. A non-finite float
-    /// has no JSON spelling, and the CBOR reader reads values through the same JSON model.
+    /// The values the schemaful `JSON` codec promises to preserve. A non-finite float
+    /// has no JSON spelling.
     Json,
     /// The values the schemaful `AVRO` codec promises to preserve. A top-level field holds only a
     /// type an Avro wire type binds, a field name is an Avro name, and an unsigned element is

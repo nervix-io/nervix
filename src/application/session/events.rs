@@ -27,7 +27,7 @@ use error_stack::ResultExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClusterObserved, DomainEntity, DomainInfo, DomainSnapshotObserved, DomainsObserved,
-    EncodedFrame, LeaderRedirect as WireLeaderRedirect, Leadership, LeadershipObserved,
+    EncodedFrame, LeaderRedirect as WireLeaderRedirect, Leadership, LeadershipObserved, NoticeKind,
     NoticeLevel, ServerFrame, ServerNotice, SessionEndReason, SessionLimits,
 };
 use nervix_dataflow_graph::DataflowGraph;
@@ -94,6 +94,7 @@ pub(super) async fn run_session_events(shared: Arc<SessionShared>) {
                 Ok(RuntimeEvent::Error(message)) => {
                     let notice = ServerNotice {
                         level: NoticeLevel::Error,
+                        kind: NoticeKind::Runtime,
                         message,
                     };
                     if !shared.send_notice(notice).await {
