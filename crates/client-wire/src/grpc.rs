@@ -61,6 +61,17 @@ pub struct FrameRejection {
 }
 
 impl FrameRejection {
+    fn into_status(self) -> Status {
+        let mut status = match self.report.current_context() {
+            FrameError::TooLarge { .. } => Status::resource_exhausted(self.report.to_string()),
+            FrameError::Truncated { .. }
+            | FrameError::WrongIdentifier { .. }
+            | FrameError::Invalid { .. } => Status::internal(self.report.to_string()),
+        };
+        status.set_source(StdArc::new(self));
+        status
+    }
+
     /// The complete frame-verification report, including its typed context and attachments.
     pub fn report(&self) -> &Report<FrameError> {
         &self.report
@@ -84,17 +95,6 @@ impl fmt::Display for FrameRejection {
 }
 
 impl Error for FrameRejection {}
-
-fn frame_rejection(report: Report<FrameError>) -> Status {
-    let mut status = match report.current_context() {
-        FrameError::TooLarge { .. } => Status::resource_exhausted(report.to_string()),
-        FrameError::Truncated { .. }
-        | FrameError::WrongIdentifier { .. }
-        | FrameError::Invalid { .. } => Status::internal(report.to_string()),
-    };
-    status.set_source(StdArc::new(FrameRejection { report }));
-    status
-}
 
 /// A tonic codec that sends frames of one root and receives frames of another.
 pub struct FrameCodec<Outbound: FrameRoot, Inbound: FrameRoot> {
@@ -216,7 +216,7 @@ impl<Inbound: FrameRoot> Decoder for FrameDecoder<Inbound> {
         };
         match VerifiedFrame::verify(bytes, &self.limits) {
             Ok(frame) => Ok(Some(frame)),
-            Err(error) => Err(frame_rejection(error)),
+            Err(error) => Err(FrameRejection { report: error }.into_status()),
         }
     }
 }
@@ -248,7 +248,10 @@ mod tests {
                 _ => tonic::Code::Internal,
             };
             let message = error.to_string();
-            let status = frame_rejection(Report::new(error.clone()).attach(Observation(7)));
+            let status = FrameRejection {
+                report: Report::new(error.clone()).attach(Observation(7)),
+            }
+            .into_status();
             let rejection = FrameRejection::find_in(&status)
                 .assured("the codec's status keeps its local verification provenance");
             assert_eq!(rejection.report().current_context(), &error);
