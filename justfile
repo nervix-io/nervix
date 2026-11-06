@@ -1376,9 +1376,9 @@ test-expiry-map:
 
 # Bolero reads its checked-in corpus from the source tree, which Miri's isolation forbids, so the
 # Miri run lifts isolation and bounds the property's random cases beside that corpus.
-test-expiry-map-miri:
+test-expiry-map-miri *args:
     MIRIFLAGS="-Zmiri-disable-isolation" BOLERO_RANDOM_ITERATIONS=4 BOLERO_RANDOM_MAX_LEN=512 \
-        cargo +nightly miri test --package nervix-expiry-map
+        cargo +nightly miri test --package nervix-expiry-map -- {{ args }}
 
 test-expiry-map-mutants:
     cargo mutants --package nervix-expiry-map --timeout 120
@@ -2585,6 +2585,10 @@ cargo-fmt:
 # Format one package during a focused implementation cycle.
 cargo-fmt-package package:
     cargo +nightly fmt --package {{ package }}
+
+# Format one Rust module and its children during a focused edit.
+rustfmt-file file:
+    rustfmt +nightly {{ quote(file) }}
 
 # Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:
