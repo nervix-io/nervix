@@ -955,7 +955,12 @@ to, because such a request has already moved the transaction past what the clien
 that is admitted runs its frozen plan step by step; each step is atomic, and a failed step leaves
 the applied prefix in place rather than rolling back the transaction. A commit's outcome arrives
 only when the final step is usable on every live node, and a client waits through `COMMITTING` for
-the outcome recorded under the commit's own reference.
+the outcome recorded under the commit's own reference. If one commit execution attempt fails, the
+server reads the transaction again before answering: a finished transaction supplies its recorded
+outcome and diagnostics, including a recorded failure; a transaction still `COMMITTING` leaves the
+command applying and answers `OutcomeUnknown(StillApplying)`. A leadership loss still follows the
+leader recovery route while the outcome is unresolved. An attempt's error cannot replace a
+terminal transaction outcome another coordinator recorded before the reply.
 
 The planning basis includes the complete committed cluster-parameter record and its revision.
 A publication through `ALTER CLUSTER SET` invalidates an earlier identified preview, including

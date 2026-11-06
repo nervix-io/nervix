@@ -591,6 +591,13 @@ test-command-recovery-scenarios: build-web-console wasm-processor-guests downloa
         --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
         --concurrency 1 --retry 0
 
+# Exercise explicit COMMIT outcome recovery and a recorded failed prefix through in-process nodes.
+test-explicit-commit-recovery: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/{explicit_commit_recovery,plexus_transactions}.feature") }} \
+        --tags '@explicit_commit_recovery or @transaction_failed_resume' \
+        --concurrency 1 --retry 0
+
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
     cargo test --package nervix-test-environment {{ args }}

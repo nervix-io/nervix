@@ -235,6 +235,10 @@ those phases.
 A committed cluster parameter revision invalidates an identified transaction preview even when
 the queued Models still fit its caps or the parameter values later return to their earlier values.
 Inspect the transaction again before committing; a parameter notice does not review a new preview.
+If a `COMMIT` attempt ends while the transaction still commits, keep its execution reference and
+repeat it to recover the outcome. `SHOW TRANSACTIONS` and an attached transaction's status explain
+progress but do not replace the result under that reference. See
+[Client Session Protocol → Transactions Over The Protocol](../../../docs/src/client-session-protocol.md#transactions-over-the-protocol).
 
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
 lookup creation, `START`, `STOP`, placement changes, or `COMMIT` returns `OK`, issue the dependent
