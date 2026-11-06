@@ -189,7 +189,7 @@ Feature: CLI public session dispatch
       """
       {"value":1,"extra":true}
       """
-    Then the CLI REPL eventually displays "[events] server ERROR: ingestor 'raw_metrics_source' general error in domain '{{domain}}': decode rejection"
+    Then the CLI REPL eventually displays "[events] runtime ERROR: ingestor 'raw_metrics_source' general error in domain '{{domain}}': decode rejection"
     When http payload is posted repeatedly to node "{{cli_node}}" with host "http-{{test_id}}.example.com" path "/metrics" until the CLI REPL displays '[events] subscription [watch] from [raw_metrics]: {"value":7}'
       """
       {"value":7}
@@ -202,6 +202,22 @@ Feature: CLI public session dispatch
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario: The CLI labels each notice by its kind and prints one membership event per node change
+    Given a 3 node nervix cluster is started
+    Then the current leader node is saved as placeholder "observer"
+    And a node other than placeholder "observer" is saved as placeholder "successor"
+    And a node other than placeholders "observer" and "successor" is saved as placeholder "departing"
+    When the CLI REPL is started on node "{{observer}}"
+    And leadership is transferred from node "{{observer}}" to node "{{successor}}"
+    Then the CLI REPL eventually displays "[events] leadership INFO: raft transition: state=Follower leader={{successor}}"
+    When node "{{departing}}" is stopped
+    Then the CLI REPL eventually displays "[events] membership INFO: node '{{departing}}' left"
+    When node "{{departing}}" is started
+    Then the CLI REPL eventually displays "[events] membership INFO: node '{{departing}}' joined (incarnation "
+    And the CLI REPL displays "node '{{departing}}' left" exactly 1 times
+    When the CLI REPL runs "exit"
+    Then the CLI REPL ends successfully
 
   Scenario Outline: CLI attaches its session to the active domain's clock
     Given a <cluster_size> node nervix cluster is started

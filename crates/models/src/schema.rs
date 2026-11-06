@@ -395,25 +395,12 @@ pub enum JsonType {
 )]
 #[strum(serialize_all = "lowercase")]
 pub enum CborType {
-    String,
-    Number,
     Integer,
-    Object,
-    Array,
+    Float,
     Boolean,
-    Null,
-    U8,
-    I8,
-    U16,
-    I16,
-    U32,
-    I32,
-    U64,
-    I64,
-    Datetime,
-    F32,
-    F64,
+    Text,
     Bytes,
+    Array,
 }
 
 #[derive(

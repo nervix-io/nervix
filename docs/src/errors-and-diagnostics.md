@@ -617,6 +617,11 @@ codec, and the field when one is at fault, and the typed reason stays beneath it
 wire field or `ON INGESTION` program; a `FieldDecodeError` or `FieldEncodeError` for a value that
 does not fit its field; a `SyslogDecodeError` or `SyslogEncodeError` for a syslog frame; the Arrow
 builder's `RuntimeSchemaError`; or the CBOR, Avro, simd-json, protobuf or UTF-8 error that failed.
+Schemaful CBOR rejects a tagged item, a non-text map key, and a duplicate map key with a typed
+`FieldDecodeError` beneath the codec and field context. A CBOR value that cannot fit an internal
+Arrow field carries `RuntimeSchemaError::CborValueTypeMismatch` with its CBOR kind and expected
+internal type. CBOR header inspection retains a typed read, syntax or depth cause if it cannot
+finish on a payload the value decoder otherwise accepts.
 An unfolding payload keeps the report of the message that failed and names its zero-based input and
 output position after it. The ingest group returns that report unchanged. A source host and an HTTP
 or WebSocket endpoint render the whole chain once as the message of the decode rejection that
@@ -2600,7 +2605,7 @@ On the serving node, a state, tick or end frame that does not fit the session's 
 sent and is logged as a warning: delivery waits for the next state or tick, and an end it could not
 send still ends the attachment. Accepting clock progress fails only for a domain the node does not
 hold, and a report that does not match the committed fence, or is not newer than the accepted tick,
-is ignored without an error. That failure reaches the node's sessions as the error notice
+is ignored without an error. That failure reaches the node's sessions as the `ControlPlane` error notice
 `failed to apply domain clock progress for '<domain>'` with its whole chain, and its log as a
 warning.
 
