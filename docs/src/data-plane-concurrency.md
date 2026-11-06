@@ -2456,6 +2456,11 @@ The `@restarted_voter_observation` workload also reaches concurrent live-policy 
 test-only reconciliation gate releases after leadership is established and remains outside the
 detector's tracked lock graph.
 
+The `parameters.multi-span-duration` workload belongs to the existing `cluster-parameters`
+invocation in every selection. It observes committed and running policy through the existing
+installation and status owners. Plexus duration parsing adds no tracked synchronization; its
+grammar and canonical round-trip checks own literal correctness.
+
 The lane builds all selected executables and diagnostic drivers before starting its workload clock.
 For each prepared invocation it lists what the build holds or reads
 the tagged scenarios from the feature files, and refuses a registered workload that the build no

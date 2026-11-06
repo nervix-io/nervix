@@ -4823,6 +4823,21 @@ tags = ["@cluster_parameters"]
 target = "test:scenarios"
 
 [[workload]]
+coverage = "Exercises the existing committed-parameter installation and status owners on one and three nodes; duration literal parsing itself has no tracked synchronization."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.multi-span-duration"
+invariant = "Committed and running policy report the complete multi-span duration on one- and three-node clusters."
+invocation = "cluster-parameters"
+scenario = "A multi-span duration commits and applies on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
 coverage = "Each live node installs the committed policy before command completion."
 examples = 2
 feature = "tests/features/cluster/cluster_parameters.feature"
