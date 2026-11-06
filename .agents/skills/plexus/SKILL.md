@@ -40,10 +40,15 @@ owner change. Its acknowledgement section distinguishes QoS 0 overflow, acknowle
 keep-alive during downstream stalls and the refusal of a broker grant below the declared QoS.
 For MQTT retained publication, typed publish properties and user-property headers, read
 [Emitters → MQTT](../../../docs/src/emitters.md#mqtt) for their exact types, limits and retry contract.
-For Pulsar source identity, keys, redelivery and event-time windows, read
-[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
+For Pulsar topic names, subscription ownership, creation position, TYPE and instances, read
+[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) before choosing the source. Its client
+reference owns the shared authentication and TLS keys, and its metadata table owns source identity,
+keys, redelivery and event-time windows. Choose
 `TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
 event time stays null, while an explicit epoch time is preserved.
+For Pulsar receipt deadlines, event times and delayed delivery, read
+[Emitters → Pulsar](../../../docs/src/emitters.md#pulsar). Check the generated capability mirror
+before carrying an option from one direction to the other.
 
 For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
 `NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,
@@ -127,6 +132,9 @@ completed, `1` failed, `3` outcome not known, `130` cancelled before admission. 
 same command again with the `--execution-reference` or `--upload-identity` the CLI printed, which
 recovers the outcome; a fresh submission could apply it twice. The CLI guide's Exit Status section
 defines each status.
+For `RESTORE`, retain the same archive bytes as well as the statement and execution reference after
+status `3`, including an invalid reply after upload. Follow the Rust client guide's
+[Restoring](https://docs.nervix.io/client-library.html#restoring) contract when recovering it.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
 URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
