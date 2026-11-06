@@ -659,7 +659,9 @@ A malformed or oversized native restore reply leaves the outcome uncertain even 
 already completed. Keep the original statement, archive and execution reference and repeat them
 to recover that outcome. The CLI exits with status 3 and prints the reference. If no earlier
 attempt could have been admitted, a local archive error, an authentication refusal or a valid
-declared stream refusal remains definitive; see
+declared stream refusal remains definitive. A later archive read failure, stream refusal or
+expired reference cannot settle an earlier complete upload whose outcome was lost or reported
+`OutcomeUnknown`; keep its original reference and restore the same archive for recovery. See
 [Restoring](client-library.md#restoring) for the native-client contract.
 
 ### Restoring From The Command Line
