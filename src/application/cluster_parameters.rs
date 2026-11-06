@@ -56,10 +56,13 @@ pub(in crate::application) async fn announce_parameter_installation(
         return;
     }
     tracing::info!(revision = %record.revision, "cluster parameters committed and installed");
-    events.relay_info(format!(
-        "cluster parameters committed at revision {}",
-        record.revision
-    ));
+    events.relay_info(
+        nervix_client_wire::NoticeKind::ClusterParameters,
+        format!(
+            "cluster parameters committed at revision {}",
+            record.revision
+        ),
+    );
     *announced = Some(record.revision);
 }
 

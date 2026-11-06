@@ -419,7 +419,8 @@ mod tests {
 
     use meticulous::ResultExt as _;
     use nervix_client_wire::{
-        NoticeLevel, ServerEvent, ServerMessage, ServerNotice, SessionLimits, VerifiedFrame,
+        NoticeKind, NoticeLevel, ServerEvent, ServerMessage, ServerNotice, SessionLimits,
+        VerifiedFrame,
     };
     use nervix_primitives::time::timeout;
 
@@ -431,6 +432,7 @@ mod tests {
     fn frame(text: &str) -> EncodedFrame<ServerFrame> {
         ServerNotice {
             level: NoticeLevel::Info,
+            kind: NoticeKind::Leadership,
             message: text.to_string(),
         }
         .encode(&SessionLimits::DEFAULT)

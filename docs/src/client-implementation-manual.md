@@ -74,11 +74,15 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 | `LeadershipObserved` | Which node leads, first on every session and again on every change |
 | `DomainsObserved` | The domain list, second on every session and again on every change |
 | `DomainSnapshotObserved`, `ClusterObserved` | The selected domain's live graph and entities, and the cluster summary, after `SelectDomainRequest` |
-| `ServerNotice` | Text for display at `Info`, `Warning`, or `Error` |
+| `ServerNotice` | Text for display at `Info`, `Warning`, or `Error`, of one kind: `Membership`, `Leadership`, `ClusterParameters`, `Runtime`, or `ControlPlane` |
 | `SubscriptionRows`, `SubscriptionDeliveryLost`, `SubscriptionRowsSkipped`, `SubscriptionEnded` | Frames of one subscription generation |
 | `DomainClockObserved`, `DomainClockTicked`, `DomainClockAttachmentEnded` | State, accepted tick progress, and end frames of one domain clock attachment |
 | `ProducerAdmissionChanged`, `ProducerEnded` | The admission state and the end of one producer |
 | `SessionEnding` | The last frame of a session the server ends |
+
+A client that presents notices MUST route each by its `kind`, as [What A Session Is
+Told](./client-session-protocol.md#what-a-session-is-told) defines the kinds, and MUST NOT derive
+meaning from a notice's text, which is for display only.
 
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
 the download of a backup's archive; see [Backup Downloads](#backup-downloads), and a restore with its

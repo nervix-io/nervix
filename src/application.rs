@@ -74,6 +74,7 @@ use futures_util::{
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_client_wire::NoticeKind;
 use nervix_consensus::{ConsensusSettings, TransactionState};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
@@ -2708,7 +2709,10 @@ impl Application {
                                     );
                             }
                             Envelope::Control(ControlEnvelope::RuntimeErrorEvent(event)) => {
-                                service_for_interconnect.broadcast_error(event.message);
+                                service_for_interconnect
+                                    .inner
+                                    .events
+                                    .report_error(NoticeKind::Runtime, event.message);
                             }
                         }
                     }
@@ -2724,7 +2728,9 @@ impl Application {
                 nervix_primitives::select! {
                     _ = cluster_events_shutdown.cancelled() => break,
                     received = cluster_event_rx.recv() => match received {
-                        Ok(message) => cluster_events.relay_info(message),
+                        Ok(change) => {
+                            cluster_events.relay_info(NoticeKind::Membership, change.to_string());
+                        }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "cluster event relay fell behind the event bus");
                         }
@@ -2742,7 +2748,9 @@ impl Application {
                 nervix_primitives::select! {
                     _ = consensus_events_shutdown.cancelled() => break,
                     received = consensus_event_rx.recv() => match received {
-                        Ok(message) => consensus_events.relay_info(message),
+                        Ok(message) => {
+                            consensus_events.relay_info(NoticeKind::Leadership, message);
+                        }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "consensus event relay fell behind the event bus");
                         }

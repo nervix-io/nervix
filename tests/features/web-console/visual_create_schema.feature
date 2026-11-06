@@ -83,7 +83,12 @@ Feature: Web console visual schema and branch creation
       | wire-json-schema | JSON   | integer | INTEGER        | 5          |
       | wire-json-schema | JSON   | boolean | BOOLEAN        | 5          |
       | wire-json-schema | JSON   | array   | ARRAY          | 5          |
-      | wire-cbor-schema | CBOR   | string  | STRING         | 19         |
+      | wire-cbor-schema | CBOR   | integer | INTEGER        | 6          |
+      | wire-cbor-schema | CBOR   | float   | FLOAT          | 6          |
+      | wire-cbor-schema | CBOR   | boolean | BOOLEAN        | 6          |
+      | wire-cbor-schema | CBOR   | text    | TEXT           | 6          |
+      | wire-cbor-schema | CBOR   | bytes   | BYTES          | 6          |
+      | wire-cbor-schema | CBOR   | array   | ARRAY          | 6          |
       | wire-avro-schema | AVRO   | boolean | BOOLEAN        | 8          |
       | wire-avro-schema | AVRO   | int     | INT            | 8          |
       | wire-avro-schema | AVRO   | long    | LONG           | 8          |
@@ -100,7 +105,7 @@ Feature: Web console visual schema and branch creation
       """
       CREATE DOMAIN {{domain}};
       CREATE WIRE JSON SCHEMA same_name MODE STRICT (payload string);
-      CREATE WIRE CBOR SCHEMA same_name MODE LOOSE (payload string);
+      CREATE WIRE CBOR SCHEMA same_name MODE LOOSE (payload text);
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
