@@ -2645,7 +2645,14 @@ through `execute_prepared_with_cancellation` ends with
 the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
 `UncertainCommand` above `RequestCancelled` at `AfterAdmission` for one that keeps running, or
 `CallCancelled` when no request of the call waited for a reply, beneath `UncertainCommand` or
-`UncertainUpload` where the call may already have taken effect. The client decides retries, session
+`UncertainUpload` where the call may already have taken effect. A command reply whose execution reference differs from its request's is reported as a protocol
+violation at the exchange reader, which ends that session before reading another frame. The call
+recovers under its own reference through the ordinary session-loss path, or reports
+`UncertainCommand` if recovery cannot finish. A restore's reference mismatch ends the session
+used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. Hosts read
+`FailureKind::Uncertain` and the original execution reference from that outer context; the CLI
+reports an unknown outcome with exit status `3` when recovery did not complete.
+The client decides retries, session
 recovery and uncertainty from those typed contexts and never from text, and a context names its own
 operation without repeating its transport status, which the next frame shows. The CLI adds the
 operation it ran above the client's report, `failed to connect to the server` or `the request to

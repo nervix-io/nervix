@@ -358,7 +358,8 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `ProducerLinks::links`, `SubscriptionInterests::leases` | producer and subscription open and close | retain: lifecycle registry |
 | session service maps, command execution locks, retained backups and restore archives | per command, control plane; 250 ms sweeps | retain: lifecycle registry |
 | consensus `incoming_snapshots` | per snapshot chunk, consensus bulk traffic | retain: bounded protocol (one transfer per peer) |
-| client-core `previews`, `servers`, `submissions`, exchange requests | client-side | retain: client-side |
+| client-core `previews`, `servers`, `submissions` | client-side | retain: client-side |
+| client-core `PendingReplies::Open::waiters` (`crates/client-core/src/exchange.rs`) | one registration before sending a request; one keyed removal for its reply or cancellation; ending the exchange drops all remaining entries | retain: client-side protocol registry, one entry per outstanding registered request. Command entries also retain their expected execution reference, with no second map or queue. A foreign outcome closes this registry under the same mutex that removes its waiter, retaining the first ending cause. Reader-future finalization, including abortion, closes any remaining entries before ending its exact attachment generation. No guard crosses an await. |
 | `FaultInjectionState::executions` | registered once per testing-node startup; queried by explicit execution occupancy, saturation and release controls and harness cleanup. Restore inspection clones the registered executor once when filling its filesystem workers and queue, releasing the map guard before admission or await. The snapshot receive probe clones its registered executor once per placement and ends that guard before its bounded admission attempts; it owns its exact reservation directly, so release does not read the map. The bulk responsiveness fixture occupies every node, then cleanup reads each retained node once before diagnostics and node stop, including after a failed body; explicit release removes the node from that retained set | test-only; entries remain owned by the scenario's injector |
 | `FaultInjectionState::emitter_faults` | explicit scenario arming/release; existing fail/stall checks at flush and one check per nonempty record-answer boundary for an armed unknown-record answer. That one-shot entry is removed when delivered; fail/stall entries last until explicit release or the world's injector drop | test-only emitter mode control in `fault_injection/emitter_mode.rs`; ordinary builds use a no-op answer hook and hold no map |
 | `FaultInjectionState::startup_voter_gossip` | Armed after cluster stop; direct-link controls and digest heartbeat freezing read receiver-scoped entries; the observer clones its reconciliation gate once, and the fixture releases it once after establishing that node's leadership; the first scheduling barrier reads the entry, and release removes it after that pass completes | test-only startup fault observation |
@@ -420,6 +421,8 @@ The maps do not retain payloads, delivery attempts or server reservations. Wire 
 are limited by the server's granted attachments; desired entries have the lifetime of application
 handles. Per-handle lifecycle owners fence restoration against close and another exchange loss;
 see [Rust client attachment recovery](../docs/src/data-plane-concurrency.md#rust-client-attachment-recovery).
+Reader-future finalization ends its exact generation even when aborted. Its cleanup reaches these
+registries once and cannot remove the attachments of a replacement generation.
 
 ## Follow-up findings outside the hot paths
 
