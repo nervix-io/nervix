@@ -52,7 +52,10 @@ use nervix_models::{
     ClientConfigEntry, ConnectorKind, MQTT_MAXIMUM_PACKET_BYTES, MQTT_SOURCE_READ_AHEAD_HEADROOM,
     MqttBroker, MqttClientConfig, MqttQos, MqttSession,
 };
-use nervix_primitives::time::{Instant, timeout, timeout_at};
+use nervix_primitives::{
+    sync::Arc,
+    time::{Instant, timeout, timeout_at},
+};
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, ConnectionError, DisconnectProperties,
     DisconnectReasonCode, Event, EventLoop, Incoming, ManualAck, Outgoing, PubAck, PubRec, Publish,
@@ -221,7 +224,7 @@ impl MqttTopicIngestorSessions<'_> {
 /// What one MQTT ingestor subscribes with.
 pub struct MqttTopicIngestorSettings {
     /// The client entries every instance connects with, rendered for that instance.
-    pub instances: Vec<Vec<ClientConfigEntry>>,
+    pub instances: Arc<[Vec<ClientConfigEntry>]>,
     /// The default identity for one instance; multiple instances append their instance index.
     pub default_client_id: String,
     /// The shared subscription group every instance joins, so instances never duplicate messages.
@@ -315,7 +318,7 @@ impl IngestorAcknowledgement {
 /// node resolver they connect through.
 #[derive(Clone)]
 pub struct MqttTopicIngestorPlan {
-    instances: Vec<Vec<ClientConfigEntry>>,
+    instances: Arc<[Vec<ClientConfigEntry>]>,
     default_client_id: String,
     subscribe_filter: String,
     session: MqttSession,
@@ -373,6 +376,13 @@ enum GatherPublishOutcome {
 }
 
 impl MqttTopicIngestorPlan {
+    /// Selects the executing unit's counter while retaining the prepared client configurations
+    /// and their identity validation. Cloning a plan shares its immutable instance entries.
+    pub fn with_read_ahead_dropped(mut self, counter: prometheus::IntCounter) -> Self {
+        self.read_ahead_dropped = counter;
+        self
+    }
+
     pub fn new(settings: MqttTopicIngestorSettings) -> Self {
         let MqttTopicIngestorSettings {
             instances,
@@ -492,7 +502,7 @@ impl MqttTopicIngestorPlan {
         &self,
     ) -> error_stack::Result<MqttTopicIngestorSessions<'_>, MqttTopicIngestorError> {
         let mut identities = BTreeMap::new();
-        for (instance_index, _) in (0_u64..).zip(&self.instances) {
+        for (instance_index, _) in (0_u64..).zip(self.instances.iter()) {
             let identity = self.session_identity(instance_index)?;
             identities.entry(identity).or_insert(instance_index);
         }
@@ -1145,7 +1155,7 @@ mod tests {
     /// The settings of one ingestor instance subscribing to `events` through `addr` and `dns`.
     fn settings(addr: &str, session: MqttSession, dns: DnsResolver) -> MqttTopicIngestorSettings {
         MqttTopicIngestorSettings {
-            instances: vec![vec![entry("addr", addr)]],
+            instances: vec![vec![entry("addr", addr)]].into(),
             default_client_id: "client".to_string(),
             share_group: "default~ingestor".to_string(),
             topic: "events".to_string(),
@@ -1325,6 +1335,24 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn prepared_clients_keep_each_units_read_ahead_count_separate() {
+        let fixture = DnsFixture::start().await;
+        let first = MqttTopicIngestorPlan::new(settings(
+            "mqtt://127.0.0.1:1883",
+            MqttSession::Persistent,
+            fixture.dns.clone(),
+        ));
+        let second = first
+            .clone()
+            .with_read_ahead_dropped(IngestorMetricsFixture::new().counter());
+        first.read_ahead_dropped.inc_by(3);
+        second.read_ahead_dropped.inc_by(7);
+        assert_eq!(first.read_ahead_dropped.get(), 3);
+        assert_eq!(second.read_ahead_dropped.get(), 7);
+        assert!(Arc::ptr_eq(&first.instances, &second.instances));
+    }
+
+    #[nervix_primitives::test]
     async fn retirement_keeps_matching_session_identities_and_releases_obsolete_ones() {
         let fixture = DnsFixture::start().await;
         let mut declared = settings(
@@ -1347,7 +1375,7 @@ mod tests {
         assert!(retiring_instances(&singleton, Some(&singleton)).is_empty());
 
         let mut parallel = singleton.clone();
-        parallel.instances.push(parallel.instances[0].clone());
+        parallel.instances = vec![parallel.instances[0].clone(); 2].into();
         assert_eq!(
             parallel
                 .client(0)
@@ -1369,7 +1397,7 @@ mod tests {
         assert_eq!(retiring_instances(&singleton, Some(&parallel)), vec![0]);
 
         let mut expanded = parallel.clone();
-        expanded.instances.push(expanded.instances[0].clone());
+        expanded.instances = vec![expanded.instances[0].clone(); 3].into();
         assert!(retiring_instances(&parallel, Some(&expanded)).is_empty());
         assert_eq!(retiring_instances(&expanded, Some(&parallel)), vec![2]);
 
@@ -1381,21 +1409,23 @@ mod tests {
         );
 
         let mut explicit = singleton.clone();
-        explicit.instances[0].push(entry("client_id", "provided-0"));
+        let mut explicit_instances = explicit.instances.to_vec();
+        explicit_instances[0].push(entry("client_id", "provided-0"));
+        explicit.instances = explicit_instances.into();
         let mut explicit_expanded = explicit.clone();
-        explicit_expanded.instances.push(vec![
+        let mut expanded_instances = explicit_expanded.instances.to_vec();
+        expanded_instances.push(vec![
             entry("addr", "mqtt://127.0.0.1:1883"),
             entry("client_id", "provided-1"),
         ]);
+        explicit_expanded.instances = expanded_instances.into();
         assert!(retiring_instances(&explicit, Some(&explicit_expanded)).is_empty());
         assert_eq!(
             retiring_instances(&explicit_expanded, Some(&explicit)),
             vec![1]
         );
         let mut repeated_identity = explicit.clone();
-        repeated_identity
-            .instances
-            .push(repeated_identity.instances[0].clone());
+        repeated_identity.instances = vec![repeated_identity.instances[0].clone(); 2].into();
         assert_eq!(retiring_instances(&repeated_identity, None), vec![0]);
     }
 
@@ -1512,7 +1542,8 @@ mod tests {
             instances: vec![
                 config_with_client_id("fixed-client"),
                 config_with_client_id("fixed-client"),
-            ],
+            ]
+            .into(),
             default_client_id: "fallback".to_string(),
             share_group: "default~mqtt_notifications".to_string(),
             topic: "notifications".to_string(),

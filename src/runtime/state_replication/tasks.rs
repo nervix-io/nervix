@@ -260,6 +260,7 @@ impl Runtime {
                 }
                 let placement = state.read().placement().clone();
                 runtime.wait_for_slow_last_write(&placement).await;
+                let _initializers = state.read().start_coordination().capture_guard().await;
                 match flush_latest_snapshot(&state, &store) {
                     Ok(Some(lsm)) => {
                         let offsets = state.read();
@@ -623,6 +624,7 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         domain: &DomainName,
         node: &ExecutionNode,
+        unit: Unit,
     ) -> error_stack::Result<Option<JoinHandle<()>>, StateIdentityError> {
         let branch_states = match node.kind() {
             ModelKind::Deduplicator => Some(RuntimeStateKind::Deduplicator),
@@ -636,14 +638,15 @@ impl Runtime {
             | ModelKind::Reorderer => None,
             _ => return Ok(None),
         };
-        let Some(primary_node) = node.execution_node().cloned() else {
+        let Some(primary_node) = node.unit_execution_node(unit).cloned() else {
             return Ok(None);
         };
-        let branch_lru = self.state_placement(
+        let branch_lru = self.state_placement_for_unit(
             domain,
             RuntimeStateKind::BranchLru,
             node.kind(),
             node.identifier.clone(),
+            unit,
             None,
         )?;
         let poll_interval = self.inner.state_replication_poll_interval;
@@ -1062,7 +1065,7 @@ impl Runtime {
             state,
             kind,
             identifier,
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
             branch_key,
         )
     }

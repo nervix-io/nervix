@@ -128,6 +128,10 @@ does not restart on progress. The configuring reference routes the status, signa
 contracts.
 For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
 retry boundary when explaining source recovery.
+For intake parallelism, read [Ingestors → Instancing](../../../docs/src/ingestors.md#instancing).
+Check the entity's instancing capability, Pulsar subscription type, Kafka offset mode and constructing
+routes before setting a count or following branch partitions. Use `DESCRIBE INGESTOR` to verify
+the planned instance placement.
 
 ## Assemble the graph
 
@@ -306,7 +310,8 @@ During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain avail
 
 Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
 for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
-selected domain. Read `Node Settings` for the complete parameter set, positive duration bounds,
+selected domain. Read `Domains And Time` → `Duration Literals` for duration spelling, and
+`Node Settings` for the complete parameter set, positive duration bounds,
 existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
 belong only to the first bootstrap, including when their value equals the default. Later starts,
 including the returning bootstrap node, omit them.
@@ -493,17 +498,18 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
   separation policy exists. Lower `RANK` values are stronger, unranked rules are the weakest rule
   tier, and equal-rank different-policy claims conflict.
-- Treat every relay as a scheduled runtime node with one owner. `CAPACITY` bounds its one owner
-  buffer cluster-wide, while each producer node and remote consumer node contributes one fixed
-  in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
+- Treat every relay unit as scheduled work with one owner. A direct branch's `PARTITIONS n`
+  gives its relay one unit per partition. `CAPACITY` bounds each unit's owner buffer, while each
+  producer node and remote consumer node contributes one fixed in-flight dispatch slot. Materialized
+  state adds state replicas to that relay; it does not add a
   separate runtime-node kind. All relays are valid placement members and corridor hops.
   On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
   creation and alteration preserve the exact capacity through storage, replay, and restart.
 - Treat `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors as cluster-wide
   listeners and exclude them from placement members. Every other ingestor, a `WEBSOCKETS CONNECTION`
-  included, is single-owner and keeps its live assignment across ordinary schedule recomputation;
-  use drain, `RELOCATE`, or a hard
-  colocation requirement when it must move.
+  included, keeps its existing live unit assignments across ordinary schedule recomputation.
+  Instance-capable sources can have several independent owners. Current `RELOCATE` refuses a
+  member with several execution units; automatic drain and failover preserve unit identity.
 - Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
   chosen work onto a named cluster node. The selection is a kind-qualified list or a
   `FROM ... TO ...` corridor, hard colocation groups always move whole, and the whole unit moves in

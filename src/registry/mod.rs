@@ -27,6 +27,7 @@ mod error;
 mod execution_revision;
 mod graph;
 mod ingestor_plan;
+mod ingestor_units;
 mod message_error_plan;
 mod mutation;
 mod placement;
@@ -37,6 +38,7 @@ mod resource_plan;
 mod restore_plan;
 mod schedule_delta;
 mod scheduler;
+mod unit_placement;
 pub(crate) use scheduler::assign_server_listener_nodes;
 mod storage;
 #[cfg(test)]

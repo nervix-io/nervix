@@ -4,6 +4,21 @@ Feature: Committed cluster parameters
   Nervix commits one parameter record for the cluster. A parameter change is validated against
   the current record and graph, then applied on every node without a process restart.
 
+  @multi_span_cluster_duration
+  Scenario Outline: A multi-span duration commits and applies on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus statements are executed on the leader node
+      """
+      ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 13m 49s;
+      """
+    Then node "node-1" eventually reports status containing "node-unavailability-timeout committed=13m 49s"
+    And node "node-<cluster_size>" eventually reports status containing "node=node-<cluster_size> node-unavailability-timeout running=13m 49s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @cluster_parameter_preview_fence
   Scenario Outline: A parameter change invalidates an inspected transaction preview on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started

@@ -100,7 +100,7 @@ fn relay_payload(delivery: RelayDelivery, ack_id: u64, sender: &Transport) -> Re
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("simulated").assured("fixture domain is valid"),
         relay: RelayName::parse("records").assured("fixture relay is valid"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         key: None,
         batch_ipc,
         metadata: Vec::new(),
@@ -442,12 +442,12 @@ impl PartitionDelivery {
     /// Partition 0, whose reply the scenario loses after admission, and partition 1, which is
     /// delivered on its own channel after the link is repaired.
     const LOST_REPLY: Self = Self {
-        unit: Unit::Partition(0),
+        unit: Unit::partition(0),
         channel: 121,
         ack_id: 121,
     };
     const AFTER_REPAIR: Self = Self {
-        unit: Unit::Partition(1),
+        unit: Unit::partition(1),
         channel: 122,
         ack_id: 122,
     };

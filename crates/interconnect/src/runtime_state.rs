@@ -180,6 +180,16 @@ pub enum StateCheckpointRead {
     Published,
     /// Use the exact checkpoint the source persisted while capturing a planned handoff.
     HandoffCapture,
+    /// Project a frozen ingestor checkpoint into one target instance before transferring it.
+    IngestorUnits(crate::IngestorUnitSelection),
+    /// One initializer's retained candidate, before the canonical start is selected.
+    KafkaStartOffer,
+    /// Immutable, unclaimed start positions for a unit. Its generation is independent of
+    /// the coordinator unit's continuously advancing committed-offset revision.
+    KafkaStartSeed {
+        generation: u64,
+        selection: crate::IngestorUnitSelection,
+    },
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]

@@ -21,7 +21,7 @@ use chumsky::{Boxed, prelude::*};
 use meticulous::ResultExt as _;
 use nervix_models::{
     DeclaredQuiesce, IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestStartPosition, RetryPolicy,
+    IngestStartPosition, IngestorEntityModel, IngestorInstances, RetryPolicy,
 };
 
 use crate::{
@@ -94,19 +94,49 @@ pub(super) fn ack_parallel_within<'src, W: 'src>(
         )
 }
 
-/// The count after `INSTANCES`.
-pub(super) fn instance_count<'src>()
--> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
-    nonzero_u64_value("instance_count", "instances must be greater than 0")
+/// The instancing body the entity declares after `INSTANCES`.
+pub(super) fn instances<'src, S: IngestorEntityModel>()
+-> impl Parser<'src, &'src [Token], IngestorInstances, extra::Err<ParseError<'src>>> + Clone {
+    let count = nonzero_u64_value("instance_count", "instances must be greater than 0")
+        .map(IngestorInstances::Count);
+    let capability = S::KIND.capabilities().instancing;
+    let grammar = match capability {
+        nervix_models::IngestorInstancingCapability::PerPartition => choice((
+            kw_phrase2(Identifier::Per, Identifier::Partition).to(IngestorInstances::PerPartition),
+            count,
+        ))
+        .boxed(),
+        nervix_models::IngestorInstancingCapability::Instances => count.boxed(),
+        nervix_models::IngestorInstancingCapability::Single => empty()
+            .try_map(|_, span| {
+                Err(Rich::custom(
+                    span,
+                    "this entity has no instance declaration",
+                ))
+            })
+            .boxed(),
+    };
+    grammar
+        .try_map(move |instances, span| {
+            if capability.permits(instances) {
+                Ok(instances)
+            } else {
+                Err(Rich::custom(
+                    span,
+                    format!("{} does not support this INSTANCES form", S::KIND),
+                ))
+            }
+        })
+        .boxed()
 }
 
 /// `INSTANCES <n>` where a source may leave it out, and one instance when it does.
-pub(super) fn optional_instances<'src>()
--> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+pub(super) fn optional_instances<'src, S: IngestorEntityModel>()
+-> impl Parser<'src, &'src [Token], IngestorInstances, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Instances)
-        .ignore_then(instance_count())
+        .ignore_then(instances::<S>())
         .or_not()
-        .map(|instances| instances.unwrap_or(NonZeroU64::MIN))
+        .map(|instances| instances.unwrap_or(IngestorInstances::ONE))
 }
 
 /// `START AT EARLIEST|LATEST`: where a source starts when its broker holds no position it can use.

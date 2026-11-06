@@ -26,12 +26,14 @@ elif [[ "$#" -ne 0 ]]; then
 fi
 
 "${script_dir}/role-wait-self-test.sh"
+"${script_dir}/instance-owners-self-test.sh"
 "${script_dir}/pause-delivery-self-test.sh"
 "${script_dir}/hold-quorum-self-test.sh"
 "${script_dir}/output-boundary-self-test.sh"
 "${script_dir}/image-package-self-test.sh"
 "${script_dir}/local-image-self-test.sh"
 "${script_dir}/startup-status-self-test.sh"
+"${script_dir}/observation-helpers-self-test.sh"
 "${script_dir}/backup-fixture-self-test.sh"
 "${script_dir}/verifier-self-check-self-test.sh"
 
@@ -682,6 +684,7 @@ jq -e --arg image "${placeholder_image}" \
     and ([.services["endpoint-load"], .services["endpoint-websocket"]]
          | all(.volumes | all(.read_only == true)))
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
+    and ([.services.admin, .services.probe] | all(.init == true and .command == ["sleep", "infinity"]))
     and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].image == $image
     and .services["nervix-1"].environment.NERVIX_RAFT_HEARTBEAT_INTERVAL == $heartbeat

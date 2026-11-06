@@ -847,8 +847,7 @@ Feature: RabbitMQ ingestion
         };
         CREATE MQTT CLIENT mqtt_out
         CONFIG {
-          'addr' = '{{mqtt_addr}}',
-          'client_id' = 'nervix-cucumber-rabbit-lost-reject-out-{{test_id}}'
+          'addr' = '{{mqtt_addr}}'
         };
         CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
         FROM rabbit_main QUEUE 'notifications_individual_{{test_id}}' MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 1h ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 200ms

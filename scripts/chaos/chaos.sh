@@ -10,7 +10,7 @@ Usage:
   just chaos run baseline --image IMAGE [--nodes 1|3] [--records N]
   just chaos run rolling-restart --image IMAGE [--nodes 1|3] [--records N]
   just chaos run leader-crash --image IMAGE [--nodes 1|3] [--records N]
-  just chaos run follower-crash|ingestor-owner-crash|emitter-owner-crash --image IMAGE [--records N]
+  just chaos run follower-crash|ingestor-owner-crash|ingestor-instances-owner-crash|emitter-owner-crash --image IMAGE [--records N]
   just chaos run pause-resume --image IMAGE [--records N]
   just chaos run partition-recovery --image IMAGE [--case CASE] [--partition-seconds N] [--records N]
   just chaos run degraded-links --image IMAGE [--profile PROFILE] [--records N]
@@ -65,6 +65,7 @@ leader-crash  Observed leader SIGKILL, failover, and explicit Docker restart
               topologies: one-node (--nodes 1), three-node (--nodes 3, default)
 follower-crash  Observed follower SIGKILL and recovery (three-node)
 ingestor-owner-crash  Observed ingestor owner SIGKILL and placement recovery (three-node)
+ingestor-instances-owner-crash  SIGKILL of one of three spread intake owners; sibling units retain their owners (three-node)
 emitter-owner-crash  Observed emitter owner SIGKILL and placement recovery (three-node)
 pause-resume  Short and failover-length Pumba pauses of the observed leader and execution owner (three-node)
 partition-recovery  Verified Pumba network partitions, healing and quorum recovery (three-node)
@@ -154,7 +155,7 @@ case "${command_name}" in
             rolling-restart)
                 exec "${script_dir}/run-rolling-restart.sh" "$@"
                 ;;
-            leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash)
+            leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash)
                 exec "${script_dir}/run-crash.sh" --scenario "${scenario}" "$@"
                 ;;
             pause-resume)
