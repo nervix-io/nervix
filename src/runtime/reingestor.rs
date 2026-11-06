@@ -255,6 +255,7 @@ impl Runtime {
                 let templates = relays.route_templates(
                     ModelKind::Reingestor,
                     &ModelName::from(&plan.name),
+                    Unit::SINGLE,
                     &plan.routes,
                 )?;
                 templates_by_reingestor.insert(plan.name.clone(), templates);
@@ -1261,7 +1262,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &domain,
                 &root_relay,
-                Unit::Single,
+                Unit::SINGLE,
                 services.clone(),
                 RelayRetention::default(),
             )
@@ -1269,8 +1270,13 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            entity_kind: ModelKind::Reingestor,
-            source: named("tenant_partition"),
+            owner: NodeUnitRef::new(
+                NodeRef::new(
+                    ModelKind::Reingestor,
+                    named::<ModelName>("tenant_partition"),
+                ),
+                Unit::SINGLE,
+            ),
             root_relay: root_relay.clone(),
             branch: None,
             branch_ttl: None,
@@ -1422,7 +1428,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &domain,
                 &root_relay,
-                Unit::Single,
+                Unit::SINGLE,
                 services.clone(),
                 RelayRetention::default(),
             )
@@ -1430,8 +1436,13 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            entity_kind: ModelKind::Reingestor,
-            source: named("tenant_partition"),
+            owner: NodeUnitRef::new(
+                NodeRef::new(
+                    ModelKind::Reingestor,
+                    named::<ModelName>("tenant_partition"),
+                ),
+                Unit::SINGLE,
+            ),
             root_relay: root_relay.clone(),
             branch: None,
             branch_ttl: None,
@@ -1546,7 +1557,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &domain,
                 &relay,
-                Unit::Single,
+                Unit::SINGLE,
                 output_services.clone(),
                 RelayRetention::default(),
             )
@@ -1561,6 +1572,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: domain_clock.clone(),
@@ -1603,8 +1615,13 @@ mod tests {
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    entity_kind: ModelKind::Reingestor,
-                    source: named("tenant_partition"),
+                    owner: NodeUnitRef::new(
+                        NodeRef::new(
+                            ModelKind::Reingestor,
+                            named::<ModelName>("tenant_partition"),
+                        ),
+                        Unit::SINGLE,
+                    ),
                     root_relay: relay.clone(),
                     branch: None,
                     branch_ttl: Some(Duration::from_secs(30)),
@@ -1893,6 +1910,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: clock_lifecycle
@@ -2157,6 +2175,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),

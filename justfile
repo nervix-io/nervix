@@ -2926,6 +2926,9 @@ clippy-target lane package args toolchain="":
 # share one directory of their own, so a package checked again, or one beside it, reuses its build.
 cargo-clippy-package package *args: (clippy-target "package" package ["--all-targets", args])
 
+# Lint one library, including its test profile, without selecting product binaries in a model mode.
+cargo-clippy-package-lib package *args: (clippy-target "package" package ["--lib", args])
+
 # Lint every product Clippy target, with four concurrent processes by default.
 cargo-clippy jobs=default_jobs: (run-with-jobs "clippy-targets" jobs)
 
@@ -3702,6 +3705,10 @@ test-chaos-local-image:
 # Bound startup artifact publication by the controller's actual remaining budget.
 test-chaos-startup-status:
     exec bash scripts/chaos/tests/startup-status-self-test.sh
+
+# Verify fresh public requests in run-owned observation helpers, including input and failures.
+test-chaos-observation-helpers:
+    exec bash scripts/chaos/tests/observation-helpers-self-test.sh
 
 # Derive the backup run's graph from the checked-in baseline fixture, as every verifier self-check does.
 test-chaos-backup-fixture:

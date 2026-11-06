@@ -431,7 +431,7 @@ impl Runtime {
             BufferedIngestMetadata::retain(&metadata),
             actual_utc_now(),
         );
-        let admission = match binding.quiesce.intake(0, payload, true) {
+        let admission = match binding.quiesce.intake(payload, true) {
             IngestorQuiesceIntake::Dispatch(payload) => {
                 match self
                     .dispatch_endpoint_binding(binding, payload, protocol)

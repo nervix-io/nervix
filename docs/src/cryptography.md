@@ -203,3 +203,8 @@ onto AWS-LC: password authentication through the MongoDB, Postgres and MySQL dri
 SCRAM while librdkafka draws its client nonce from `rd_jitter`, SQS and object-storage request
 signing, RabbitMQ PKCS#12 client identities and Parquet encryption in Iceberg. Non-security uses,
 the register's entries and the inventory's non-security and unused rows, are not refused.
+
+Runtime checkpoint digests also identify retained Kafka start offers and immutable pending-seed
+projections. Their purpose is non-security content checking: detecting changed, truncated or
+mismatched transfer bodies inside authenticated node requests. The existing checkpoint digest
+owner computes and verifies them under bounded execution and memory admission.

@@ -11,6 +11,104 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
+/// The archive's eight-byte, four-byte-aligned rank for an execution unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub(crate) struct UnitWire {
+    upper: u32,
+    lower: u32,
+}
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the archive unit rank reserves zero and one rank for every u32 partition index"
+    )
+)]
+const PARTITION_END: u64 = 1u64 << u32::BITS;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "archived instance ranks follow the complete single and u32 partition rank range"
+    )
+)]
+const INSTANCE_START: u64 = PARTITION_END + 1;
+
+impl From<nervix_models::Unit> for UnitWire {
+    fn from(unit: nervix_models::Unit) -> Self {
+        use meticulous::OptionExt as _;
+
+        let rank = match unit.kind() {
+            nervix_models::UnitKind::Single => 0,
+            nervix_models::UnitKind::Partition(index) => u64::from(index)
+                .checked_add(1)
+                .assured("a 32-bit partition plus one fits in 64 bits"),
+            nervix_models::UnitKind::Instance(index) => index
+                .checked_add(INSTANCE_START)
+                .assured("a validated unit index leaves room for the single and partition ranks"),
+        };
+        let [a, b, c, d, e, f, g, h] = rank.to_be_bytes();
+        Self {
+            upper: u32::from_be_bytes([a, b, c, d]),
+            lower: u32::from_be_bytes([e, f, g, h]),
+        }
+    }
+}
+
+impl From<UnitWire> for nervix_models::Unit {
+    fn from(unit: UnitWire) -> Self {
+        use meticulous::{OptionExt as _, ResultExt as _};
+
+        let rank = (u64::from(unit.upper) << u32::BITS) | u64::from(unit.lower);
+        match rank {
+            0 => Self::SINGLE,
+            1..=PARTITION_END => Self::partition(
+                u32::try_from(
+                    rank.checked_sub(1)
+                        .verified("a partition rank is at least one"),
+                )
+                .verified("the partition rank is at most 2^32"),
+            ),
+            _ => Self::try_instance(
+                rank.checked_sub(INSTANCE_START)
+                    .verified("instance ranks follow the complete single and partition range"),
+            )
+            .verified("an archive rank minus the instance origin fits the unit index range"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use meticulous::ResultExt as _;
+    use nervix_models::Unit;
+
+    use super::UnitWire;
+
+    #[test]
+    fn unit_record_preserves_its_eight_byte_layout_and_semantic_boundaries() {
+        assert_eq!(std::mem::size_of::<UnitWire>(), 8);
+        assert_eq!(std::mem::size_of::<rkyv::Archived<UnitWire>>(), 8);
+        assert_eq!(std::mem::align_of::<rkyv::Archived<UnitWire>>(), 4);
+        for unit in [
+            Unit::SINGLE,
+            Unit::partition(0),
+            Unit::partition(u32::MAX),
+            Unit::FIRST_INSTANCE,
+            Unit::try_instance(u64::from(u32::MAX) + 1).assured("the selected ordinal fits"),
+            Unit::try_instance(Unit::MAX_INSTANCE_INDEX).assured("the maximum ordinal fits"),
+        ] {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&UnitWire::from(unit))
+                .assured("the current primitive unit record encodes");
+            assert_eq!(bytes.len(), 8);
+            let wire = rkyv::from_bytes::<UnitWire, rkyv::rancor::Error>(&bytes)
+                .assured("the current primitive unit record decodes");
+            assert_eq!(Unit::from(wire), unit);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct ManifestWire {
     pub(crate) format_major: u16,
@@ -186,7 +284,7 @@ pub(crate) struct NodeNameWire(pub(crate) String);
 pub(crate) struct WasmStateDescriptorWire {
     pub(crate) domain: String,
     pub(crate) entity: String,
-    pub(crate) unit: nervix_models::Unit,
+    pub(crate) unit: UnitWire,
     pub(crate) schema: [u8; 32],
     pub(crate) branch_fingerprint: Option<[u8; 32]>,
     pub(crate) branch: Option<Vec<StateField>>,
@@ -198,7 +296,7 @@ pub(crate) struct WasmStateDescriptorWire {
 pub(crate) struct KafkaOffsetsWire {
     pub(crate) domain: String,
     pub(crate) entity: String,
-    pub(crate) unit: nervix_models::Unit,
+    pub(crate) unit: UnitWire,
     pub(crate) schema: [u8; 32],
     pub(crate) revision: u64,
     pub(crate) applied_start_generation: Option<u64>,
@@ -217,7 +315,7 @@ pub(crate) struct BranchLifecycleWire {
     pub(crate) domain: String,
     pub(crate) owner_kind: String,
     pub(crate) entity: String,
-    pub(crate) unit: nervix_models::Unit,
+    pub(crate) unit: UnitWire,
     pub(crate) schema: [u8; 32],
     pub(crate) revision: u64,
     pub(crate) branches: Vec<BranchLifecycleEntryWire>,

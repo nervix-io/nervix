@@ -263,9 +263,13 @@ initial_remote_path_ready() {
     for host in "${node_hosts[@]}"; do
         capture_metrics "${host}" >/dev/null 2>&1 || return 1
     done
-    metric_is_positive "${artifact_dir}/public/metrics-nervix-1.txt" \
-        'direction="sent"' 'physical_node_id="node-1"' 'relay="chaos_records"' \
-        'target="chaos_ingestor"' || return 1
+    if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+        instance_source_traffic_ready || return 1
+    else
+        metric_is_positive "${artifact_dir}/public/metrics-nervix-1.txt" \
+            'direction="sent"' 'physical_node_id="node-1"' 'relay="chaos_records"' \
+            'target="chaos_ingestor"' || return 1
+    fi
     if [[ "${node_count}" == "3" ]]; then
         metric_is_positive "${artifact_dir}/public/metrics-nervix-2.txt" \
             'direction="received"' 'physical_node_id="node-2"' 'relay="chaos_records"' \

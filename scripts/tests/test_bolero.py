@@ -143,6 +143,10 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "runtime-kafka-unit-layouts",
+            "runtime-ingestor-metric-layouts",
+            "models-ingestor-instancing",
+            "interconnect-intake-units",
             "typed-runner-lease",
             "typed-runner-policy",
             "typed-runner-compilation",

@@ -32,15 +32,15 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) dns: Option<DnsResolver>,
     /// Also held by the entity gate's deadline task, which releases an expired lease long after
     /// the call that engaged it returned.
-    pub(in crate::runtime) ingestors: Arc<DashMap<DomainNodeRef, IngestorRuntime, RandomState>>,
+    pub(in crate::runtime) ingestors: Arc<DashMap<DomainNodeUnitRef, IngestorRuntime, RandomState>>,
     /// Also held by the entity gate's deadline task, alongside `ingestors`.
     pub(in crate::runtime) ingestor_quiescence:
-        Arc<DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>>,
+        Arc<DashMap<DomainNodeUnitRef, Arc<IngestorQuiesceControl>, RandomState>>,
     pub(in crate::runtime) memory_pressure: MemoryPressurePause,
     pub(in crate::runtime) ingestor_statuses:
-        DashMap<DomainNodeRef, Arc<IngestorStatus>, RandomState>,
+        DashMap<DomainNodeUnitRef, Arc<IngestorStatus>, RandomState>,
     pub(in crate::runtime) ingestor_readiness:
-        DashMap<DomainNodeRef, IngestorReadiness, RandomState>,
+        DashMap<DomainNodeUnitRef, IngestorInstanceReadiness, RandomState>,
     pub(in crate::runtime) emitter_statuses:
         DashMap<DomainNodeRef, Arc<task_status::TaskStatus<EmitterRetryStatus>>, RandomState>,
     pub(in crate::runtime) emitter_confirmation_waits:
@@ -87,14 +87,14 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) in_flight_by_domain:
         DashMap<DomainName, Arc<AckRootTracker>, RandomState>,
     pub(in crate::runtime) in_flight_by_ingestor:
-        DashMap<DomainNodeRef, Arc<AckRootTracker>, RandomState>,
+        DashMap<DomainNodeUnitRef, Arc<AckRootTracker>, RandomState>,
     pub(in crate::runtime) generator_activity_by_domain:
         DashMap<DomainName, Arc<AtomicUsize>, RandomState>,
     pub(in crate::runtime) emitter_buffers: DashMap<DomainNodeRef, Arc<AtomicUsize>, RandomState>,
     pub(in crate::runtime) force_flush_by_domain:
         DashMap<DomainName, Arc<DomainForceFlush>, RandomState>,
     pub(in crate::runtime) node_quiesce_counters:
-        DashMap<DomainNodeRef, Arc<NodeQuiesceCounters>, RandomState>,
+        DashMap<DomainNodeUnitRef, Arc<NodeQuiesceCounters>, RandomState>,
     /// Also held by the entity gate's deadline task, alongside `ingestors`.
     pub(in crate::runtime) entity_gate_holds:
         Arc<DashMap<CoordinationIdentity, Arc<EntityGateOperation>, RandomState>>,

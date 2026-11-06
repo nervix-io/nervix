@@ -19,6 +19,8 @@ source "${script_dir}/output-boundary.sh"
 source "${script_dir}/image-package-check.sh"
 # shellcheck source=verifier-self-check.sh
 source "${script_dir}/verifier-self-check.sh"
+# shellcheck source=instance-owners.sh
+source "${script_dir}/instance-owners.sh"
 
 usage() {
     cat <<EOF
@@ -404,13 +406,17 @@ fi
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
 # The restart, recovery, stateful, endpoints, lifetimes, domain-time, mixed-instability, backup
 # fault and restore scenarios share their traffic, findings and exit handling.
+if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+    fixture_file="${script_dir}/fixtures/instances.plexus"
+fi
+
 recovery_scenario=false
 case "${scenario}" in
     stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) recovery_scenario=true ;;
@@ -934,6 +940,18 @@ compose() {
     run_bounded "${compose_call_timeout:-120}" docker compose "${compose_args[@]}" "$@"
 }
 
+# Keep an exec's remote process under the same bound as its Docker client. Ending the client alone
+# does not end a process inside a reusable helper. Both tool images provide timeout's -k form.
+helper_request() {
+    local service="$1"
+    shift
+    local remaining limit="${compose_call_timeout:-120}"
+    remaining="$(remaining_seconds)"
+    if ((remaining == 0)); then return 124; fi
+    if ((limit > remaining)); then limit="${remaining}"; fi
+    compose exec -T --interactive=false "${service}" timeout -k 5s "${limit}s" "$@" </dev/null
+}
+
 run_cli() {
     local domain="$1"
     local command_text="$2"
@@ -944,12 +962,12 @@ run_cli() {
     if [[ -n "${domain}" ]]; then
         domain_args=(--domain "${domain}")
     fi
-    compose run --rm --no-deps admin \
+    helper_request admin \
         nervix-cli \
         --server "http://${cli_host}:47391" \
         "${domain_args[@]}" \
         --password "${CHAOS_PASSWORD}" \
-        --command "${command_text}" >"${cli_output}" 2>&1 || cli_status=$?
+        --command "${command_text}" </dev/null >"${cli_output}" 2>&1 || cli_status=$?
     cat "${cli_output}"
     if [[ "${cli_status}" -eq 0 ]] \
         && ! grep -Fq 'Error:' "${cli_output}" \
@@ -1826,16 +1844,16 @@ node_listener_probe="
 # Requires every listener of HOSTNAME to answer and its /readyz to report a known leader.
 probe_node() {
     local hostname="$1"
-    compose run --rm --no-deps probe sh -eu -c "${node_listener_probe}
+    helper_request probe sh -eu -c "${node_listener_probe}
         wget -q -T 3 -O /dev/null \"http://\$1:9090/readyz\"
-    " -- "${hostname}" >/dev/null 2>&1
+    " -- "${hostname}" </dev/null >/dev/null 2>&1
 }
 
 # Requires every listener of HOSTNAME to answer, whatever its /readyz reports: a node can know no
 # leader for a moment during an election, which loss on a leader's link can start.
 probe_node_listeners() {
     local hostname="$1"
-    compose run --rm --no-deps probe sh -eu -c "${node_listener_probe}" -- "${hostname}" >/dev/null 2>&1
+    helper_request probe sh -eu -c "${node_listener_probe}" -- "${hostname}" </dev/null >/dev/null 2>&1
 }
 
 cluster_status_ready() {
@@ -1924,8 +1942,8 @@ record_load_pacing() {
 capture_metrics() {
     local hostname="$1"
     local output="${artifact_dir}/public/metrics-${hostname}.txt"
-    compose run --rm --no-deps probe wget -q -T 5 -O - \
-        "http://${hostname}:9090/metrics" >"${output}"
+    helper_request probe wget -q -T 5 -O - \
+        "http://${hostname}:9090/metrics" </dev/null >"${output}" || return $?
     trim_file "${output}" 1048576
 }
 
@@ -2235,7 +2253,9 @@ compose config >"${artifact_dir}/compose.rendered.yaml"
 compose_ready=true
 
 phase "broker startup and provisioning"
-compose up --detach broker
+# The helpers live only for this run. Every exec still starts a fresh CLI or probe process with
+# its own public request, while repeated observations avoid creating and attaching containers.
+compose up --detach --no-deps broker admin probe
 wait_for "Kafka broker" 90 probe_broker
 broker_admin /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server broker:9092 \
@@ -2439,9 +2459,11 @@ fi
 
 phase "public placement evidence"
 if [[ "${node_count}" == "3" ]]; then
-    domain_cli_command \
-        'RELOCATE INGESTOR chaos_ingestor ONTO NODE node-1 IGNORE PREFERENCES;' \
-        >"${artifact_dir}/public/relocate-ingestor.txt" 2>&1
+    if [[ "${scenario}" != ingestor-instances-owner-crash ]]; then
+        domain_cli_command \
+            'RELOCATE INGESTOR chaos_ingestor ONTO NODE node-1 IGNORE PREFERENCES;' \
+            >"${artifact_dir}/public/relocate-ingestor.txt" 2>&1
+    fi
     domain_cli_command \
         'RELOCATE RELAY chaos_records ONTO NODE node-2 IGNORE PREFERENCES;' \
         >"${artifact_dir}/public/relocate-relay.txt" 2>&1
@@ -2457,9 +2479,15 @@ else
     expected_emitter_owner="node-1"
 fi
 
-wait_for "ingestor owner ${expected_ingestor_owner}" 60 \
-    describe_owner_ready 'DESCRIBE INGESTOR chaos_ingestor;' \
-    "${expected_ingestor_owner}" "${artifact_dir}/public/describe-ingestor.txt"
+if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+    wait_for 'three distinct ready ingestor instance owners' 60 \
+        describe_spread_instances_ready "${artifact_dir}/public/describe-ingestor.txt" \
+        "${artifact_dir}/public/instance-owners.json"
+else
+    wait_for "ingestor owner ${expected_ingestor_owner}" 60 \
+        describe_owner_ready 'DESCRIBE INGESTOR chaos_ingestor;' \
+        "${expected_ingestor_owner}" "${artifact_dir}/public/describe-ingestor.txt"
+fi
 wait_for "relay owner ${expected_relay_owner}" 60 \
     describe_owner_ready 'DESCRIBE RELAY chaos_records;' \
     "${expected_relay_owner}" "${artifact_dir}/public/describe-relay.txt"
@@ -2484,6 +2512,14 @@ jq -n \
         "public/describe-emitter.txt"
       ]
     }' >"${artifact_dir}/results/remote-path.json"
+if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+    remote_path_tmp="$(mktemp "${artifact_dir}/results/.remote-path.XXXXXX")"
+    jq --slurpfile instances "${artifact_dir}/public/instance-owners.json" \
+        'del(.ingestor_owner) | .ingestor_instances = $instances[0]
+        | .evidence += ["public/instance-owners.json"]' \
+        "${artifact_dir}/results/remote-path.json" >"${remote_path_tmp}"
+    mv "${remote_path_tmp}" "${artifact_dir}/results/remote-path.json"
+fi
 
 if [[ "${scenario}" != "baseline" ]]; then
     # Fault scenarios use this setup and the shared final ledger verifier.

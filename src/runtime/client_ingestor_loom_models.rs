@@ -49,7 +49,12 @@ fn loom_a_client_batch_racing_a_quiesce_is_counted_by_its_drain_or_refused() {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("tenant").assured("a literal domain name");
         let ingestor = IngestorName::parse("orders_in").assured("a literal ingestor name");
-        let metric_labels = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+        let metric_labels = metrics.register_ingestor_quiesce(
+            &domain,
+            &ingestor,
+            nervix_models::Unit::SINGLE,
+            None,
+        );
         let control = Arc::new(IngestorQuiesceControl::new(
             IngestQuiesceMode::Suspend,
             metrics,

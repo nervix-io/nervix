@@ -14,9 +14,9 @@ use super::*;
 fn retiring_one_partition_keeps_the_sibling_route_and_assignment() {
     let routes = StateReplicationRouting::default();
     let mut first = placed(0, 0, 1);
-    first.unit = nervix_models::Unit::Partition(0);
+    first.unit = nervix_models::Unit::partition(0);
     let mut second = first.clone();
-    second.unit = nervix_models::Unit::Partition(1);
+    second.unit = nervix_models::Unit::partition(1);
     let first_slot = Arc::new(ArcSwapOption::from(Some(assigned(1))));
     let second_slot = Arc::new(ArcSwapOption::from(Some(assigned(1))));
     routes.register_unit_assignment(&first.unit_ref(), &first_slot);
@@ -54,7 +54,7 @@ fn materialized_relay_publication_retains_exact_routes_and_reclaims_ended_branch
         state: RuntimeState::MaterializedRelay {
             schema: SchemaFingerprint::from_digest([1; 32]),
         },
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key,
         ..placed(0, 0, 1)
     });
@@ -162,7 +162,7 @@ fn a_materialized_branch_publication_owns_absence_beside_the_relay_snapshot() {
         state: RuntimeState::MaterializedRelay {
             schema: SchemaFingerprint::from_digest([1; 32]),
         },
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
         ..placed(0, 0, 1)
     };
@@ -187,7 +187,7 @@ fn a_materialized_branch_publication_owns_absence_beside_the_relay_snapshot() {
         ReplicatedState::MaterializedRelay(root),
     );
     let branch_placement = RuntimeStatePlacement {
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: acme.clone(),
         ..root_placement.clone()
     };
@@ -241,7 +241,7 @@ pub(super) fn placed(entity: usize, branch: usize, generation: u8) -> RuntimeSta
         domain: domain("routes"),
         kind: ModelKind::Deduplicator,
         identifier: named::<ModelName>(&format!("dedup_{entity}")),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", &format!("tenant-{branch}")),
         state: RuntimeState::Deduplicator {
             schema: SchemaFingerprint::from_digest([generation; 32]),

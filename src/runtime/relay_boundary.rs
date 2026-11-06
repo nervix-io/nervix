@@ -83,7 +83,7 @@ impl RelayBranchPresences {
     pub(super) fn single(presence: RelayBranchPresence) -> Self {
         Self {
             partitioning: RelayPartitioning::Whole,
-            by_unit: BTreeMap::from([(Unit::Single, presence)]),
+            by_unit: BTreeMap::from([(Unit::SINGLE, presence)]),
         }
     }
 
@@ -134,7 +134,7 @@ impl RelayOwnerRoutes {
     #[cfg(test)]
     pub(super) fn single(owner: ClusterNodeName) -> Self {
         Self {
-            by_unit: BTreeMap::from([(Unit::Single, owner)]),
+            by_unit: BTreeMap::from([(Unit::SINGLE, owner)]),
         }
     }
 

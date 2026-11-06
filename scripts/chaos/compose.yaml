@@ -139,6 +139,8 @@ services:
     profiles:
       - tools
     entrypoint: []
+    init: true
+    command: [sleep, infinity]
     labels:
       <<: *run-labels
       io.nervix.chaos.role: admin
@@ -177,6 +179,8 @@ services:
     profiles:
       - tools
     entrypoint: []
+    init: true
+    command: [sleep, infinity]
     labels:
       <<: *run-labels
       io.nervix.chaos.role: observer

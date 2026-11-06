@@ -205,6 +205,9 @@ bound PULL ingestor with connecting PUSH peers when a peer can restart: a connec
 does not detect or recover a lost peer. Read the ZeroMQ sections of Ingestors and Emitters for the
 current connection, retry and deadline limits.
 
+- Check [ingestor instancing](../../../../docs/src/ingestors.md#instancing) before adding placement
+  rules. Validate connector capability, count addressability, constructing branch structure and
+  Kafka offset ownership; inspect each instance with `DESCRIBE INGESTOR`.
 - Every referenced name is declared in the active domain before use.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
   schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,

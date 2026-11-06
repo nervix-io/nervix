@@ -154,7 +154,6 @@ pub(in crate::registry) struct PlacementAnalysis {
 pub(in crate::registry) struct EffectivePlacementPlan {
     pub(in crate::registry) pairs: HashMap<PlacementPair, ResolvedPlacementPair>,
     pub(in crate::registry) require_groups: Vec<Vec<NodeRef>>,
-    pub(in crate::registry) group_by_member: HashMap<NodeRef, usize>,
 }
 
 impl PlacementAnalysis {
@@ -310,16 +309,9 @@ impl PlacementAnalysis {
             })
             .collect::<Vec<_>>();
         let require_groups = placement_require_groups(&require_pairs);
-        let mut group_by_member = HashMap::default();
-        for (group_index, members) in require_groups.iter().enumerate() {
-            for member in members {
-                group_by_member.insert(member.clone(), group_index);
-            }
-        }
         EffectivePlacementPlan {
             pairs,
             require_groups,
-            group_by_member,
         }
     }
 
