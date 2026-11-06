@@ -2718,7 +2718,12 @@ the server's `RequestCancelled` at `BeforeAdmission` for a command that never ra
 violation at the exchange reader, which ends that session before reading another frame. The call
 recovers under its own reference through the ordinary session-loss path, or reports
 `UncertainCommand` if recovery cannot finish. A restore's reference mismatch ends the session
-used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. Hosts read
+used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. A reply whose
+kind cannot answer its request, such as a domain listing under a command's request identity, is
+reported the same way at the exchange reader, as `ReplyKindMismatch` naming the request and the
+reply's kind, before anything the reply carries is applied. Every request still waiting on that
+session is interrupted. A call that cannot recover reports `RequestInterrupted` above that cause,
+and a command `UncertainCommand` above both. Hosts read
 `FailureKind::Uncertain` and the original execution reference from that outer context; the CLI
 reports an unknown outcome with exit status `3` when recovery did not complete.
 The client decides retries, session

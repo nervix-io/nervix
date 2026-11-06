@@ -82,8 +82,9 @@ and reconnect behavior, read
 directly. Follow the same documentation version as the selected index; these client chapters are
 outside the curated Plexus index.
 
-For native command or restore recovery after an execution-reference mismatch, read
-[Client Library](https://docs.nervix.io/client-library.html) and the command and restore contracts in
+For native command or restore recovery after an execution-reference mismatch or a reply of another
+kind than its request, read [Client Library](https://docs.nervix.io/client-library.html) and the
+command and restore contracts in
 [Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html) directly.
 Keep the original execution reference when recovering an uncertain outcome.
 
