@@ -27,16 +27,13 @@ mirror = "Consumption declares subscription ownership and, when ingestor-owned, 
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."MQTT TOPIC"]
-mirror = "Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names."
+mirror = "Both directions declare QOS 0, 1 or 2 independently of MODE. Consumption alone declares SESSION: NO ACK accepts every session/QoS pairing, while ACK SEQUENTIAL, ACK PARALLEL and SUSPEND require SESSION PERSISTENT with QOS 1 or 2. Every ingestor joins a Nervix-managed shared subscription, so its broker must support shared subscriptions. Publication pairs QOS 0 with NO ACK and QOS 1 or 2 with an ACK mode; its clean or persistent session follows QoS without a SESSION clause. Consumption reads the delivered packet's metadata and ordered, repeated user properties; publication writes RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names."
 
 [entity."NATS SUBJECT"]
-envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
-metadata = "The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace."
 mirror = "Subject consumption can join a queue group; Core publication completes after its flush. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."NATS STREAM"]
-metadata = "The current stream declaration exposes message headers but no typed stream, consumer, sequence, timestamp or delivery-count metadata namespace."
 mirror = "A durable pull consumer an operator provisioned acknowledges or negatively acknowledges each delivery on its own subject. A stream emitter names a provisioned stream, sends its expected-stream header with each message and waits for PubAck."
 properties = "This entity declares no typed PROPERTIES block; its MESSAGE ID envelope and written headers travel with the payload."
 

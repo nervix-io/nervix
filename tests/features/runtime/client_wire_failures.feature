@@ -435,6 +435,7 @@ Feature: Client wire failure regressions
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given command finalization on node "{{old_leader}}" pauses before its outcome is recorded
     And command finalization on node "{{new_leader}}" pauses before its outcome is recorded
+    And command reconciliation of execution reference "finalized-batch-{{test_id}}" pauses on node "{{old_leader}}"
     And the leader refuses the admission of execution reference "finalized-batch-{{test_id}}" as a leader whose lease lapsed
     When the active session begins this Plexus command request with execution reference "finalized-batch-{{test_id}}" in the background
       """
@@ -445,11 +446,14 @@ Feature: Client wire failure regressions
       """
     Then the command finalization pause on node "{{old_leader}}" is reached
     And the leader refused the admission of execution reference "finalized-batch-{{test_id}}" as a leader whose lease lapsed
+    And the transaction targeted by execution reference "finalized-batch-{{test_id}}" is saved as placeholder "batch_transaction"
+    And transaction "{{batch_transaction}}" eventually has state "COMMITTED"
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
     When the command finalization pause on node "{{old_leader}}" is released
     Then the background command request reports an unknown outcome because leadership moved
-    And the command finalization pause on node "{{new_leader}}" is reached
+    When the command reconciliation pause for execution reference "finalized-batch-{{test_id}}" on node "{{old_leader}}" is released
+    Then the command finalization pause on node "{{new_leader}}" is reached
     When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{old_leader}}"
     When the command finalization pause on node "{{new_leader}}" is released
@@ -481,7 +485,8 @@ Feature: Client wire failure regressions
       """
       SHOW TRANSACTIONS;
       """
-    Then the only transaction id is saved as placeholder "batch_transaction"
+    Then the only transaction id is saved as placeholder "completed_batch_transaction"
+    And placeholder "completed_batch_transaction" equals placeholder "batch_transaction"
     And the last command output contains
       """
       state=COMMITTED
@@ -502,6 +507,7 @@ Feature: Client wire failure regressions
     And a node other than placeholder "applying_leader" is saved as placeholder "applying_successor"
     Given command finalization on node "{{applying_leader}}" pauses before its outcome is recorded
     And command finalization on node "{{applying_successor}}" pauses before its outcome is recorded
+    And command reconciliation of execution reference "applying-batch-{{test_id}}" pauses on node "{{applying_leader}}"
     And the leader refuses the next model publication in domain "{{domain}}" and the pause release after it with "a lapsed leader lease"
     When the active session begins this Plexus command request with execution reference "applying-batch-{{test_id}}" in the background
       """
@@ -517,7 +523,8 @@ Feature: Client wire failure regressions
     Then node "{{applying_successor}}" eventually reports leader "{{applying_successor}}"
     When the command finalization pause on node "{{applying_leader}}" is released
     Then the background command request reports an unknown outcome because leadership moved
-    And the command finalization pause on node "{{applying_successor}}" is reached
+    When the command reconciliation pause for execution reference "applying-batch-{{test_id}}" on node "{{applying_leader}}" is released
+    Then the command finalization pause on node "{{applying_successor}}" is reached
     When leadership is transferred from node "{{applying_successor}}" to node "{{applying_leader}}"
     Then node "{{applying_leader}}" eventually reports leader "{{applying_leader}}"
     When the command finalization pause on node "{{applying_successor}}" is released
@@ -1310,6 +1317,36 @@ Feature: Client wire failure regressions
       {"note":"{{wide_note}}","sequence":1}
       """
     And client "subscriber" subscription "wide_seen" is active
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_foreign_execution @deloxide_stress
+  Scenario Outline: A native command recovers its own execution after a foreign command reply on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "recovering" is connected to node "{{leader}}"
+    And the next successful reply to native command "CREATE SCHEMA recovered_identity (value STRING);" names another execution
+    When client "recovering" executes these Plexus commands
+      """
+      CREATE SCHEMA recovered_identity (value STRING);
+      """
+    Then the native command recovered only its own execution reference
+    When client "recovering" executes these Plexus commands
+      """
+      SHOW CREATE SCHEMA recovered_identity;
+      """
+    Then the last command output contains
+      """
+      recovered_identity
+      """
 
     Examples:
       | cluster_size |

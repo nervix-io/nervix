@@ -648,8 +648,8 @@ Each of these sources declares a [header model](./connector-contract.md#header-m
 | `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `PULSAR TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `MQTT TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
-| `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
-| `NATS STREAM` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `NATS SUBJECT` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `NATS STREAM` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `WEBSOCKETS CONNECTION` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -1022,7 +1022,7 @@ applies, by the external system's own rule where it has one:
 | `SQS QUEUE` | `QUEUE` | 1 to 80 ASCII letters, digits, `-`, and `_`, and a FIFO queue's name ends in `.fifo`: SQS's own rule |
 | `REDIS PUBSUB` | `CHANNEL` | 1 to 1,024 bytes of any text; a `*` is the character itself |
 | `REDIS PUBSUB` | `PATTERN` | 1 to 1,024 bytes of any text, which Redis matches against channel names as a glob; see [Redis Pub/Sub](#redis-pubsub) |
-| `NATS SUBJECT` | `SUBJECT` | At most 1,024 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last |
+| `NATS SUBJECT` | `SUBJECT` | At most 1,024 UTF-8 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last. The byte bound and embedded-wildcard refusal are Nervix restrictions, not NATS server limits |
 | `NATS SUBJECT` | `QUEUE GROUP` | 1 to 255 bytes without whitespace or control characters |
 | `NATS STREAM` | `STREAM` | 1 to 255 bytes without whitespace, control characters, `.`, `*`, `>`, `/` or `\`: the JetStream server's rule, stricter only in refusing every whitespace and control character |
 | `NATS STREAM` | `CONSUMER` | The rule of a stream name |
@@ -2073,8 +2073,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-ingest).
 <!-- connector-matrix:ingest-mqtt-topic:end -->
 
+#### MQTT broker and client
+
 The topic filter is a string literal; see [External Names](#external-names) for the levels and
-wildcards it may hold.
+wildcards it may hold. The broker must support MQTT 5 shared subscriptions and permit the
+subscription `$share/<domain>~<ingestor>/<filter>` at the declared QoS. Every instance joins that
+group, including an ingestor with only one instance. Write just the filter in `TOPIC`: Nervix
+adds the share group, and a filter cannot begin with a `$share` level of its own.
 
 The client's `addr` names the broker by its scheme, host and port alone: `mqtt://` or `mqtts://`, a
 host, and a nonzero port, such as `mqtt://broker.example.com:1883`. A connection reads nothing else
@@ -2103,12 +2108,28 @@ interval bounds each acknowledgement write. A broker-supplied zero disables the 
 acknowledgement-write deadline derived from it; it does not make a silent connection fail within a
 fixed time.
 
+#### MQTT sessions and delivery modes
+
 `SESSION CLEAN` starts a fresh broker session on every connection and retains no session after
 disconnect. `SESSION PERSISTENT` resumes the broker session for the same client identity and
 requests the maximum Session Expiry Interval (`0xFFFFFFFF`). The broker's accepted expiry,
 offline-queue limits and eviction policy still govern retention. Plexus exposes no session-expiry
-setting. Nervix keeps delivery attempts and acknowledgements in memory; a persistent broker
-session does not persist that local state.
+setting. An ingestor also accepts a retained broker session when a new owner connects without
+local protocol state; the broker redelivers its unacknowledged QoS 1/2 publishes. Nervix keeps
+delivery attempts and acknowledgements in memory; a persistent broker session does not persist
+that local state. The [emitter's session recovery](emitters.md#mqtt) has a separate boundary.
+
+`SESSION` and `QOS` are required, in that order before `MODE`. The legal combinations are:
+
+| Session | QoS | Mode families | Quiesce choices |
+| --- | --- | --- | --- |
+| `CLEAN` | `0`, `1`, `2` | `NO ACK` | `BUFFER`, `DROP` |
+| `PERSISTENT` | `0` | `NO ACK` | `BUFFER`, `DROP` |
+| `PERSISTENT` | `1`, `2` | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | `SUSPEND`, `BUFFER`, `DROP` |
+
+Use the complete mode and quiesce bodies from the declaration above. `NO ACK` at QoS 1 or 2
+still uses that QoS on the connection, but settles before graph processing; it has no in-flight
+ACK window and never takes `MAX`. `SUSPEND` is valid with persistent QoS 1/2 even under `NO ACK`.
 
 Delivery constraints:
 
@@ -2130,7 +2151,7 @@ Delivery constraints:
   acknowledgements, and a batch above 65,535 gathers at most 65,535 of them before its
   `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
   holds a batch
-- `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages. Every instance subscribes to `$share/<domain>~<ingestor>/<filter>`, so the share group belongs to Nervix and a topic filter cannot begin with a `$share` level of its own
+- `INSTANCES <count>` controls Nervix consumer parallelism within the shared subscription group
 
 A new subscription becomes ready only when the broker grants the declared QoS. A lower grant
 fails through the general error policy and `DESCRIBE INGESTOR` names the requested and granted
@@ -2142,6 +2163,8 @@ retained subscription cannot turn the rejection into a successful resume. Suspen
 pending retirement. Permission granted later permits a fresh subscription attempt. An accepted
 persistent session keeps its original grant across reconnects; changing the filter or QoS retires
 that session.
+
+#### MQTT metadata and user properties
 
 Each publish's packet supplies its metadata and headers:
 
@@ -2169,6 +2192,8 @@ Each publish's packet supplies its metadata and headers:
 
 An `ON QUIESCE BUFFER` retains a publish's metadata and user properties with its payload, and its
 `MAX SIZE` counts the payload alone.
+
+#### MQTT acknowledgement and keep-alive
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for,
 and every `PUBREC` its QoS 2 publishes ask for, is written to the connection, within one keep-alive
@@ -2214,6 +2239,8 @@ Cancellation retains any discard acknowledgement and its original keep-alive dea
 next read. An ordinary partial batch ahead of a discard is returned and acknowledged first,
 preserving MQTT acknowledgement order. The following read starts the discard acknowledgement's
 deadline and reports its size exactly once after that acknowledgement has been written.
+
+#### MQTT identities, suspension and retirement
 
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
@@ -2284,9 +2311,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |
-| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace. |
+| Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2301,8 +2328,10 @@ See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md
 `SUBJECT` and `QUEUE GROUP` are string literals Nervix subscribes with exactly as written, letter
 case included, within the [external name rules](#external-names). A subscription subject may use
 the NATS wildcards as whole tokens: `SUBJECT 'orders.*.EU'` matches one token in the middle, and
-`SUBJECT 'orders.>'` every remaining token, so `>` comes last. A message's subject and reply
-subject are not exposed as typed metadata; programs read its payload and headers.
+`SUBJECT 'orders.>'` every remaining token, so `>` comes last. `metadata.subject` is the concrete
+subject of the delivered message, including when the subscription uses a wildcard.
+`metadata.reply` is its reply subject, or `NULL` when absent. Both have type `STRING`.
+Header reads retain the wire order, including interleaved repeated names, with exact name matching.
 
 `NATS SUBJECT` ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
@@ -2357,9 +2386,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | STREAM 'orders' (nats_stream) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `CONSUMER 'nervix'` (string literal checked by nats_consumer); required |
-| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current stream declaration exposes message headers but no typed stream, consumer, sequence, timestamp or delivery-count metadata namespace. |
+| Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
@@ -2407,7 +2436,19 @@ The consumer's position is the stream's: an instance that resumes, on its own no
 after its owner stopped, continues after the last delivery it acknowledged. A delivery an instance
 received and had not acknowledged when its connection was lost is delivered again once the
 consumer's `AckWait` passes. A delivery carries the headers it was published with; its stream and
-consumer sequences, its timestamp and how often it was delivered are not exposed as typed metadata.
+consumer identity, stream sequence, timestamp and delivery count are exposed as typed metadata.
+Stream messages expose `metadata.subject` and `metadata.reply` as well as `metadata.stream` and
+`metadata.consumer` (`STRING`), `metadata.sequence` and `metadata.delivered` (`U64`), and
+`metadata.timestamp` (`DATETIME`). The sequence is the stream sequence; the delivery count is the
+number of attempts to deliver this message. The timestamp is when the server accepted the
+publication and can supply `TIMESTAMP AT metadata.timestamp`. A stream delivery's reply subject
+is the server's `$JS.ACK` acknowledgement subject. Header reads preserve the received order.
+Delivery metadata is decoded only where a program reads it. A malformed requested field, a
+nonpositive sequence or delivery count, or a timestamp outside Nervix's signed Unix-nanosecond
+range refuses that row through `ON MESSAGE ERROR`, after `FILTER WHERE` and before event-time
+selection; none becomes a null or a zero. Unread metadata does not change settlement through the
+delivery's opaque acknowledgement subject. Buffering retains each field's typed value or failure.
+
 A lost connection ends the instance's pull as it ends a `NATS SUBJECT` instance's subscription, and
 `DESCRIBE INGESTOR` shows it as the transient error `NATS connection lost` until the instance has
 connected, looked the consumer up and pulled again on its `RETRY POLICY`.

@@ -1136,11 +1136,16 @@ declaration scenarios qualify these facts together.
 `.`-separated tokens, none empty, without whitespace or control characters, kept exactly as
 written. A subscription may write `*` for one token and `>` for every remaining token, each only
 as a whole token and `>` only last; a publication subject admits neither, since a message is
-published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
+published to one literal subject. The vocabulary owns the isolated parser for this NATS server
+2.11 subject contract; its 1,024-byte bound and refusal of embedded wildcard characters are
+Nervix restrictions, rather than server limits. The queue-group name has a separate rule because
+it has no subject-token grammar. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
 `INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
-acknowledgement for a subscriber. Both directions carry headers by name, and the ingestor projects
-no typed metadata field. The subject emitter declares Core `NO ACK` publication, codec
-payloads, no envelope clause, and optional batching without a protocol maximum: each server
+acknowledgement for a subscriber. Both directions retain every header pair in wire order, including
+interleaved repeated names, and match names exactly. The ingestor declares `metadata.subject` and
+`metadata.reply` as `STRING`; the subject is the concrete delivered subject and the reply is null
+when absent. The subject emitter declares Core `NO ACK` publication, codec payloads, the
+`REPLY TO` envelope clause, and optional batching without a protocol maximum: each server
 announces its `max_payload`, and the client refuses a message above it before writing it. The
 unpooled client's Nervix-owned keys are the address, `timeout_ms`, the TLS files and the optional
 authentication keys `token`, `credentials_file` and `nkey_seed`. Its schema declares the latter
@@ -1165,8 +1170,18 @@ declaration scenarios qualify these facts together.
 pull consumer of it, both an operator's, each held to the server's own name rule of 1 to 255 bytes
 without whitespace, control characters, `.`, `*`, `>` or a path separator. It declares
 `ACK SEQUENTIAL` and `ACK PARALLEL`, `SUSPEND`, `BUFFER` and `DROP`, the `broker_redelivered`
-position class and the `answered` acknowledgement confirmation, headers by name, and no typed
-metadata field. Its connector looks the consumer up when an instance resumes, never creates it,
+position class and the `answered` acknowledgement confirmation, and ordered header pairs.
+Its metadata starts with the delivered subject and reply, then the stream and consumer names,
+the `U64` stream sequence, the server's publication timestamp as `DATETIME`, and the `U64` delivery
+count. The delivered reply is the `$JS.ACK` subject used for settlement. Delivery metadata is
+decoded only for fields a program requests. The source retains its opaque acknowledgement
+independently of metadata decoding. A malformed metadata field, a nonpositive sequence or delivery
+count, or an out-of-range publication timestamp carries a typed field failure through retention
+and replay. A requested invalid field refuses its row through `ON MESSAGE ERROR`, after
+`FILTER WHERE` and before event-time selection. An unread field refuses nothing. One synchronous
+visit borrows and parses the acknowledgement once, only if a requested stream field needs it;
+no metadata is persisted.
+Its connector looks the consumer up when an instance resumes, never creates it,
 and refuses a push consumer and one whose acknowledgement policy is not explicit. One pull request
 at a time asks for at most the host's window, and at most the consumer's `MaxRequestBatch`, and
 waits without expiry or for the consumer's `MaxRequestExpires`, so the deliveries it holds ahead of
@@ -1189,7 +1204,24 @@ carries the expected-stream header; a subject the stream does not capture is rej
 keeps the same ID and JetStream can deduplicate it. The emitter bounds in-flight publishes by the
 ACK window and each PubAck by `ACK TIMEOUT`, settling confirmed records through the shared
 confirmation window before retrying unresolved records. It never creates a stream or persists
-hot-path records.
+hot-path records. Core `REPLY TO` is evaluated through the shared envelope owner and retained with
+the payload across retry. The connector checks the reply against the publication-subject rule
+before handing it to the driver. Both NATS connection builders require TLS for a `tls://` address,
+including on subsequent connections. The pinned driver owns ordered header encoding and decoding.
+The shared client-options builder selects its validated transport projection: folded values are normalized in the
+existing frame allocation, which the payload already retains, and compact checked offsets make
+header visits borrow each immutable name and value directly. The offsets fit the NATS server's
+[signed 32-bit payload bound](https://github.com/nats-io/nats-server/blob/main/server/server.go);
+the decoder still reports an offset-conversion failure for a peer outside that contract. Outbound pairs move into the driver without copying names or values; the driver
+checks the complete encoded size before allocating the wire buffer. Stream-reserved message ID
+and expected-stream headers override only exactly spelled names and leave other repeats in their
+written positions. The SDK authoring view retains indexed lookup and its JSON contract, including keys with empty
+value arrays. Header maps use a shared immutable handle, with copy-on-write for SDK authoring;
+Nervix constructs its complete outbound projection once. The handle and its optional field are
+both smaller than an inline indexed map, including for deliveries without headers. Borrowed
+transport visits and clones allocate nothing. Driver-owner checks cover populated shapes,
+long repeated names, large values, continuation folding, empty payload ownership, byte counts
+and reserved overrides. The connector never reconstructs transport order from a map.
 
 `MQTT TOPIC` keeps a subscription's topic filter and a publication's topic exactly as written,
 letter case included, within MQTT's 65,535-byte string. A filter may write `+` for one level and
@@ -1387,7 +1419,7 @@ to fit one. The layouts are:
 - `ordered_repeats`: every header in the order it was written, a repeated name once for each of its
   values, such as Kafka record headers.
 - `repeats_by_name`: every value of a name, together and in the order written, while the order of
-  different names is not declared, such as a NATS header map.
+  different names is not declared, such as an HTTP response header map.
 - `last_wins`: one value per name, the last one written, while the order of names is not declared,
   such as SQS message attributes.
 - `sorted_by_name`: one value per name, the last one written, with names in ascending byte order,
@@ -1411,8 +1443,7 @@ the `write_header` calls of one record become on the published message.
 | --- | --- | --- | --- |
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
-| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC`, `MQTT TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
-| `repeats_by_name`, exact names | `NATS SUBJECT`, `NATS STREAM` | `NATS SUBJECT`, `NATS STREAM` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `NATS SUBJECT`, `NATS STREAM` | `KAFKA TOPIC`, `MQTT TOPIC`, `NATS SUBJECT`, `NATS STREAM` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `sorted_by_name`, lowercase names | None | `HTTP REQUEST` | one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -1493,7 +1524,8 @@ redelivery flag followed by its AMQP basic properties, `SQS QUEUE` the message i
 first-receive times, receive count, group and deduplication identifiers, sequence number and
 sender identifier, `SYSLOG LISTENER` the peer address, transport and verified TLS client subject,
 `REDIS PUBSUB` the delivering channel and the pattern it matched, `PROMETHEUS QUERY` the query and
-the instant it was evaluated at, and every other entity none. The endpoint entities are served by
+the instant it was evaluated at, and NATS the delivered subject and reply with the additional
+stream delivery fields above. Every other entity supplies none. The endpoint entities are served by
 the host itself rather than a connector crate, so the server's endpoint intake hands their values
 over the same way a connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
@@ -1501,7 +1533,11 @@ validation reads that declaration for the fields an ingestor's route programs an
 connector's message hands the host the value of every declared field in declared order, one typed
 call per field into the host's value sink, so the three cannot disagree. A value is a `STRING`,
 `BYTES`, `BOOL`, `U8`, `U16`, `U32`, `I32`, `I64`, `U64` or `DATETIME`, the transport's own type
-rather than a wider or narrower one, and it is absent where the message carries none. A connector
+rather than a wider or narrower one, and it is absent where the message carries none. A field whose
+transport representation cannot be decoded carries its original typed failure. The value sink can
+request a deferred field producer; a group evaluates it only for a field its programs read, while
+an owned capture evaluates every field once. Each producer emits exactly one value. A typed failure
+retains its cause through capture and replay and refuses a row only where the field is read. A connector
 that keeps a message whose transport value its field's type cannot hold hands that value over as
 unrepresentable, with its declared type and a description of the transport value, never a
 substitute value and never an absence: `RABBITMQ QUEUE` does so for an AMQP timestamp after
@@ -1529,14 +1565,14 @@ The host projects metadata lazily. When an ingestor binds its programs, the host
 declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest
 group of the ingestor builds Arrow columns for those fields and no others. A group of an ingestor
 that reads none visits no metadata value at all. A message whose value for a read field is
-unrepresentable is refused once its ingestor's `FILTER WHERE` has kept it and before its event time
-is selected: each output route's `ON MESSAGE ERROR` policy receives a message error with code
-`validation` and operation `admit` that names `metadata.<field>` and describes the value, and the
-message's ACK resolves through that policy as any other refused message's does. A value that is
-unrepresentable in a field no program reads refuses nothing, so the lazy projection still decides
-what a message costs and whether it can fail. Transport headers keep their projection whatever the
-programs read, because an ingestor's error-route programs may call `read_header` and are compiled
-with the domain's routing, outside the source host.
+unrepresentable or invalid is refused once its ingestor's `FILTER WHERE` has kept it and before
+its event time is selected: each output route's `ON MESSAGE ERROR` policy receives a message error
+with code `validation` and operation `admit` that names `metadata.<field>` and describes the value
+or typed failure. The message's ACK resolves through that policy as any other refused message's
+does. An unrepresentable or invalid value in a field no program reads refuses nothing, so the lazy
+projection still decides what a message costs and whether it can fail. Transport headers keep their
+projection whatever the programs read, because an ingestor's error-route programs may call
+`read_header` and are compiled with the domain's routing, outside the source host.
 
 Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
 remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
@@ -3322,6 +3358,14 @@ sequenceDiagram
   overflow clause: capacity refuses new input instead of discarding accepted bodies.
 
 ## Failure and observation
+
+The emitter host observes one publish or due staged-commit attempt through retained metric
+children. Its existing typed result selects `succeeded`, `transient`, `misconfigured` or
+`violation`; cancellation before a definitive answer is transient. A settled record rejection
+does not itself fail the attempt. Unknown or repeated record answers remain contract violations.
+The observation keeps the original report, retry decision, pending acknowledgements and error
+policy intact. [Connector Interactions](metrics-and-observability.md#connector-interactions) owns
+the families, labels, duration buckets and owner-routed `destination:` inspection section.
 
 The compiler failure-contract gate reads exact source-owned outcome classifications at the
 contract's payload preparation and Sentry's override of it, Kafka's `ACK TIMEOUT` conversion,

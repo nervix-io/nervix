@@ -41,6 +41,17 @@ RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The 
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
 certificate/key pairing refusal remains independent of the scheme check.
 
+NATS stream metadata is decoded where a program requests it. A malformed acknowledgement
+subject retains the driver's parsing cause; a nonpositive sequence or delivery count and an
+out-of-range publication timestamp have distinct typed field causes. `IngestMetadataFailure`
+shares the immutable typed cause through capture and replay. The host projects it into a validation
+row outcome only for a read field, after `FILTER WHERE` and before event-time selection. A delivery
+retains its opaque transport acknowledgement independently; a missing acknowledgement remains a
+source-attempt failure. A computed Core reply subject
+that violates the publication-subject rule instead becomes a per-record rejection before hand-over.
+An invalid literal reply subject is refused by registry preflight with `NatsReplySubject` and the
+external-name validation cause, before the emitter starts.
+
 An OTEL literal outside its declared field domain is a typed registry mapping issue that names
 the signal, key and required constraint. It carries no literal value. A TLS file key with a
 plaintext endpoint is a typed client-schema scheme refusal before file inspection, for either
@@ -606,6 +617,11 @@ codec, and the field when one is at fault, and the typed reason stays beneath it
 wire field or `ON INGESTION` program; a `FieldDecodeError` or `FieldEncodeError` for a value that
 does not fit its field; a `SyslogDecodeError` or `SyslogEncodeError` for a syslog frame; the Arrow
 builder's `RuntimeSchemaError`; or the CBOR, Avro, simd-json, protobuf or UTF-8 error that failed.
+Schemaful CBOR rejects a tagged item, a non-text map key, and a duplicate map key with a typed
+`FieldDecodeError` beneath the codec and field context. A CBOR value that cannot fit an internal
+Arrow field carries `RuntimeSchemaError::CborValueTypeMismatch` with its CBOR kind and expected
+internal type. CBOR header inspection retains a typed read, syntax or depth cause if it cannot
+finish on a payload the value decoder otherwise accepts.
 An unfolding payload keeps the report of the message that failed and names its zero-based input and
 output position after it. The ingest group returns that report unchanged. A source host and an HTTP
 or WebSocket endpoint render the whole chain once as the message of the decode rejection that
@@ -1299,7 +1315,10 @@ A NATS source whose client loses its connection to the server reports
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
 `IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error.
 The driver's `ConnectError` remains beneath `Connect`, so a peer that closes before its initial
-INFO message is reported as `expected INFO, got nothing`. A NATS STREAM source reports the
+INFO message is reported as `expected INFO, got nothing`. The driver's ordered header decoder
+keeps invalid UTF-8, header-name, header-value and checked-offset conversion failures as typed
+causes under `io::Error`; these remain transport failures, separate from projected delivery-field
+failures. A NATS STREAM source reports the
 server's answer that its stream or consumer does not exist as
 `NatsStreamIngestorError::MissingStream` or `MissingConsumer` beneath `IngestorError::Resume`,
 naming the stream and the consumer, and a consumer it cannot read as declared as `PushConsumer` or
@@ -2080,6 +2099,14 @@ failure beneath the reason can quote the payload it evaluated, and is not render
 
 ### Whole-Batch And Node Failures
 
+Emitter interaction metrics project the host's existing typed result into a bounded observation:
+success, retryable failure (also an interrupted attempt), invalid connector configuration, or
+terminal preparation/contract violation. An unknown or repeated record answer belongs to the
+last class. The projection does not replace a report, render its cause into a label or change
+retry and acknowledgement policy. A settled record rejection can therefore accompany a
+successful host attempt. The exact label spellings and families belong to
+[Connector Interactions](metrics-and-observability.md#connector-interactions).
+
 A planned batch that fails as a whole, rather than one message at a time, returns a
 `PlannedGeneralError` report together with the acknowledgements of every message the batch held.
 The error names the step that failed: preparing lookup inputs or the input batch, executing the
@@ -2499,7 +2526,10 @@ describes impact inspection.
 The session service's own edges report the same way. A gRPC call whose credentials do not
 authenticate it fails as a `GrpcAuthenticationError` report, `Required`, `Failed` or `Busy`, and the
 call ends with `UNAUTHENTICATED`, or with `UNAVAILABLE` when the node could not verify the
-credentials now; the status names only the refusal. A command on a transaction its session is no
+credentials now; the status names only the refusal. Known, unknown and invalid names use the same
+per-name pacing and generic rejection; the delay never carries a separate user-existence outcome.
+An unavailable verification establishes no failure bucket and preserves any existing pacing.
+A command on a transaction its session is no
 longer bound to fails as a `SessionTransactionBindingError` report, whose current context selects
 the `TransactionTakenOver` or `TransactionDetached` disposition and whose chain is the command's
 message. A domain snapshot that cannot be encoded for a session is `SnapshotEncodingError::Graph`
@@ -2575,7 +2605,7 @@ On the serving node, a state, tick or end frame that does not fit the session's 
 sent and is logged as a warning: delivery waits for the next state or tick, and an end it could not
 send still ends the attachment. Accepting clock progress fails only for a domain the node does not
 hold, and a report that does not match the committed fence, or is not newer than the accepted tick,
-is ignored without an error. That failure reaches the node's sessions as the error notice
+is ignored without an error. That failure reaches the node's sessions as the `ControlPlane` error notice
 `failed to apply domain clock progress for '<domain>'` with its whole chain, and its log as a
 warning.
 
@@ -2615,7 +2645,14 @@ through `execute_prepared_with_cancellation` ends with
 the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
 `UncertainCommand` above `RequestCancelled` at `AfterAdmission` for one that keeps running, or
 `CallCancelled` when no request of the call waited for a reply, beneath `UncertainCommand` or
-`UncertainUpload` where the call may already have taken effect. The client decides retries, session
+`UncertainUpload` where the call may already have taken effect. A command reply whose execution reference differs from its request's is reported as a protocol
+violation at the exchange reader, which ends that session before reading another frame. The call
+recovers under its own reference through the ordinary session-loss path, or reports
+`UncertainCommand` if recovery cannot finish. A restore's reference mismatch ends the session
+used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. Hosts read
+`FailureKind::Uncertain` and the original execution reference from that outer context; the CLI
+reports an unknown outcome with exit status `3` when recovery did not complete.
+The client decides retries, session
 recovery and uncertainty from those typed contexts and never from text, and a context names its own
 operation without repeating its transport status, which the next frame shows. The CLI adds the
 operation it ran above the client's report, `failed to connect to the server` or `the request to
@@ -3305,6 +3342,17 @@ owner and compiled configuration context. Missing, stale or incomplete compiler 
 gate; compiler findings feed no debt count. These are repository validation errors and add no
 runtime failure variants.
 [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
+
+`nervix-ratchet` keeps orchestration refusals in typed `error-stack` reports through its command
+boundary. Evidence failures retain the configuration, file and target or package identity;
+measurement refusals retain the peak and declared bound. The command renders the complete report,
+including diagnostic attachments. Cargo progress text is ignored; malformed JSON records stop
+analysis with their log path and typed parser cause. Authored-token provenance retains its typed
+parser cause beneath the source-file context. Driver compilation records preserve exit status or
+signal, resident peak, cgroup OOM observations and admission outcome, so a failed compiler, failed
+driver and interrupted compiler keep distinct diagnoses.
+[Architecture enforcement](architecture-enforcement.md) owns the matrix, shared admission protocol
+and cache evidence that produce these tooling reports.
 
 The isolated architecture compiler emits sixteen ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and

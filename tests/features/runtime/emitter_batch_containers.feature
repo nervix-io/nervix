@@ -34,7 +34,7 @@ Feature: Emitter batch containers
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE WIRE JSON SCHEMA event_json_wire MODE STRICT ( seq integer, note string );
-      CREATE WIRE CBOR SCHEMA event_cbor_wire MODE STRICT ( seq integer, note string );
+      CREATE WIRE CBOR SCHEMA event_cbor_wire MODE STRICT ( seq integer, note text );
       CREATE WIRE AVRO SCHEMA event_avro_wire MODE STRICT ( seq long, note string );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';

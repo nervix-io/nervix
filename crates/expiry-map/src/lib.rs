@@ -58,8 +58,8 @@ intrusive_adapter!(
 ///
 /// Insertion appends to the newest end of the order. Callers can inspect or
 /// remove the oldest value in constant time without shifting the remaining
-/// entries. Keys and values are immutable while stored so intrusive pointers
-/// always refer to stable data.
+/// entries. Keys stay immutable, and [`Self::renew`] mutates values only while the map is
+/// exclusively borrowed, keeping every linked allocation stable.
 pub struct ExpiryMap<K, V> {
     // This field must be dropped before `entries`: the list borrows its nodes.
     order: LinkedList<EntryAdapter<K, V>>,
@@ -107,8 +107,8 @@ where
 
         // SAFETY: `node_ptr` points into an Arc now owned by `entries`, so moving
         // or rehashing the map cannot move or exclusively retag the Entry. The
-        // Entry is unlinked here, remains immutable while linked, and every
-        // removal keeps the Arc alive until after unlinking.
+        // Entry is unlinked here, and every removal keeps the Arc alive until
+        // after unlinking. Renewal reborrows its value only through the retained pointer.
         self.order
             .push_back(unsafe { UnsafeRef::from_raw(node_ptr) });
         true
@@ -124,6 +124,66 @@ where
         self.entries
             .get(KeyRef::from_key(key))
             .map(|entry| &entry.value)
+    }
+
+    /// Returns the stored shared key and value without changing the expiration order.
+    pub fn get_shared(&self, key: &K) -> Option<(&Arc<K>, &V)> {
+        self.entries
+            .get(KeyRef::from_key(key))
+            .map(|entry| (&entry.key, &entry.value))
+    }
+
+    /// Moves an existing entry to the newest end and returns its shared key and mutable value.
+    ///
+    /// The lookup and relink take constant time. The key and value keep their allocations, and a
+    /// missing key leaves the map unchanged. Key callbacks finish before the node is detached,
+    /// so a panicking lookup leaves its order intact. The caller updates any expiration value
+    /// before releasing the returned borrow.
+    ///
+    /// ```
+    /// use meticulous::OptionExt as _;
+    /// use nervix_expiry_map::ExpiryMap;
+    ///
+    /// let mut map = ExpiryMap::new();
+    /// assert!(map.insert("first", 1));
+    /// assert!(map.insert("second", 2));
+    /// let (_, value) = map.renew(&"first").assured("the entry was inserted above");
+    /// *value = 3;
+    /// assert_eq!(map.remove_oldest(), Some(2));
+    /// assert_eq!(map.remove_oldest(), Some(3));
+    /// ```
+    ///
+    /// The exclusive value borrow keeps its entry alive:
+    ///
+    /// ```compile_fail
+    /// use nervix_expiry_map::ExpiryMap;
+    ///
+    /// let mut map = ExpiryMap::new();
+    /// map.insert("first", 1);
+    /// let Some((_, value)) = map.renew(&"first") else { return; };
+    /// map.clear();
+    /// *value = 2;
+    /// ```
+    pub fn renew(&mut self, key: &K) -> Option<(&Arc<K>, &mut V)> {
+        let key = KeyRef::from_key(key);
+        let stored = self.entries.get_mut(key)?;
+        let node_ptr = Arc::as_ptr(stored);
+        // End the list's borrow before taking an exclusive reference to the entry, then derive
+        // its new list pointer from that reference. No further key callback may run while it is
+        // detached: a Hash or Eq panic must leave both views together. The allocation never moves.
+        Self::unlink(&mut self.order, node_ptr);
+        let node = Arc::get_mut(stored)
+            .assured("the index owns the only Entry Arc; external shared handles own only its key");
+        let node_ptr = ptr::from_mut(node);
+        // SAFETY: the entry remains in the index at this address, was unlinked above, and the
+        // returned value borrow prevents another map operation until mutation ends.
+        self.order
+            .push_back(unsafe { UnsafeRef::from_raw(node_ptr) });
+        // Derive both field borrows through the list's raw pointer too: a sibling reborrow through
+        // `node` would invalidate that pointer for the value's bytes under Stacked Borrows.
+        // SAFETY: the same exclusive map borrow prevents any other access to this value, and
+        // `node_ptr` points into the indexed allocation until that borrow ends.
+        Some(unsafe { (&(*node_ptr).key, &mut *ptr::addr_of_mut!((*node_ptr).value)) })
     }
 
     /// Returns the oldest entry.
@@ -170,12 +230,10 @@ where
     /// Removes an entry by key.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let key = KeyRef::from_key(key);
-        let node_ptr = self.entries.get(key).map(Arc::as_ptr)?;
-        let (stored_key, node) = self.entries.remove_entry(key).verified(
-            "the map inserts into the index and the order list together and holds &mut self here",
-        );
-        debug_assert_eq!(Arc::as_ptr(&node), node_ptr);
-        self.unlink(node_ptr);
+        let (stored_key, node) = self.entries.remove_entry(key)?;
+        // The removed Arc keeps the allocation alive while its list link is withdrawn.
+        let node_ptr = Arc::as_ptr(&node);
+        Self::unlink(&mut self.order, node_ptr);
         drop(stored_key);
 
         let Ok(node) = Arc::try_unwrap(node) else {
@@ -224,12 +282,12 @@ where
         self.entries.is_empty()
     }
 
-    fn unlink(&mut self, node_ptr: *const Entry<K, V>) {
+    fn unlink(order: &mut LinkedList<EntryAdapter<K, V>>, node_ptr: *const Entry<K, V>) {
         // SAFETY: the pointer was read from `entries` under exclusive access to
         // this map. Every indexed Entry is linked exactly once, and the Arc that
         // owns it remains alive in the caller until this cursor removes the sole
         // UnsafeRef from `order`.
-        let linked = unsafe { self.order.cursor_mut_from_ptr(node_ptr) }
+        let linked = unsafe { order.cursor_mut_from_ptr(node_ptr) }
             .remove()
             .verified(
                 "the map inserts into the index and the order list together and holds &mut self \
@@ -427,6 +485,138 @@ mod tests {
     }
 
     #[test]
+    fn keyed_operations_keep_panicking_callbacks_before_order_mutation() {
+        #[derive(PartialEq, Eq)]
+        struct CountedKey<'a> {
+            value: u8,
+            hashes: &'a Cell<usize>,
+        }
+
+        impl std::hash::Hash for CountedKey<'_> {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                let next = self
+                    .hashes
+                    .get()
+                    .checked_add(1)
+                    .assured("this test hashes only a handful of keys");
+                self.hashes.set(next);
+                assert_eq!(next, 1, "the query's next hash callback panics");
+                std::hash::Hash::hash(&self.value, state);
+            }
+        }
+
+        let hashes = Cell::new(0);
+        let mut map = ExpiryMap::new();
+        assert!(map.insert(
+            CountedKey {
+                value: 7,
+                hashes: &hashes
+            },
+            10
+        ));
+        hashes.set(0);
+        let renewed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (_, value) = map
+                .renew(&CountedKey {
+                    value: 7,
+                    hashes: &hashes,
+                })
+                .assured("the query names the inserted entry");
+            *value = 11;
+        }));
+        assert!(renewed.is_ok(), "renewal hashes its query only once");
+        assert_eq!(hashes.get(), 1);
+
+        // The next lookup panics before it finds the entry. Catching a key callback must leave
+        // the index and order together, so iteration and a later removal remain safe.
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some((_, value)) = map.renew(&CountedKey {
+                value: 7,
+                hashes: &hashes,
+            }) {
+                *value = 99;
+            }
+        }));
+        assert!(refused.is_err());
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.iter().map(|(_, value)| *value).collect::<Vec<_>>(),
+            vec![11]
+        );
+        hashes.set(0);
+        assert_eq!(
+            map.remove(&CountedKey {
+                value: 7,
+                hashes: &hashes
+            }),
+            Some(11)
+        );
+        assert_eq!(hashes.get(), 1);
+    }
+
+    #[test]
+    fn shared_lookup_returns_the_stored_key_without_changing_order() {
+        let key = Arc::new("first".to_string());
+        let mut map = ExpiryMap::new();
+        assert!(map.insert_shared(key.clone(), 10));
+        assert!(map.insert("second".to_string(), 20));
+        let (stored, value) = map.get_shared(key.as_ref()).assured("the key was inserted");
+        assert!(Arc::ptr_eq(stored, &key));
+        assert_eq!(*value, 10);
+        assert!(map.get_shared(&"missing".to_string()).is_none());
+        assert_eq!(map.remove_oldest(), Some(10));
+        assert_eq!(map.remove_oldest(), Some(20));
+    }
+
+    #[test]
+    fn a_renewed_entry_keeps_its_key_and_value_allocations() {
+        let key = Arc::new("first".to_string());
+        let mut map = ExpiryMap::new();
+        assert!(map.insert_shared(key.clone(), 10));
+        assert!(map.insert("second".to_string(), 20));
+        let address = std::ptr::from_ref(map.get(key.as_ref()).assured("the key was inserted"));
+
+        let (stored, renewed) = map.renew(key.as_ref()).assured("the key was inserted");
+        assert!(Arc::ptr_eq(stored, &key));
+        assert_eq!(std::ptr::from_mut(renewed).cast_const(), address);
+        *renewed = 11;
+
+        assert_eq!(map.oldest(), Some((&"second".to_string(), &20)));
+        let (stored, value) = map
+            .iter_shared()
+            .last()
+            .assured("the map holds two entries");
+        assert!(Arc::ptr_eq(stored, &key));
+        assert_eq!(*value, 11);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.remove_oldest(), Some(20));
+        assert_eq!(map.remove_oldest(), Some(11));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn renewal_handles_missing_singleton_middle_and_newest_entries() {
+        let mut map = ExpiryMap::new();
+        assert_eq!(map.renew(&0).map(|(_, value)| value), None);
+        assert!(map.insert(0, 0));
+        assert_eq!(map.renew(&0).map(|(_, value)| value), Some(&mut 0));
+        assert!(map.insert(1, 10));
+        assert!(map.insert(2, 20));
+        assert_eq!(map.renew(&1).map(|(_, value)| value), Some(&mut 10));
+        assert_eq!(map.renew(&1).map(|(_, value)| value), Some(&mut 10));
+        assert_eq!(map.renew(&3).map(|(_, value)| value), None);
+        assert_eq!(
+            map.iter()
+                .map(|(key, value)| (*key, *value))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (2, 20), (1, 10)]
+        );
+        assert_eq!(map.remove(&2), Some(20));
+        assert_eq!(map.remove_oldest(), Some(0));
+        assert_eq!(map.remove_oldest(), Some(10));
+    }
+
+    #[test]
     fn moving_the_map_does_not_move_linked_values() {
         let mut original = ExpiryMap::default();
         for key in 0..128 {
@@ -495,6 +685,7 @@ mod tests {
         Remove(String),
         RemoveOldest,
         Lookup(String),
+        Renew(String),
         ShareInto,
         Clear,
     }
@@ -507,7 +698,8 @@ mod tests {
                 100..=139 => Operation::InsertShared(key),
                 140..=179 => Operation::Remove(key),
                 180..=209 => Operation::RemoveOldest,
-                210..=239 => Operation::Lookup(key),
+                210..=229 => Operation::Lookup(key),
+                230..=239 => Operation::Renew(key),
                 240..=251 => Operation::ShareInto,
                 252..=u8::MAX => Operation::Clear,
             }
@@ -628,6 +820,27 @@ mod tests {
                     let expected = self.reference.get(key).copied();
                     assert_eq!(self.map.contains_key(key), expected.is_some());
                     assert_eq!(self.map.get(key).map(|value| value.identity), expected);
+                    let shared = self.map.get_shared(key);
+                    assert_eq!(shared.map(|(_, value)| value.identity), expected);
+                    if let Some((stored, _)) = shared {
+                        assert_eq!(stored.as_ref(), key);
+                    }
+                }
+                Operation::Renew(key) => {
+                    let expected = self.reference.shift_remove(key);
+                    if let Some(identity) = expected {
+                        self.reference.insert(key.clone(), identity);
+                    }
+                    let renewed = self.map.renew(key);
+                    assert_eq!(renewed.as_ref().map(|(_, value)| value.identity), expected);
+                    if let Some((stored, _)) = renewed {
+                        let shared = stored.clone();
+                        let (indexed, _) = self
+                            .map
+                            .get_shared(key)
+                            .verified("renewal preserves the entry");
+                        assert!(Arc::ptr_eq(&shared, indexed));
+                    }
                 }
                 Operation::ShareInto => self.share_into(),
                 Operation::Clear => {

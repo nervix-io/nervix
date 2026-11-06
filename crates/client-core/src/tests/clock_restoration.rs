@@ -24,7 +24,9 @@ use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc};
 use super::{DEADLINE, client_on, detached_exchange, domain, reply_frame, verified};
 use crate::{
     Client, ClientError, DomainClockEvent, DomainClockInterruption, DomainClockRestorationFailure,
-    exchange::{Exchange, ExchangeReader, PendingReplies, ReaderFlow, SESSION_LIMITS},
+    exchange::{
+        Exchange, ExchangeReader, PendingReplies, ReaderFlow, SESSION_LIMITS, SessionEvents,
+    },
 };
 
 /// One exchange the test serves: the frames the client sends on it, and the reader the client
@@ -40,7 +42,7 @@ impl ServedExchange {
     fn connect() -> (Client, Self) {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let exchange = detached_exchange(frames, pending.clone());
+        let exchange = detached_exchange(frames, pending.clone(), SessionEvents::new().emitters);
         let reader = ExchangeReader::new(
             pending,
             exchange.emitters.clone(),
@@ -55,10 +57,8 @@ impl ServedExchange {
     fn reopen(client: &Client) -> (Exchange, Self) {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let mut exchange = detached_exchange(frames, pending.clone());
         let emitters = client.inner.events.emitters.clone();
-        exchange.generation = emitters.begin_generation();
-        exchange.emitters = emitters.clone();
+        let exchange = detached_exchange(frames, pending.clone(), emitters.clone());
         let reader = ExchangeReader::new(pending, emitters, exchange.generation.clone());
         (exchange, Self { requests, reader })
     }

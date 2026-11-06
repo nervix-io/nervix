@@ -690,7 +690,7 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.49.1"
-source = "git+https://github.com/glebpom/nats.rs.git?rev=d131b7bc954fc57b8447e0d402a896b4b67010b1#d131b7bc954fc57b8447e0d402a896b4b67010b1"
+source = "git+https://github.com/glebpom/nats.rs.git?rev=649282d58fb5248ea24e620385c5dabf1bdaa813#649282d58fb5248ea24e620385c5dabf1bdaa813"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -709,6 +709,7 @@ dependencies = [
  "serde_json",
  "serde_nanos",
  "serde_repr",
+ "smallvec",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -7214,6 +7215,7 @@ dependencies = [
  "error-stack",
  "futures-util",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-connector",
  "nervix-execution",
  "nervix-models",
@@ -8035,6 +8037,7 @@ dependencies = [
  "chitchat",
  "chrono",
  "ciborium",
+ "ciborium-ll",
  "clap",
  "clap_complete",
  "criterion 0.5.1",
@@ -8311,6 +8314,7 @@ dependencies = [
  "error-stack",
  "futures-util",
  "gloo-net 0.7.0",
+ "indexmap 2.14.2",
  "js-sys",
  "leptos",
  "meticulous",

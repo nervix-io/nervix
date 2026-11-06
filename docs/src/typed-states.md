@@ -314,17 +314,24 @@ A polled HTTP request's header holds a literal or names a client secret as two s
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
 
-A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`,
-so a stored declaration holds the archived union of both. The registry's `NERVIX MODEL NSE` archive signature identifies the
-current Model layout, including those unions, the separate JSON and CBOR wire type enums, the AVRO
-representation types, explicit `BASE64` codec encoding, a Pulsar subscription's required type, an
-owned Pulsar subscription's required start position, a Kafka consumer group's required start
-position, the required 16-bit branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT
+The NATS driver's ordered transport header projection owns either validated frame bytes with
+checked compact ranges or the emitter's owned ordered pairs. Names, values and payloads keep
+their ownership through publication; neither a cast nor a fabricated range stands for a failed
+transport offset conversion. The SDK's indexed authoring and typed-inspection views preserve
+empty JSON value arrays. These driver representations never enter semantic Models or plans.
+
+A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored
+declaration holds the archived union of both. The registry's `NERVIX CBOR NATS` archive
+signature identifies the current Model layout, including those unions, separate JSON and CBOR wire
+type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec encoding, a
+Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+consumer group's required start position, the required 16-bit branch partition count, Sentry
+platform, an ingestor's `TIMESTAMP AT
 metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS
 QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
 ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside
 its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
-`PATTERN`, and that header state. Consensus's `raft_stream_emit_` keyspaces and current state metadata
+`PATTERN`, and that header state. Consensus's `raft_cbor_nats_` keyspaces and current state metadata
 encoding identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps. The runtime state
 store's `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps,
@@ -975,6 +982,14 @@ the required runtime-state identity. Runtime owners enforce transitions that dep
 execution or recovery. Connectors and the session edge validate external representations when
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
+
+NATS stream metadata crosses that boundary with nonzero stream sequence and delivery counts and
+a typed publication timestamp. Requested fields are decoded from the opaque acknowledgement during
+a synchronous metadata visit. An invalid field retains its typed cause as `IngestMetadataFailure`,
+with one immutable failure identity shared by capture and replay; its equality identifies that same
+failure instance. A Core message's absent reply subject remains absent and reads as a typed null;
+a conversion failure is a distinct state and refuses a row only where the field is read. Deferred
+field producers emit exactly one value, and the host validates that boundary.
 
 The Iceberg emitter validates its configured location into a URL before creating its storage factory.
 The initialized operator belongs to that storage root: a later object path must match its scheme,
