@@ -507,6 +507,8 @@ struct ScenarioWorld {
     saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
     /// How the last restore stream a scenario shaped itself ended.
     last_restore_end: Option<crate::backup::restore::RestoreStreamEnd>,
+    /// A real restore whose test peer substituted its reply, and its exact-reference recovery.
+    restore_reply_validation: Option<Box<backup::restore_reply_validation::RestoreValidation>>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<crate::backup::restore::BackgroundRestore>,
     /// Real filesystem capacity held while an accepted restore tries its client inspection.
