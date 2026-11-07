@@ -158,6 +158,11 @@ A scenario can release the byte cadence once. That wakes every delayed chunk and
 sockets, buffered bytes and the reserved listener intact; future connections also run without
 pacing. A release does not parse the stream, fabricate a product response or replace a connection.
 
+Both proxy sockets preserve the interconnect's `TCP_NODELAY` policy. The accepted socket and the
+connection to the private listener disable Nagle coalescing before forwarding, so small writes
+follow the fixture's explicit byte cadence and its release. Focused socket-owner tests check both
+options and preserve request and response bytes across the two distinct connection legs.
+
 The rate-limited case transfers leadership to node-2 while the stopped follower has only its
 initial log, making the new leader recover an unconfirmed previous-log boundary. The scenario
 starts the follower without the harness's catch-up retries, records append-stream
