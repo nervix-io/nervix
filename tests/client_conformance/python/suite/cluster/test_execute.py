@@ -5,6 +5,7 @@ execution again, and one session shared by several threads."""
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +29,7 @@ def test_a_prepared_command_completes_under_its_execution_reference(
     assert outcome.schema is None
     assert outcome.backup is None
     assert outcome.restore is None
+    assert outcome.upload_failure is None
 
 
 def test_a_failed_command_reports_its_diagnostics_with_their_spans(session: nx.Session) -> None:
@@ -73,6 +75,32 @@ def test_a_command_whose_deadline_passed_is_recovered_by_executing_it_again(
     outcome = session.execute(execution, cancel=deadline())
     assert outcome.disposition == nx.Disposition.COMPLETED
     assert execute(session, statement).disposition == nx.Disposition.FAILED
+
+
+def test_an_upload_completes_again_under_its_identity_and_refuses_another_archive(
+    session: nx.Session, unique: str, tmp_path: Path
+) -> None:
+    resource = f"bundle_{unique}"
+    completed(session, f"CREATE RESOURCE {resource};")
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    payload = directory / "payload.txt"
+    payload.write_bytes(b"first archive\n")
+    # ANCHOR: upload
+    execution = session.prepare(f"UPLOAD RESOURCE {resource} VERSION '{directory}';")
+    uploaded = session.execute(execution, cancel=deadline())
+    assert uploaded.disposition == nx.Disposition.COMPLETED
+    assert uploaded.upload_failure is None
+    # The same execution sends the same archive under the same upload identity, so it completes
+    # again instead of installing a second version.
+    assert session.execute(execution, cancel=deadline()).disposition == nx.Disposition.COMPLETED
+    # ANCHOR_END: upload
+    payload.write_bytes(b"different archive\n")
+    # ANCHOR: upload_conflict
+    refused = session.execute(execution, cancel=deadline())
+    assert refused.disposition == nx.Disposition.FAILED
+    assert refused.upload_failure == nx.UploadFailure.IDENTITY_CONFLICT
+    # ANCHOR_END: upload_conflict
 
 
 def test_one_session_serves_several_threads_at_once(session: nx.Session, unique: str) -> None:

@@ -82,6 +82,18 @@ class Disposition:
     def __hash__(self) -> int: ...
 
 @final
+class UploadFailure:
+    INVALID_STREAM: ClassVar[UploadFailure]
+    RESOURCE_NOT_DECLARED: ClassVar[UploadFailure]
+    SIZE_MISMATCH: ClassVar[UploadFailure]
+    QUOTA_EXCEEDED: ClassVar[UploadFailure]
+    INSTALLATION_FAILED: ClassVar[UploadFailure]
+    IDENTITY_CONFLICT: ClassVar[UploadFailure]
+    def __int__(self) -> int: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
 class EventKind:
     ROWS: ClassVar[EventKind]
     DELIVERY_LOST: ClassVar[EventKind]
@@ -409,6 +421,8 @@ class Execution:
 class Outcome:
     @property
     def disposition(self) -> Disposition: ...
+    @property
+    def upload_failure(self) -> UploadFailure | None: ...
     @property
     def message(self) -> str: ...
     @property

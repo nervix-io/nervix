@@ -238,6 +238,11 @@ tier = "cluster"
 
 [[test]]
 host = "python"
+identity = "cluster/test_execute.py::test_an_upload_completes_again_under_its_identity_and_refuses_another_archive"
+tier = "cluster"
+
+[[test]]
+host = "python"
 identity = "cluster/test_execute.py::test_one_session_serves_several_threads_at_once"
 tier = "cluster"
 

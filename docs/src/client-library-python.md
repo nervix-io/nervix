@@ -102,6 +102,24 @@ An outcome also carries what its command opened: the `subscription` and `schema`
 `CREATE SUBSCRIPTION`, the archive summary of a `BACKUP` and the report of a `RESTORE`. Each is `None`
 for a command that opened none.
 
+`UPLOAD RESOURCE <name> VERSION '<directory>';` streams a local directory as a new version of a
+resource the domain declares. The session serves it itself, under the upload identity its
+`Execution` fixed, so executing the same execution again sends the same archive under the same
+identity and completes without installing a second version.
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_execute.py:upload}}
+```
+
+An upload the cluster refused is a `FAILED` outcome whose `upload_failure` says why. It is `None` for
+a completed upload and for every other command. `IDENTITY_CONFLICT` means the identity already names
+another archive: keep the original bytes to recover that upload, and prepare the statement again
+for a different one.
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_execute.py:upload_conflict}}
+```
+
 ## Complete A Statement
 
 `Session.suggest` asks the cluster what may follow the cursor in a partial statement, from the
@@ -510,13 +528,15 @@ reads a withheld value as a null, so read `states` to tell a withheld value from
 
 ## What The Library Does Not Expose
 
-The package exposes sessions, Plexus execution, completion, subscriptions, domain clocks, client
-endpoints, backup and restore. It does not expose these parts of the Rust client:
+The package exposes sessions, Plexus execution with resource uploads, completion, subscriptions,
+domain clocks, client endpoints, backup and restore. It does not expose these parts of the Rust
+client:
 
 - the typed transaction status, transaction attach and transaction inspection; `BEGIN`, `COMMIT` and
   `REVERT` still run through `execute`, and the session keeps its transaction across a reconnect;
 - the typed domain list, structured choice lookups, server notices and the leadership view;
-- resource uploads from a local directory;
+- uploads that report their progress or run under an upload identity you choose; `UPLOAD RESOURCE`
+  runs through `execute` under the identity its `Execution` fixed;
 - `DESCRIBE BACKUP`, which reads an archive without a server.
 
 There is no asyncio interface: every call blocks its thread with the GIL released, so run a call on
