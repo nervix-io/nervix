@@ -329,8 +329,8 @@ current connection, retry and deadline limits.
   response, is retried with the same bytes and records rather than prepared again. A batching
   Sentry emitter places its members inside one event in one envelope, and a `SYSLOG` codec places
   complete member messages in one frame's JSON-array `MSG`.
-  SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
-  only with branched input.
+  Check SQS `.fifo` queue and group-expression requirements against the
+  [SQS emitter contract](../../../../docs/src/emitters.md#sqs), including branch-field scope.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above
   that range is rejected through `ON MESSAGE ERROR` instead of being written or used as an
   `ON CONFLICT` target, so map such a column to `STRING` when the full unsigned range must reach

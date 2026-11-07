@@ -115,7 +115,7 @@ An operation waiting for a turn holds no place in the class's queue. A place in 
 every byte the class releases until it is satisfied, so a storage operation waiting there would
 hold the class's remaining room for itself until the store's own earlier working set ended. Storage
 operations instead wait for each other at the turn, and the rest of the class stays with its other
-work: a source's control call, a replication frame being encoded and a follower's answer find room
+work: an ingestor's control call, a replication frame being encoded and a follower's answer find room
 beside the working set the store holds. A working set returns its bytes before its turn passes, so
 the next one is admitted without waiting in the class.
 
@@ -400,10 +400,10 @@ one oversized first entry travels alone. The reader releases the ordered storage
 chunks and retains the chunk's working set, its memory charge and the store's Commands turn, until
 its entries have been handed to the consumer. Handing out the final entry releases the exhausted
 iterator allocation, its charge and its turn before that poll returns. A consumer that parks with
-its final entry therefore holds no empty chunk that could keep another reader or a source control
+its final entry therefore holds no empty chunk that could keep another reader or an ingestor control
 call out of the Commands class. A chunk that still holds entries, such as a replication stream's
 while its follower has not answered, keeps its working set; another reader or storage operation
-then waits for the turn rather than in the Commands class, so a source control call still finds
+then waits for the turn rather than in the Commands class, so an ingestor control call still finds
 room. The reader retains an explicit exhausted boundary, without the allocation, so a subsequent
 chunk still yields before requesting the ordered storage worker.
 
@@ -510,9 +510,10 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_inference_avro_logs`,
-`raft_inference_avro_meta`, `raft_inference_avro_state`, and
-`raft_inference_avro_snapshots`. Opening it validates the complete keyspace namespace before
+The current emitter Models carry explicit key expressions, source-partition routing and
+expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces: `raft_key_avro_logs`,
+`raft_key_avro_meta`, `raft_key_avro_state`, and
+`raft_key_avro_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka

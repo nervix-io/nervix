@@ -135,7 +135,7 @@ Reading top to bottom:
   `KAFKA CLIENT`, and the topic and consumer group are string literals sent to Kafka exactly
   as written.
 - `OFFSET BY CONSUMER GROUP` tracks progress in Kafka; `MODE ACK SEQUENTIAL` acknowledges records
-  in order. The full Kafka source grammar is in
+  in order. The full Kafka ingestor grammar is in
   [Supported Ingestor Types](ingestors.md#supported-ingestor-types).
 - `TO orders` starts a route. Routes begin empty: `INHERIT ALL` copies every decoded field into
   the outgoing record, and later steps show `SET` constructing new values. See

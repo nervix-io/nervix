@@ -535,7 +535,7 @@ for the HTTP/2 maximum names RFC 9113.
 
 A Kafka consumer's single control-operation turn is an ordering invariant rather than an
 operator capacity. Its fixed constant states that a cancelled native mutation cannot be
-overtaken by the next operation. The source control-call budget is the external client's
+overtaken by the next operation. The ingestor control-call budget is the external client's
 `socket.timeout.ms`; [Connector Contract](connector-contract.md) owns that per-system value.
 
 Sentry's 1,000,000-byte event limit is a fixed external ingestion contract. The connector

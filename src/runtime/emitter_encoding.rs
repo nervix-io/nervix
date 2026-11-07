@@ -604,17 +604,11 @@ fn batch_envelope(
     batch: &EmitterPublishBatch,
     row_index: usize,
 ) -> EmitterRuntimeResult<Result<BatchEnvelope, UnpublishableRow>> {
-    let key = batch
-        .relay_batch()
-        .keys
-        .get(row_index)
-        .ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "emitter batch row {row_index} has no branch key entry"
-            ))
-        })?
-        .as_ref()
-        .map(|key| key.as_str().to_string());
+    batch.relay_batch().keys.get(row_index).ok_or_else(|| {
+        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+            "emitter batch row {row_index} has no branch key entry"
+        ))
+    })?;
     let headers = batch.headers_for_row(row_index).cloned().ok_or_else(|| {
         Report::new(EmitterRuntimeError::EncodeBatch)
             .attach_printable(format!("emitter batch row {row_index} has no header entry"))
@@ -628,7 +622,7 @@ fn batch_envelope(
         Err(failure) => return Ok(Err(UnpublishableRow::Envelope(failure))),
     };
     Ok(Ok(BatchEnvelope {
-        key,
+        destination: batch.destination(row_index),
         headers,
         message_group,
         clauses,
@@ -867,11 +861,14 @@ mod tests {
                 .expect("the test rows match the emitter input schema"),
             Timestamp::from_unix_nanos(100),
         )
-        .with_envelopes(RowEnvelopes::Evaluated(vec![
-            Ok(Arc::new(message_id("first"))),
-            Ok(Arc::new(message_id("second"))),
-            Err(EnvelopeError::OmittedInputRow),
-        ]))
+        .with_envelopes(RowEnvelopes::Evaluated(
+            vec![
+                Ok(Arc::new(message_id("first")).into()),
+                Ok(Arc::new(message_id("second")).into()),
+                Err(EnvelopeError::OmittedInputRow),
+            ]
+            .into(),
+        ))
     }
 
     #[nervix_primitives::test]

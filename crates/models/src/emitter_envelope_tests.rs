@@ -58,6 +58,8 @@ fn property(name: &str) -> EnvelopeProperty {
 /// An envelope that writes every clause kind once.
 fn every_clause() -> EmitterEnvelope {
     EmitterEnvelope {
+        key: Some(text("key")),
+        partition_from_branch: true,
         persistent: true,
         mandatory: true,
         retain: true,
@@ -121,6 +123,8 @@ fn every_clause_and_property_its_entity_declares_is_admitted() {
 fn only(kind: EnvelopeClauseKind) -> EmitterEnvelope {
     let mut envelope = EmitterEnvelope::default();
     match kind {
+        EnvelopeClauseKind::Key => envelope.key = Some(text("key")),
+        EnvelopeClauseKind::PartitionFromBranch => envelope.partition_from_branch = true,
         EnvelopeClauseKind::Persistent => envelope.persistent = true,
         EnvelopeClauseKind::Mandatory => envelope.mandatory = true,
         EnvelopeClauseKind::Retain => envelope.retain = true,
