@@ -535,7 +535,13 @@ class Silence:
 
 @dataclass(frozen=True)
 class SlowRead:
-    """Take a body 64 KiB every 50 milliseconds, and store nothing of it."""
+    """Take a body 64 KiB every 50 milliseconds, and store nothing of it.
+
+    The accepted socket keeps its constrained window; later connections use the explicit
+    healthy receive buffer so the injected crawl does not also throttle every retry.
+    """
+
+    receive_buffer_after_accept: int
 
 
 class FakeBucket:
@@ -635,6 +641,9 @@ class FakeBucket:
                 fault = self.fault()
                 length = int(self.headers["Content-Length"])
                 if isinstance(fault, SlowRead):
+                    self.server.socket.setsockopt(
+                        socket.SOL_SOCKET, socket.SO_RCVBUF, fault.receive_buffer_after_accept
+                    )
                     self.crawl(length)
                     return
                 try:
@@ -913,7 +922,7 @@ class TransferTests(unittest.TestCase):
     def test_an_upload_that_crawls_is_cut_off_and_sent_again(self) -> None:
         fake = FakeBucket(receive_buffer=8192)
         self.addCleanup(fake.close)
-        fake.faults = [("part-0", SlowRead())]
+        fake.faults = [("part-0", SlowRead(receive_buffer_after_accept=2 * 1024 * 1024))]
         limits = artifacts.Limits(
             slowest_bytes_per_second=8 * 1024 * 1024, slow_seconds=0.5, watch_seconds=0.05, backoff_jitter=0
         )

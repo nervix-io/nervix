@@ -190,7 +190,7 @@ async fn generators_that_outlast_their_stop_grace_share_one_grace() {
     for index in 0..UNRESPONSIVE_TASKS {
         let generator = named::<GeneratorName>(&format!("produce_{index}"));
         execution.generator_tasks.insert(
-            NodeRef::new(ModelKind::Generator, &generator),
+            NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &generator), Unit::SINGLE),
             unresponsive_task(),
         );
     }
@@ -232,7 +232,7 @@ async fn task_kinds_stop_in_turn_so_each_kind_keeps_its_own_grace() {
     let mut execution = idle_execution(&domain);
     let generator = named::<GeneratorName>("produce");
     execution.generator_tasks.insert(
-        NodeRef::new(ModelKind::Generator, &generator),
+        NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &generator), Unit::SINGLE),
         unresponsive_task(),
     );
     let reingestor = named::<ReingestorName>("reroute");
@@ -260,7 +260,7 @@ async fn tasks_that_stop_at_once_cost_no_grace() {
         let generator = named::<GeneratorName>(&format!("produce_{index}"));
         let mut stopped = stopped.clone();
         execution.generator_tasks.insert(
-            NodeRef::new(ModelKind::Generator, &generator),
+            NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &generator), Unit::SINGLE),
             nervix_primitives::task::spawn(async move {
                 stopped
                     .wait_for(|stopped| *stopped)
@@ -681,7 +681,10 @@ async fn a_stopping_domain_waits_past_the_stop_grace_for_a_materialized_relays_l
         .spawn_materialized_stream_snapshot_task(relay.persistence.clone())
         .expect("a persisting runtime starts the relay's checkpoint writer");
     execution.placement_tasks.insert(
-        NodeRef::new(ModelKind::Relay, &checkpoints.placement.identifier),
+        NodeUnitRef::new(
+            NodeRef::new(ModelKind::Relay, &checkpoints.placement.identifier),
+            Unit::SINGLE,
+        ),
         PlacementTasks {
             replication: Vec::new(),
             checkpoints: vec![writer],
@@ -737,6 +740,7 @@ fn relay_state_task_applying_as_it_stops(
     applying: oneshot::Receiver<()>,
 ) -> RelayStateTask {
     let (shutdown, mut stopped) = watch::channel(false);
+    let unit = state.read().placement().unit;
     let runtime = runtime.clone();
     let task = nervix_primitives::task::spawn(async move {
         stopped
@@ -754,7 +758,11 @@ fn relay_state_task_applying_as_it_stops(
             .await
             .expect("the relay's assignment stays authoritative");
     });
-    RelayStateTask { shutdown, task }
+    RelayStateTask {
+        shutdown,
+        task,
+        unit,
+    }
 }
 
 /// A materialized relay's state task goes on applying what the relay delivers while its domain
@@ -793,7 +801,10 @@ async fn a_stopping_domain_writes_a_materialized_relays_last_checkpoint_once_its
         .spawn_materialized_stream_snapshot_task(persistence)
         .expect("a persisting runtime starts the relay's checkpoint writer");
     execution.placement_tasks.insert(
-        NodeRef::new(ModelKind::Relay, &checkpoints.placement.identifier),
+        NodeUnitRef::new(
+            NodeRef::new(ModelKind::Relay, &checkpoints.placement.identifier),
+            Unit::SINGLE,
+        ),
         PlacementTasks {
             replication: Vec::new(),
             checkpoints: vec![writer],

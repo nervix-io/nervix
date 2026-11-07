@@ -42,10 +42,23 @@ use super::*;
 pub(super) struct RelayTransit {
     admitted: AtomicU64,
     handed_on: AtomicU64,
+    /// A partition also contributes to its relay's whole-node admission sequence. The parent
+    /// outlives every partition counter and never points back to one of them.
+    parent: Option<Arc<RelayTransit>>,
 }
 
 impl RelayTransit {
+    pub(super) fn within(parent: Arc<Self>) -> Self {
+        Self {
+            parent: Some(parent),
+            ..Self::default()
+        }
+    }
+
     fn admit(&self) {
+        if let Some(parent) = &self.parent {
+            parent.admit();
+        }
         self.admitted.fetch_add(1, Ordering::Release);
     }
 
@@ -53,6 +66,9 @@ impl RelayTransit {
     /// consumer, to the drain that reads the handed-on total.
     fn hand_on(&self) {
         self.handed_on.fetch_add(1, Ordering::Release);
+        if let Some(parent) = &self.parent {
+            parent.hand_on();
+        }
     }
 
     /// The batches the relay holds now.

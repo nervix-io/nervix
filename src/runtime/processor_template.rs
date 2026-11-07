@@ -1,3 +1,10 @@
+//! Processor program instantiation and branch-state binding.
+//!
+//! Layer: data plane.
+//! - **Owns.** Binding each prepared processor program to one unit's concrete branch state.
+//! - **Depends on.** Typed plans, prepared engines and unit-qualified runtime state services.
+//! - **Must not know.** Plexus parsing, semantic Models or placement policy.
+
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
@@ -481,11 +488,13 @@ impl RelayProcessorTemplate {
         &self,
         runtime: &Runtime,
         domain: &DomainName,
+        unit: Unit,
         key: &Option<BranchKey>,
         incarnation: u64,
         revision: &ProcessorPlanRevision,
     ) -> error_stack::Result<RelayProcessorNode, ProcessorTemplateError> {
         Ok(RelayProcessorNode {
+            unit,
             kind: self.kind,
             processor: self.processor.clone(),
             input_relays: self.input_relays.clone(),
@@ -509,11 +518,12 @@ impl RelayProcessorTemplate {
                     compiled_key_program,
                 } => {
                     let placement = runtime
-                        .state_placement(
+                        .state_placement_for_unit(
                             domain,
                             RuntimeStateKind::Deduplicator,
                             self.kind,
                             &self.processor,
+                            unit,
                             key.clone(),
                         )
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
@@ -548,11 +558,12 @@ impl RelayProcessorTemplate {
                     compiled_aggregates,
                 } => {
                     let placement = runtime
-                        .state_placement(
+                        .state_placement_for_unit(
                             domain,
                             RuntimeStateKind::WindowProcessor,
                             self.kind,
                             &self.processor,
+                            unit,
                             key.clone(),
                         )
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
@@ -697,11 +708,12 @@ impl RelayProcessorTemplate {
                     compiled,
                 } => {
                     let placement = runtime
-                        .state_placement(
+                        .state_placement_for_unit(
                             domain,
                             RuntimeStateKind::WasmProcessor,
                             self.kind,
                             &self.processor,
+                            unit,
                             key.clone(),
                         )
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
@@ -862,7 +874,14 @@ impl BranchInstanceTemplate {
         for (processor, template) in &self.processors {
             nervix_primitives::task::consume_budget().await;
             let node = template
-                .instantiate(runtime, domain, &key, incarnation, &self.revision)
+                .instantiate(
+                    runtime,
+                    domain,
+                    self.owner.unit,
+                    &key,
+                    incarnation,
+                    &self.revision,
+                )
                 .await?;
             processors.insert(processor.clone(), node);
         }
@@ -903,13 +922,17 @@ impl BranchInstanceTemplate {
                     .input_relays
                     .iter()
                     .map(|relay| {
-                        let metrics = runtime.inner.metrics.resolve_node_input_metrics(
-                            domain,
-                            processor.kind,
-                            &processor.processor,
-                            relay,
-                            physical_node_id,
-                            branch,
+                        let metrics = runtime.inner.metrics.resolve_unit_node_input_metrics(
+                            NodeBatchMetricsSpec {
+                                unit: self.owner.unit,
+                                domain,
+                                kind: processor.kind,
+                                node: &processor.processor,
+                                relay,
+                                physical_node_id,
+                                branch,
+                                direction: "received",
+                            },
                         );
                         (relay.clone(), metrics)
                     })
@@ -928,7 +951,7 @@ impl BranchInstanceTemplate {
                     .map(|output| {
                         let metrics = runtime.inner.metrics.resolve_node_batch_metrics(
                             NodeBatchMetricsSpec {
-                                unit: Unit::SINGLE,
+                                unit: self.owner.unit,
                                 domain,
                                 kind: processor.kind,
                                 node: &processor.processor,
@@ -1046,7 +1069,7 @@ mod tests {
         };
         let revision = ProcessorPlanRevision::new();
         let mut node = template
-            .instantiate(&runtime, &domain, &None, 1, &revision)
+            .instantiate(&runtime, &domain, Unit::SINGLE, &None, 1, &revision)
             .await
             .expect("deduplicator template must instantiate");
 
@@ -1143,7 +1166,7 @@ mod tests {
         };
         let revision = ProcessorPlanRevision::new();
         let mut node = template
-            .instantiate(&runtime, &domain, &None, 1, &revision)
+            .instantiate(&runtime, &domain, Unit::SINGLE, &None, 1, &revision)
             .await
             .assured("the test publishes the WASM processor state identity before instantiation");
 
@@ -1244,7 +1267,7 @@ mod tests {
         };
         let revision = ProcessorPlanRevision::new();
         let mut node = template
-            .instantiate(&runtime, &domain, &None, 1, &revision)
+            .instantiate(&runtime, &domain, Unit::SINGLE, &None, 1, &revision)
             .await
             .expect("deduplicator template must instantiate");
         let refusal = |node: &mut RelayProcessorNode, desired: RelayProcessorTemplate| {

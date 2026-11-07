@@ -58,6 +58,23 @@ Every input and output relay must match it exactly. State, scheduling, buffers, 
 views are instantiated independently for every concrete branch. Only ingestors and reingestors
 construct branch keys.
 
+### Partitioned processing
+
+A processor or generator whose named branch declares `PARTITIONS n` runs as one independently
+owned unit per partition. A concrete key selects the same partition index throughout the branch.
+Each unit has its own supervisor, branch registry, collection and output buffers, retained state,
+and state replicas. Branch TTL and `MAX INSTANCES` apply inside each unit's registry; account for
+all partitions when sizing a branched graph.
+
+The scheduler prefers the corresponding upstream partition's owner. A materialized dependency
+reads the concrete branch from that relay partition's owner, locally when colocated and remotely
+otherwise. Each generator enumerates only its own partition's materialized rows.
+
+`SHOW CLUSTER STATUS` and `DESCRIBE` report each partition's owner and replicas. Processor metrics
+include `partition`. Failover and drain transfer unit-qualified state; a sibling unit keeps its
+supervisor and checkpoint tasks. `RELOCATE` without a selector moves every unit of the selected
+node together; it does not select an individual concrete branch.
+
 ## Filters and construction
 
 Transforming routes use the [working-message model](working-message.md). The scopes below describe
