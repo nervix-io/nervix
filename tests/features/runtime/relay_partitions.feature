@@ -105,7 +105,7 @@ Feature: Relay partitions
         };
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
@@ -296,7 +296,7 @@ Feature: Relay partitions
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
@@ -428,7 +428,7 @@ Feature: Relay partitions
         BRANCHED BY by_tenant;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
@@ -532,8 +532,8 @@ Feature: Relay partitions
         BRANCHED BY by_tenant_short;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
-      CREATE ENDPOINT short_ingress ON edge PATH '/short' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
+      CREATE HTTP ENDPOINT short_ingress ON edge PATH '/short';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
@@ -669,8 +669,8 @@ Feature: Relay partitions
         CAPACITY 1;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT held_ingress ON edge PATH '/held' TYPE HTTP;
-      CREATE ENDPOINT flowing_ingress ON edge PATH '/flowing' TYPE HTTP;
+      CREATE HTTP ENDPOINT held_ingress ON edge PATH '/held';
+      CREATE HTTP ENDPOINT flowing_ingress ON edge PATH '/flowing';
 
       CREATE HTTP ENDPOINT INGESTOR http_held
         FROM held_ingress MODE NO ACK
@@ -784,7 +784,7 @@ Feature: Relay partitions
         BRANCHED BY by_tenant;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
@@ -899,7 +899,7 @@ Feature: Relay partitions
         BRANCHED BY by_tenant;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK

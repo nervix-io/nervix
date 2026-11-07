@@ -31,7 +31,7 @@ Feature: Altering schemas on a running domain
         };
 
       CREATE VHOST edge http-{{test_id}}-alter.example.com;
-      CREATE ENDPOINT running_event_ingress ON edge PATH '/alter-running' TYPE HTTP;
+      CREATE HTTP ENDPOINT running_event_ingress ON edge PATH '/alter-running';
 
       CREATE HTTP ENDPOINT INGESTOR running_event_ingestor
         FROM running_event_ingress MODE NO ACK
@@ -117,8 +117,8 @@ Feature: Altering schemas on a running domain
           'bind' = 'false'
         };
       CREATE VHOST timeout_edge http-{{test_id}}-alter-timeout.example.com;
-      CREATE ENDPOINT timeout_ingress
-        ON timeout_edge PATH '/alter-timeout' TYPE HTTP;
+      CREATE HTTP ENDPOINT timeout_ingress
+        ON timeout_edge PATH '/alter-timeout';
       CREATE HTTP ENDPOINT INGESTOR timeout_ingestor
         FROM timeout_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timeout_event_codec
@@ -220,10 +220,10 @@ Feature: Altering schemas on a running domain
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
       CREATE VHOST state_edge http-{{test_id}}-alter-state.example.com;
-      CREATE ENDPOINT mutable_ingress
-        ON state_edge PATH '/mutable' TYPE HTTP;
-      CREATE ENDPOINT stable_ingress
-        ON state_edge PATH '/stable' TYPE HTTP;
+      CREATE HTTP ENDPOINT mutable_ingress
+        ON state_edge PATH '/mutable';
+      CREATE HTTP ENDPOINT stable_ingress
+        ON state_edge PATH '/stable';
 
       CREATE HTTP ENDPOINT INGESTOR mutable_ingestor
         FROM mutable_ingress MODE NO ACK
@@ -335,7 +335,7 @@ Feature: Altering schemas on a running domain
         };
 
       CREATE VHOST rollback_edge http-{{test_id}}-rollback.example.com;
-      CREATE ENDPOINT rollback_ingress ON rollback_edge PATH '/alter-rollback' TYPE HTTP;
+      CREATE HTTP ENDPOINT rollback_ingress ON rollback_edge PATH '/alter-rollback';
 
       CREATE HTTP ENDPOINT INGESTOR rollback_ingestor
         FROM rollback_ingress MODE NO ACK

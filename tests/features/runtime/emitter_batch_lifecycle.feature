@@ -83,7 +83,7 @@ Feature: Emitter batch lifecycle
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge batch-move-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -167,8 +167,8 @@ Feature: Emitter batch lifecycle
       CREATE RELAY settings SCHEMA tenant_configuration BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge batch-state-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT configuration_ingress ON edge PATH '/settings' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT configuration_ingress ON edge PATH '/settings';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -263,7 +263,7 @@ Feature: Emitter batch lifecycle
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge batch-lifecycle-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -350,9 +350,9 @@ Feature: Emitter batch lifecycle
       CREATE RELAY first_events SCHEMA event BRANCHED BY first_tenant;
       CREATE RELAY second_events SCHEMA event BRANCHED BY second_tenant;
       CREATE VHOST edge batch-source-retention-{{test_id}}.example.com;
-      CREATE ENDPOINT plain_ingress ON edge PATH '/plain' TYPE HTTP;
-      CREATE ENDPOINT first_ingress ON edge PATH '/first' TYPE HTTP;
-      CREATE ENDPOINT second_ingress ON edge PATH '/second' TYPE HTTP;
+      CREATE HTTP ENDPOINT plain_ingress ON edge PATH '/plain';
+      CREATE HTTP ENDPOINT first_ingress ON edge PATH '/first';
+      CREATE HTTP ENDPOINT second_ingress ON edge PATH '/second';
       CREATE HTTP ENDPOINT INGESTOR plain_ingestor
         FROM plain_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -447,7 +447,7 @@ Feature: Emitter batch lifecycle
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 400s;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge batch-expiry-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -523,8 +523,8 @@ Feature: Emitter batch lifecycle
       CREATE RELAY settings SCHEMA tenant_configuration BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge batch-wait-expiry-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT configuration_ingress ON edge PATH '/settings' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT configuration_ingress ON edge PATH '/settings';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec

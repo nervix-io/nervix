@@ -305,7 +305,7 @@ Feature: Client ingestors
       );
       CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_in;
       CREATE VHOST edge orders-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/orders' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/orders';
       CREATE HTTP ENDPOINT INGESTOR orders_http
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec

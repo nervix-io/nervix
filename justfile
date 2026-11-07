@@ -336,6 +336,13 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# Endpoint inspection/refusal cases use in-process nodes and the native session client.
+test-endpoint-heads *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/kinded_endpoint_heads.feature {{ quote(args) }}
+
 # Exercise emitter destination keys and partitions without unrelated client-tool preparation.
 test-emitter-destinations *args: build-deps
     #!/usr/bin/env bash
@@ -1321,6 +1328,10 @@ test-consensus *args:
 # Run vocabulary unit tests and representation properties.
 test-models *args:
     cargo test --package nervix-models --all-targets -- {{ args }}
+
+# Run vocabulary API examples and compile-time refusals, optionally matching one API.
+test-models-docs filter="":
+    cargo test --package nervix-models --doc {{ quote(filter) }}
 
 # Run vocabulary tests with their declared Arrow schema boundary enabled.
 test-models-arrow *args:

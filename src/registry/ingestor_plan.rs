@@ -262,8 +262,8 @@ impl EndpointIntakeStartPlan {
             }));
         }
         if matches!(mode, EndpointIngestMode::Ack { .. })
-            && resolved.endpoint_type == nervix_models::EndpointType::Websockets
-            && resolved.signaling_protocol.is_none()
+            && resolved.kind.endpoint_type() == nervix_models::EndpointType::Websockets
+            && resolved.kind.signaling_protocol().is_none()
         {
             return Err(Report::new(
                 EntrypointPlanError::MissingEndpointAckProtocol {
@@ -1263,8 +1263,8 @@ mod tests {
         ClientPoolBounds, CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
         CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq,
-        CreateEndpoint, EndpointType, FlushPolicy, GeneralErrorPolicy, IngestorName, MqttQos,
-        MqttSession, NodeRef, OutputBranch, ProcessorOutputs, PrometheusQueryIngestor,
+        CreateEndpoint, FlushPolicy, GeneralErrorPolicy, IngestorName, MqttQos, MqttSession,
+        NodeRef, OutputBranch, ProcessorOutputs, PrometheusQueryIngestor,
         PulsarSubscriptionOwnership,
     };
     use nonzero_ext::nonzero;
@@ -1679,8 +1679,7 @@ mod tests {
                 name: named("upstream"),
                 on_vhost: named("public"),
                 path: "/events".to_string(),
-                endpoint_type: EndpointType::Http,
-                signaling_protocol: None,
+                kind: nervix_models::EndpointKind::Http,
             }),
             plan: IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(
                 HttpEndpointIngestorStartPlan(EndpointIntakeStartPlan {
@@ -1867,8 +1866,9 @@ mod tests {
             name: named("upstream"),
             on_vhost: named("public"),
             path: "/events".to_owned(),
-            endpoint_type: EndpointType::Websockets,
-            signaling_protocol: None,
+            kind: nervix_models::EndpointKind::Websockets {
+                signaling_protocol: None,
+            },
         });
         let error = planned_entrypoints(domain_models(source, endpoint))
             .expect_err("there is no implicit wire protocol for acknowledged frames");
@@ -2040,8 +2040,7 @@ mod tests {
             name: named("different"),
             on_vhost: named("public"),
             path: "/events".to_string(),
-            endpoint_type: EndpointType::Http,
-            signaling_protocol: None,
+            kind: nervix_models::EndpointKind::Http,
         })
     )]
     fn rejects_a_resolved_source_with_the_wrong_identity(

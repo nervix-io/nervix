@@ -45,15 +45,13 @@ Feature: Relay branch presence
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT state_ingress
+      CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/state'
-        TYPE HTTP;
+        PATH '/state';
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR state_notifications
         FROM state_ingress MODE NO ACK

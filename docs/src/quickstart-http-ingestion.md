@@ -11,7 +11,7 @@ Inbound endpoints are served by the node itself on its HTTP listener — `--http
 
 Three statements, in order: the `VHOST` names the hostnames served, the `ENDPOINT` binds a path on
 that vhost, and the ingestor consumes the endpoint. An `HTTP ENDPOINT` ingestor names its connector
-and entity in its head and reads only a `TYPE HTTP` endpoint. The existing `order_codec` decodes
+and entity in its head and reads only an `HTTP ENDPOINT`. The existing `order_codec` decodes
 the same JSON as the Kafka path:
 
 ```plexus
@@ -21,10 +21,9 @@ CREATE RELAY orders_http SCHEMA order_record UNBRANCHED;
 
 CREATE VHOST edge orders.example.com;
 
-CREATE ENDPOINT orders_ingress
+CREATE HTTP ENDPOINT orders_ingress
   ON edge
-  PATH '/orders'
-  TYPE HTTP;
+  PATH '/orders';
 
 CREATE HTTP ENDPOINT INGESTOR http_orders
   FROM orders_ingress MODE NO ACK

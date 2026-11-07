@@ -14,8 +14,8 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-kinded-ingestors.example.com;
-      CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
+      CREATE HTTP ENDPOINT http_ingress ON edge PATH '/events';
+      CREATE WEBSOCKETS ENDPOINT ws_ingress ON edge PATH '/stream';
       CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9/events',
         'timeout_ms' = 5000
@@ -338,8 +338,8 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-kinded-alter.example.com;
-      CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
+      CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR web_ingestor
         FROM ingress_a MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -385,18 +385,18 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-kinded-references.example.com;
-      CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
+      CREATE HTTP ENDPOINT http_ingress ON edge PATH '/events';
+      CREATE WEBSOCKETS ENDPOINT ws_ingress ON edge PATH '/stream';
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
       """
-    When these Plexus commands fail with "HTTP ENDPOINT ingestor 'web_ingestor' in domain '{{domain}}' requires a TYPE HTTP endpoint, but endpoint 'ws_ingress' is TYPE WEBSOCKETS"
+    When these Plexus commands fail with "HTTP ENDPOINT ingestor 'web_ingestor' in domain '{{domain}}' requires a HTTP ENDPOINT, but endpoint 'ws_ingress' is WEBSOCKETS ENDPOINT"
       """
       CREATE HTTP ENDPOINT INGESTOR web_ingestor
         FROM ws_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these Plexus commands fail with "WEBSOCKETS ENDPOINT ingestor 'stream_ingestor' in domain '{{domain}}' requires a TYPE WEBSOCKETS endpoint, but endpoint 'http_ingress' is TYPE HTTP"
+    When these Plexus commands fail with "WEBSOCKETS ENDPOINT ingestor 'stream_ingestor' in domain '{{domain}}' requires a WEBSOCKETS ENDPOINT, but endpoint 'http_ingress' is HTTP ENDPOINT"
       """
       CREATE WEBSOCKETS ENDPOINT INGESTOR stream_ingestor
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -427,8 +427,8 @@ Feature: Ingestors name their connector and entity in the statement head
     When these Plexus commands are executed on the leader node
       """
       CREATE VHOST edge http-{{test_id}}-kinded-completion.example.com;
-      CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
+      CREATE HTTP ENDPOINT http_ingress ON edge PATH '/events';
+      CREATE WEBSOCKETS ENDPOINT ws_ingress ON edge PATH '/stream';
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
       """

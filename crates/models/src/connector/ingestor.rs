@@ -423,7 +423,7 @@ impl IngestorReferenceKind {
                 let Model::Endpoint(endpoint) = model else {
                     return false;
                 };
-                endpoint.endpoint_type == endpoint_type
+                endpoint.kind.endpoint_type() == endpoint_type
             }
             Self::Schema => model.kind() == ModelKind::Schema,
         }

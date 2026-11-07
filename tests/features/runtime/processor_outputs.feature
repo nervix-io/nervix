@@ -34,7 +34,7 @@ Feature: Processor output routing
       CREATE RELAY failing_events SCHEMA routed_event UNBRANCHED;
       CREATE RELAY route_errors SCHEMA error_record UNBRANCHED;
       CREATE VHOST edge output-error-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
@@ -108,7 +108,7 @@ Feature: Processor output routing
       CREATE RELAY immediate_events SCHEMA routed_event UNBRANCHED;
       CREATE RELAY delayed_events SCHEMA routed_event UNBRANCHED;
       CREATE VHOST edge output-flush-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
@@ -191,10 +191,9 @@ Feature: Processor output routing
 
       CREATE VHOST edge http-ingestor-output-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/ingestor-output'
-        TYPE HTTP;
+        PATH '/ingestor-output';
 
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
@@ -271,7 +270,7 @@ Feature: Processor output routing
         TO SCHEMA source_event;
       CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
       CREATE VHOST edge sequential-set-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
@@ -367,14 +366,12 @@ Feature: Processor output routing
         CREATE RELAY warnings_ss SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE RELAY info_ss SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress_a
+        CREATE HTTP ENDPOINT ingress_a
         ON edge
-        PATH '/route-a'
-        TYPE HTTP;
-        CREATE ENDPOINT ingress_b
+        PATH '/route-a';
+        CREATE HTTP ENDPOINT ingress_b
         ON edge
-        PATH '/route-b'
-        TYPE HTTP;
+        PATH '/route-b';
         CREATE HTTP ENDPOINT INGESTOR ingestor_logs_a
         FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -495,10 +492,9 @@ Feature: Processor output routing
         CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_http_notifications;
         CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-output-route-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/output-route'
-        TYPE HTTP;
+        PATH '/output-route';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -590,10 +586,9 @@ Feature: Processor output routing
         CREATE RELAY warnings_ss SCHEMA notification_out BRANCHED BY by_source_logs;
         CREATE RELAY info_ss SCHEMA notification_out BRANCHED BY by_source_logs;
         CREATE VHOST edge http-project-output-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/project-output'
-        TYPE HTTP;
+        PATH '/project-output';
         CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -715,8 +710,8 @@ Feature: Processor output routing
         CREATE RELAY primary_out SCHEMA notification BRANCHED BY by_branch_state;
         CREATE RELAY audit_out SCHEMA notification BRANCHED BY by_branch_state;
         CREATE VHOST edge http-branch-state-{{test_id}}.example.com;
-        CREATE ENDPOINT state_ingress ON edge PATH '/branch-state' TYPE HTTP;
-        CREATE ENDPOINT ingress ON edge PATH '/branch-input' TYPE HTTP;
+        CREATE HTTP ENDPOINT state_ingress ON edge PATH '/branch-state';
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/branch-input';
         CREATE HTTP ENDPOINT INGESTOR preference_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING preference_codec

@@ -154,7 +154,7 @@ Feature: Web console execution graph
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant_user;
       CREATE RELAY validated_notifications SCHEMA notification BRANCHED BY by_tenant_user;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_ingress ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications_ingestor
         FROM notifications_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -201,7 +201,7 @@ Feature: Web console execution graph
       CREATE RELAY pending SCHEMA retry_record UNBRANCHED;
       CREATE RELAY retried SCHEMA retry_record UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT retry_ingress ON edge PATH '/retries' TYPE HTTP;
+      CREATE HTTP ENDPOINT retry_ingress ON edge PATH '/retries';
       CREATE HTTP ENDPOINT INGESTOR retry_ingestor
         FROM retry_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_codec

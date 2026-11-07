@@ -264,9 +264,9 @@ Feature: MySQL emission
       CREATE RELAY second_notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT poison_ingress ON edge PATH '/poison' TYPE HTTP;
-      CREATE ENDPOINT first_ingress ON edge PATH '/first' TYPE HTTP;
-      CREATE ENDPOINT second_ingress ON edge PATH '/second' TYPE HTTP;
+      CREATE HTTP ENDPOINT poison_ingress ON edge PATH '/poison';
+      CREATE HTTP ENDPOINT first_ingress ON edge PATH '/first';
+      CREATE HTTP ENDPOINT second_ingress ON edge PATH '/second';
       CREATE HTTP ENDPOINT INGESTOR http_poison
         FROM poison_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
