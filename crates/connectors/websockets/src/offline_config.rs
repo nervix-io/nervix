@@ -20,10 +20,10 @@ use nervix_connector::{OfflineClientConfigError, client_tls_paths, read_tls_file
 use nervix_models::{ClientConfigEntry, ClientConfigKey};
 use rustls_pki_types::{CertificateDer, pem::PemObject as _};
 
-/// Reads the client's CA file without opening a connection. The source adds this file's
-/// certificates to the default roots, so a file without one fails nothing when the source opens
+/// Reads the client's CA file without opening a connection. The ingestor adds this file's
+/// certificates to the default roots, so a file without one fails nothing when the ingestor opens
 /// and leaves a private CA untrusted. A section the parser cannot read still counts as a
-/// certificate here: the source refuses it when it opens.
+/// certificate here: the ingestor refuses it when it opens.
 pub fn validate_client_configuration(
     config: &[ClientConfigEntry],
 ) -> error_stack::Result<(), OfflineClientConfigError> {
@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ca_file_with_a_certificate_passes_beside_sections_the_source_skips() {
+    fn a_ca_file_with_a_certificate_passes_beside_sections_the_ingestor_skips() {
         let certificate = ca_certificate_pem();
         let key = private_key_pem();
         for ca_pem in [certificate.clone(), format!("a note\n{key}{certificate}")] {

@@ -694,23 +694,23 @@ mod tests {
     }
 
     async fn opened(plan: &NatsStreamIngestorPlan) -> NatsStreamIngestor {
-        let mut source = NatsStreamIngestor::open(plan, 0)
+        let mut ingestor = NatsStreamIngestor::open(plan, 0)
             .await
             .assured("opening a NATS STREAM ingestor connects nothing");
-        timeout(OBSERVATION_BOUND, source.resume())
+        timeout(OBSERVATION_BOUND, ingestor.resume())
             .await
             .assured("the stand-in server answers the lookup within the bound")
             .assured("the instance binds the pull consumer");
-        source
+        ingestor
     }
 
     async fn read(
-        source: &mut NatsStreamIngestor,
+        ingestor: &mut NatsStreamIngestor,
         request: IngestorBatchRequest,
     ) -> Vec<NatsStreamIngestorMessage> {
         let batch = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
         .assured("the stand-in server delivers within the bound")
@@ -745,10 +745,10 @@ mod tests {
             let script = nervix_primitives::task::spawn(async move {
                 answer_lookup(&server, &answer).await;
             });
-            let mut source = NatsStreamIngestor::open(&plan, 0)
+            let mut ingestor = NatsStreamIngestor::open(&plan, 0)
                 .await
                 .assured("opening a NATS STREAM ingestor connects nothing");
-            let error = timeout(OBSERVATION_BOUND, source.resume())
+            let error = timeout(OBSERVATION_BOUND, ingestor.resume())
                 .await
                 .assured("the stand-in server answers the lookup within the bound")
                 .expect_err("a consumer that does not exist fails the resume");
@@ -760,7 +760,7 @@ mod tests {
                 .downcast_ref::<NatsStreamIngestorError>()
                 .assured("the typed cause stays beneath the resume failure");
             assert_eq!(cause.to_string(), expected);
-            assert!(source.needs_resume());
+            assert!(ingestor.needs_resume());
             script.await.assured("the script answers the lookup");
         }
     }
@@ -795,10 +795,10 @@ mod tests {
             let script = nervix_primitives::task::spawn(async move {
                 answer_lookup(&server, &consumer_info(config)).await;
             });
-            let mut source = NatsStreamIngestor::open(&plan, 0)
+            let mut ingestor = NatsStreamIngestor::open(&plan, 0)
                 .await
                 .assured("opening a NATS STREAM ingestor connects nothing");
-            let error = timeout(OBSERVATION_BOUND, source.resume())
+            let error = timeout(OBSERVATION_BOUND, ingestor.resume())
                 .await
                 .assured("the stand-in server answers the lookup within the bound")
                 .expect_err("a consumer the ingestor cannot read fails the resume");
@@ -828,26 +828,26 @@ mod tests {
             answer_settlement(&mut connection, "$JS.ACK.orders.nervix.1.2.2.0.0", b"-NAK").await;
             connection
         });
-        let mut source = opened(&plan).await;
+        let mut ingestor = opened(&plan).await;
 
-        let first = read(&mut source, SEQUENTIAL).await;
+        let first = read(&mut ingestor, SEQUENTIAL).await;
         assert_eq!(payloads(&first), vec![b"first".to_vec()]);
         let positions = first
             .iter()
             .map(|message| message.position().clone())
             .collect::<Vec<_>>();
-        timeout(OBSERVATION_BOUND, source.acknowledge(&positions))
+        timeout(OBSERVATION_BOUND, ingestor.acknowledge(&positions))
             .await
             .assured("the server answers the acknowledgement within the bound")
             .assured("an answered acknowledgement confirms the delivery");
 
-        let second = read(&mut source, SEQUENTIAL).await;
+        let second = read(&mut ingestor, SEQUENTIAL).await;
         assert_eq!(payloads(&second), vec![b"second".to_vec()]);
         let positions = second
             .iter()
             .map(|message| message.position().clone())
             .collect::<Vec<_>>();
-        timeout(OBSERVATION_BOUND, source.reject(&positions))
+        timeout(OBSERVATION_BOUND, ingestor.reject(&positions))
             .await
             .assured("the server answers the negative acknowledgement within the bound")
             .assured("an answered negative acknowledgement returns the delivery");
@@ -875,20 +875,20 @@ mod tests {
             expect_pull(&mut connection, 3).await;
             connection
         });
-        let mut source = opened(&plan).await;
+        let mut ingestor = opened(&plan).await;
         let parallel = IngestorBatchRequest {
             max_messages: NonZeroUsize::new(3).assured("a fixed window of three is positive"),
             batch_timeout: Some(OBSERVATION_BOUND),
         };
 
-        let batch = read(&mut source, parallel).await;
+        let batch = read(&mut ingestor, parallel).await;
         assert_eq!(
             payloads(&batch),
             vec![b"first".to_vec(), b"second".to_vec()],
             "a pull that ended brings no more, so the read returns what it brought"
         );
         let cancellation = IngestorReadCancellation::new();
-        let next = source.next_batch(parallel, &cancellation);
+        let next = ingestor.next_batch(parallel, &cancellation);
         let second_pull = timeout(OBSERVATION_BOUND, async {
             nervix_primitives::select! {
                 _ = next => panic!("no delivery follows the second pull"),
@@ -917,13 +917,13 @@ mod tests {
                 .await;
             connection
         });
-        let mut source = opened(&plan).await;
+        let mut ingestor = opened(&plan).await;
         let parallel = IngestorBatchRequest {
             max_messages: NonZeroUsize::new(3).assured("a fixed window of three is positive"),
             batch_timeout: Some(OBSERVATION_BOUND),
         };
 
-        let batch = read(&mut source, parallel).await;
+        let batch = read(&mut ingestor, parallel).await;
         assert_eq!(
             payloads(&batch),
             vec![b"first".to_vec()],
@@ -931,7 +931,7 @@ mod tests {
         );
         let next = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(parallel, &IngestorReadCancellation::new()),
+            ingestor.next_batch(parallel, &IngestorReadCancellation::new()),
         )
         .await
         .assured("the retained refusal returns at once");
@@ -945,7 +945,7 @@ mod tests {
             matches!(cause, NatsStreamIngestorError::PullRefused { .. }),
             "the retained failure is the refusal: {cause}"
         );
-        assert!(source.needs_resume());
+        assert!(ingestor.needs_resume());
         script
             .await
             .assured("the script refuses the pull after its first delivery");
@@ -978,18 +978,18 @@ mod tests {
             connection.ping_client().await;
             connection
         });
-        let mut source = opened(&plan).await;
+        let mut ingestor = opened(&plan).await;
         let parallel = IngestorBatchRequest {
             max_messages: NonZeroUsize::new(3).assured("a fixed window of three is positive"),
             batch_timeout: Some(Duration::from_millis(50)),
         };
 
-        let first = read(&mut source, parallel).await;
+        let first = read(&mut ingestor, parallel).await;
         assert_eq!(payloads(&first), vec![b"first".to_vec()]);
         first_read
             .send(())
             .assured("the script waits for the first read to end");
-        let second = read(&mut source, parallel).await;
+        let second = read(&mut ingestor, parallel).await;
         assert_eq!(
             payloads(&second),
             vec![b"second".to_vec()],
@@ -1015,10 +1015,10 @@ mod tests {
                 .await;
             connection
         });
-        let mut source = opened(&plan).await;
+        let mut ingestor = opened(&plan).await;
         let read = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(SEQUENTIAL, &IngestorReadCancellation::new()),
+            ingestor.next_batch(SEQUENTIAL, &IngestorReadCancellation::new()),
         )
         .await
         .assured("the refusal reaches the instance within the bound");
@@ -1042,7 +1042,7 @@ mod tests {
                 description: Some("Consumer Deleted".to_owned()),
             }
         );
-        assert!(source.needs_resume());
+        assert!(ingestor.needs_resume());
         script.await.assured("the script refuses the pull");
     }
 
@@ -1064,13 +1064,13 @@ mod tests {
             answer_settlement(&mut connection, "$JS.ACK.orders.nervix.1.1.1.0.0", b"+ACK").await;
             connection
         });
-        let mut source = opened(&plan).await;
+        let mut ingestor = opened(&plan).await;
         // A read whose host cancelled it sends its pull request and then ends at once.
         let cancellation = IngestorReadCancellation::new();
         cancellation.cancel();
         let interrupted = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(SEQUENTIAL, &cancellation),
+            ingestor.next_batch(SEQUENTIAL, &cancellation),
         )
         .await
         .assured("a cancelled read ends at once")
@@ -1083,13 +1083,13 @@ mod tests {
         allow_delivery
             .send(())
             .assured("the script waits for the delivery to be allowed");
-        let held = read(&mut source, SEQUENTIAL).await;
+        let held = read(&mut ingestor, SEQUENTIAL).await;
         assert_eq!(payloads(&held), vec![b"held".to_vec()]);
         let positions = held
             .iter()
             .map(|message| message.position().clone())
             .collect::<Vec<_>>();
-        timeout(OBSERVATION_BOUND, source.acknowledge(&positions))
+        timeout(OBSERVATION_BOUND, ingestor.acknowledge(&positions))
             .await
             .assured("the server answers the acknowledgement within the bound")
             .assured("an answered acknowledgement confirms the delivery");
@@ -1127,7 +1127,7 @@ mod tests {
             assert_eq!(returned.message, b"-NAK");
             connection
         });
-        let mut source = opened(&plan).await;
+        let mut ingestor = opened(&plan).await;
         let cancellation = IngestorReadCancellation::new();
         let cancelled_once_pulled = async {
             pull_sent.await.assured("the script sees the pull request");
@@ -1136,7 +1136,7 @@ mod tests {
         let (interrupted, ()) = timeout(
             OBSERVATION_BOUND,
             join(
-                source.next_batch(SEQUENTIAL, &cancellation),
+                ingestor.next_batch(SEQUENTIAL, &cancellation),
                 cancelled_once_pulled,
             ),
         )
@@ -1158,11 +1158,11 @@ mod tests {
             .assured("the client answers the script's ping within the bound")
             .assured("the script reports that the client holds the delivery");
 
-        timeout(OBSERVATION_BOUND, source.suspend())
+        timeout(OBSERVATION_BOUND, ingestor.suspend())
             .await
             .assured("the drain ends once the client wrote the unsubscription")
             .assured("suspending lets the pull go");
-        assert!(source.needs_resume());
+        assert!(ingestor.needs_resume());
         script
             .await
             .assured("the script sees the received delivery returned");
@@ -1171,10 +1171,10 @@ mod tests {
     #[nervix_primitives::test]
     async fn an_instance_without_a_pull_reads_nothing_and_settles_nothing() {
         let plan = plan("nats://127.0.0.1:4222");
-        let mut source = NatsStreamIngestor::open(&plan, 0)
+        let mut ingestor = NatsStreamIngestor::open(&plan, 0)
             .await
             .assured("opening a NATS STREAM ingestor connects nothing");
-        let batch = source
+        let batch = ingestor
             .next_batch(SEQUENTIAL, &IngestorReadCancellation::new())
             .await
             .assured("an instance without a pull asks to be resumed");
@@ -1182,7 +1182,7 @@ mod tests {
         let position = NatsStreamIngestorPosition {
             acknowledgement: Subject::from("$JS.ACK.orders.nervix.1.1.1.0.0"),
         };
-        let acknowledged = source
+        let acknowledged = ingestor
             .acknowledge(std::slice::from_ref(&position))
             .await
             .expect_err("no connection can confirm an acknowledgement");
@@ -1190,7 +1190,7 @@ mod tests {
             acknowledged.current_context(),
             IngestorError::Acknowledge { connector: NATS }
         ));
-        let rejected = source
+        let rejected = ingestor
             .reject(std::slice::from_ref(&position))
             .await
             .expect_err("no connection can take a delivery back");

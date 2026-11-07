@@ -392,7 +392,7 @@ Feature: SQS emission
       CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
       TO sqs_main QUEUE 'fifo_kept_{{test_id}}.fifo'
-      FIFO GROUP FROM BRANCH
+      FIFO GROUP branch.tenant
       SEND BATCH MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING order_codec
       INHERIT ALL

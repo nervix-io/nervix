@@ -165,7 +165,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SQS QUEUE EMITTER sqs_fifo FROM tenant_outgoing
-        TO sqs_main QUEUE 'sqs_fifo.fifo' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'sqs_fifo.fifo' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 165ms MAX 16s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -354,7 +354,7 @@ Feature: Emitter publishing modes
     Then the last command output contains
       """
       to: SQS QUEUE sqs_main QUEUE 'sqs_fifo.fifo'
-      options: FIFO GROUP FROM BRANCH SEND SINGLE
+      options: FIFO GROUP branch.tenant SEND SINGLE
       mode: ACK RETRY POLICY BACKOFF 165ms MAX 16s
       quiesce: none
       envelope: none
@@ -488,7 +488,7 @@ Feature: Emitter publishing modes
         'timeout_ms' = '5000'
       };
       CREATE SQS QUEUE EMITTER alter_fifo_group FROM tenant_outgoing
-        TO sqs_main QUEUE 'alter_orders.fifo' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'alter_orders.fifo' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -556,28 +556,28 @@ Feature: Emitter publishing modes
     When these Plexus commands fail with "ending in .fifo"
       """
       CREATE SQS QUEUE EMITTER group_on_standard_queue FROM tenant_outgoing
-        TO sqs_main QUEUE 'orders' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'orders' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus commands fail with "requires branched input"
+    When these Plexus commands fail with "branch.tenant"
       """
       CREATE SQS QUEUE EMITTER unbranched_fifo_group FROM outgoing
-        TO sqs_main QUEUE 'orders.fifo' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'orders.fifo' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus commands fail with "requires branched input"
+    When these Plexus commands fail with "branch.tenant"
       """
       CREATE SQS QUEUE EMITTER mixed_fifo_group FROM tenant_outgoing, outgoing
-        TO sqs_main QUEUE 'mixed_orders.fifo' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'mixed_orders.fifo' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus commands fail with "requires branched input"
+    When these Plexus commands fail with "branch.tenant"
       """
       ALTER SQS QUEUE EMITTER alter_fifo_group ADD FROM outgoing;
       """
@@ -592,7 +592,7 @@ Feature: Emitter publishing modes
     When these Plexus commands fail with "MODE"
       """
       CREATE KAFKA TOPIC EMITTER fifo_on_kafka FROM outgoing
-        TO kafka_main TOPIC 'fifo_on_kafka' FIFO GROUP FROM BRANCH
+        TO kafka_main TOPIC 'fifo_on_kafka' FIFO GROUP branch.tenant
           MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -675,7 +675,7 @@ Feature: Emitter publishing modes
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge http-{{test_id}}-set-mode-timeout.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED

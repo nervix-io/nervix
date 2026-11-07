@@ -30,7 +30,7 @@ Feature: Schema type strictness
 
   Scenario Outline: JSON codecs require explicit RFC3339 encoding for string datetime wire fields
     Given a <cluster_size> node nervix cluster is started
-    When these Plexus commands fail with "json field 'created_at' type mismatch"
+    When these Plexus commands fail with "json field 'created_at' needs ENCODE created_at AS RFC3339 for its DATETIME value"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA orders ( created_at DATETIME );

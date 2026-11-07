@@ -35,7 +35,7 @@ debt the `non_aws_lc_crypto` count records. Nervix obtains that cryptography tod
 | Secure randomness | The operating-system generator of `rand_core`, for interconnect entropy and for password salts. |
 | Password derivation | Argon2, for user passwords. |
 | NATS user authentication | AWS-LC Ed25519 in the NATS connection owner; its nonce callback signs nkey and credentials-file authentication. This operation moves to the boundary when FIPS Prep 02 establishes it. |
-| Other digests | BLAKE3, for backups, resources, checkpoints, archives, identities and fingerprints. No site is classified yet. |
+| Other digests | BLAKE3, for backups, resources, checkpoints, archives, identities and fingerprints. No product site is classified yet. |
 
 ## Algorithm Policy
 
@@ -67,10 +67,15 @@ A site that uses a non-approved hash records its non-security purpose where it i
 register lists it with the site and the hash. The count recognises no recorded BLAKE3 purpose yet,
 so it holds every BLAKE3 site as unclassified.
 
-The NATS authentication wire codec in
-`crates/connectors/nats/src/client/authentication.rs` uses CRC-16/XMODEM only to detect transcription
+The maintained format-only [NKey fork](https://github.com/nervix-io/nkeys), called by
+`crates/connectors/nats/src/client/authentication.rs`, uses CRC-16/XMODEM only to detect transcription
 errors in a seed or public-key encoding, as the [NATS nkeys format](https://github.com/nats-io/nkeys/blob/main/strkey.go)
 requires. It makes no authenticity decision from the checksum; AWS-LC signs the server nonce.
+
+`tests/web_console_restore_faults/unrecorded_failure.rs` uses BLAKE3 only to check that its controlled
+test-generated archive bytes match the captured restore start. The fixture owns both inputs and
+makes no authenticity or authorization decision. This test site is outside the authored product-use
+scope of the count below.
 
 ## Inventory Outside AWS-LC
 
@@ -179,9 +184,13 @@ generated authored location and the complete source and site representations.
 
 NATS nkey and credentials-file authentication signs the server's nonce through AWS-LC Ed25519.
 The connector uses async-nats' authentication callback, and the product does not enable that
-driver's `nkeys` feature. The independent `nkeys` signer is a test-only interoperability oracle
-and scenario fixture, outside the release product graph. Adding the callback therefore adds no
-non-AWS-LC cryptography edge and leaves the count unchanged.
+driver's `nkeys` feature. The organization-owned NKey fork is consumed with default features
+disabled: only its format codec is present, with no signing, hashing or random backend. The driver
+fork exposes borrowed credentials parsing independently of nonce signing. Both dependencies are
+pinned to immutable commits. The published `nkeys` signer remains an independent test-only
+interoperability oracle and scenario fixture, outside the release product graph. This arrangement
+adds no non-AWS-LC cryptography edge. Seed decoding clears both its intermediate record and its
+returned bytes; neither the codec nor credentials parser includes secret values in refusals.
 
 The signing operation currently lives in `crates/connectors/nats/src/client/authentication.rs`
 while `nervix-crypto` is still a target. FIPS Prep 02 moves it into the boundary; wire decoding

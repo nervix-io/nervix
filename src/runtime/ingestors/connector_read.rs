@@ -93,14 +93,14 @@ impl<M> BrokerRead<M> {
         match self.batch {
             Ok(IngestorBatch::Messages(messages)) => {
                 if messages.is_empty() {
-                    host.report_error("source returned an empty message batch".to_string());
+                    host.report_error("ingestor returned an empty message batch".to_string());
                 }
                 ReadOutcome::TakeIn(messages)
             }
             Ok(IngestorBatch::Interrupted { gathered }) => {
                 if !self.end.cancelled() {
                     host.report_error(
-                        "source interrupted a read the host did not cancel".to_string(),
+                        "ingestor interrupted a read the host did not cancel".to_string(),
                     );
                 }
                 ReadOutcome::TakeIn(gathered)
@@ -123,7 +123,7 @@ impl<M> BrokerRead<M> {
 /// still awaits it, so every message the ingestor already took from its transport reaches the loop
 /// rather than being dropped with the read.
 pub(super) async fn read_batch<C>(
-    source: &mut C,
+    connector: &mut C,
     host: &mut IngestorHost,
     shutdown: &mut watch::Receiver<bool>,
     request: IngestorBatchRequest,
@@ -132,7 +132,7 @@ where
     C: BrokerIngestorConnector,
 {
     let cancellation = IngestorReadCancellation::new();
-    let mut read = pin!(source.next_batch(request, &cancellation));
+    let mut read = pin!(connector.next_batch(request, &cancellation));
     let end = loop {
         nervix_primitives::task::consume_budget().await;
         let next_flush = host.next_flush();

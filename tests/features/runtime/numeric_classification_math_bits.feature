@@ -42,7 +42,7 @@ Feature: Numeric classification, math and bit functions
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge float-functions-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TO readings
@@ -133,7 +133,7 @@ Feature: Numeric classification, math and bit functions
       CREATE RELAY register_errors SCHEMA register_error UNBRANCHED;
       CREATE VHOST edge bit-functions-{{test_id}}.example.com;
       CREATE ENDPOINT register_ingress ON edge PATH '/registers' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR register_source
+      CREATE HTTP ENDPOINT INGESTOR register_ingestor
         FROM register_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING register_batch_codec
         TO register_samples

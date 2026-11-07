@@ -498,9 +498,9 @@ JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference 
 fields; a domain and codec reference select that codec's output schema fields; a domain and resource
 reference select completed resource versions. Wire-schema targets have separate discriminants, so
 a codec cannot mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A
-visual ingestor uses a distinct source-reference target for each of the 14 connector and entity
+visual ingestor uses a distinct ingestor-reference target for each of the 14 connector and entity
 pairs that read an external system; a client producer ingestor selects its schema through the
-schema target instead. Each source-reference target requires a domain and offers clients of its
+schema target instead. Each ingestor-reference target requires a domain and offers clients of its
 pair's connector, except the HTTP endpoint and WebSocket endpoint targets, which offer endpoints of
 that `TYPE`. Its decoding-codec target offers codecs that can decode. An unbranched-relay
 target needs a domain; a branched-relay target also needs the selected branch and offers relays
@@ -613,6 +613,10 @@ execution reference like any other lost reply.
 ## Command Dispositions
 
 Client CONFIG validation uses the ordinary failed-command outcome before configuration commits.
+An invalid connector/entity mode, option, envelope, metadata read or header write that the registry
+can judge from the declaration is likewise a failed command before graph publication. These
+refusals add no command disposition: the client still decides from the typed disposition and
+recovers an uncertain attempt under its original execution reference.
 The registry checks declared keys and the composition root runs network-free driver checks for
 standalone mutations and transaction preflight. Refusals name the client and key without rendering
 driver values that may contain credentials. A refused transaction statement leaves the transaction
@@ -1350,7 +1354,7 @@ also hosts a runtime consumer of the relay receives the batch once, for that con
 subscriptions piggyback on that delivery. Each batch reaches a subscription at most once. Delivery
 to a node is ordered per branch; batches of different branches may arrive in a different order than
 the owner published them. The subscription copy carries no acknowledgements, so a subscriber never
-holds back a source's acknowledgement beyond the time its `BLOCKING` backpressure takes.
+holds back an ingestor's acknowledgement beyond the time its `BLOCKING` backpressure takes.
 
 ### Generations, Endings, And Cleanup
 
@@ -1636,7 +1640,7 @@ message. The four outcomes keep the boundary's four facts apart:
 - **`NotAdmitted`.** No row entered the graph. The cause is an `InvalidBatch` defect, `Suspended`,
   `Busy`, `Draining`, `ProducerEnded`, or `CreditExceeded`. Only `Suspended` and `Busy` are
   temporary.
-- **`Completed`.** The batch's source acknowledgement root resolved successfully.
+- **`Completed`.** The batch's ingestor acknowledgement root resolved successfully.
 - **`ProcessingFailed`.** The batch was admitted and its acknowledgement failed, with `AckTimedOut`
   or `Rejected`. Some effects may have happened.
 - **`OutcomeUnknown`.** The batch may have been admitted, and no terminal result can be established:
@@ -1794,7 +1798,7 @@ authenticated relay-class duplex stream and reserves their granted bytes on both
 executing nodes. Loss of the stream or either endpoint revokes outstanding attempts. There is no
 durable cursor or consumer result history across an owner loss; upstream replay may be needed.
 [Emitters](./emitters.md#client-emitters)
-owns the source acknowledgement guarantee and [Cluster
+owns the ingestor acknowledgement guarantee and [Cluster
 Interconnect](./interconnect.md#client-consumer-streams) owns the forwarding form.
 
 The executing node exports active consumer and forwarding credit gauges, retained IPC work
@@ -2060,6 +2064,14 @@ A restore that failed at a step is `RequestFailed`, and its report names the ste
 steps before it as `Applied`, and those after it as `NotAttempted`. A dry run reports every step as
 `Planned`, and is never admitted or recorded.
 
+An executed `RequestFailed` without a `RestoreReport` can refuse verification or planning before
+admission, or report that the attempt's task could not finish. It does not give an earlier
+attempt's recorded outcome. After a whole upload lost its answer, or an `OutcomeUnknown` answer,
+the web console keeps the restore unknown under its original reference when a later attempt
+returns such a failure, retaining that complete typed outcome beneath the uncertainty. An initial
+failure remains definitive. A failure with origin `Recovered`, or one carrying a restore report,
+settles the restore, including the steps a failed restore already applied.
+
 A domain whose restore has not published its complete runtime-state generation refuses `START`
 with a definitive command failure naming the incomplete installation. Planning rejects it before
 admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
@@ -2109,7 +2121,9 @@ when ten minutes of repetitions leave it unknown. It reports the outcome as unkn
 the restore ends without it after an attempt may have had the restore admitted, by sending the
 whole archive without learning the outcome or by an `OutcomeUnknown` answer: when the file can no
 longer be read, a reply cannot be accepted, the leader refuses a later stream, or the leader no
-longer holds the reference.
+longer holds the reference. A later executed request failure without a restore report likewise
+leaves an earlier possible admission unknown; the matching request and execution identities alone
+do not make it the earlier restore's recorded result.
 
 ## Node Stop And Restart As A Client Observes Them
 
@@ -2202,10 +2216,18 @@ The C ABI's lifecycle follows from that choice:
   and its producers, consumers and deliveries keep it running until they are released too. Every
   object a function hands out is owned by the caller and has exactly one release function, and a
   borrowed pointer stays valid only until the object it was read from is released.
-- **Execution identity.** `nx_session_prepare` captures one command and its durable execution
-  reference before anything is sent. `nx_session_execute` runs it, and running the same prepared
-  execution again after an uncertain, cancelled, or timed-out call recovers the command's outcome
-  instead of running it twice. Every failure of `nx_session_execute` names that reference.
+- **Connection policy.** A host builds an `nx_connect_options` handle with copied credentials,
+  a TLS requirement, copied CA PEM, additional seed URLs and connect, request, retry and backup
+  wait deadlines. `nx_session_connect` reads a snapshot of that handle and applies the Rust
+  client's URL, TLS and deadline validation. A session begun at an HTTPS URL requires HTTPS on
+  every seed and redirect, even when the host selected preferred TLS.
+- **Execution identity.** `nx_session_prepare` captures one statement and a reference before
+  anything is sent. For a durable command, `nx_session_execute` reuses that reference, so running
+  the same prepared execution after uncertainty, cancellation or timeout recovers its outcome.
+  CREATE SUBSCRIPTION, DELETE SUBSCRIPTION and ATTACH or DETACH DOMAIN CLOCK are session-local
+  requests without durable outcome identity. Repeating CREATE, DELETE or ATTACH can be refused
+  even when the first succeeded; a repeated DELETE fails when the subscription is already absent.
+  The host inspects the session state or events to establish the earlier effect.
 - **Threads.** Each session runs on a runtime of its own, with two threads the library owns. The
   library never calls host code, so no host function ever runs on a library thread. Every blocking
   call runs on the calling thread until it completes, fails, or is cancelled, and a session may be
@@ -2226,6 +2248,12 @@ The C ABI's lifecycle follows from that choice:
   `nx_event_cell_varlen` borrows one string or bytes value. Events are reference counted:
   `nx_event_retain` adds a reference, and the event and its frame are freed with the last
   `nx_event_release`, from any thread.
+- **Restoration failures.** A subscription or clock event with kind `RESTORATION_FAILED` exposes
+  the server or local failure message as borrowed bytes and the wait until the next attempt as
+  unsigned nanoseconds. Accessors return `NX_ERROR_TYPE` for other kinds and
+  `NX_ERROR_INVALID_ARGUMENT` for missing outputs. `NX_ERROR_OVERFLOW` is returned when the
+  bounded subscription event queue loses unread events; a per-subscription consumer overflow is
+  delivered as `NX_EVENT_CONSUMER_OVERFLOW` instead.
 - **Clock events.** `nx_session_next_clock_event` uses the same cancellation and deadline rules as
   the subscription wait, but returns a separate `nx_clock_event` reference. Its kind, domain,
   generation, state, paced mapping, tick and end-reason accessors expose the fields each event
@@ -2409,7 +2437,7 @@ It does not provide:
   nothing replays or deduplicates it. The application keeps its source data and decides.
 - **Exactly-once delivery.** A subscription is a live view with at-most-once delivery per admitted
   batch. Rows in transit can be lost without a report while relay ownership moves or a node-to-node
-  delivery fails, and a source may redeliver a record that the graph then passes again.
+  delivery fails, and an ingestor may redeliver a record that the graph then passes again.
 - **Automatic rollback.** A failed transaction keeps the applied prefix of its execution steps, and
   a cancelled waiter keeps its admitted effect. Undoing either is a new command.
 - **Durable subscription replay.** Subscriptions keep no offsets and are not persisted. A restored

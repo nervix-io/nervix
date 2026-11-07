@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The SQS client Model, the queue source and emitter Models with their delivery mode,
-//!   request shape and FIFO grouping, the queue name a source receives with and the rule SQS holds
+//! - **Owns.** The SQS client Model, the queue ingestor and emitter Models with their delivery mode,
+//!   request shape and FIFO grouping, the queue name an ingestor receives with and the rule SQS holds
 //!   it to, the message size and delay SQS itself admits, the attribute types it carries, the most
 //!   messages one receive returns, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations, expressions and the names a body
+//! - **Depends on.** The shared ingestor and emitter declarations, expressions and the names a body
 //!   references.
 //! - **Must not know.** The SQS driver, or how a queue is received from or
 //!   sent to.
@@ -207,7 +207,7 @@ impl IngestorDeclaration for SqsQueueIngestor {
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
         delivery: &[DeclaredDelivery::ACK_SEQUENTIAL, SQS_ACK_PARALLEL],
-        // The queue keeps each message until the source deletes it, so suspending loses nothing.
+        // The queue keeps each message until the ingestor deletes it, so suspending loses nothing.
         quiesce: &[DeclaredQuiesce::SUSPEND],
         locator: Some(LocatorDeclaration {
             keywords: "QUEUE",
@@ -425,11 +425,11 @@ impl fmt::Display for SqsReceiveMax {
 
 connector_ingestors! {
     connector Sqs = "SQS";
-    /// What an SQS source reads.
+    /// What an SQS ingestor reads.
     pub enum SqsIngestor;
     /// The alterations of the ingestors that read an SQS entity.
     pub enum SqsQueueIngestorAlteration;
-    /// The entities an SQS source reads.
+    /// The entities an SQS ingestor reads.
     pub enum SqsIngestorEntity {
         Queue(SqsQueueIngestor => SqsQueueIngestorChange) = "QUEUE", "SQS";
     }
@@ -511,7 +511,7 @@ pub struct SqsQueueEmitter {
     pub mode: SqsQueuePublishingMode,
     pub client: ClientName,
     pub queue: SqsQueueName,
-    pub fifo_group: Option<SqsFifoGroup>,
+    pub fifo_group: Option<Expression>,
     pub send: SqsSend,
 }
 
@@ -538,14 +538,6 @@ pub enum SqsSend {
     Batch,
 }
 
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum SqsFifoGroup {
-    FromBranch,
-    Expression(Expression),
-}
-
 impl EmitterDeclaration for SqsQueueEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         // An SQS message's attributes: one value per name, the last written, in no order, each a
@@ -569,18 +561,10 @@ impl EmitterDeclaration for SqsQueueEmitter {
             OptionDeclaration {
                 keywords: "FIFO GROUP",
                 presence: OptionPresence::Optional { default: None },
-                form: OptionForm::Choice(&[
-                    OptionChoice {
-                        name: "<expression>",
-                        value: Some(OptionValue::Expression),
-                        example: "FIFO GROUP tenant",
-                    },
-                    OptionChoice {
-                        name: "FROM BRANCH",
-                        value: None,
-                        example: "FIFO GROUP FROM BRANCH",
-                    },
-                ]),
+                form: OptionForm::Value {
+                    value: OptionValue::Expression,
+                    example: "FIFO GROUP branch.tenant",
+                },
             },
             OptionDeclaration {
                 keywords: "SEND",
@@ -630,8 +614,8 @@ impl EmitterEntityBody for SqsQueueEmitter {
 pub enum SqsQueueEmitterChange {
     /// `SET QUEUE '<queue>'`.
     Queue(SqsQueueName),
-    /// `SET FIFO GROUP <expression> | FROM BRANCH`.
-    FifoGroup(SqsFifoGroup),
+    /// `SET FIFO GROUP <expression>`.
+    FifoGroup(Expression),
     /// `DROP FIFO GROUP`: the emitter sends no message group.
     DropFifoGroup,
     /// `SET SEND SINGLE|BATCH`.
@@ -669,7 +653,10 @@ impl crate::EmitterEntityChange for SqsQueueEmitterChange {
     fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
         let text = match self {
             Self::Queue(queue) => format!("SET QUEUE {}", crate::string_literal(queue.as_str())),
-            Self::FifoGroup(group) => format!("SET FIFO GROUP {}", group.to_canonical_plexus()?),
+            Self::FifoGroup(group) => format!(
+                "SET FIFO GROUP {}",
+                crate::canonical::expression_to_plexus(group)?
+            ),
             Self::DropFifoGroup => "DROP FIFO GROUP".to_owned(),
             Self::Send(send) => format!("SET SEND {}", send.keyword()),
             Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),

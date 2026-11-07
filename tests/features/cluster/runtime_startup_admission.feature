@@ -39,7 +39,7 @@ Feature: Runtime startup admission
         PATH '/events'
         TYPE HTTP;
 
-      CREATE HTTP ENDPOINT INGESTOR admission_source
+      CREATE HTTP ENDPOINT INGESTOR admission_ingestor
         FROM admission_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING admission_event_codec
         TO admission_input

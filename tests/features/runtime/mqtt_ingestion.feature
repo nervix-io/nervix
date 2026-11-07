@@ -102,7 +102,7 @@ Feature: MQTT ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       reconnect backoff: 250ms
       """
     When ingestor "mqtt_notifications" leaves fault mode
@@ -1055,7 +1055,7 @@ Feature: MQTT ingestion
       """
     And the entity gate pause for domain "{{domain}}" is released
     # The alteration restarts the source under its hold. The broker delivers a publish again to the
-    # replacement when no PUBACK for it reached the broker before the stopping source's connection
+    # replacement when no PUBACK for it reached the broker before the stopping ingestor's connection
     # closed: delivery is at least once, and every publish arrives.
     Then within "30s" the relay subscription receives payloads
       """

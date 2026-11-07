@@ -570,13 +570,13 @@ Feature: Web console Plexus REPL
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
-    When selector ".prompt-row input" is filled with "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec TO outgoing SET value = read_"
+    When selector ".prompt-row input" is filled with "CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" contains "read_header"
     And selector ".suggestions" contains "read_headers"
-    When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
+    When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR ingestor FROM broker TOPIC 'events' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" contains "read_header"
     And selector ".suggestions" contains "read_headers"
-    When selector ".prompt-row input" is filled with "CREATE REDIS PUBSUB INGESTOR source FROM broker CHANNEL 'events' MODE NO ACK ON QUIESCE DROP DECODE USING codec TO outgoing SET value = read_"
+    When selector ".prompt-row input" is filled with "CREATE REDIS PUBSUB INGESTOR ingestor FROM broker CHANNEL 'events' MODE NO ACK ON QUIESCE DROP DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" does not contain "read_header"
     When selector ".prompt-row input" is filled with "CREATE KAFKA TOPIC EMITTER emitter FROM incoming TO broker TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
     Then selector ".suggestions" contains "write_header"
@@ -1316,7 +1316,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1366,7 +1366,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
@@ -1407,7 +1407,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1443,7 +1443,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1561,7 +1561,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
@@ -1616,7 +1616,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
@@ -1656,7 +1656,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "leader"
@@ -1732,7 +1732,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR rust_filter FROM raw_metrics FILTER WHERE input.rust_keep DEDUPLICATE ON input.value MAX TIME 10m UNBRANCHED TO rust_filtered_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR go_filter FROM rust_filtered_metrics FILTER WHERE input.go_keep DEDUPLICATE ON input.value MAX TIME 10m UNBRANCHED TO go_filtered_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
@@ -2223,7 +2223,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_node;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reingestor_metrics_source
+      CREATE HTTP ENDPOINT INGESTOR reingestor_metrics_ingestor
         FROM reingestor_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -2251,14 +2251,14 @@ Feature: Web console Plexus REPL
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
-    And selector ".graph-hit-layer" contains "reingestor_metrics_source"
+    And selector ".graph-hit-layer" contains "reingestor_metrics_ingestor"
     And selector ".graph-hit-layer" contains "notification_forwarder"
     And selector ".graph-hit-layer" contains "reingestor_metrics_node"
     And selector ".graph-hit-layer" contains "tenant_notifications"
     And selector ".graph-branch-label-layer" contains "by_reingestor_metrics_source"
     And selector ".graph-branch-label-layer" contains "by_reingestor_metrics_node"
     And branch group "by_reingestor_metrics_source" body overlaps graph item "notification_forwarder"
-    And branch group "by_reingestor_metrics_source" body does not overlap graph item "reingestor_metrics_source"
+    And branch group "by_reingestor_metrics_source" body does not overlap graph item "reingestor_metrics_ingestor"
     And branch group "by_reingestor_metrics_source" body does not overlap graph item "reingestor_metrics_node"
     And branch group "by_reingestor_metrics_node" body does not overlap graph item "reingestor_metrics_node"
 
@@ -2381,7 +2381,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_buffer_source CAPACITY 3;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_relay_buffer_source;
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
-      CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR relay_buffer_source
+      CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR relay_buffer_ingestor
         FROM relay_buffer_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -2408,14 +2408,14 @@ Feature: Web console Plexus REPL
       """
     And the web console is opened on the leader node
     Then selector ".graph-hit-layer" contains "relay_buffer_ingress"
-    And graph edge from "relay_buffer_ingress" to "relay_buffer_source" is visible
-    And graph edge from "relay_buffer_ingress" to "relay_buffer_source" has traffic statistics
+    And graph edge from "relay_buffer_ingress" to "relay_buffer_ingestor" is visible
+    And graph edge from "relay_buffer_ingress" to "relay_buffer_ingestor" has traffic statistics
       """
       messages_total>=1
       bytes_total>=1
       batches_total=0
       """
-    And graph edge from "relay_buffer_source" to "notifications" has traffic statistics
+    And graph edge from "relay_buffer_ingestor" to "notifications" has traffic statistics
       """
       messages_total>=1
       bytes_total>=1
@@ -2426,7 +2426,7 @@ Feature: Web console Plexus REPL
       """
       {"user_id":42}
       """
-    Then graph edge from "relay_buffer_source" to "notifications" has traffic statistics
+    Then graph edge from "relay_buffer_ingestor" to "notifications" has traffic statistics
       """
       messages_total>=2
       bytes_total>=1
@@ -2458,10 +2458,10 @@ Feature: Web console Plexus REPL
       CREATE RELAY ss2 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT source_txns_endpoint ON edge PATH '/source' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_txns FROM source_txns_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING txn_codec TO ss1 INHERIT ALL BRANCHED BY by_source_txns SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns FROM source_txns_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING txn_codec TO ss1 INHERIT ALL BRANCHED BY by_source_txns SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR dedup_txns FROM ss1 DEDUPLICATE ON input.value MAX TIME 10m BRANCHED BY by_source_txns TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
-    Then selector ".graph-hit-layer" contains "source_txns"
+    Then selector ".graph-hit-layer" contains "ingestor_txns"
     And selector ".graph-hit-layer" contains "dedup_txns"
     When these Plexus commands are executed on the leader node
       """
@@ -2488,7 +2488,7 @@ Feature: Web console Plexus REPL
     And selector ".graph-hit-layer" contains "source_txns_endpoint"
     And selector ".graph-hit-layer" contains "state_txns_endpoint"
     And selector ".graph-hit-layer" contains "ENDPOINT"
-    And graph item "source_txns" does not overlap graph item "state_txns_ingestor"
+    And graph item "ingestor_txns" does not overlap graph item "state_txns_ingestor"
     And graph item "ss1" does not overlap graph item "state_txns"
     And graph item "fwd" does not overlap graph item "rr1"
     And graph edge from "fwd" to "rr1" is visible

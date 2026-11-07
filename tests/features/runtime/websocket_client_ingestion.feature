@@ -113,7 +113,7 @@ Feature: Websocket client ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "ws_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "ws_notifications" leaves fault mode
     Then the relay subscription receives a payload

@@ -102,7 +102,7 @@ Feature: NATS ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "nats_notifications" leaves fault mode
     Then within "10s" repeatedly publishing NATS message to subject "notifications_reconnect_{{test_id}}" yields a relay subscription payload
@@ -123,7 +123,7 @@ Feature: NATS ingestion
   # The ingestor reads through an endpoint the scenario controls, so the NATS server can go down for
   # this ingestor alone while the other scenarios keep sharing it. A lost connection ends the
   # subscription and the host reopens it on its reconnect cadence: DESCRIBE INGESTOR shows the failed
-  # reconnects and a growing delay. A successful subscription makes the source ready; the previous
+  # reconnects and a growing delay. A successful subscription makes the ingestor ready; the previous
   # failure and backoff remain until the next accepted batch proves progress.
   @nats_ingestor_lost_connection
   Scenario Outline: NATS ingestor reports a lost server connection and reconnects on its reconnect cadence

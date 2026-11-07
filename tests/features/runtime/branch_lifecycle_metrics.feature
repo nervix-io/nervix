@@ -41,7 +41,7 @@ Feature: Branch lifecycle metrics
         PATH '/branch-metrics'
         TYPE HTTP;
 
-      CREATE HTTP ENDPOINT INGESTOR branch_metrics_source
+      CREATE HTTP ENDPOINT INGESTOR branch_metrics_ingestor
         FROM branch_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -139,7 +139,7 @@ Feature: Branch lifecycle metrics
         PATH '/branch-metrics'
         TYPE HTTP;
 
-      CREATE HTTP ENDPOINT INGESTOR branch_metrics_source
+      CREATE HTTP ENDPOINT INGESTOR branch_metrics_ingestor
         FROM branch_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications

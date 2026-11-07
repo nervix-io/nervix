@@ -87,7 +87,7 @@ Bolero obligation, and none of those discharges a suite.
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
 | `endpoint-client.py` | The [endpoints](#endpoints) scenario's HTTP and WebSocket client, which runs inside the pinned Python image and writes its ledger of attempts to its log |
 | `docker-event-recording.sh` | The run's live Docker event recording and its marker windows |
-| `output-boundary.sh`, `consumer-group.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, the source consumer group's members and the nodes that run them, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
+| `output-boundary.sh`, `consumer-group.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, the ingestor consumer group's members and the nodes that run them, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
 | `verifier-self-check.sh` | The verifier self-check's bound, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
 | `cleanup.sh` | Removal of one run's labeled resources, with optional evidence capture |
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
@@ -384,7 +384,7 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-rate-probe` | The production link transfer and ICMP probes, with delayed Docker launches and starts, stalled, partial, lost and refused transfers, failed log reads and cleanup, and invalid clocks |
 | `just test-chaos-degraded-evidence` | The degraded-link controller, parser and effect limits at 40 and 400 packets |
 | `just test-chaos-hold-quorum` | The mixed-instability hold check for a degraded link that leaves every voter in a quorum |
-| `just test-chaos-pause-delivery` | A failover-length pause's emitter check on the retained leader and relay-owner pause timelines: the source consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled emitter; the window that opens at placement when the consumer stayed in place; and emitter progress sampled after the unpause |
+| `just test-chaos-pause-delivery` | A failover-length pause's emitter check on the retained leader and relay-owner pause timelines: the ingestor consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled emitter; the window that opens at placement when the consumer stayed in place; and emitter progress sampled after the unpause |
 | `just test-chaos-output-boundary [SELECTION]` | The suite preparation and baseline execution budgets and the Kafka end-offset observations, without Docker |
 | `just test-chaos-verifier-self-check` | The identity of the chaos scripts, every reason a verifier self-check record does not apply, and a run's refusal of such a record before it creates anything, without Docker |
 | `just test-chaos-image-package` | The image-package check and its refused or invalid observations |
@@ -424,7 +424,7 @@ A run records each phase it enters in `phases.ndjson` and its final phase in `ma
 | `public placement evidence` | On three nodes, `RELOCATE` places the relay on `node-2` and the emitter on `node-3`, so traffic crosses nodes. The single-instance fixtures place the ingestor on `node-1`; the spread-instance fixture observes all three ready unit owners without relocating the logical ingestor. Each placement must read back through `DESCRIBE` within 60 seconds |
 | The scenario's own phases | Traffic startup, then each fault and its recovery |
 | `load pacing` | The pacing verdict of every continuous load |
-| `offset and output boundaries` | Consumer offsets at the source boundary, then the output boundary |
+| `offset and output boundaries` | Consumer offsets at the input boundary, then the output boundary |
 | `external ledger verification` | The exact ledger |
 | `public diagnostics` | Final status, descriptions, consumer groups and metrics |
 
@@ -490,11 +490,11 @@ The stateful and domain-time scenarios add a second load beside the first:
 Each runs the same script with its own fixture, topic and stop file. `manifest.json` lists every
 load under `loads`, with its service, topic and interval.
 
-After the load stops, the runner reconstructs the accepted-input ledger from the source topic
+After the load stops, the runner reconstructs the accepted-input ledger from the input topic
 itself. A producer's own report is never the ledger: an ambiguous producer outcome is recorded, and
 the broker decides what was accepted. The runner then checks two things:
 
-- that the ingestor's consumer group has committed through the source boundary, within 120 seconds.
+- that the ingestor's consumer group has committed through the input boundary, within 120 seconds.
   The backup and restore scenarios have no consumer group to check: their ingestor keeps
   domain-owned offsets, which their archives record
 - that the output topic holds at least the accepted input
@@ -880,7 +880,7 @@ The baseline proves the deployment and the external verifiers before any fault i
 three nodes it places the ingestor, relay and emitter on three different nodes, so every record
 crosses two node boundaries; on one node all three run on `node-1`. It produces its fixture,
 reconstructs the accepted input from Kafka and requires an exact ledger with no duplicate. It
-requires the consumer group to be committed through the source boundary. It also requires the
+requires the consumer group to be committed through the input boundary. It also requires the
 public metrics to count every record along the path:
 
 - the ingestor's node, `node-1`, sent each record to the relay
@@ -923,7 +923,7 @@ The run proceeds in order:
 4. Through the cluster, the packaged CLI restores the archived domain as the new, stopped domain
    `chaos_restored`, backs that domain up and describes its archive offline. The run compares the
    two archives' public checkpoint identities, revisions, branch counts and exact Kafka positions.
-   The run never starts the restored domain, while the source traffic continues.
+   The run never starts the restored domain, while the input traffic continues.
 5. After the cut, the runner requires renewed ingestor and emitter progress, stops the producer and
    checks the exact ledger, counting replay duplicates separately.
 
@@ -958,7 +958,7 @@ Each cycle proceeds in order:
 4. It requires the archive's acknowledged `chaos_input` offset to be at or past the previous
    cycle's, so a cut never moves the domain's committed position back.
 
-After the final source boundary, `verify-backup-state.sh` judges the deduplicator and window outputs
+After the final input boundary, `verify-backup-state.sh` judges the deduplicator and window outputs
 against the accepted-input ledger:
 
 - every unique record and every closed window must appear
@@ -999,11 +999,11 @@ For the first three faults, an acknowledgement gate holds the cut open until the
 - **Why it sits on the broker.** A node's interface carries only the fault itself, so a partition
   plan never overlaps the gate.
 - **Injecting the fault.** The run first waits until the output stays unchanged across two
-  observations while the source runs at least two records ahead. It then starts the backup
+  observations while the ingestor runs at least two records ahead. It then starts the backup
   through the emitter's node with a 30-second quiesce timeout. Once `DESCRIBE INGESTOR` reports
   `status: quiesced` and `quiesce state: domain pause`, it injects the fault, so the fault always
   lands inside a held cut.
-- **Lifting the gate.** While the fault holds, the run records the source and output boundaries
+- **Lifting the gate.** While the fault holds, the run records the input and output boundaries
   and lifts the gate, leaving the fault as the only obstacle. A cut the gate holds past its quiesce
   timeout fails. A publish held past the graph's 30-second `ACK TIMEOUT` is retried, and the ledger
   admits the retry as a replay.
@@ -1042,7 +1042,7 @@ The fault backup must end in an outcome the backup contract allows:
 - **Interrupted download.** The failure must carry the backup's execution reference, and recovering
   by that reference must report that the restarted holder no longer retains the archive.
 
-Whatever the outcome, the cluster must settle, the source and the emitter must move past the records
+Whatever the outcome, the cluster must settle, the ingestor and the emitter must move past the records
 the fault found, and a fresh backup must verify offline, restore and compare. A product violation is
 a recovery finding: the run still reaches the final exact ledger, then fails with every finding.
 
@@ -1288,7 +1288,7 @@ The observer probes each node's session and interconnect ports, `/livez`, `/read
 and the web console every two seconds, and it reports a node unavailable when any probe fails.
 While a node is stopped:
 
-- within 20 seconds, the observer must report the node unavailable and the source broker must
+- within 20 seconds, the observer must report the node unavailable and the input broker must
   advance
 - on three nodes, the survivors must agree on a caught-up leader within 90 seconds, and the emitter
   must then progress within 60 seconds
@@ -1373,7 +1373,7 @@ target is still paused:
 
 - the survivors to agree on a caught-up leader other than the paused node, within 35 seconds
 - every graph node to be owned on a survivor, within 35 seconds
-- when the paused node ran the ingestor, the source consumer group to have members only on the
+- when the paused node ran the ingestor, the ingestor consumer group to have members only on the
   relocated ingestor's node, one of which holds the partition, within 60 seconds of the pause
   request
 - emitter progress, within 20 seconds of that handoff, or of the relocation when the paused node did not
@@ -1435,7 +1435,7 @@ heartbeat and unavailability settings and records them.
 
 - In the follower and leader cases, the majority must move the isolated node's execution within 90
   seconds. With the follower isolated, Kafka output must keep flowing.
-- An isolated node keeps running work it was already admitted to, and Kafka can leave the source
+- An isolated node keeps running work it was already admitted to, and Kafka can leave the input
   partition with the isolated former owner's consumer. The leader case therefore does not require
   majority delivery; it records the consumer-group members during the isolation. Members are
   attributed to nodes by their fixed addresses.
@@ -1476,7 +1476,7 @@ Repeated samples keep:
 
 - all three nodes' public metrics
 - Docker stats
-- the broker's source and output boundaries and the estimated backlog
+- the broker's input and output boundaries and the estimated backlog
 - interconnect pending work, relay attempts and resolved admissions
 - TCP retransmissions in the sender's namespace
 - reset and connection-failure retry indicators
@@ -1498,7 +1498,7 @@ Every healed profile must recover before its `--drain-seconds` deadline, in four
 A missed deadline fails at once. It leaves a profile-local `recovery-deadline.json` with the
 baseline, the required and observed windows, the latest backlog, the sample timeline and the action
 timeline, and its finding distinguishes a short observation window from stalled or slow output.
-Source offsets and the exact ledger must reconcile after the load stops.
+Input offsets and the exact ledger must reconcile after the load stops.
 
 The run keeps:
 
@@ -1572,7 +1572,7 @@ just chaos run former-owner-restart --image nervix:debian --isolation-seconds 90
 The run proceeds in order:
 
 1. It relocates the ingestor, relay and emitter onto the observed follower. That node must hold the
-   source partition, which the consumer group shows by its fixed address, and must emit output.
+   input partition, which the consumer group shows by its fixed address, and must emit output.
 2. After a settled read confirms the leader and all three owners, the run kills that former owner.
 3. While the former owner is down, the survivors must take its work over. An acknowledged
    `RELOCATE` then moves each unit to the survivor that failover did not choose. The consumer group
@@ -1636,7 +1636,7 @@ permitted, and the verdict says which case applied.
 Each node must report the same committed configuration as before the crash. The consumer group must
 run only on the scheduled ingestor owner, and a canary after the restart must be acknowledged and
 visible through every node. Each node's events must be exactly its kill, exit and start. The exact
-ledger shows that every accepted record was delivered from the replayable source.
+ledger shows that every accepted record was delivered from the replayable ingestor.
 `results/cluster-restart-progress.json` records:
 
 - the Raft, liveness and retention settings read from Docker inspection
@@ -1804,7 +1804,7 @@ boundary is a record.
 3. **Shared again.** The run starts the peer domain again, and records 81 to 120 reach both.
 4. **WebSocket.** While the HTTP client holds, a second client opens a WebSocket through a node
    other than the endpoint owner and sends 20 frames. The run then stops and starts the primary
-   domain, which replaces the source. The retained connection then sends one more frame, and
+   domain, which replaces the ingestor. The retained connection then sends one more frame, and
    the endpoint must close it with code 1013. The client then opens a new connection and sends
    20 more frames.
 5. **The fault.** The HTTP client sends records 121 to 160, then the rest of its 400 records while
@@ -1877,7 +1877,7 @@ paths, each with its own attached Kafka emitter and output topic:
 - **The reingestor `chaos_life_rotate`.** It moves every record onto the LRU-bounded branches, which
   four branches keep evicting.
 
-Four pipelines have their own sources, which the run produces to directly:
+Four pipelines have their own ingestors, which the run produces to directly:
 
 - **The expiring path.** A junction with `REQUIRED WAIT` reads the expiring relay's green row.
 - **The late path.** Its emitter writes to `chaos_life_late_output`, which the run creates only
@@ -1895,15 +1895,15 @@ entity's owner from `DESCRIBE RELOCATION ... ONTO NODE ... IGNORE PREFERENCES`, 
 nothing, because `DESCRIBE` has no form for a generator. The deployment uses a one-second state
 snapshot interval and, on three nodes, one state replica.
 
-**The phases.** The run holds the life load after a record count, waits until the source has
+**The phases.** The run holds the life load after a record count, waits until the ingestor has
 acknowledged every record before it, and only then moves the hold, so each record's expected
 profile is exact.
 
 1. **Loaded profiles.** Red, gold and green publish version 1 at second 10 of the run's base minute,
    and `SHOW RELAY chaos_life_profiles MATERIALIZED STATE` must show them and no blue row.
 2. **Parked records.** Blue has no profile, so blue's first six records park on `REQUIRED WAIT`.
-   The load holds after 24 records. The source's committed offset stays below blue's first record.
-   Blue then publishes version 1, and the source acknowledges through record 24.
+   The load holds after 24 records. The ingestor's committed offset stays below blue's first record.
+   Blue then publishes version 1, and the ingestor acknowledges through record 24.
 3. **Timestamps.** Red publishes four more versions, and the run requires the relay's state after
    each one:
 
@@ -1914,10 +1914,10 @@ profile is exact.
    | 4 | 20, equal | 2 | 57 to 72 |
    | 5 | 30 | 5 | 73 onward |
 
-   The run waits until the profile source has acknowledged each publication before it requires the
+   The run waits until the profile ingestor has acknowledged each publication before it requires the
    state.
 4. **A missing topic.** Five records reach the late path. Its emitter must report `status: ERROR`
-   in `DESCRIBE EMITTER` while its topic is missing. The run then creates the topic, and the source
+   in `DESCRIBE EMITTER` while its topic is missing. The run then creates the topic, and the ingestor
    must acknowledge every record and the emitter return to `status: OK`.
 5. **A force flush.** Six records reach the buffered path. Once the nodes' metrics count them
    received, the output must still be empty. `ALTER KAFKA TOPIC INGESTOR chaos_life_flush_ingestor
@@ -1955,7 +1955,7 @@ records to their tables and return to `status: OK`. The run continues for 80 mor
 then drains every path.
 
 **The verdicts.** `verify-lifetimes-evidence.sh` judges each path against the accepted-input ledger
-of its source. Records past the milestone of record 88 may be replayed identically after a fault,
+of its ingestor. Records past the milestone of record 88 may be replayed identically after a fault,
 because a fault can interrupt an acknowledgement after its record was written. Every other
 deviation is a violation.
 
@@ -2183,7 +2183,7 @@ container.
 
 - After the last heal of a step, every node must settle within 150 seconds and output must advance
   within 90 seconds.
-- Within 120 seconds, the source may run at most `--max-recovery-backlog` records ahead of the emitter
+- Within 120 seconds, the ingestor may run at most `--max-recovery-backlog` records ahead of the emitter
   (default 20).
 - A canary through every faulted node must be acknowledged.
 - The public metrics may report at most `--max-pending` pending interconnect operations (default
@@ -2391,7 +2391,7 @@ The controller's own bounds:
 | Startup status publication | 30 s |
 | Each owner after placement | 60 s |
 | Settled public role before a crash or pause | 30 s |
-| Consumer offsets at the source boundary | 120 s |
+| Consumer offsets at the input boundary | 120 s |
 | Output containing the accepted input | 120 s; `--drain-seconds` for degraded links |
 | Output stability window | 30 s |
 | Final ingestor-boundary query of a recovery scenario | 60 s |
@@ -2919,7 +2919,7 @@ a passing rerun never converts a failure into a pass.
 For an image that passes a scenario, the suite guarantees these things about the faults that run
 injected and verified, on that worker:
 
-- **Delivery.** Every record the source accepted was delivered with its exact content and branch,
+- **Delivery.** Every record the ingestor accepted was delivered with its exact content and branch,
   and no duplicate appeared beyond the identical replays its fault permits.
 - **Ownership and consensus.** They recovered within the scenario's bounds, as observed through
   public interfaces.
@@ -3014,8 +3014,8 @@ and requalified with the scenario that found it:
 | Task | Defect and fix |
 | --- | --- |
 | [Cluster Chaos 12](https://app.clickup.com/t/86bc87uqe) | After a crash or a graceful restart, the former bootstrap leader restored its listeners but kept no live peers and its old Raft term, so the cluster never converged. A restarted node now seeds gossip from its recovered Raft membership |
-| [Cluster Chaos 13](https://app.clickup.com/t/86bc8az2d) | A Kafka seek that failed during the rewind after a relay-owner crash could skip an accepted record. The source now retries the seek before its next poll |
-| [Cluster Chaos 14](https://app.clickup.com/t/86bc8dqzu) | Attributed the historical relay-owner crash that accepted 226 records and emitted 225 to a defect separate from the rewind of task 13. A receiver had admitted a routed batch and acknowledged its own share after forced recovery removed its emitter, so the source committed past a record no emitter wrote. A routed batch that carries record acknowledgements now fails them when no attached consumer of its relay runs on the receiving node, and the source redelivers the record |
+| [Cluster Chaos 13](https://app.clickup.com/t/86bc8az2d) | A Kafka seek that failed during the rewind after a relay-owner crash could skip an accepted record. The ingestor now retries the seek before its next poll |
+| [Cluster Chaos 14](https://app.clickup.com/t/86bc8dqzu) | Attributed the historical relay-owner crash that accepted 226 records and emitted 225 to a defect separate from the rewind of task 13. A receiver had admitted a routed batch and acknowledged its own share after forced recovery removed its emitter, so the ingestor committed past a record no emitter wrote. A routed batch that carries record acknowledgements now fails them when no attached consumer of its relay runs on the receiving node, and the ingestor redelivers the record |
 | [Cluster Chaos 15](https://app.clickup.com/t/86bc8fh8k) | After a partition healed, an isolated node could stay alone in gossip, or keep a failed outbound interconnect session, so the cluster never converged. Retained gossip routes are restored, and blackholed sessions are retired by HTTP/2 pings |
 | [Cluster Chaos 16](https://app.clickup.com/t/86bc8fhah) | While one node was partitioned, the connected peers dropped each other from gossip, and the leader moved work off healthy nodes |
 | [Cluster Chaos 20](https://app.clickup.com/t/86bc8py55) | Under one-way loss from the leader to one follower, control commands through the connected quorum went unacknowledged, because completion barriers waited for the unreachable follower. The barriers now use the leader's term-fenced application-health view |
@@ -3023,7 +3023,7 @@ and requalified with the scenario that found it:
 | [Cluster Chaos 22](https://app.clickup.com/t/86bc947an) | A resolution addressed to an earlier incarnation of a node could resolve an unrelated pending acknowledgement or admission of its new process. The IDs are now bound to the registering incarnation |
 | [Cluster Chaos 23](https://app.clickup.com/t/86bc947b1) | In consumer-group mode, a rewind could stall on a partition that a rebalance had moved away, which left the ingestor stalled after the rejection that triggered the rewind |
 | [Cluster Chaos 24](https://app.clickup.com/t/86bc947bp) | The leader re-added a restarted voter at its new interconnect address on every one-second pass, instead of recording the address once |
-| [Cluster Chaos 32](https://app.clickup.com/t/86bc95vz6) | A forwarded record acknowledgement lost during burst loss stalled an `ACK SEQUENTIAL` source. A node now fails a forwarded acknowledgement its receiver stops reporting, as [Cluster Interconnect](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting) describes |
+| [Cluster Chaos 32](https://app.clickup.com/t/86bc95vz6) | A forwarded record acknowledgement lost during burst loss stalled an `ACK SEQUENTIAL` ingestor. A node now fails a forwarded acknowledgement its receiver stops reporting, as [Cluster Interconnect](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting) describes |
 | [Cluster Chaos 39](https://app.clickup.com/t/86bcd4hzv) | A restarted voter lost its work when gossip heard of it before observing it live |
 | [Cluster Chaos 40](https://app.clickup.com/t/86bcd8q49) | A stopping follower's drain needed a user password. It now uses the node's own certificate |
 | [Cluster Chaos 43](https://app.clickup.com/t/86bcdg30p) and [58](https://app.clickup.com/t/86bcdknqt) | A restarted window owner discarded its open windows. The restore was then requalified on an official image |
@@ -3031,7 +3031,7 @@ and requalified with the scenario that found it:
 | [Cluster Chaos 52](https://app.clickup.com/t/86bcdkcf1) and [60](https://app.clickup.com/t/86bcdwr9y) | A stopping node's drain was abandoned, through its one-second cordon release and through a Kafka ingestor held quiesced until the drain timeout |
 | [Cluster Chaos 56](https://app.clickup.com/t/86bcdk4tn) | A restarting voter required a bootstrap host that no longer resolved, instead of using its recovered Raft members |
 | [Cluster Chaos 67](https://app.clickup.com/t/86bcghajy) | The destination of a forced failover held its graph installation, and every later revision, for the deliveries in flight to a paused former owner, up to the 60-second entity gate deadline |
-| [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | When forced recovery moved the replica of a Kafka ingestor's domain offsets while the ingestor kept running, the schedule rebound the offsets but left the ingestor committing through the originator of the superseded binding. Every commit was refused, and the source replayed from its last commit for as long as it ran. A reassignment now hands the kept ingestor the originator its offsets' new binding issued |
+| [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | When forced recovery moved the replica of a Kafka ingestor's domain offsets while the ingestor kept running, the schedule rebound the offsets but left the ingestor committing through the originator of the superseded binding. Every commit was refused, and the ingestor replayed from its last commit for as long as it ran. A reassignment now hands the kept ingestor the originator its offsets' new binding issued |
 
 **Harness corrections.** These tasks corrected the suite itself:
 
@@ -3140,7 +3140,7 @@ parameter-change contract.
 `just chaos run ingestor-instances-owner-crash --image <immutable-image>` installs the dedicated
 `fixtures/instances.plexus` graph with three globally indexed Kafka consumers on three nodes. The
 existing crash controller SIGKILLs the observed owner of instance 0, verifies the outage, checks
-continued source and sink progress, restarts the same container and checks recovery and the final
+continued ingestor and emitter progress, restarts the same container and checks recovery and the final
 delivery ledger. The public description must show all three units running and ready on distinct
 owners before the fault. During the outage every unit remains running and ready, only the failed
 owner's unit changes owner, and each sibling keeps its exact owner. The before/after index-to-owner
@@ -3148,6 +3148,6 @@ JSON maps are retained beside the ordinary fault evidence. The case joins the so
 runs locally against release and diagnostic images of the same source revision.
 
 The input topic has one partition, so Kafka may assign traffic to any one of the three consumers.
-The initial source metric must be positive on an observed intake node; the relay and emitter
+The initial ingestor metric must be positive on an observed intake node; the relay and emitter
 metrics must also be positive on their distinct, explicitly placed nodes. The setup retains every
 instance owner in `public/instance-owners.json` and `results/remote-path.json`.

@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Browser presentation and editing of one ingestor's source and node-wide settings.
 //! - **Depends on.** The ingestor draft, typed choices, and the route editor.
-//! - **Must not know.** Source connectors, registry snapshots, or command dispatch internals.
+//! - **Must not know.** Ingestor connectors, registry snapshots, or command dispatch internals.
 
 #![cfg_attr(
     nervix_lint,
@@ -456,7 +456,7 @@ pub(super) fn IngestorEditor(
                 } />
         </label>
         <fieldset class="create-field create-ingestor-source">
-            <legend>"Source type"</legend>
+            <legend>"Ingestor entity"</legend>
             <For each=IngestorEntityKind::modeled
                 key=|kind| kind.form_key()
                 children=move |kind| view! {
@@ -470,7 +470,7 @@ pub(super) fn IngestorEditor(
                 } />
         </fieldset>
         <Show when=move || entity_kind().is_some() fallback=|| ()>
-            <ChoiceGroup class_name="create-ingestor-source-ref" label="Source client or endpoint"
+            <ChoiceGroup class_name="create-ingestor-source-ref" label="Client or endpoint"
                 control=ChoiceControl::IngestSourceRef signals=signals request_tx=request_tx
                 session_generation=session_generation show_detail=true />
         </Show>
@@ -592,7 +592,7 @@ pub(super) fn IngestorEditor(
             draft.source.reference.as_ref().is_some_and(|selected| !selected.is_current())
                 || draft.codec.as_ref().is_some_and(|selected| !selected.is_current())
         } fallback=|| ()>
-            <p class="create-reference-invalid" role="alert">"The selected domain, source or codec changed. Select affected references again."</p>
+            <p class="create-reference-invalid" role="alert">"The selected domain, entity or codec changed. Select affected references again."</p>
         </Show>
     }
 }

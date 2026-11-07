@@ -51,6 +51,7 @@ single_client_emitter_plan! {
     /// A Kafka emitter: the topic it produces to, and how it learns that a record was accepted.
     KafkaTopicEmitterPlan {
         topic: nervix_models::KafkaTopicName,
+        partition_from_branch: bool,
         mode: BrokerPublishingMode,
         batch: Option<EmitterBatchPolicy>,
     }
@@ -61,6 +62,7 @@ single_client_emitter_plan! {
     /// accepted.
     PulsarTopicEmitterPlan {
         topic: nervix_models::PulsarTopicName,
+        partition_from_branch: bool,
         mode: BrokerPublishingMode,
         batch: Option<EmitterBatchPolicy>,
     }

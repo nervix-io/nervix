@@ -45,7 +45,7 @@ Feature: Calendar, time zone and formatted datetime functions
       CREATE RELAY local_events SCHEMA local_event UNBRANCHED;
       CREATE VHOST edge calendar-functions-{{test_id}}.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP NOW
@@ -163,7 +163,7 @@ Feature: Calendar, time zone and formatted datetime functions
       CREATE RELAY parse_errors SCHEMA parse_error UNBRANCHED;
       CREATE VHOST edge datetime-parsing-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TO readings

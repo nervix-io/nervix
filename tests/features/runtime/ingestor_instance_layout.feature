@@ -17,7 +17,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE KAFKA TOPIC INGESTOR spread_source
+      CREATE KAFKA TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'future_layout_{{test_id}}' OFFSET BY DOMAIN INSTANCES 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -26,7 +26,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       CREATE SUBSCRIPTION observing TO events;
       START AT '2100-01-01T00:00:00Z';
       """
-    Then within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     When these Plexus commands are executed on the leader node
       """
       STOP;
@@ -45,13 +45,13 @@ Feature: Kafka domain offsets survive intake unit layout changes
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER KAFKA TOPIC INGESTOR spread_source
+      ALTER KAFKA TOPIC INGESTOR spread_ingestor
         SET FROM broker TOPIC 'future_layout_{{test_id}}' OFFSET BY DOMAIN INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND;
       START;
       """
-    Then within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
       "partition":0
@@ -77,7 +77,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE KAFKA TOPIC INGESTOR spread_source
+      CREATE KAFKA TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'events' OFFSET BY DOMAIN INSTANCES 3
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED
@@ -85,7 +85,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER KAFKA TOPIC INGESTOR spread_source
+      ALTER KAFKA TOPIC INGESTOR spread_ingestor
         SET FROM broker TOPIC 'events' OFFSET BY DOMAIN INSTANCES 4
         MODE NO ACK ON QUIESCE SUSPEND;
       """
@@ -93,7 +93,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 4 instances of ingestor "spread_source" on <owners> distinct owners
+    Then the last cluster status lists 4 instances of ingestor "spread_ingestor" on <owners> distinct owners
 
     Examples:
       | nodes | owners |
@@ -115,7 +115,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE KAFKA TOPIC INGESTOR spread_source
+      CREATE KAFKA TOPIC INGESTOR spread_ingestor
         FROM broker TOPIC 'layout_input_{{test_id}}' OFFSET BY DOMAIN INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -124,7 +124,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       CREATE SUBSCRIPTION observing TO events;
       START AT '2000-01-01T00:00:00Z';
       """
-    Then within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     When Kafka message is published to topic "layout_input_{{test_id}}" partition 0
       """
       {"phase":0,"partition":0}
@@ -161,14 +161,14 @@ Feature: Kafka domain offsets survive intake unit layout changes
     And within "5s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "events" across physical nodes totals 6
     When these Plexus commands are executed on the leader node
       """
-      ALTER KAFKA TOPIC INGESTOR spread_source
+      ALTER KAFKA TOPIC INGESTOR spread_ingestor
         SET FROM broker TOPIC 'layout_input_{{test_id}}' OFFSET BY DOMAIN INSTANCES 4
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND;
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 4 instances of ingestor "spread_source" on <owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then the last cluster status lists 4 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     When Kafka message is published to topic "layout_input_{{test_id}}" partition 0
       """
       {"phase":1,"partition":0}
@@ -206,15 +206,15 @@ Feature: Kafka domain offsets survive intake unit layout changes
     When these Plexus commands are executed on the leader node
       """
       STOP;
-      ALTER KAFKA TOPIC INGESTOR spread_source
+      ALTER KAFKA TOPIC INGESTOR spread_ingestor
         SET FROM broker TOPIC 'layout_input_{{test_id}}' OFFSET BY DOMAIN INSTANCES 2
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND;
       START;
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 2 instances of ingestor "spread_source" on <shrink_owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then the last cluster status lists 2 instances of ingestor "spread_ingestor" on <shrink_owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     When Kafka message is published to topic "layout_input_{{test_id}}" partition 0
       """
       {"phase":2,"partition":0}
@@ -251,14 +251,14 @@ Feature: Kafka domain offsets survive intake unit layout changes
     And within "5s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "events" across physical nodes totals 18
     When these Plexus commands are executed on the leader node
       """
-      ALTER KAFKA TOPIC INGESTOR spread_source
+      ALTER KAFKA TOPIC INGESTOR spread_ingestor
         SET FROM broker TOPIC 'layout_input_{{test_id}}' OFFSET BY DOMAIN INSTANCES 4
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND;
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status lists 4 instances of ingestor "spread_source" on <owners> distinct owners
-    And within "60s" every instance of ingestor "spread_source" reports running and ready on its scheduled owner
+    Then the last cluster status lists 4 instances of ingestor "spread_ingestor" on <owners> distinct owners
+    And within "60s" every instance of ingestor "spread_ingestor" reports running and ready on its scheduled owner
     When Kafka message is published to topic "layout_input_{{test_id}}" partition 0
       """
       {"phase":3,"partition":0}

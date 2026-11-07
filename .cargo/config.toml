@@ -1,6 +1,0 @@
-# Temporary CU-86bcyqk33 local functional-check override; remove before committing.
-[profile.dev.package.nervix-plexus]
-opt-level = 0
-
-[profile.test.package.nervix-plexus]
-opt-level = 0

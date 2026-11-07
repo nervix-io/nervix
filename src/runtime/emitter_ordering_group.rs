@@ -9,7 +9,7 @@
 //! - **Must not know.** Which emitter writes records under a group, what the external system does with
 //!   it, or when the emitter publishes.
 //!
-//! A emitter that orders records per group receives each record's group already evaluated, so the
+//! An emitter that orders records per group receives each record's group already evaluated, so the
 //! expression that produced it, and the reason a record has none, both stay with the host.
 
 #![cfg_attr(
@@ -20,7 +20,7 @@
 use arrow_array::UInt64Array;
 use error_stack::ResultExt as _;
 
-use super::{filter_map::ExecutedFilterMap, *};
+use super::{filter_map::ExecutedFilterMap, vm_compile::EmitterFilterMapScope, *};
 
 /// The column a compiled ordering-group expression writes each row's group into.
 const ORDERING_GROUP_FIELD: &str = "ordering_group";
@@ -28,10 +28,22 @@ const ORDERING_GROUP_FIELD: &str = "ordering_group";
 /// How the host evaluates the ordering group of an emitter whose plan declares one.
 #[derive(Debug, Clone)]
 pub(super) enum CompiledOrderingGroup {
-    /// Every record is published under its batch's concrete branch key.
-    FromBranch,
+    /// Branch-dependent expressions are compiled against each source's resolved schema.
+    Sources(Box<OrderingGroupSources>),
     /// Every record is published under the `STRING` this program produces for its source row.
     Expression(CompiledProgramWithMaterializedInterest),
+}
+
+/// One boxed owner keeps source-specific programs out of the common program's inline storage.
+#[derive(Clone)]
+pub(super) struct OrderingGroupSources {
+    by_relay: BTreeMap<RelayName, CompiledProgramWithMaterializedInterest>,
+}
+
+impl std::fmt::Debug for OrderingGroupSources {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.by_relay, formatter)
+    }
 }
 
 impl CompiledOrderingGroup {
@@ -43,10 +55,40 @@ impl CompiledOrderingGroup {
         context: RuntimeVmCompileContext<'_>,
     ) -> RuntimeVmCompileResult<Self> {
         let node = ModelName::from(emitter);
-        let expression = match declared {
-            EmitterOrderingGroupPlan::FromBranch => return Ok(Self::FromBranch),
-            EmitterOrderingGroupPlan::Expression(program) => program,
-        };
+        let EmitterOrderingGroupPlan::Expression {
+            program: expression,
+            sources,
+        } = declared;
+        if !sources.is_empty() {
+            let mut programs = BTreeMap::new();
+            for (relay, branching) in sources {
+                let context = RuntimeVmCompileContext {
+                    current_branching: branching,
+                    ..context
+                };
+                let program = Self::compile_program(
+                    expression,
+                    &node,
+                    input.clone(),
+                    context,
+                    context.branch_binding(),
+                )?;
+                programs.insert(relay.clone(), program);
+            }
+            return Ok(Self::Sources(Box::new(OrderingGroupSources {
+                by_relay: programs,
+            })));
+        }
+        Self::compile_program(expression, &node, input, context, None).map(Self::Expression)
+    }
+
+    fn compile_program(
+        expression: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
+        node: &ModelName,
+        input: RuntimeVmSchema,
+        context: RuntimeVmCompileContext<'_>,
+        branch_binding: Option<VmCompileBinding>,
+    ) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
         let output_schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
             ORDERING_GROUP_FIELD,
             ArrowDataType::Utf8,
@@ -58,7 +100,7 @@ impl CompiledOrderingGroup {
                     node: node.clone(),
                 })?;
         let program = compile_emitter_filter_map_part(
-            &node,
+            node,
             expression.clone(),
             RuntimeVmSchemaPair {
                 input: input.schema,
@@ -66,12 +108,15 @@ impl CompiledOrderingGroup {
                 output: output_schema,
                 output_sensitivity: VmSchemaSensitivity::default(),
             },
-            true,
-            None,
+            EmitterFilterMapScope {
+                codec_route: true,
+                header_writes: None,
+                branch_binding,
+            },
             error_sites,
             context,
         )?;
-        Ok(Self::Expression(program))
+        Ok(program)
     }
 
     /// The ordering group of every row of `batch`.
@@ -81,12 +126,16 @@ impl CompiledOrderingGroup {
     pub(super) async fn evaluate(
         &self,
         executor: &Executor,
+        source_relay: &RelayName,
         batch: &RelayRecordBatch,
         execution_now: Timestamp,
         side_inputs: &HashMap<String, RuntimeValue>,
     ) -> Result<OrderingGroups, PlannedGeneralFailure> {
         let program = match self {
-            Self::FromBranch => return Ok(OrderingGroups::from_branch(batch.key.as_ref())),
+            Self::Sources(programs) => programs
+                .by_relay
+                .get(source_relay)
+                .verified("every admitted source has its compiled ordering group"),
             Self::Expression(program) => program,
         };
         let executed = execute_filter_map_program_on_batch(
@@ -115,8 +164,6 @@ impl CompiledOrderingGroup {
 /// Why one row has no ordering group. The emitter rejects that row when it publishes it.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(super) enum OrderingGroupError {
-    #[error("ordering group FROM BRANCH received an unbranched record")]
-    UnbranchedRecord,
     #[error("ordering group expression omitted its input row")]
     OmittedInputRow,
     #[error("ordering group expression failed with {} at {span}", .code.as_str())]
@@ -131,28 +178,15 @@ pub(super) enum OrderingGroupError {
 /// The ordering group of every row of one emitter batch, as the host evaluated it.
 #[derive(Debug, Clone)]
 pub(super) enum OrderingGroups {
-    /// Every row is published under the batch's concrete branch key.
-    Branch(BranchKey),
-    /// No row has a group, for the one reason every row shares.
-    Unavailable(OrderingGroupError),
     /// Each row's own group, evaluated from the emitter's expression.
     Evaluated(EvaluatedOrderingGroups),
 }
 
 impl OrderingGroups {
-    /// The groups of a batch whose records are published under their branch key.
-    fn from_branch(key: Option<&BranchKey>) -> Self {
-        match key {
-            Some(key) => Self::Branch(key.clone()),
-            None => Self::Unavailable(OrderingGroupError::UnbranchedRecord),
-        }
-    }
-
     /// The groups of `source_rows`, in that order: the rows an emitter route kept, each with the
     /// group its own source row produced.
     pub(super) fn select(&self, source_rows: &[usize]) -> EmitterRuntimeResult<Self> {
         match self {
-            Self::Branch(_) | Self::Unavailable(_) => Ok(self.clone()),
             Self::Evaluated(groups) => {
                 let selected = groups.select(source_rows)?;
                 Ok(Self::Evaluated(selected))
@@ -163,7 +197,6 @@ impl OrderingGroups {
     /// How many rows these groups describe, absent when they describe every row alike.
     pub(super) fn row_count(&self) -> Option<usize> {
         match self {
-            Self::Branch(_) | Self::Unavailable(_) => None,
             Self::Evaluated(groups) => Some(groups.groups.len()),
         }
     }
@@ -172,8 +205,6 @@ impl OrderingGroups {
     /// describe no such row.
     pub(super) fn group(&self, row: usize) -> Option<Result<&str, &OrderingGroupError>> {
         match self {
-            Self::Branch(key) => Some(Ok(key.as_str())),
-            Self::Unavailable(error) => Some(Err(error)),
             Self::Evaluated(groups) => groups.group(row),
         }
     }
@@ -181,8 +212,6 @@ impl OrderingGroups {
     /// The bytes these groups hold beyond the batch they describe.
     pub(super) fn estimated_bytes(&self) -> u64 {
         match self {
-            // The branch key is the one the batch already carries.
-            Self::Branch(_) | Self::Unavailable(_) => 0,
             Self::Evaluated(groups) => groups.groups.values().len().arch_into(),
         }
     }
@@ -190,10 +219,7 @@ impl OrderingGroups {
     /// The bytes the groups of `rows` hold beyond the batch they describe, as
     /// [`Self::estimated_bytes`] measures them for every row.
     pub(super) fn estimated_bytes_of_rows(&self, rows: &[usize]) -> u64 {
-        let Self::Evaluated(groups) = self else {
-            // The branch key is the one the batch already carries.
-            return 0;
-        };
+        let Self::Evaluated(groups) = self;
         let mut bytes = 0_u64;
         for row in rows {
             // A row without a group holds only the reason it has none.
@@ -451,6 +477,7 @@ mod tests {
         group
             .evaluate(
                 &Executor::default(),
+                &named("source"),
                 batch,
                 Timestamp::from_unix_nanos(1),
                 &HashMap::default(),
@@ -467,6 +494,106 @@ mod tests {
                     .expect("the groups must describe every row of the batch")
             })
             .collect()
+    }
+
+    #[nervix_primitives::test]
+    async fn a_branch_group_binds_each_sources_own_branch_schema() {
+        let input = test_schema(&[("tenant", ParseAsType::String)]);
+        let emitter = named("grouped");
+        let mut declared = EmitterOrderingGroupPlan::expression(
+            &emitter,
+            &expression("branch.tenant"),
+            input.arrow_schema().as_ref(),
+        )
+        .expect("the group lowers");
+        let EmitterOrderingGroupPlan::Expression { sources, .. } = &mut declared;
+        for (source, fields) in [
+            ("first", vec![("tenant", ParseAsType::String)]),
+            (
+                "second",
+                vec![("zone", ParseAsType::I64), ("tenant", ParseAsType::String)],
+            ),
+        ] {
+            sources.insert(
+                named(source),
+                ResolvedBranching::branched(
+                    named(source),
+                    nervix_models::CreateSchema {
+                        name: named(source),
+                        fields: fields
+                            .into_iter()
+                            .map(|(name, ty)| nervix_models::SchemaField {
+                                name: named(name),
+                                ty,
+                                optional: false,
+                                sensitive: false,
+                            })
+                            .collect(),
+                    },
+                    nervix_models::BranchPartitions::ONE,
+                ),
+            );
+        }
+        let group = CompiledOrderingGroup::compile(
+            &declared,
+            &emitter,
+            RuntimeVmSchema {
+                schema: input.arrow_schema(),
+                sensitivity: VmSchemaSensitivity::default(),
+            },
+            RuntimeVmCompileContext {
+                available_materialized_streams: &HashMap::default(),
+                available_lookups: &HashMap::default(),
+                current_branching: &ResolvedBranching::unbranched(),
+                udfs: None,
+            },
+        )
+        .expect("each source's branch schema binds independently");
+        for (source, expected, fields) in [
+            (
+                "first",
+                "acme",
+                vec![("tenant", RuntimeValue::String("acme".to_owned()))],
+            ),
+            (
+                "second",
+                "beta",
+                vec![
+                    ("zone", RuntimeValue::I64(9)),
+                    ("tenant", RuntimeValue::String("beta".to_owned())),
+                ],
+            ),
+        ] {
+            nervix_primitives::task::consume_budget().await;
+            let key = BranchKey::from_fields(
+                fields.into_iter().map(|(name, value)| (named(name), value)),
+            )
+            .expect("the branch key is valid");
+            let (acks, _completion) = AckSet::root();
+            let batch = RelayRecordBatch::from_messages(
+                input.clone(),
+                vec![RelayMessage {
+                    key: Some(key),
+                    record: test_runtime_row([(
+                        "tenant".to_owned(),
+                        RuntimeValue::String("message".to_owned()),
+                    )]),
+                    acks,
+                }],
+            )
+            .expect("the source batch builds");
+            let groups = group
+                .evaluate(
+                    &Executor::default(),
+                    &named(source),
+                    &batch,
+                    Timestamp::from_unix_nanos(1),
+                    &HashMap::default(),
+                )
+                .await
+                .expect("the source group evaluates");
+            assert_eq!(groups.group(0), Some(Ok(expected)));
+        }
     }
 
     #[nervix_primitives::test]
@@ -537,37 +664,6 @@ mod tests {
                     .starts_with("ordering group expression failed with division_by_zero at ")),
             "the failure names the code: {failed:?}"
         );
-    }
-
-    #[nervix_primitives::test]
-    async fn a_branch_group_is_the_batch_key_and_an_unbranched_batch_has_none() {
-        let input_schema = test_schema(&[("tenant", ParseAsType::String)]);
-        let unbranched = unbranched_batch(
-            input_schema.clone(),
-            vec![vec![("tenant", RuntimeValue::String("acme".to_string()))]],
-        );
-
-        let groups = evaluate(&CompiledOrderingGroup::FromBranch, &unbranched).await;
-
-        assert_eq!(groups.row_count(), None);
-        assert_eq!(
-            groups.group(0),
-            Some(Err(&OrderingGroupError::UnbranchedRecord))
-        );
-        assert_eq!(groups.estimated_bytes(), 0);
-
-        let key = string_branch_key("tenant", "acme");
-        let mut branched = unbranched;
-        branched.key = key.clone();
-        let key = key.expect("a one-field branch key is concrete");
-
-        let groups = evaluate(&CompiledOrderingGroup::FromBranch, &branched).await;
-
-        assert_eq!(groups.group(0), Some(Ok(key.as_str())));
-        let selected = groups
-            .select(&[0, 0])
-            .expect("a branch group selects any rows");
-        assert_eq!(selected.group(1), Some(Ok(key.as_str())));
     }
 
     fn executed(

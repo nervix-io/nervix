@@ -35,7 +35,7 @@ Feature: Processor output routing
       CREATE RELAY route_errors SCHEMA error_record UNBRANCHED;
       CREATE VHOST edge output-error-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
         TO source_events
@@ -109,7 +109,7 @@ Feature: Processor output routing
       CREATE RELAY delayed_events SCHEMA routed_event UNBRANCHED;
       CREATE VHOST edge output-flush-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
         TO incoming_events
@@ -196,7 +196,7 @@ Feature: Processor output routing
         PATH '/ingestor-output'
         TYPE HTTP;
 
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         FILTER WHERE input.active
@@ -272,7 +272,7 @@ Feature: Processor output routing
       CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
       CREATE VHOST edge sequential-set-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_events
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TO projected_events
@@ -375,7 +375,7 @@ Feature: Processor output routing
         ON edge
         PATH '/route-b'
         TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR source_logs_a
+        CREATE HTTP ENDPOINT INGESTOR ingestor_logs_a
         FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs_a
@@ -385,7 +385,7 @@ Feature: Processor output routing
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_logs_b
+        CREATE HTTP ENDPOINT INGESTOR ingestor_logs_b
         FROM ingress_b MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs_b
@@ -594,7 +594,7 @@ Feature: Processor output routing
         ON edge
         PATH '/project-output'
         TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR source_logs
+        CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs
@@ -717,7 +717,7 @@ Feature: Processor output routing
         CREATE VHOST edge http-branch-state-{{test_id}}.example.com;
         CREATE ENDPOINT state_ingress ON edge PATH '/branch-state' TYPE HTTP;
         CREATE ENDPOINT ingress ON edge PATH '/branch-input' TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR preference_source
+        CREATE HTTP ENDPOINT INGESTOR preference_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING preference_codec
         TO tenant_preferences
@@ -727,7 +727,7 @@ Feature: Processor output routing
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR notification_source
+        CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming

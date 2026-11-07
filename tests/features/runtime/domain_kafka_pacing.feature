@@ -19,14 +19,14 @@ Feature: Kafka ingestor domain pacing
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR source
+      CREATE KAFKA TOPIC INGESTOR ingestor
         FROM kafka_main TOPIC 'start_once_in_{{test_id}}'
         OFFSET BY DOMAIN INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s
         RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER sink FROM events
+      CREATE KAFKA TOPIC EMITTER emitter FROM events
         TO kafka_main TOPIC 'start_once_out_{{test_id}}'
         MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -47,7 +47,7 @@ Feature: Kafka ingestor domain pacing
       """
     When these Plexus statements are executed on the leader node
       """
-      ALTER KAFKA TOPIC INGESTOR source SET DECODE USING resumed_codec;
+      ALTER KAFKA TOPIC INGESTOR ingestor SET DECODE USING resumed_codec;
       """
     And Kafka message is published to topic "start_once_in_{{test_id}}" partition 0
       """
@@ -128,14 +128,14 @@ Feature: Kafka ingestor domain pacing
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR source
+      CREATE KAFKA TOPIC INGESTOR ingestor
         FROM kafka_main TOPIC 'restored_start_in_{{test_id}}'
         OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s
         RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER sink FROM events
+      CREATE KAFKA TOPIC EMITTER emitter FROM events
         TO kafka_main TOPIC 'restored_start_out_{{test_id}}'
         MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -203,7 +203,7 @@ Feature: Kafka ingestor domain pacing
         'bootstrap.servers' = '{{mock_kafka_addr}}',
         'socket.timeout.ms' = '30000'
       };
-      CREATE KAFKA TOPIC INGESTOR stalled_source
+      CREATE KAFKA TOPIC INGESTOR stalled_ingestor
         FROM slow_kafka TOPIC 'control_wait_{{test_id}}'
         OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
         RETRY POLICY BACKOFF 100ms MAX 1s
@@ -212,7 +212,7 @@ Feature: Kafka ingestor domain pacing
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE VHOST edge control-{{test_id}}.example.com;
       CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR healthy_source
+      CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
         FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -231,11 +231,11 @@ Feature: Kafka ingestor domain pacing
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "ingestor" "stalled_source" is saved as placeholder "kafka_owner"
+    Then the last cluster status owner for scheduled "ingestor" "stalled_ingestor" is saved as placeholder "kafka_owner"
     Given the mock Kafka broker holds every answer
     When these Plexus statements are executed on the leader node
       """
-      ALTER KAFKA TOPIC INGESTOR stalled_source
+      ALTER KAFKA TOPIC INGESTOR stalled_ingestor
         SET DECODE USING resume_codec;
       """
     Then within "30s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually reaches at least 1
@@ -977,7 +977,7 @@ Feature: Kafka ingestor domain pacing
       CREATE KAFKA CLIENT added_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR added_source
+      CREATE KAFKA TOPIC INGESTOR added_ingestor
         FROM added_kafka TOPIC 'added_earliest_{{test_id}}'
         OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING added_codec
@@ -986,7 +986,7 @@ Feature: Kafka ingestor domain pacing
       CREATE SUBSCRIPTION added_subscription TO added_events;
       START;
       """
-    Then within "30s" DESCRIBE INGESTOR "added_source" on the leader node contains
+    Then within "30s" DESCRIBE INGESTOR "added_ingestor" on the leader node contains
       """
       kafka observed partitions: 0
       """
@@ -1003,7 +1003,7 @@ Feature: Kafka ingestor domain pacing
       """
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "added_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "added_ingestor" on the leader node contains
       """
       kafka observed partitions: 0,1
       """

@@ -122,7 +122,14 @@ fn records_carry_ordered_repeated_headers_and_their_log_position() {
         ]
     );
     assert!(emit.options.is_empty());
-    assert_eq!(emit.envelope, [EnvelopeClauseKind::Timestamp]);
+    assert_eq!(
+        emit.envelope,
+        [
+            EnvelopeClauseKind::Key,
+            EnvelopeClauseKind::PartitionFromBranch,
+            EnvelopeClauseKind::Timestamp,
+        ]
+    );
     assert!(emit.properties.is_empty());
 }
 

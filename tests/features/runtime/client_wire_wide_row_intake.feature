@@ -19,7 +19,7 @@ Feature: Establishing a wide subscription row after a refused input handoff
       CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
       CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wide_source
+      CREATE HTTP ENDPOINT INGESTOR wide_ingestor
         FROM wide_ingress MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wide_record_codec
         TO wide_records SET sequence = message.sequence, note = message.note UNBRANCHED

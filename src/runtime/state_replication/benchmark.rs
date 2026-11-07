@@ -28,7 +28,7 @@ pub struct StateReplicationBenchmark {
 
 impl StateReplicationBenchmark {
     /// Deliver one replica acknowledgement through the runtime's frame router, independently of
-    /// the source task and the offset commit it wakes.
+    /// the ingestor task and the offset commit it wakes.
     pub fn acknowledgement_frame(&self) {
         self.runtime.handle_state_replication_ack(
             &self.replica,
@@ -160,7 +160,7 @@ impl StateReplicationBenchmark {
     }
 
     /// Commit the next offset and deliver the replica's acknowledgement of it once the commit waits
-    /// for its replica, as every acknowledged batch of a domain-offset Kafka source does.
+    /// for its replica, as every acknowledged batch of a domain-offset Kafka ingestor does.
     pub async fn commit_acknowledged_offset(&mut self) {
         let lsm = self
             .offsets

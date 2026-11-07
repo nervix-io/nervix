@@ -346,7 +346,7 @@ Feature: Emitter batch containers
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR json_batch_source
+      CREATE KAFKA TOPIC INGESTOR json_batch_ingestor
         FROM kafka_main TOPIC 'json_batches_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_json_batches_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -358,7 +358,7 @@ Feature: Emitter batch containers
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR proto_batch_source
+      CREATE KAFKA TOPIC INGESTOR proto_batch_ingestor
         FROM kafka_main TOPIC 'proto_batches_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_proto_batches_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s

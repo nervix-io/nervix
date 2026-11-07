@@ -24,7 +24,7 @@ Feature: Attached record outcomes across independent branch deliveries
       CREATE KAFKA CLIENT ack_owner_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR ack_owner_source
+      CREATE KAFKA TOPIC INGESTOR ack_owner_ingestor
         FROM ack_owner_kafka TOPIC 'ack_owners_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'ack_owners_group_{{test_id}}' START AT EARLIEST
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
@@ -33,7 +33,7 @@ Feature: Attached record outcomes across independent branch deliveries
           BRANCHED BY ack_owner_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER ack_owner_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER ack_owner_emitter
         FROM ack_owner_records
         TO ack_owner_kafka TOPIC 'ack_owners_out_{{test_id}}'
           MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s

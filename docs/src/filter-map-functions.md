@@ -65,14 +65,14 @@ in:
 
 | Context | Window aggregates | `read_header`, `read_headers` | `LOOKUP_HASH_MAP` | `now()`, `uuid_v4()`, `uuid_v7()` |
 | --- | --- | --- | --- | --- |
-| Ingestor `FILTER WHERE` and route `INHERIT`, `SET`, and `WHERE` | No | On a header-capable source | Yes | Yes |
+| Ingestor `FILTER WHERE` and route `INHERIT`, `SET`, and `WHERE` | No | On a header-capable ingestor | Yes | Yes |
 | `BRANCHED BY ... SET` on ingestors and reingestors | No | No | Yes | Yes |
 | Processor `FROM ... WHERE` and `FILTER WHERE`, and the routes of junctions, deduplicators, reorderers, reingestors, inferencers, and WASM processors | No | No | Yes | Yes |
 | Window route `SET` | Yes, and only here | No | No | Yes |
 | Window route `WHERE` | No | No | Yes | Yes |
 | Generator routes, correlator routes, and `CORRELATE WHERE` | No | No | No | Yes |
 | `DEDUPLICATE ON`, reorderer `BY`, and inferencer `INPUTS` | No | No | No | Yes |
-| Emitter `FROM ... WHERE`, route `SET`, `WHERE`, and `INVOKE`, HTTP `METHOD` and `PATH`, and SQS `FIFO GROUP` | No | No | Yes | Yes |
+| Emitter `FROM ... WHERE`, route `SET`, `WHERE`, and `INVOKE`, `KEY` and other computed envelope values, HTTP `METHOD` and `PATH`, and SQS `FIFO GROUP` | No | No | Yes | Yes |
 | Emitter `VALUES` and OpenTelemetry `ATTRIBUTES` | No | No | No | Yes |
 | `ON MESSAGE ERROR SEND TO ... SET` | No | For a failure on a header-capable ingestor | No | Yes |
 | Materialized-state `DEFAULT` | No | No | No | No |

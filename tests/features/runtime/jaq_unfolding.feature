@@ -19,7 +19,7 @@ Feature: JAQ codec unfolding
       CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT order_lines_endpoint ON edge PATH '/order-lines' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR order_lines_source
+      CREATE HTTP ENDPOINT INGESTOR order_lines_ingestor
         FROM order_lines_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_lines_codec
         TO order_lines
@@ -67,7 +67,7 @@ Feature: JAQ codec unfolding
       CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT order_lines_endpoint ON edge PATH '/order-lines' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR order_lines_source
+      CREATE HTTP ENDPOINT INGESTOR order_lines_ingestor
         FROM order_lines_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_line_stream_codec
         TO order_lines
@@ -115,7 +115,7 @@ Feature: JAQ codec unfolding
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR events_source
+      CREATE HTTP ENDPOINT INGESTOR events_ingestor
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING events_codec
         TO events
@@ -176,7 +176,7 @@ Feature: JAQ codec unfolding
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT flood_endpoint ON edge PATH '/flood' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR flood_source
+      CREATE HTTP ENDPOINT INGESTOR flood_ingestor
         FROM flood_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING flood_codec
         TO events
@@ -233,7 +233,7 @@ Feature: JAQ codec unfolding
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR selected_event_source
+      CREATE KAFKA TOPIC INGESTOR selected_event_ingestor
         FROM kafka_main TOPIC 'selected_events_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_selected_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -299,7 +299,7 @@ Feature: JAQ codec unfolding
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR split_event_source
+      CREATE KAFKA TOPIC INGESTOR split_event_ingestor
         FROM kafka_main TOPIC 'split_events_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_split_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -384,7 +384,7 @@ Feature: JAQ codec unfolding
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR split_event_source
+      CREATE KAFKA TOPIC INGESTOR split_event_ingestor
         FROM kafka_main TOPIC 'split_events_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_split_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -463,7 +463,7 @@ Feature: JAQ codec unfolding
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR tenant_batch_source
+      CREATE KAFKA TOPIC INGESTOR tenant_batch_ingestor
         FROM kafka_main TOPIC 'tenant_batches_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_tenant_batches_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -514,7 +514,7 @@ Feature: JAQ codec unfolding
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR notifications_source
+      CREATE HTTP ENDPOINT INGESTOR notifications_ingestor
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications

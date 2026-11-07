@@ -370,7 +370,7 @@ impl Runtime {
         let entrypoints = &revision.entrypoints;
         let emitter_plans = &revision.emitters;
         for plan in entrypoints.ingestors() {
-            // A client source's window and durations are already typed in its plan.
+            // A client ingestor's window and durations are already typed in its plan.
             let Some(acknowledgement) = plan.transport_acknowledgement() else {
                 continue;
             };

@@ -141,7 +141,7 @@ Feature: Client wire failure regressions
       CREATE RELAY held_records SCHEMA held_record UNBRANCHED;
       CREATE VHOST held_edge held-binding-{{test_id}}.example.com;
       CREATE ENDPOINT held_ingress ON held_edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_codec
         TO held_records INHERIT ALL UNBRANCHED
@@ -957,7 +957,7 @@ Feature: Client wire failure regressions
       CREATE KAFKA CLIENT relocation_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR relocation_offset_source
+      CREATE KAFKA TOPIC INGESTOR relocation_offset_ingestor
         FROM relocation_kafka TOPIC 'relocation_offsets_{{test_id}}'
           OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 200ms MAX 5s
@@ -971,7 +971,7 @@ Feature: Client wire failure regressions
       ON GENERAL ERROR LOG;
       START;
       """
-    Then within "5s" DESCRIBE INGESTOR "relocation_offset_source" on the leader node contains
+    Then within "5s" DESCRIBE INGESTOR "relocation_offset_ingestor" on the leader node contains
       """
       kafka observed partitions: 0
       """
@@ -991,7 +991,7 @@ Feature: Client wire failure regressions
       """
     Then the relocation publication pause for domain "{{domain}}" is reached
     When Kafka topic "relocation_offsets_{{test_id}}" partition count is changed to 2
-    Then within "5s" DESCRIBE INGESTOR "relocation_offset_source" on the leader node contains
+    Then within "5s" DESCRIBE INGESTOR "relocation_offset_ingestor" on the leader node contains
       """
       kafka observed partitions: 0,1
       """
@@ -999,7 +999,7 @@ Feature: Client wire failure regressions
     Then the background Plexus execution fails with "schedule changed"
     When these Plexus commands are executed on the leader node
       """
-      DESCRIBE INGESTOR relocation_offset_source;
+      DESCRIBE INGESTOR relocation_offset_ingestor;
       """
     Then the last command output contains
       """
@@ -1030,7 +1030,7 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE ACK MAX 8 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wire_record_codec
         TO wire_records INHERIT ALL
@@ -1100,7 +1100,7 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE ACK MAX 8 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wire_record_codec
         TO wire_records INHERIT ALL
@@ -1165,7 +1165,7 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records INHERIT ALL UNBRANCHED
@@ -1276,7 +1276,7 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records
@@ -1321,7 +1321,7 @@ Feature: Client wire failure regressions
     And the last relay subscription payload masks field "sequence"
     When these Plexus commands are executed on the leader node
       """
-      DROP INGESTOR wire_source;
+      DROP INGESTOR wire_ingestor;
       DROP RELAY wire_records;
       """
     Then within "30s" client "subscriber" observes subscription "wire_seen" ended with reason "RelayRemoved"
@@ -1362,7 +1362,7 @@ Feature: Client wire failure regressions
       CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
       CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wide_source
+      CREATE HTTP ENDPOINT INGESTOR wide_ingestor
         FROM wide_ingress MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wide_record_codec
         TO wide_records

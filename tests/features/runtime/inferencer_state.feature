@@ -17,7 +17,7 @@ Feature: Stateful inferencer tensors
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE VHOST edge infer-private-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features INHERIT ALL UNBRANCHED
@@ -57,7 +57,7 @@ Feature: Stateful inferencer tensors
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE VHOST edge infer-sensitive-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features INHERIT ALL UNBRANCHED
@@ -146,7 +146,7 @@ Feature: Stateful inferencer tensors
       CREATE RELAY audited SCHEMA audited BRANCHED BY by_tenant;
       CREATE VHOST edge infer-state-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -231,7 +231,7 @@ Feature: Stateful inferencer tensors
       CREATE RELAY rejected SCHEMA rejected UNBRANCHED;
       CREATE VHOST edge infer-inputs-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features INHERIT ALL UNBRANCHED
@@ -330,7 +330,7 @@ Feature: Stateful inferencer tensors
       CREATE RELAY rejected SCHEMA rejected UNBRANCHED;
       CREATE VHOST edge infer-refusal-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features INHERIT ALL UNBRANCHED

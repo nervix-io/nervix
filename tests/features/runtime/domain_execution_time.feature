@@ -34,7 +34,7 @@ Feature: Domain execution time
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_events
+      CREATE HTTP ENDPOINT INGESTOR ingestor_events
         FROM source_event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TIMESTAMP NOW
@@ -120,7 +120,7 @@ Feature: Domain execution time
         ON edge
         PATH '/probe'
         TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR clock_probe_source
+      CREATE HTTP ENDPOINT INGESTOR clock_probe_ingestor
         FROM clock_probe_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_probe_codec
         TIMESTAMP NOW
@@ -196,7 +196,7 @@ Feature: Domain execution time
         ON edge
         PATH '/calculations'
         TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR calculation_source
+      CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TIMESTAMP NOW
@@ -283,7 +283,7 @@ Feature: Domain execution time
         ON edge
         PATH '/trigger'
         TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR trigger_source
+      CREATE HTTP ENDPOINT INGESTOR trigger_ingestor
         FROM trigger_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING trigger_event_codec
         TIMESTAMP NOW

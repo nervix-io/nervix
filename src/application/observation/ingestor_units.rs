@@ -3,7 +3,7 @@
 //! Layer: control plane.
 //! - **Owns.** Local and remote unit status and metric collection for ingestor inspection.
 //! - **Depends on.** Typed unit placements, runtime inspection and the interconnect.
-//! - **Must not know.** Source tasks, connector drivers or record delivery.
+//! - **Must not know.** Ingestor tasks, connector drivers or record delivery.
 
 #![cfg_attr(
     nervix_lint,

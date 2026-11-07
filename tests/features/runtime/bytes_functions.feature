@@ -17,7 +17,7 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_events SCHEMA binary_event UNBRANCHED;
       CREATE VHOST edge bytes-base64-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR binary_source
+      CREATE HTTP ENDPOINT INGESTOR binary_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_event_codec
         TO binary_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -25,7 +25,7 @@ Feature: Typed bytes and native encoding functions
       CREATE HTTP CLIENT binary_api CONFIG {
         'endpoint' = '{{http_receiver.binary_api}}', 'timeout_ms' = 5000
       };
-      CREATE HTTP REQUEST EMITTER binary_sink FROM binary_events
+      CREATE HTTP REQUEST EMITTER binary_emitter FROM binary_events
         TO binary_api METHOD 'POST' PATH '/bytes'
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
           ENCODE USING binary_event_codec
@@ -93,7 +93,7 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
       CREATE VHOST edge bytes-functions-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR text_source
+      CREATE HTTP ENDPOINT INGESTOR text_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING text_input_codec
         TO text_inputs
@@ -151,7 +151,7 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_errors SCHEMA binary_error UNBRANCHED;
       CREATE VHOST edge bytes-error-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR encoded_source
+      CREATE HTTP ENDPOINT INGESTOR encoded_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING encoded_codec
         TO encoded_inputs
@@ -207,7 +207,7 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_texts SCHEMA binary_text UNBRANCHED;
       CREATE VHOST edge bytes-wire-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR binary_source
+      CREATE HTTP ENDPOINT INGESTOR binary_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_codec
         TO binary_inputs
@@ -258,7 +258,7 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
       CREATE VHOST edge bytes-sensitive-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR binary_source
+      CREATE HTTP ENDPOINT INGESTOR binary_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_codec
         TO binary_inputs

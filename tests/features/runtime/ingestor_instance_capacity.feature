@@ -15,7 +15,7 @@ Feature: Ingestor instance counts fit the execution-unit representation
       """
     When these Plexus statements fail with "cannot be represented as execution units on this target"
       """
-      CREATE KAFKA TOPIC INGESTOR oversized_source
+      CREATE KAFKA TOPIC INGESTOR oversized_ingestor
         FROM broker TOPIC 'events' OFFSET BY DOMAIN INSTANCES 18446744073709551615
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED

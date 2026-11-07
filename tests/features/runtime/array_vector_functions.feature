@@ -15,7 +15,7 @@ Feature: Typed array and vector expressions
       CREATE RELAY results SCHEMA result UNBRANCHED;
       CREATE VHOST edge arrays-{{test_id}}.example.com;
       CREATE ENDPOINT numbers_ingress ON edge PATH '/numbers' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR numbers_source
+      CREATE HTTP ENDPOINT INGESTOR numbers_ingestor
         FROM numbers_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING numbers_codec
         TO numbers
@@ -81,7 +81,7 @@ Feature: Typed array and vector expressions
       CREATE RELAY vector_errors SCHEMA vector_error UNBRANCHED;
       CREATE VHOST edge vectors-{{test_id}}.example.com;
       CREATE ENDPOINT source_ingress ON edge PATH '/vectors' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_node
+      CREATE HTTP ENDPOINT INGESTOR ingestor_node
         FROM source_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
         TO sources
@@ -159,7 +159,7 @@ Feature: Typed array and vector expressions
       CREATE RELAY unsafe_results SCHEMA unsafe_result UNBRANCHED;
       CREATE VHOST edge fixed-arrays-{{test_id}}.example.com;
       CREATE ENDPOINT source_ingress ON edge PATH '/fixed-arrays' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_node
+      CREATE HTTP ENDPOINT INGESTOR ingestor_node
         FROM source_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
         TO sources

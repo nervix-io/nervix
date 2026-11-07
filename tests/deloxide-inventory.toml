@@ -79,6 +79,26 @@ path = "crates/rate-limit/src/keyed.rs"
 workloads = ["owner.rate-limit-keyed-transactions"]
 
 [[workload]]
+coverage = "An actual applied joint promotion is interrupted at its uniform continuation through the consensus storage pause's tracked condition-variable wait and release; reconciliation finishes and both survivors apply commands after each possible voter stops. Async membership serialization and watches are untracked."
+examples = 3
+feature = "tests/features/cluster/membership_recovery.feature"
+id = "scenario.joint-membership-recovery"
+invariant = "An interrupted joint transition becomes the committed uniform target without a deadlock, and any two of its three voters can continue committing."
+invocation = "scenarios"
+scenario = "A refused uniform step is reconciled before any one of three voters stops"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the controlled joint promotion reaches the consensus storage pause's tracked wait and release, then completes reconciliation and stops each possible voter. Async membership serialization and watches are untracked."
+examples = 3
+feature = "tests/features/cluster/membership_recovery.feature"
+id = "stress.joint-membership-recovery"
+invariant = "An interrupted joint transition becomes the committed uniform target without a deadlock, and any two of its three voters can continue committing."
+invocation = "stress-scenarios"
+scenario = "A refused uniform step is reconciled before any one of three voters stops"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Kafka records through the real broker and the source host's tracked ingestion and ACK state, with every new metadata field read in NO ACK, ACK SEQUENTIAL and ACK PARALLEL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
 examples = 6
 feature = "tests/features/runtime/kafka_metadata.feature"
@@ -450,6 +470,7 @@ kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@joint_membership_recovery",
   "@client_restore_codec_native",
   "@client_restore_uncertainty_native",
   "@ingestor_instance_lifecycle",
@@ -634,7 +655,7 @@ target = "test:scenarios"
 # Check 41311131846 ran 78 of 80 examples within the former 3840s suite budget after the two
 # NATS STREAM lost-PubAck examples joined this serial selection. Both passed in 30.6s total;
 # the last window example finished its body at 3835s and another remained queued. The current
-# 84-example inventory has a 3960s suite budget and a 360s teardown reserve in this bound.
+# 94-example inventory has a 3960s suite budget and a 360s teardown reserve in this bound.
 [[invocation]]
 bound_seconds = 4320
 concurrency = 1
@@ -3814,9 +3835,14 @@ workloads = [
 ]
 
 [[owner]]
-gap = "The listed node workloads reach the armed-fault mutex and sync-delay RwLock during durable writes. They do not arm StoragePause's blocking condition-variable wait and release or inject a nonzero sync delay; those fault effects are outside the registered lane workloads."
+gap = "The listed node workloads reach the armed-fault mutex and sync-delay RwLock during durable writes. The joint-membership workloads also reach StoragePause's blocking condition-variable wait and release. They do not inject a nonzero sync delay; that fault effect is outside the registered lane workloads."
 path = "crates/consensus/src/storage_fault.rs"
-workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "stress.diagnostic-nodes",
+  "scenario.joint-membership-recovery",
+  "stress.joint-membership-recovery",
+]
 
 [[owner]]
 path = "crates/interconnect/src/connection.rs"
@@ -5217,6 +5243,36 @@ id = "parameters.positive-duration"
 invariant = "Repeated-work durations have a typed positive bound."
 invocation = "cluster-parameters"
 scenario = "A parameter change refuses a nonpositive snapshot interval on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Session completion pages on one and three nodes through the server's statement grammar; the assignment grammar itself takes no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.completion-unassigned"
+invariant = "Completing a parameter change offers only the parameters it has not assigned."
+invocation = "cluster-parameters"
+scenario = "Completing a parameter change offers only the parameters it has not assigned on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A named client's command is refused by the server's statement grammar on one and three nodes before admission; parsing takes no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.repeat-refusal"
+invariant = "A parameter change refuses a repeated parameter at the word that repeats it, naming the parameter."
+invocation = "cluster-parameters"
+scenario = "A parameter change refuses a repeated parameter where the repeat is written on a cluster of <cluster_size>"
 selections = [
   "deloxide",
   "deloxide-order",

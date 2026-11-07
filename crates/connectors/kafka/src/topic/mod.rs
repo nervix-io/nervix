@@ -36,7 +36,7 @@ mod retirement;
 use std::{
     ffi::c_int,
     future::Future,
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -45,7 +45,7 @@ use std::{
 use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use delivery::{HandedOverRecord, KafkaDeliveryReport, KafkaProducerContext};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 pub use ingestor::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
@@ -62,7 +62,7 @@ use nervix_connector::{
     EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
     EmitterWriteResult, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
 };
-use nervix_execution::Executor;
+use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{ClientConfigEntry, ConnectorKind, KafkaTopicName, Timestamp};
 use nervix_primitives::{
     sync::oneshot,
@@ -109,6 +109,7 @@ pub struct KafkaTopicEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub topic: KafkaTopicName,
     pub mode: BrokerPublishingMode,
+    pub partition_from_branch: bool,
 }
 
 /// The librdkafka producer a Kafka emitter publishes through.
@@ -127,7 +128,8 @@ pub struct KafkaTopicEmitter {
     /// Shared with the flush a finish runs on the runtime's blocking pool, which keeps the producer
     /// until librdkafka's flush returns, and whichever lets it go last retires it.
     producer: Retiring<KafkaProducer>,
-    topic: KafkaTopicName,
+    topic: Box<str>,
+    partitioning: Option<Box<KafkaPartitionMetadata>>,
     mode: BrokerPublishingMode,
     /// librdkafka's validated payload-byte capacity, resolved once with the producer's config.
     #[cfg_attr(
@@ -138,6 +140,119 @@ pub struct KafkaTopicEmitter {
         )
     )]
     queue_capacity_bytes: NonZeroU64,
+}
+
+/// Only explicit partition routing discovers destination metadata. Ordinary publication keeps
+/// its existing producer, allocation count and fixed footprint.
+struct KafkaPartitionMetadata {
+    executor: Executor,
+    timeout: Duration,
+}
+
+#[derive(Debug, Error)]
+enum KafkaPartitionMetadataError {
+    #[error("{connector} partition metadata admission failed", connector = ConnectorKind::Kafka)]
+    Admission,
+    #[error("{connector} partition metadata execution failed", connector = ConnectorKind::Kafka)]
+    Execution,
+    #[error("{connector} partition metadata exceeded socket.timeout.ms", connector = ConnectorKind::Kafka)]
+    Timeout,
+    #[error("{connector} partition metadata was cancelled", connector = ConnectorKind::Kafka)]
+    Cancelled,
+    #[error("{connector} topic '{topic}' has no usable destination partitions", connector = ConnectorKind::Kafka)]
+    Partitions { topic: Box<str> },
+}
+
+impl KafkaPartitionMetadata {
+    fn new(config: &ClientConfig, executor: Executor) -> EmitterStartResult<Self> {
+        let native = config
+            .create_native_config()
+            .map_err(KafkaTopicEmitter::invalid_configuration)?;
+        let value = native
+            .get("socket.timeout.ms")
+            .map_err(KafkaTopicEmitter::invalid_configuration)?;
+        let milliseconds = value
+            .parse::<u32>()
+            .assured("librdkafka validates and renders a bounded positive socket timeout");
+        Ok(Self {
+            executor,
+            timeout: Duration::from_millis(u64::from(milliseconds)),
+        })
+    }
+
+    async fn partition_count(
+        &self,
+        producer: &Retiring<KafkaProducer>,
+        topic: &str,
+    ) -> Result<u32, Report<EmitterWriteError>> {
+        let failure = || EmitterWriteError::Publish {
+            connector: ConnectorKind::Kafka.keyword(),
+        };
+        let deadline = Instant::now()
+            .checked_add(self.timeout)
+            .assured("the validated native timeout fits the monotonic clock");
+        let producer = producer.clone();
+        let topic = topic.to_owned().into_boxed_str();
+        let topic_bytes = topic.len();
+        let operation =
+            move |_charge: nervix_execution::Reservation,
+                  cancellation: &nervix_execution::Cancellation| {
+                if cancellation.is_cancelled() {
+                    return Err(Report::new(KafkaPartitionMetadataError::Cancelled));
+                }
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or_else(|| Report::new(KafkaPartitionMetadataError::Timeout))?;
+                let metadata = producer
+                    .client()
+                    .fetch_metadata(Some(&topic), remaining)
+                    .change_context(KafkaPartitionMetadataError::Partitions {
+                        topic: topic.clone(),
+                    })?;
+                if cancellation.is_cancelled() {
+                    return Err(Report::new(KafkaPartitionMetadataError::Cancelled));
+                }
+                let topic_metadata = metadata
+                    .topics()
+                    .iter()
+                    .find(|candidate| candidate.name() == topic.as_ref())
+                    .ok_or_else(|| {
+                        Report::new(KafkaPartitionMetadataError::Partitions {
+                            topic: topic.clone(),
+                        })
+                    })?;
+                if let Some(error) = topic_metadata.error() {
+                    return Err(Report::new(KafkaError::MetadataFetch(error.into()))
+                        .change_context(KafkaPartitionMetadataError::Partitions { topic }));
+                }
+                let count = u32::try_from(topic_metadata.partitions().len())
+                    .assured("native partition counts fit u32");
+                if count == 0 {
+                    return Err(Report::new(KafkaPartitionMetadataError::Partitions {
+                        topic,
+                    }));
+                }
+                Ok(count)
+            };
+        let charge_bytes = std::mem::size_of_val(&operation)
+            .checked_add(topic_bytes)
+            .assured("the charged job is held in memory");
+        let charge = self
+            .executor
+            .try_reserve(MemoryClass::Commands, charge_bytes.arch_into())
+            .change_context(KafkaPartitionMetadataError::Admission)
+            .change_context_lazy(failure)?;
+        let running = self
+            .executor
+            .run_storage(StorageClass::Connector, charge, operation);
+        timeout_at(deadline, running)
+            .await
+            .map_err(|_| Report::new(KafkaPartitionMetadataError::Timeout))
+            .change_context_lazy(failure)?
+            .change_context(KafkaPartitionMetadataError::Execution)
+            .change_context_lazy(failure)?
+            .change_context_lazy(failure)
+    }
 }
 
 /// Why a Kafka emitter could not create its producer, beneath the emitter's start failure.
@@ -322,6 +437,14 @@ impl Future for KafkaAnswer {
     }
 }
 
+/// Maps a resolved source ordinal into the broker's positive, native partition count.
+impl KafkaTopicEmitter {
+    fn destination_partition(source: u64, count: NonZeroU32) -> i32 {
+        i32::try_from(source % u64::from(count.get()))
+            .assured("Kafka exposes at most i32::MAX partitions")
+    }
+}
+
 impl KafkaTopicEmitter {
     pub const KIND: nervix_models::EmitterEntityKind =
         nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic);
@@ -329,10 +452,19 @@ impl KafkaTopicEmitter {
     pub fn new(config: KafkaTopicEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let producer_config = Self::producer_config(&config.config, config.mode)?;
         let queue_capacity_bytes = Self::producer_queue_capacity(&producer_config)?;
+        let partitioning = if config.partition_from_branch {
+            Some(Box::new(KafkaPartitionMetadata::new(
+                &producer_config,
+                host.executor(),
+            )?))
+        } else {
+            None
+        };
         let producer = Self::create_producer(&producer_config, host.executor())?;
         Ok(Self {
             producer,
-            topic: config.topic,
+            topic: config.topic.into_boxed_str(),
+            partitioning,
             mode: config.mode,
             queue_capacity_bytes,
         })
@@ -450,6 +582,7 @@ impl KafkaTopicEmitter {
     async fn publish_unconfirmed(
         &self,
         records: Vec<EmitterRecord>,
+        partitions: Option<u32>,
     ) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
@@ -465,7 +598,7 @@ impl KafkaTopicEmitter {
                     continue;
                 }
             };
-            match self.hand_over(&record, create_time, None) {
+            match self.hand_over(&record, create_time, None, partitions) {
                 Ok(()) => outcome.deliver(record.id),
                 Err(error) if Self::is_record_rejection(&error) => {
                     outcome.reject(record.rejected(format!("kafka rejected record: {error}")));
@@ -489,6 +622,7 @@ impl KafkaTopicEmitter {
         &self,
         records: Vec<EmitterRecord>,
         settings: AckConfirmation,
+        partitions: Option<u32>,
     ) -> PerRecordOutcome<EmitterRecordId> {
         let mut window: ConfirmationWindow<KafkaAnswer> =
             ConfirmationWindow::new(KAFKA, settings, records.len());
@@ -506,7 +640,13 @@ impl KafkaTopicEmitter {
                 }
             };
             let answer = match self
-                .hand_over_confirmed(&record, create_time, &mut window, settings.timeout)
+                .hand_over_confirmed(
+                    &record,
+                    create_time,
+                    &mut window,
+                    settings.timeout,
+                    partitions,
+                )
                 .await
             {
                 Ok(answer) => answer,
@@ -536,12 +676,13 @@ impl KafkaTopicEmitter {
         create_time: Option<KafkaCreateTime>,
         window: &mut ConfirmationWindow<KafkaAnswer>,
         timeout: Duration,
+        partitions: Option<u32>,
     ) -> EmitterWriteResult<KafkaAnswer> {
         let mut queue_deadline = None;
         loop {
             nervix_primitives::task::consume_budget().await;
             let (answer, report) = oneshot::channel();
-            match self.hand_over(record, create_time, Some(answer)) {
+            match self.hand_over(record, create_time, Some(answer), partitions) {
                 Ok(()) => return Ok(KafkaAnswer { report }),
                 Err(error @ KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull)) => {
                     if window.settle_next().await?.is_some() {
@@ -598,15 +739,26 @@ impl KafkaTopicEmitter {
         message: &EmitterRecord,
         create_time: Option<KafkaCreateTime>,
         answer: Option<oneshot::Sender<KafkaDeliveryReport>>,
+        partitions: Option<u32>,
     ) -> Result<(), KafkaError> {
         let handed_over = self.producer.context().retain(answer);
-        let mut record = BaseRecord::<str, [u8], Box<HandedOverRecord>>::with_opaque_to(
-            self.topic.as_str(),
+        let mut record = BaseRecord::<[u8], [u8], Box<HandedOverRecord>>::with_opaque_to(
+            self.topic.as_ref(),
             handed_over,
         )
         .payload(message.payload.as_slice());
-        if let Some(key) = message.key.as_deref() {
-            record = record.key(key);
+        if let Some(destination) = &message.destination {
+            if let Some(key) = &destination.key {
+                record = record.key(key.as_bytes());
+            }
+            if let Some(source) = destination.source_partition {
+                let count = partitions.verified("an explicit destination has a metadata snapshot");
+                let partition = Self::destination_partition(
+                    source,
+                    NonZeroU32::new(count).verified("metadata resolved a positive partition count"),
+                );
+                record = record.partition(partition);
+            }
         }
         if !message.headers.is_empty() {
             record = record.headers(Self::owned_headers(&message.headers));
@@ -779,9 +931,22 @@ impl EmitterLifecycle for KafkaTopicEmitter {
 #[async_trait]
 impl RecordEmitter for KafkaTopicEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
+        let partitions = match &self.partitioning {
+            None => None,
+            Some(metadata) => match metadata.partition_count(&self.producer, &self.topic).await {
+                Ok(count) => Some(count),
+                Err(failure) => {
+                    let mut outcome = PerRecordOutcome::with_capacity(records.len());
+                    outcome.fail(failure);
+                    return outcome;
+                }
+            },
+        };
         match self.mode {
-            BrokerPublishingMode::NoAck => self.publish_unconfirmed(records).await,
-            BrokerPublishingMode::Ack(settings) => self.publish_confirmed(records, settings).await,
+            BrokerPublishingMode::NoAck => self.publish_unconfirmed(records, partitions).await,
+            BrokerPublishingMode::Ack(settings) => {
+                self.publish_confirmed(records, settings, partitions).await
+            }
         }
     }
 }
@@ -1134,3 +1299,6 @@ mod retirement_tests;
 )]
 #[path = "emitter_retirement_tests.rs"]
 mod emitter_retirement_tests;
+
+#[cfg(test)]
+mod destination_properties;

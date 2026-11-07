@@ -33,7 +33,7 @@ Feature: Replica catch-up of branch-keyed state
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_catch_up_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_catch_up_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -113,7 +113,7 @@ Feature: Replica catch-up of branch-keyed state
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge dedup-catch-up-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/dedup' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant

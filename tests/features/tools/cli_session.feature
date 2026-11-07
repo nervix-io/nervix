@@ -144,7 +144,7 @@ Feature: CLI public session dispatch
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "leader"
@@ -170,7 +170,7 @@ Feature: CLI public session dispatch
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "cli_node"
@@ -189,7 +189,7 @@ Feature: CLI public session dispatch
       """
       {"value":1,"extra":true}
       """
-    Then the CLI REPL eventually displays "[events] runtime ERROR: ingestor 'raw_metrics_source' general error in domain '{{domain}}': decode rejection"
+    Then the CLI REPL eventually displays "[events] runtime ERROR: ingestor 'raw_metrics_ingestor' general error in domain '{{domain}}': decode rejection"
     When http payload is posted repeatedly to node "{{cli_node}}" with host "http-{{test_id}}.example.com" path "/metrics" until the CLI REPL displays '[events] subscription [watch] from [raw_metrics]: {"value":7}'
       """
       {"value":7}

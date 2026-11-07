@@ -722,7 +722,8 @@ impl SessionServiceImpl {
     }
 
     /// Installs the authority fences of the committed `state` ahead of graph installation, then
-    /// advertises its runtime revision once every domain clock on this node matches it.
+    /// records and advertises its runtime revision once every domain clock on this node matches
+    /// it.
     pub(in crate::application) async fn install_committed_domain_clocks(
         &self,
         state: &ConsensusRuntimeState,
@@ -733,6 +734,10 @@ impl SessionServiceImpl {
             &state.domain_clock_authorities,
         );
         if let CommittedClockInstallation::Complete = installation {
+            self.inner.application_progress.advance(
+                nervix_interconnect::ApplicationProgressPhase::DomainClockInstalled,
+                state.revision,
+            );
             self.inner
                 .cluster
                 .set_local_domain_clock_revision_installed(state.revision)

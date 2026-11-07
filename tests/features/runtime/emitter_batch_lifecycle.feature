@@ -27,7 +27,7 @@ Feature: Emitter batch lifecycle
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE KAFKA TOPIC INGESTOR source
+      CREATE KAFKA TOPIC INGESTOR ingestor
         FROM kafka_source TOPIC 'batch_shutdown_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'batch_shutdown_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 50ms MAX 1s
@@ -83,7 +83,7 @@ Feature: Emitter batch lifecycle
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge batch-move-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -167,14 +167,14 @@ Feature: Emitter batch lifecycle
       CREATE VHOST edge batch-state-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE ENDPOINT configuration_ingress ON edge PATH '/settings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TIMESTAMP NOW
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR configuration_source
+      CREATE HTTP ENDPOINT INGESTOR configuration_ingestor
         FROM configuration_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING configuration_codec
         TIMESTAMP NOW
@@ -261,7 +261,7 @@ Feature: Emitter batch lifecycle
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge batch-lifecycle-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
@@ -349,18 +349,18 @@ Feature: Emitter batch lifecycle
       CREATE ENDPOINT plain_ingress ON edge PATH '/plain' TYPE HTTP;
       CREATE ENDPOINT first_ingress ON edge PATH '/first' TYPE HTTP;
       CREATE ENDPOINT second_ingress ON edge PATH '/second' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR plain_source
+      CREATE HTTP ENDPOINT INGESTOR plain_ingestor
         FROM plain_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO plain_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR first_source
+      CREATE HTTP ENDPOINT INGESTOR first_ingestor
         FROM first_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO first_events INHERIT ALL BRANCHED BY first_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR second_source
+      CREATE HTTP ENDPOINT INGESTOR second_ingestor
         FROM second_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO second_events INHERIT ALL BRANCHED BY second_tenant SET tenant = message.tenant
@@ -443,7 +443,7 @@ Feature: Emitter batch lifecycle
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge batch-expiry-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TIMESTAMP NOW
@@ -519,14 +519,14 @@ Feature: Emitter batch lifecycle
       CREATE VHOST edge batch-wait-expiry-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE ENDPOINT configuration_ingress ON edge PATH '/settings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TIMESTAMP NOW
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR configuration_source
+      CREATE HTTP ENDPOINT INGESTOR configuration_ingestor
         FROM configuration_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING configuration_codec
         TIMESTAMP NOW
@@ -596,7 +596,7 @@ Feature: Emitter batch lifecycle
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE KAFKA TOPIC INGESTOR source
+      CREATE KAFKA TOPIC INGESTOR ingestor
         FROM kafka_source TOPIC 'batch_policy_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'batch_policy_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 50ms MAX 1s
@@ -719,7 +719,7 @@ Feature: Emitter batch lifecycle
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE KAFKA TOPIC INGESTOR source
+      CREATE KAFKA TOPIC INGESTOR ingestor
         FROM kafka_source TOPIC 'batch_stop_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'batch_stop_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 50ms MAX 1s

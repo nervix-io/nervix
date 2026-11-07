@@ -1,8 +1,8 @@
 //! A Kafka producer is destroyed on a connector worker, whoever lets its last handle go.
 //!
 //! Outside the layer order: a harness.
-//! - **Owns.** Causal regressions for each owner that can hold a producer's last handle (a emitter its
-//!   host drops before it publishes or once it finished it, a emitter dropped while its broker holds
+//! - **Owns.** Causal regressions for each owner that can hold a producer's last handle (an emitter its
+//!   host drops before it publishes or once it finished it, an emitter dropped while its broker holds
 //!   the answers to the records it sent, a flush that outlives the finish that started it), for a
 //!   destruction that waits for the producer's polling thread or meets a full connector queue, and
 //!   for the charge a producer holds for its own retirement.
@@ -48,41 +48,41 @@ const ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 
 /// A `NO ACK` emitter on `executor` whose producer already reached the broker: it delivered one record
 /// and its finish found that record answered.
-async fn connected_sink(
+async fn connected_emitter(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     executor: &Executor,
 ) -> KafkaTopicEmitter {
-    let mut sink = emitter_on(
+    let mut emitter = emitter_on(
         cluster,
         &FAST_RECONNECT,
         BrokerPublishingMode::NoAck,
         executor.clone(),
     );
-    let outcome = sink
+    let outcome = emitter
         .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
         .await;
     assert_eq!(
         outcome.into_parts().delivered,
         vec![EmitterRecordId::new(0)]
     );
-    let finished = sink
+    let finished = emitter
         .finish(Instant::now() + ANSWER_DEADLINE)
         .await
         .assured("the mock broker answers the first record before the deadline");
     assert_eq!(finished, EmitterFinish::Flushed);
-    sink
+    emitter
 }
 
 /// Hands three records to `emitter`'s producer while its broker holds every answer, so they stay in
 /// flight.
 async fn send_held_records(
     cluster: &MockCluster<'static, DefaultProducerContext>,
-    sink: &mut KafkaTopicEmitter,
+    emitter: &mut KafkaTopicEmitter,
 ) {
     cluster
         .broker_round_trip_time(1, HELD_ROUND_TRIP)
         .assured("the test broker can hold its replies");
-    let outcome = sink
+    let outcome = emitter
         .publish(vec![
             record(1, PARTITION_ZERO_KEYS[0], small_payload(1)),
             record(2, PARTITION_ZERO_KEYS[1], small_payload(2)),
@@ -98,25 +98,25 @@ async fn send_held_records(
         ]
     );
     assert_eq!(
-        sink.retained_records(),
+        emitter.retained_records(),
         3,
         "the broker answers none of the records it holds"
     );
 }
 
-/// A emitter whose emitter's composition fails after the emitter started is dropped before it publishes.
+/// An opened emitter is dropped before publishing when its host's composition fails.
 #[nervix_primitives::test]
-async fn a_emitter_dropped_before_it_publishes_destroys_its_producer_on_a_connector_worker() {
+async fn an_emitter_dropped_before_it_publishes_destroys_its_producer_on_a_connector_worker() {
     let cluster = cluster(1, 1);
     let executor = Executor::default();
-    let sink = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone());
+    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone());
     let before = executor.snapshot().connector_storage;
 
-    drop(sink);
+    drop(emitter);
 
     connector_workers_reach(
         &executor,
-        "the unused sink's producer is destroyed by a connector job",
+        "the unused emitter's producer is destroyed by a connector job",
         |workers| {
             workers.admitted == before.admitted + 1 && workers.completed == before.completed + 1
         },
@@ -124,37 +124,37 @@ async fn a_emitter_dropped_before_it_publishes_destroys_its_producer_on_a_connec
     .await;
 }
 
-/// The host finishes a emitter once its emitter publishes nothing more, then drops it when the
+/// The host finishes an emitter once it will publish nothing more, then drops it when the
 /// emitter's task ends, after its loop or when a swap or `ALTER` replaces it.
 #[nervix_primitives::test]
 async fn a_finished_emitter_its_host_drops_destroys_its_producer_on_a_connector_worker() {
     let cluster = cluster(1, 1);
     let executor = Executor::default();
-    let mut sink = emitter_on(
+    let mut emitter = emitter_on(
         &cluster,
         &[],
         confirmed(1, Duration::from_secs(60)),
         executor.clone(),
     );
-    let outcome = sink
+    let outcome = emitter
         .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
         .await;
     assert_eq!(
         outcome.into_parts().delivered,
         vec![EmitterRecordId::new(0)]
     );
-    let finished = sink
+    let finished = emitter
         .finish(Instant::now() + ANSWER_DEADLINE)
         .await
         .assured("a producer whose records were all answered has nothing to send");
     assert_eq!(finished, EmitterFinish::NothingHeld);
     let before = executor.snapshot().connector_storage;
 
-    drop(sink);
+    drop(emitter);
 
     connector_workers_reach(
         &executor,
-        "the finished sink's producer is destroyed by a connector job",
+        "the finished emitter's producer is destroyed by a connector job",
         |workers| {
             workers.admitted == before.admitted + 1 && workers.completed == before.completed + 1
         },
@@ -165,15 +165,15 @@ async fn a_finished_emitter_its_host_drops_destroys_its_producer_on_a_connector_
 /// Destroying a producer whose broker holds the answers to the records it sent purges those records
 /// and waits for librdkafka to report them, and then for librdkafka's threads.
 #[nervix_primitives::test]
-async fn a_emitter_dropped_while_its_broker_holds_its_records_destroys_its_producer_on_a_connector_worker()
+async fn an_emitter_dropped_while_its_broker_holds_its_records_destroys_its_producer_on_a_connector_worker()
  {
     let cluster = cluster(1, 1);
     let executor = Executor::default();
-    let mut sink = connected_sink(&cluster, &executor).await;
-    send_held_records(&cluster, &mut sink).await;
+    let mut emitter = connected_emitter(&cluster, &executor).await;
+    send_held_records(&cluster, &mut emitter).await;
     let before = executor.snapshot().connector_storage;
 
-    drop(sink);
+    drop(emitter);
 
     connector_workers_reach(
         &executor,
@@ -194,10 +194,10 @@ async fn a_flush_that_outlives_its_finish_destroys_the_producer_on_a_connector_w
 {
     let cluster = cluster(1, 1);
     let executor = Executor::default();
-    let mut sink = connected_sink(&cluster, &executor).await;
-    send_held_records(&cluster, &mut sink).await;
+    let mut emitter = connected_emitter(&cluster, &executor).await;
+    send_held_records(&cluster, &mut emitter).await;
     let before = executor.snapshot().connector_storage;
-    let mut finishing = Box::pin(sink.finish(Instant::now() + HELD_ROUND_TRIP));
+    let mut finishing = Box::pin(emitter.finish(Instant::now() + HELD_ROUND_TRIP));
     let first_poll = poll_fn(|context| Poll::Ready(finishing.as_mut().poll(context))).await;
     assert!(
         first_poll.is_pending(),
@@ -205,7 +205,7 @@ async fn a_flush_that_outlives_its_finish_destroys_the_producer_on_a_connector_w
     );
     drop(finishing);
 
-    drop(sink);
+    drop(emitter);
     // The flush cannot end while the broker holds every answer, so it still holds the producer.
     assert_eq!(
         executor.snapshot().connector_storage.admitted,
@@ -247,14 +247,17 @@ async fn a_destruction_that_waits_for_the_polling_thread_waits_on_a_connector_wo
         .broker_down(1)
         .assured("the mock cluster takes broker 1 down");
     let executor = Executor::default();
-    let sink = emitter_on(
+    let emitter = emitter_on(
         &cluster,
         &FAST_RECONNECT,
         BrokerPublishingMode::NoAck,
         executor.clone(),
     );
     let hold = PollingThreadHold::waker();
-    let mut probe = awaited_hand_over(&sink, record(0, PARTITION_ZERO_KEYS[0], small_payload(0)));
+    let mut probe = awaited_hand_over(
+        &emitter,
+        record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
+    );
     let polled = Pin::new(&mut probe).poll(&mut Context::from_waker(&hold.waker));
     assert!(
         polled.is_pending(),
@@ -274,7 +277,7 @@ async fn a_destruction_that_waits_for_the_polling_thread_waits_on_a_connector_wo
     let watchdog = nervix_primitives::task::spawn(async move {
         watching
             .send(())
-            .assured("the test awaits the watchdog before it drops the sink");
+            .assured("the test awaits the watchdog before it drops the emitter");
         let waited_on_a_worker = connector_workers_reached(&watched, |workers| {
             workers.admitted == before.admitted + 1 && workers.running == before.running + 1
         })
@@ -284,9 +287,9 @@ async fn a_destruction_that_waits_for_the_polling_thread_waits_on_a_connector_wo
     });
     has_started
         .await
-        .assured("the watchdog runs before the sink is dropped");
+        .assured("the watchdog runs before the emitter is dropped");
 
-    drop(sink);
+    drop(emitter);
 
     let waited_on_a_worker = watchdog.await.assured("the watchdog's task is joined");
     assert!(
@@ -308,11 +311,11 @@ async fn a_destruction_that_waits_for_the_polling_thread_waits_on_a_connector_wo
 async fn a_producer_destruction_waits_for_a_place_in_a_full_connector_queue() {
     let cluster = cluster(1, 1);
     let executor = single_connector_worker();
-    let sink = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone());
+    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone());
     let full = FullConnectorQueue::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
 
-    drop(sink);
+    drop(emitter);
     full.release().await;
 
     connector_workers_reach(
@@ -337,7 +340,7 @@ async fn a_producer_holds_the_charge_of_its_retirement_from_its_creation() {
     let capacity = executor.snapshot().commands_memory.capacity_bytes;
     let occupied = executor
         .try_reserve(MemoryClass::Commands, capacity)
-        .assured("the test occupies the command budget before starting the sink");
+        .assured("the test occupies the command budget before starting the emitter");
 
     let refused = KafkaTopicEmitter::new(
         emitter_config(&cluster, &[], BrokerPublishingMode::NoAck),
@@ -375,13 +378,13 @@ async fn a_producer_holds_the_charge_of_its_retirement_from_its_creation() {
         })
     ));
     drop(occupied);
-    let sink = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone());
+    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone());
     let charge = u64::try_from(std::mem::size_of::<KafkaProducer>())
         .assured("a producer handle's size fits in u64");
     assert_eq!(executor.snapshot().commands_memory.reserved_bytes, charge);
     let before = executor.snapshot().connector_storage;
 
-    drop(sink);
+    drop(emitter);
 
     connector_workers_reach(
         &executor,

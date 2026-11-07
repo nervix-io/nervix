@@ -161,7 +161,7 @@ Feature: Pulsar ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "pulsar_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "pulsar_notifications" leaves fault mode
     And Pulsar message is published to topic "notifications_reconnect_{{test_id}}"
