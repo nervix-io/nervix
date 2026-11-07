@@ -63,7 +63,7 @@ the downloaded artifact:
 | `coverage-ci-selection` | Exact-source suite and Bolero call selection |
 | `coverage-wasm-bindgen` | The console build's wasm-bindgen CLI selection, installation and verification |
 | `coverage-model-runner` | Native collector supervision, command and artifact accounting |
-| `coverage-typed-ratchet-python` | The remaining architecture gate and audit callers, source checks, the native collector, the Bolero runner and its coverage export, and the console build script |
+| `coverage-typed-ratchet-python` | The remaining source checks, the native collector, the Bolero runner and its coverage export, and the console build script; the Rust audit is collected by the native typed-ratchet producer |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
 
 The Python paced driver runs with the wheel installed in its own CPython 3.12 environment.

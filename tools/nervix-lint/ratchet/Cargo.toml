@@ -8,7 +8,9 @@ version.workspace = true
 anyhow.workspace = true
 aws-lc-rs = "=1.18.2"
 clap = { version = "4.6", features = ["derive", "env"] }
+dec_from_char = "=0.2.1"
 error-stack.workspace = true
+indexmap.workspace = true
 libc = "0.2"
 meticulous.workspace = true
 nervix-approx-into = { path = "../../../crates/approx-into" }
@@ -17,6 +19,8 @@ nervix-primitives.workspace = true
 nix = { version = "=0.30.1", features = ["signal", "process"] }
 serde.workspace = true
 serde_json.workspace = true
+serde-json-fmt = "=0.2.0"
+regex = "1"
 tempfile = "3.27"
 thiserror.workspace = true
 toml = "1.1"

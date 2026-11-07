@@ -47,6 +47,35 @@ pub enum Error {
     QueueLocked,
     #[error("cannot start or supervise the analysis driver")]
     Driver,
+    #[error("git {arguments:?} failed with status {status:?}")]
+    AuditGit {
+        arguments: Vec<String>,
+        status: Option<i32>,
+    },
+    #[error("invalid {record} audit record")]
+    AuditRecord { record: AuditRecord },
+    #[error("origin {remote} is not a GitHub repository")]
+    AuditRemote { remote: String },
+    #[error("gh api {path} failed after {attempts} attempt(s)")]
+    AuditGithub { path: String, attempts: usize },
+    #[error("the compiler analysis did not complete")]
+    AuditIncomplete,
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+pub enum AuditRecord {
+    #[error("baseline")]
+    Baseline,
+    #[error("commit")]
+    Commit,
+    #[error("blame")]
+    Blame,
+    #[error("hunk")]
+    Hunk,
+    #[error("candidate")]
+    Candidate,
+    #[error("report")]
+    Report,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]

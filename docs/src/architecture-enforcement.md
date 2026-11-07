@@ -23,7 +23,7 @@ complete gate passes. No numeric allowance controls a semantic rule.
 | Workspace wrapper | `nervix-ratchet wrap` | Runs the driver as a child beneath the compiler wrapper the host configures, records every compilation and admits it against host memory through the shared advisory-lock queue. |
 | Gate | `nervix-ratchet gate` (`just ratchet`) | Requires the complete diagnostic gate, reads the product's dependency graph with `cargo tree` and compares the six structural counts with `debt-baseline.json`. |
 | Complexity analyzer | `nervix-ratchet crap` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
-| Audit | `scripts/lint_audit.py` (`just lint-audit`) | Attributes review candidates to the history that produced them. |
+| Audit | `tools/nervix-lint/ratchet/src/audit` (`nervix-ratchet audit`, `just lint-audit`) | Consumes one in-process matrix report and attributes review candidates to the history that produced them. |
 
 Product source owns the policy: the [source contracts](#source-contracts) and the reason-bearing
 expectations at the operations they cover. The tooling owns recognition and evidence, and nothing it
@@ -461,6 +461,13 @@ candidate carries its owning body, that body's execution contract (declared, or 
 reachability from a recurring caller), its spans and macro origins, and the configurations that
 compiled it.
 
+The command calls the matrix runner once and refuses an incomplete report before reading history
+or publishing an audit. Without inventory flags it uses the complete gate; `--inventory` or any
+`--configuration` selects warning levels. Git provenance is parsed into typed records and cached:
+blame metadata is shared by the lines that use it, and attribution borrows cached hunks and line
+histories. Independent blame and line-history reads use at most eight scoped workers and eight Git
+children, with no dispatch lock held while waiting for a child. Every worker joins before return.
+
 | Kind | Resolved pattern | Controls that are not candidates |
 | --- | --- | --- |
 | `repeated_lookup` | Keyed operations (`get`, `get_mut`, `contains_key`, `insert`, `remove`, `entry`, indexing and their IndexMap forms) of a standard, hashbrown, IndexMap, DashMap or JSON map collection, on one receiver place with one key value, where a later operation can run after an earlier one. `guarded` marks a later operation in a branch the earlier result selected. | Exclusive branches, a receiver or key assigned between the operations, different keys or collections, and another type with map-like method names. |
@@ -498,8 +505,13 @@ when it predates every plausible count; and `uncommitted` for lines not yet comm
 is evidence for review, never a classification: chronology alone proves nothing.
 
 Candidate identities hash the kind, file, owner, primary source and pattern facts without byte
-offsets, so an unrelated edit keeps them, and a repeat within one owner takes an ordinal.
-`audit.json` and `audit.md` land in `target/lint-audit/<source identity>/`. They are generated
+offsets, so an unrelated edit keeps them, and a repeat within one owner takes an ordinal. Identity
+preimages use sorted JSON keys, ASCII escaping (including DEL and UTF-16 surrogate pairs), and a
+space after separators. Report JSON uses the same escaping and ordering with compact separators.
+`audit.json` and `audit.md` land in `target/lint-audit/<first 16 of source identity>/`, or
+`--output-dir`. JSON is atomically replaced after a complete audit; Markdown and the per-kind
+total, recurring and suspected summary describe that same report. An analysis, history, GitHub or
+output failure exits nonzero. The outputs are generated
 evidence: review dispositions, inventories and measurements belong on the owning task, and nothing
 reads them back as policy.
 
