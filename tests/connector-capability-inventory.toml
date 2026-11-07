@@ -1475,20 +1475,6 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "FIFO GROUP <expression>"
-entity = "SQS QUEUE EMITTER"
-scenarios = [
-  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS FIFO preserves order independently for interleaved branch groups" },
-]
-
-[[capability]]
-capability = "FIFO GROUP FROM BRANCH"
-entity = "SQS QUEUE EMITTER"
-scenarios = [
-  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS FIFO groups follow the rows an emitter route keeps" },
-]
-
-[[capability]]
 capability = "MODE ACK"
 entity = "SQS QUEUE EMITTER"
 scenarios = [
@@ -2141,4 +2127,39 @@ capability = "REPLY TO"
 entity = "NATS SUBJECT EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/nats_envelope_metadata.feature", scenario = "A NATS SUBJECT emitter sends a request with its evaluated reply subject" },
+]
+[[capability]]
+capability = "FIFO GROUP"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_destinations.feature", scenario = "An SQS FIFO group expression reads the exact branch field" },
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS FIFO preserves order independently for interleaved branch groups" },
+]
+
+[[capability]]
+capability = "KEY"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_destinations.feature", scenario = "Broker emitters publish the declared byte key on <broker> with <key_clause>" },
+]
+
+[[capability]]
+capability = "PARTITION FROM BRANCH"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_destinations.feature", scenario = "A broker destination follows each branch partition modulo its own count on <broker>" },
+]
+
+[[capability]]
+capability = "KEY"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_destinations.feature", scenario = "Broker emitters publish the declared byte key on <broker> with <key_clause>" },
+]
+
+[[capability]]
+capability = "PARTITION FROM BRANCH"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_destinations.feature", scenario = "A broker destination follows each branch partition modulo its own count on <broker>" },
 ]

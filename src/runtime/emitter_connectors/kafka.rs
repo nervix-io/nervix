@@ -34,6 +34,7 @@ impl EmitterConnectorStarter {
                     config: connector.client.config.entries.clone(),
                     topic: connector.topic.clone(),
                     mode: connector.mode,
+                    partition_from_branch: connector.partition_from_branch,
                 },
                 context.emitter_host(),
             ),

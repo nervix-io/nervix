@@ -67,6 +67,11 @@ prepare-archive-counts-fuzz: (prepare-bolero "registry-archived-models")
 test-bolero filter="": bolero-deps
     python3 -m scripts.bolero test {{ quote(filter) }}
 
+# Run selected registered owners with their canonical case, corpus and execution checks. Global
+# compiled discovery stays with validate-bolero and CI; local qualification builds only its owners.
+test-bolero-focused +filters: bolero-deps
+    python3 -c 'import sys; from scripts.bolero import load_inventory, select, test_targets; inventory = load_inventory(); selected = {target.id: target for query in sys.argv[1:] for target in select(inventory, query)}; test_targets(inventory, tuple(selected.values()))' {{ quote(filters) }}
+
 # Compile every ordinary harness `test-bolero` runs, as it builds them, without running a property.
 build-bolero filter="": bolero-deps
     python3 -m scripts.bolero build {{ quote(filter) }}
@@ -329,6 +334,13 @@ test-scenarios *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
+
+# Exercise emitter destination keys and partitions without unrelated client-tool preparation.
+test-emitter-destinations *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/emitter_destinations*.feature") }} {{ quote(args) }}
 
 # These checks reuse the scenario executable for both embedded nodes and a server process.
 test-inferencer-state *args: build-deps
@@ -2721,6 +2733,10 @@ benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
         --repository-root "{{ justfile_directory() }}" \
         run-all --nervix-mode image --nervix-image {{ quote(nervix_image) }} \
         --artifacts-root {{ quote(artifacts_root) }} {{ args }}
+
+# Format explicit modules during a focused edit without traversing sibling module trees.
+cargo-fmt-files +files:
+    rustup run nightly rustfmt --edition 2024 --config skip_children=true {{ files }}
 
 cargo-fmt:
     cargo +nightly fmt

@@ -145,6 +145,8 @@ defines each status.
 For `RESTORE`, retain the same archive bytes as well as the statement and execution reference after
 status `3`, including an invalid reply after upload. Follow the Rust client guide's
 [Restoring](https://docs.nervix.io/client-library.html#restoring) contract when recovering it.
+For browser restore recovery, read [the web console's Backup And Restore section](../../../docs/src/client-tools-web-console.md#backup-and-restore)
+before interpreting a later request failure as the result of an earlier possibly admitted restore.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
 URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
@@ -633,8 +635,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   protobuf export request by successful source-record count and uncompressed encoded size, and an
   OTEL request never combines records of two Arrow carriers; see
   [Emitters](../../../docs/src/emitters.md#batching).
-  For SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
-  queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
+  For Kafka/Pulsar record keys, destination partitions and SQS FIFO group expressions, read
+  [Emitters → Envelope Clauses](../../../docs/src/emitters.md#envelope-clauses) and the connector's
+  section before choosing the expression and externally provisioned topic or queue.
 - Give every client resource mount an explicit `MOUNT <resource> VERSION <u64>|LATEST` clause. Put
   database pool bounds before the mount, and keep a WebSocket client's `WITH SIGNALING PROTOCOL`
   clause before the mount. `LATEST` is resolved when the statement is applied; the stored client
