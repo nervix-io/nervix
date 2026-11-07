@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -1823,6 +1824,40 @@ void Endpoints::run() {
     std::cout << "PASS" << std::endl;
 }
 
+void run_upload(const Session &session) {
+    const std::string query = env("NERVIX_PROBE_UPLOAD_QUERY");
+    nx_execution *raw_execution = nullptr;
+    check(nx_session_prepare(session.get(), bytes(query), query.size(), nullptr, &raw_execution));
+    Execution execution(raw_execution);
+    for (const char *line : {"UPLOAD completed", "RETRY completed"}) {
+        nx_outcome *raw_outcome = nullptr;
+        check(nx_session_execute(session.get(), execution.get(), nullptr, &raw_outcome));
+        Outcome outcome(raw_outcome);
+        if (nx_outcome_disposition(outcome.get()) != NX_DISPOSITION_COMPLETED) {
+            throw std::runtime_error("the upload must complete");
+        }
+        nx_upload_failure failure = NX_UPLOAD_INVALID_STREAM;
+        if (nx_outcome_upload_failure(outcome.get(), &failure)) {
+            throw std::runtime_error("a completed upload has no refusal");
+        }
+        std::cout << line << std::endl;
+    }
+    std::ofstream file(env("NERVIX_PROBE_UPLOAD_FILE"), std::ios::binary | std::ios::trunc);
+    file << "different archive\n";
+    file.close();
+    if (!file) throw std::runtime_error("the changed upload fixture could not be written");
+    nx_outcome *raw_outcome = nullptr;
+    check(nx_session_execute(session.get(), execution.get(), nullptr, &raw_outcome));
+    Outcome outcome(raw_outcome);
+    nx_upload_failure failure = NX_UPLOAD_INVALID_STREAM;
+    if (nx_outcome_disposition(outcome.get()) != NX_DISPOSITION_FAILED ||
+        !nx_outcome_upload_failure(outcome.get(), &failure) || failure != NX_UPLOAD_IDENTITY_CONFLICT) {
+        throw std::runtime_error("the upload must report its typed identity conflict");
+    }
+    std::cout << "CONFLICT IdentityConflict" << std::endl;
+    std::cout << "PASS" << std::endl;
+}
+
 void run(const std::string &mode) {
     const std::string server = env("NERVIX_PROBE_GRPC_URI");
     const std::string username = env("NERVIX_PROBE_USERNAME");
@@ -1850,6 +1885,10 @@ void run(const std::string &mode) {
     check(nx_session_connect(bytes(server), server.size(), bytes(domain), domain.size(),
                              options.get(), nullptr, &raw_session));
     Session session(raw_session);
+    if (mode == "upload") {
+        run_upload(session);
+        return;
+    }
     if (mode == "connection") {
         run_connection(session);
         return;

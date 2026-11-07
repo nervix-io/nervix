@@ -1,5 +1,6 @@
 //! The enumerations a Python host reads and passes, with the stable value of every variant.
 //!
+//! Layer: edges.
 //! - **Owns.** One Python class per enumeration of the host session runtime, whose members are
 //!   spelled as constants and compare equal to the runtime's stable values, and the conversions
 //!   between each class and the runtime's own enumeration.
@@ -76,6 +77,18 @@ host_enum! {
         ExecutionReferenceConflict = 7 as "EXECUTION_REFERENCE_CONFLICT",
         ExecutionReferenceExpired = 8 as "EXECUTION_REFERENCE_EXPIRED",
         PreviewStale = 9 as "PREVIEW_STALE",
+    }
+}
+
+host_enum! {
+    /// Why a resource upload failed.
+    UploadFailure from UploadFailure {
+        InvalidStream = 1 as "INVALID_STREAM",
+        ResourceNotDeclared = 2 as "RESOURCE_NOT_DECLARED",
+        SizeMismatch = 3 as "SIZE_MISMATCH",
+        QuotaExceeded = 4 as "QUOTA_EXCEEDED",
+        InstallationFailed = 5 as "INSTALLATION_FAILED",
+        IdentityConflict = 6 as "IDENTITY_CONFLICT",
     }
 }
 
@@ -347,6 +360,7 @@ impl From<Tls> for TlsRequirement {
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<FailureKind>()?;
     module.add_class::<Disposition>()?;
+    module.add_class::<UploadFailure>()?;
     module.add_class::<EventKind>()?;
     module.add_class::<EndReason>()?;
     module.add_class::<RestorationCause>()?;

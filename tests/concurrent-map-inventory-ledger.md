@@ -435,7 +435,7 @@ epic, but tracing them found defects:
 - Processor branch metric series in `branch_counters` and `branch_histograms` are never removed
   when their branch is evicted or expires, and global series of dropped graph nodes stay until
   their relay is removed.
-- `transaction_executions`, `resource_upload_executions` and `resource_replication_executions` in
+- `transaction_executions` and `resource_replication_executions` in
   the session service keep entries after failed or completed work.
 - `shared_clients` release removes its slot after decrementing without rechecking its users, so a
   lease that joins in between can be orphaned.
@@ -448,6 +448,7 @@ epic, but tracing them found defects:
 
 | Owner and map | Access and lifecycle | Classification |
 | --- | --- | --- |
+| `ResourceUploadExecutions::entries`, reached through `SessionServiceInner::resource_upload_executions` | One entry operation registers each installing, importing, recovering or waiting attempt; one releases it on completion, cancellation or any return. A busy recovery probe uses one entry lookup and creates no lease; a successful probe registers under that entry guard. The async guard ends before release, and the final attempt removes its entry under the same guard as admission. The map holds only active or waiting keys, independently of durable outcomes. | cold control-plane upload and restore ownership; no record, batch or acknowledgement lookup |
 | `RuntimeInner::state_identities` | Backup capture reads current scheduled identities before decoding retained checkpoints. Restore clears domain state handles only after complete publication under the consensus authority guard. | observer and stopped-domain lifecycle |
 | Session capture sections and restore uploads | Coordinator-scoped registration, bounded chunk transfer and expiration; checkpoint finish stages bytes, and publish replaces the complete set. | control-plane transfer; quota and deadline bounded |
 | Test command pauses and failed restore checkpoints | Armed by a scenario and consumed at restore publication or staging, the route polling boundary, and handoff force-flush publication. | test-only fault observation |
