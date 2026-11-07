@@ -349,6 +349,13 @@ test-emitter-destinations *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/emitter_destinations*.feature") }} {{ quote(args) }}
 
+# Qualify SYSLOG's existing batch outline and exact single-message and singleton-batch bytes.
+test-syslog-encoding *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{emitter_batch_containers,syslog_encoding}.feature") }} --tags '@emitter_batch_syslog or @syslog_encoding' {{ quote(args) }}
+
 # These checks reuse the scenario executable for both embedded nodes and a server process.
 test-inferencer-state *args: build-deps
     #!/usr/bin/env bash
