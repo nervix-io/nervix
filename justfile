@@ -2717,14 +2717,19 @@ benchmark-nervix-image image benchmark_name="kafka-filter-map" *args:
         --implementation nervix --nervix-mode image --nervix-image {{ quote(image) }} {{ args }}
 
 # Exercise the six rewritten codec graphs through the real workload driver without timing claims.
-benchmark-codec-heads image artifacts=(cargo_target_dir + "/codec-benchmark-smoke"):
+[positional-arguments]
+benchmark-codec-heads image artifacts=(cargo_target_dir + "/codec-benchmark-smoke") *workloads:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --package nervix-benchmark --bins
-    for workload in hot-path-ingest hot-path-processor hot-path-relay-fanout hot-path-remote-delivery kafka-dedup-window kafka-filter-map; do
+    shift 2
+    if [[ "$#" == 0 ]]; then
+        set -- hot-path-ingest hot-path-processor hot-path-relay-fanout hot-path-remote-delivery kafka-dedup-window kafka-filter-map
+    fi
+    for workload in "$@"; do
         "{{ cargo_target_dir }}/debug/nervix-benchmark" run "${workload}" \
             --implementation nervix --nervix-mode image --nervix-image {{ quote(image) }} \
-            --duration-seconds 1 --warmup-seconds 1 --partitions 2 --max-backlog-messages 256 \
+            --duration-seconds 1 --warmup-seconds 1 --partitions 2 \
             --artifacts-root {{ quote(artifacts) }}
     done
 
