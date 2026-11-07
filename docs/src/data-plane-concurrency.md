@@ -71,16 +71,16 @@ cold paths around that handle: registration and first installation, where `entry
 installers a single winner, replacement, teardown, and observers.
 
 MQTT input retirement is a cold lifecycle path. It snapshots locally owned typed entrypoint
-plans from the installed execution, releases the registry guard, stops the source tasks, and
+plans from the installed execution, releases the registry guard, stops the ingestor tasks, and
 then performs network cleanup and replacement preparation. Each connection has one mutable
-owner; simultaneous attempts are bounded by the declared source instance count. Matching session
+owner; simultaneous attempts are bounded by the declared ingestor instance count. Matching session
 identities keep their broker state across instance-count changes. The public drop, topic-change
 and unavailable-endpoint scenarios are registered for active, order and stressed lifecycle
 diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
 tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
 
 Pulsar input retirement uses the same cold lifecycle boundary: it snapshots typed plans, releases
-the registry guard and stops the exact source tasks before comparing resolved subscription
+the registry guard and stops the exact ingestor tasks before comparing resolved subscription
 identities and removing an unused owned subscription. Matching replacements retain their backlog.
 The public drop and replacement outlines cover running and passive installation in active,
 order and stressed diagnostics. No new synchronization protocol or hot-path map access is added;
@@ -181,7 +181,7 @@ live work and never to a fixed capacity.
 Record allocation and receiver batch watcher tasks reserve relay memory before creating their
 retained rows. A batch task multiplexes row progress and keepalive polls every 100 milliseconds;
 each row and the single task have fixed charges. The cadence remains shorter than a one-second
-source ACK timeout while task cardinality stays bounded by admitted batches. Before admission, the
+ingestor ACK timeout while task cardinality stays bounded by admitted batches. Before admission, the
 delivering side reports the batch's records alive from inside the delivery itself: the task that
 runs the delivery races it against a 100-millisecond timer and, each time the timer wins, publishes
 progress on each record's own acknowledgement root. That adds no task, no shared state and no
@@ -260,7 +260,7 @@ quorum commits and the returning voter catches up. The test probe counts attempt
 opens in its existing blocking map. Deloxide does not track the request-stream or network waits;
 the applicable Turmoil suite and real-process Chaos faults retain their separate claims.
 
-## Relay, Transport And Source Lifetimes
+## Relay, Transport And Ingestor Lifetimes
 
 A concrete producer retains its branch channel handle. The relay publishes branch membership in a
 persistent immutable table; concurrent first binding selects one allocation with CAS. Each branch
@@ -296,7 +296,7 @@ retain the selected publisher and observe complete snapshots. Domain removal wit
 entry; terminal shutdown clears the table after ending executions. Buffered error routes similarly
 send through the worker retained by the bound plan, with no failure-path discovery acquisition.
 
-Source polling writes a retained instance readiness scalar. Starting and ready may alternate;
+Ingestor polling writes a retained instance readiness scalar. Starting and ready may alternate;
 retired is final, so a late poll or drop cannot change a replacement instance's readiness. These
 scalar transitions and worker claims use relaxed atomic operations and publish no other data.
 Shuttle checks production binding, refresh, retirement and polling races. ArcSwap internals remain
@@ -319,7 +319,7 @@ The resulting design uses four forms of ownership:
   retains those handles.
 - Scalar progress and counts use atomics with an ordering chosen for the contract they enforce.
 - State that changes for every row or batch belongs exclusively to one task, branch, delivery
-  channel, or source attempt. That owner mutates ordinary collections directly: a task-local
+  channel, or ingestor attempt. That owner mutates ordinary collections directly: a task-local
   `HashMap`, `BTreeMap`, `IndexMap` or JSON map and its `entry` API are not synchronization, and
   exclusive ownership does not pin the task to an operating-system thread. When other tasks need to
   observe such state, the owner publishes an immutable value of it; observers never reach into the
@@ -356,7 +356,7 @@ writer.
 | State | Publication owner and scope | Reader contract |
 | --- | --- | --- |
 | Domain routing snapshot | Each domain retains one stable publication handle across execution rebuilds. Schedule application stages and replaces the relay services, schemas, branch declarations, materialized-state ownership, lookups, UDFs, codecs, signaling protocols, and the complete map of bound processor plans together. Each plan carries a typed identity and prepared VM and WASM artifacts for one installed node revision. | A task sees the old routing revision or the new routing revision, never a mixture of their fields. Long-lived tasks use a local pointer cache instead of returning to the domain execution registry per batch. Existing processor branches compare typed plan identities between batches; new branches resolve their template from the same published map. |
-| Ingestor and reingestor programs | Schedule application installs the domain's decision-layer entrypoint plans inside its complete typed execution revision. An ingestor start binds its node filter and routes against the staged routing revision into one immutable route set before its source opens. A reingestor start prepares the branched entrypoints of its routes and binds each input's source filter, its node filter and its routes before any entrypoint or input task starts. A running relay registers the consumer of a swapped-in input only after that. | Every source instance, endpoint request and ingest group of one ingestor shares the same bound route allocation, and a reingestor input task owns its bound programs. Neither compiles a program on the hot path nor returns to the domain execution registry per batch. A reingestor start that fails leaves no entrypoint, task or registered consumer behind, so a relay never refuses attached delivery for a consumer that has no receiver. |
+| Ingestor and reingestor programs | Schedule application installs the domain's decision-layer entrypoint plans inside its complete typed execution revision. An ingestor start binds its node filter and routes against the staged routing revision into one immutable route set before its connector opens. A reingestor start prepares the branched entrypoints of its routes and binds each input's source filter, its node filter and its routes before any entrypoint or input task starts. A running relay registers the consumer of a swapped-in input only after that. | Every ingestor instance, endpoint request and ingest group of one ingestor shares the same bound route allocation, and a reingestor input task owns its bound programs. Neither compiles a program on the hot path nor returns to the domain execution registry per batch. A reingestor start that fails leaves no entrypoint, task or registered consumer behind, so a relay never refuses attached delivery for a consumer that has no receiver. |
 | Emitter execution plans | The decision layer prepares the domain's typed emitter and ordered source edges with lowered expressions from one schedule revision; schedule application installs them in that revision. Startup, swaps and relocation bind a selected plan to local mounts, schemas and UDFs; relay inputs are registered during those transitions. Remote consumer edges come from the same plans. | An emitter task owns its bound programs and emitter configuration for its lifetime. Per-batch work does not read the schedule or client Models; emitter retries reuse the typed configuration. A dynamic flush change sends only its new flush policy to the running task. |
 | Message-error route plans | The registry selects each DLQ route from the committed schedule. Domain installation binds its schemas, branch declaration, flush contract, relay target and SET program before tasks start. Schedule application publishes the complete bound route map with the routing state of one typed revision. | A failed record looks up its prepared route in the task’s retained immutable routing snapshot, which publishes the bound plans together with the routing revision, before running its VM program or delivery. A buffered route compares the bound plan allocation with its running delivery task; a replacement drains the preceding task and starts a task with the new target and cadence. |
 | Node identity and remote dispatcher | The node runtime publishes this once after cluster join, when the authenticated interconnect and process incarnation are known. Relay boundaries created afterwards retain the same dispatcher handle. | Readers borrow the stable node identity, incarnation, transport, admission service, and ACK registry without a write-once lock or repeated name allocation. |
@@ -369,30 +369,30 @@ writer.
 | Application progress | Each node publishes its process incarnation's progress record through a watch. Its writers, the consensus applied revision, the runtime applicator and the domain clock installer, only advance a phase, and an advance that moves nothing publishes nothing. The progress reports a node holds while it leads are a second watch over one map keyed by incarnation; each held report replaces it under the watch's lock, merging the incarnation's phases without moving one back and keeping only the incarnations the availability view holds live besides the reporter. | A revision barrier subscribes to both watches before it reads the record or the held reports, so an advance or a report after that read wakes it. The reporter registers on the record watch and the Raft leadership watch before it reads, and keeps one report in flight carrying the record it read last. No record, batch or acknowledgement path reaches either watch. A production-owner Shuttle check explores reports and advances racing a waiting barrier; the async watch waits remain outside Deloxide's detector. |
 | Forced-recovery destination installation | A recovery subscribes to the domain installation watch before looking for its execution, and selects its matching node under the schedule application mutex. | The watch retains a publication racing the absence check; the mutex orders selection after graph construction, even when domain lifecycle publication occurred first. The existing preparation deadline bounds both waits. The mutex is released before checkpoint transfer and guest restoration. A production-owner Shuttle check explores installation racing selection; async mutex and watch waits remain outside Deloxide's detector. |
 | Runtime-state assignment | Each state placement publishes one packed atomic binding containing its generation and capability. Replication roles are a separate immutable published snapshot. A running Kafka ingestor commits its domain offsets through a published originator, which schedule application replaces when a reassignment rebinds the offsets while the ingestor keeps running on its node. | A per-message operation admits itself, compares the exact binding it was granted, and proceeds only while that generation still grants the required capability. It never takes the assignment barrier. A commit loads the ingestor's published originator once; an ingestor instance the schedule stopped keeps its own superseded originator and stays refused. |
-| Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
+| Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, ingestor support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. An ingestor host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
 | Backup state snapshot | Branch lifecycle publications, Kafka offset commits and WASM checkpoints register on a per-domain atomic generation before changing their published state. After the domain is paused and drained, the owner closes that generation with a Release RMW and waits with Acquire loads for registered publishers to leave. It then serializes Kafka positions and branch lifecycle into the runtime state store and opens one database snapshot for those records and durable WASM saves. The closing RMW is in the release sequence that a publisher entering the next generation acquires. | A publisher that entered before the cut completes into the captured view; a publisher that enters after it waits for the next generation. An older periodic storage write cannot replace a newer forced publication. The backup reads the database snapshot off the record path and stages owned section bytes. A live backup does not close the generation and reports its weaker cut explicitly. The server's Shuttle and Loom checks drive this production fence. |
 | Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces and unreferenced active chunk sets. Publication runs on stopped-domain lifecycle paths. The admitted maintenance loop also follows running checkpoint replacement and purge under the installation barrier; record delivery adds no lock. |
 | Metric series handles | Each relay, node, ingestor, emitter, or concrete branch resolves its label set, internal series, and Prometheus child when its owning task or branch is created. | Recording uses the retained series directly. Counters update atomically; a histogram records through its already-resolved per-series accumulator without a registry lookup, key construction, or map guard. A node input folds a whole batch's delivery latencies in one kernel pass over the batch's high-watermark column before recording, so each latency series locks its accumulator and reads the wall clock once per batch rather than once per row, and its Prometheus child takes the batch in one flush. Whether a series was ever observed is an atomic flag set under that lock and read without it. Registration and removal stay on lifecycle paths. |
-| Connector interaction handles | An emitter resolves `EmitterInteractionMetrics` beside its output metrics at installation, registering every operation/outcome child at zero. A source host resolves its existing native children together in `IngestorInteractionMetrics`, keeping them by value; its decode-rejection policy owner takes its child separately by value. | Emitter recording borrows retained Prometheus children and atomic `CounterSeries` owners. A scope guard records one typed outcome and duration per publish or due staged commit, including a transient outcome on cancellation. The registry is reached only during registration and inspection; inspection clones one target's handles and releases the guard before formatting. History remains until the process ends. Source recording retains its existing increments, labels and ownership. There is no new coordination protocol or tracked lock on recording, so Deloxide does not apply to these handles. |
+| Connector interaction handles | An emitter resolves `EmitterInteractionMetrics` beside its output metrics at installation, registering every operation/outcome child at zero. An ingestor host resolves its existing native children together in `IngestorInteractionMetrics`, keeping them by value; its decode-rejection policy owner takes its child separately by value. | Emitter recording borrows retained Prometheus children and atomic `CounterSeries` owners. A scope guard records one typed outcome and duration per publish or due staged commit, including a transient outcome on cancellation. The registry is reached only during registration and inspection; inspection clones one target's handles and releases the guard before formatting. History remains until the process ends. Ingestor recording retains its existing increments, labels and ownership. There is no new coordination protocol or tracked lock on recording, so Deloxide does not apply to these handles. |
 | MQTT broker packet limit | Each MQTT emitter's event-loop task stores the Maximum Packet Size of every `CONNACK` its client receives, or the broker's silence about one, as one atomic scalar. A reconnect replaces it. | A publish loads the scalar once per record to reject a packet the broker would refuse before handing it to the client. The value stands alone, so relaxed ordering is its whole contract, and a record published before the first `CONNACK` is measured only against the protocol's largest packet. |
 
-The Syslog stream source gives each accepted connection its own decoder and one bounded intake
+The Syslog stream ingestor gives each accepted connection its own decoder and one bounded intake
 channel send. After decoding a frame, the connection completes that send even when a SUSPEND watch
 change races a full channel; it observes the pause before its next read. An accept error removes
-only the listening socket, leaving the connection tasks and channel owned by the same source until
-resume rebinds the socket. Source close aborts those tasks. The registered Syslog Shuttle check
+only the listening socket, leaving the connection tasks and channel owned by the same ingestor until
+resume rebinds the socket. Ingestor close aborts those tasks. The registered Syslog Shuttle check
 explores the full-channel handoff against a pause change. One-node and three-node Cucumber
 scenarios exercise every listener. They check the delivered frame count through entity quiescence
-and keep one connection streaming after an injected accept failure while the source rebinds its
-listening socket. The test-only fault channel enters through the source plan and retains one armed
+and keep one connection streaming after an injected accept failure while the ingestor rebinds its
+listening socket. The test-only fault channel enters through the ingestor plan and retains one armed
 request until its selected listener acknowledges it. Another arm cannot replace an unobserved
 request, and a cancelled accept leaves it available. No shared lock or map is reached per frame.
 
 The Syslog frame carries its immutable peer metadata through that same handoff. UDP and TCP keep
 their socket address inline; TLS frames share one connection-owned address and optional verified
 client subject, decoded once after the handshake. Retaining a quiesced payload copies the complete
-declared metadata row, so ending the source message cannot change its transport or TLS peer. The
-source's Shuttle check includes metadata preservation across the occupied-queue pause race. Its
+declared metadata row, so ending the ingested message cannot change its transport or TLS peer. The
+ingestor's Shuttle check includes metadata preservation across the occupied-queue pause race. Its
 async channel and watch, and the immutable metadata itself, have no tracked blocking-lock
 acquisition for Deloxide to observe.
 
@@ -502,7 +502,7 @@ programs and compiled WASM modules.
 
 ## Retained Task Dependencies
 
-A source or emitter retains one atomic failure publication. An emitter's task and its retained
+An ingestor or emitter retains one atomic failure publication. An emitter's task and its retained
 connector background task own independent failures within that publication: task only, connector
 only, or both. Each failure contains its safe error and optional retry. A writer clears its own
 failure through a read-copy-update of the current publication, preserving the other writer's
@@ -560,7 +560,7 @@ connection it opens for the keeper against the maximum. The notification and the
 asynchronous and outside Deloxide's tracked locks; the registered Shuttle checks under
 [Protocols and their checks](#protocols-and-their-checks) drive the production keeper.
 
-Each Redis Pub/Sub source has one socket reader and one bounded asynchronous handoff. The reader
+Each Redis Pub/Sub ingestor has one socket reader and one bounded asynchronous handoff. The reader
 reserves a slot before decoding its next frame, retains one parsing future across its idle probe,
 and hands each decoded message over once. Host read cancellation acts on the receiver and leaves
 the reader's partial frame intact. Suspend and close abort and join that exact reader before a
@@ -645,9 +645,9 @@ The concurrent map inventory records their lifecycle registration, observation a
 ### Server endpoint intake
 
 `EndpointIntakeRoutes` owns one immutable host-and-path table containing each domain's configured
-endpoint definitions and the source lifetimes bound to them. Domain install or teardown and source
+endpoint definitions and the ingestor lifetimes bound to them. Domain install or teardown and ingestor
 bind or unbind derive a replacement from the current publication with `ArcSwap::rcu`. Concurrent
-writers retry against the latest complete table, preserving unrelated domains and sources. A
+writers retry against the latest complete table, preserving unrelated domains and ingestors. A
 passive installation publishes no endpoint definitions. The listening socket remains present on
 every node independently of this table.
 
@@ -663,12 +663,12 @@ upgrade through all later frames, including signaling data frames. Readers share
 allocation and borrow its prepared intakes; they do not clone route vectors, programs, codecs, or
 sender maps and do not return to a concurrent registry for each frame.
 
-Each source lifetime publishes its optional intake through `ArcSwapOption`. Close, drop, domain
+Each ingestor lifetime publishes its optional intake through `ArcSwapOption`. Close, drop, domain
 replacement, domain teardown, and runtime clear publish absence before withdrawing that lifetime.
-Retained routes therefore refuse later admission even after a replacement source starts. A request
+Retained routes therefore refuse later admission even after a replacement ingestor starts. A request
 that already loaded a present intake keeps its lease until dispatch finishes. Unbind removes the
-exact source allocation, so a late close cannot remove a replacement with the same typed identity.
-Configuration withdrawal removes the route; source withdrawal alone leaves configured metadata
+exact ingestor allocation, so a late close cannot remove a replacement with the same typed identity.
+Configuration withdrawal removes the route; ingestor withdrawal alone leaves configured metadata
 available to report unavailable intake. These publications remain volatile data-plane state.
 
 A request dispatches all bindings of its resolved endpoint concurrently before waiting for their
@@ -680,7 +680,7 @@ An acknowledged endpoint intake owns one semaphore window, created from its type
 It tries admission once and holds the borrowed permit through graph ACK/NACK, its absolute
 physical timeout, or intake ending. Exact lifetime ending cancels the lifetime token before
 publishing absent intake. A separate wait observes shutdown or handoff through the quiesce owner's
-existing register-before-read publication wait, so the HTTP response does not wait for source
+existing register-before-read publication wait, so the HTTP response does not wait for ingestor
 close after drain. Resumable pauses preserve the admitted root. Completion ready in the same poll
 as an ending wins; otherwise ending or deadline returns its unavailable outcome and releases the
 slot. Listener admission shutdown also ends the wait before graph drain. No response slot, payload, ACK root or outcome is persisted. Dropping a request drops its
@@ -746,6 +746,23 @@ member, or the message-count limit. Each encoding attempt uses the codec's bound
 
 An emitter evaluates only envelope clauses its entity declares and retains their prepared values
 with the payload in its pending work, so a retry uses the same envelope and input-row identities.
+
+An explicit record key is evaluated while the source branch is available. Its typed STRING or
+BYTES value and the source partition ordinal belong to the retained envelope, so every attempt
+uses the admitted values. The execution plan carries the resolved source partition count for
+`PARTITION FROM BRANCH`; changing that count changes the plan. The source relay and concrete
+branch remain independent packing fences even when the transport key is absent.
+
+Pulsar selects a destination partition through its driver's routing callback. One emitter task
+owns the current send's ordinal and sets its selected atomic immediately before handing the
+message over. The pinned driver calls the callback synchronously under that task's exclusive
+producer borrow, before awaiting the selected partition producer. The callback only reads the
+ordinal; it neither publishes another value nor supplies a wakeup. Relaxed ordering suffices for
+this scalar in the same send. The shared handle satisfies the driver's `Sync` callback API and
+does not transfer write ownership to a producer task. This keeps the driver's partition producers,
+connections, queues and receipt ownership intact. Deloxide observes no blocking lock on this
+path, and the callback makes no cross-location publication or wait-and-notify claim.
+
 A record emitter prepares its external bytes once before retention, including when a payload carries
 one row without `BATCH`. A Sentry envelope therefore keeps its event identity and complete bytes
 across retries and connector replacement; preparation adds no shared owner or synchronization.
@@ -781,16 +798,16 @@ An active retry uses its existing keepalive owner; an empty host and connector d
 Terminal teardown races the whole emitter task against its domain shutdown signal. It can cancel
 an in-flight connector await after the graph drain budget expires, dropping the task's volatile
 payloads and ACK guards together. That cancellation cannot resolve a member as delivered; an
-acknowledged source retains its own redelivery boundary. Entity-pause swaps do not use this
+acknowledged ingestor retains its own redelivery boundary. Entity-pause swaps do not use this
 terminal cancellation: the old task must complete its deadline-bounded stop before the new task
 starts.
 The Shuttle check over the emitter's prepared payload and ACK owner races a connector await with
 the terminal shutdown signal and asserts that dropping an unanswered request leaves its attached
-source unacknowledged.
+ingestor unacknowledged.
 
-### Kafka source control execution
+### Kafka ingestor control execution
 
-Kafka sources and partition inspectors submit synchronous driver operations to the node's bounded
+Kafka ingestors and partition inspectors submit synchronous driver operations to the node's bounded
 connector storage class. Each job keeps its consumer and reservation until the native operation
 exits. An asynchronous semaphore gives each consumer one control-operation turn; the admitted
 closure retains that turn until it exits, so cancelling an assignment cannot let a following
@@ -851,18 +868,18 @@ beside tracked ingestion, acknowledgement and quiesce state, and include a broke
 buffering quiesce. Driver polling and the event-loop task remain outside Deloxide's lock detector;
 the ingestor-host and MQTT driver Shuttle checks retain their existing scope.
 
-### Kafka source rejection floors
+### Kafka ingestor rejection floors
 
-A Kafka source under `OFFSET BY CONSUMER GROUP` records the earliest rejected record of every
+A Kafka ingestor under `OFFSET BY CONSUMER GROUP` records the earliest rejected record of every
 partition it rejects in its consumer's context, before it seeks the partitions the consumer is
 still assigned. The context's rebalance handling starts each partition the group assigns at its
 floor, so a revocation that loses the seek, from a rebalance, the host leaving and rejoining the
 group, or a lapsed group session, never resumes the partition past the rejected record. A commit
 that passes the record forgets the floor, and an eager assignment that omits a partition forgets
 its floor, since another member now resumes it from the committed offset. The floors sit behind one
-thread-blocking lock per consumer: the source takes it once per rejection and, while a floor is
+thread-blocking lock per consumer: the ingestor takes it once per rejection and, while a floor is
 outstanding, once per acknowledged batch, and the rebalance handling takes it once per assignment.
-librdkafka serves a rebalance only while the source polls for its next batch, and the host never
+librdkafka serves a rebalance only while the ingestor polls for its next batch, and the host never
 polls while it rejects or acknowledges, so the lock is never contended. No guard is held across an
 await or a driver call that waits on the broker: under it, the rebalance handling only sets the
 start offsets of the assignment list in memory. The registered
@@ -870,7 +887,7 @@ start offsets of the assignment list in memory. The registered
 and
 `topic::ingestor::rejection::shuttle_tests::shuttle_a_commit_past_the_rejected_record_lets_the_group_resume_from_the_committed_offset`
 checks let a coordinator task decide a revocation and an assignment at any point of a rejection,
-serve them in the source's polls as librdkafka does, and hold that the first record read again
+serve them in the ingestor's polls as librdkafka does, and hold that the first record read again
 from the partition is the rejected one, and that once a commit passes it the record after the
 committed one is read next. Native consumer-group traffic is outside Shuttle. Deloxide's detector
 tracks the floors' lock, which the lane's refused-commit shutdown workloads reach at assignment, at
@@ -1299,7 +1316,7 @@ bounded deadline.
 
 ### Acknowledgement state
 
-Each source attempt owns one in-memory acknowledgement tree. Fan-out reserves shares in an atomic
+Each ingestor attempt owns one in-memory acknowledgement tree. Fan-out reserves shares in an atomic
 pending count, and each completion resolves one share with a compare-and-swap. A second atomic word
 encodes either a typed tracking state with its active-share count or the completed state; its
 reserved raw representation stays inside the encoding's owner. That state records whether shares
@@ -1542,10 +1559,10 @@ owner path the same two read-modify-writes per batch as the pending count they r
 delivery two more, and a drain reads them only on its own poll.
 
 A broker ingestor's batch keeps its acknowledgement roots counted beyond their resolution. The
-source host creates confirmed roots, and a confirmed root that resolves hands its domain and
+ingestor host creates confirmed roots, and a confirmed root that resolves hands its domain and
 ingestor counts to the completion that observes it instead of releasing them. The batch
 acknowledgement drops the completion of every root that resolves while another is still
-unresolved and keeps the completion of the last, which the source loop drops once `acknowledge` or
+unresolved and keeps the completion of the last, which the ingestor loop drops once `acknowledge` or
 `reject` has returned. The hand-over is part of the root's one terminal transition, so a drain that
 reads the counts by read-modify-write never finds them at zero between a batch's last resolution
 and its transport's confirmation. An unresolved root keeps holding them itself, unless it waits only
@@ -1564,10 +1581,10 @@ concurrent map.
 
 Each delivery's intake group reads the immutable `domain_routings` publication once. The
 [concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md) records that cadence;
-drain, status and clock handles remain retained by the source host.
+drain, status and clock handles remain retained by the ingestor host.
 
 Transport failure does not drop the graph waits of admitted siblings. The same task retains them
-to their outcomes before the source reconnects and replays the retained positions; those outcomes
+to their outcomes before the ingestor reconnects and replays the retained positions; those outcomes
 cause no more writes on the failed transport. Shutdown still ends the waits and counts both
 retained positions and unresolved graph waits as unconfirmed.
 
@@ -1642,7 +1659,7 @@ for a consumer it selected before the fence. Only relays selected by the typed f
 and whose routing actually changes are retired. Completed planned handoffs keep their ordinary
 quiescence path. Remote admission uses its existing cancellation/reconciliation budget of five
 seconds per interrupted attempt, rather than retaining a permit until the former owner resumes or
-the entity gate deadline passes. Unconfirmed deliveries fail their record ACKs for source retry;
+the entity gate deadline passes. Unconfirmed deliveries fail their record ACKs for ingestor retry;
 already admitted work retains its existing ACK and silence contracts.
 
 The production channel-owner Shuttle check
@@ -1664,7 +1681,7 @@ An owner buffer admits a batch before its fan-out begins. Fan-out therefore take
 dispatch permit before it reads any local or remote runtime-consumer route and holds the permit
 until fan-out has attached the consumer ACK shares and resolved the owner's share. A schedule swap
 cannot replace the routes while that permit is live. If the gate has closed first, fan-out fails
-the record ACKs and returns the batch for source retry. Waiting for the gate here would deadlock
+the record ACKs and returns the batch for ingestor retry. Waiting for the gate here would deadlock
 the swap, because the swap's drain counts the
 buffered batch. The same gate protocol orders the nonwaiting attempt and the swap engagement.
 
@@ -1721,8 +1738,8 @@ it:
   in that queue. The executor's semaphore hands a freed place to waiting jobs in the order they
   asked, ahead of any job asking afterwards. The wait is scoped to the one class, holds no lock,
   and ends when a place frees or when the ingestor's shutdown or a new quiesce interrupts it
-- a live payload a paced ingestor or a source whose loop may be held handed over without an
-  acknowledgement waits for a place the same way. The source host registers for the next quiesce
+- a live payload a paced ingestor or an ingestor whose loop may be held handed over without an
+  acknowledgement waits for a place the same way. The ingestor host registers for the next quiesce
   publication before it compares it with the decision the payload was taken in under, so a new
   decision always ends the wait, and the host then decides on the payload again; the ingestor's
   stop ends it as well. The race holds no lock and no guard across an await
@@ -1750,10 +1767,10 @@ it:
   lock scoped to that entity, one newest announcement per branch, and taken all at once by the
   entity's one replica task, never across an await; see [Replica catch-up](#replica-catch-up)
 - an ACK root locks only its single terminal sender transition
-- a Kafka consumer-group source's rejected-partition floors sit behind one lock per consumer, taken
+- a Kafka consumer-group ingestor's rejected-partition floors sit behind one lock per consumer, taken
   once per rejection, once per acknowledged batch while a floor is outstanding, and once per
   rebalance, never across an await or a driver call that waits on the broker; see
-  [Kafka source rejection floors](#kafka-source-rejection-floors)
+  [Kafka ingestor rejection floors](#kafka-ingestor-rejection-floors)
 
 These sites are accepted for the contract and bound named above. A lock that merely makes shared
 state convenient, protects immutable configuration, or repeats registry discovery on every batch
@@ -1987,7 +2004,7 @@ lint caps and unfulfilled expectations fail. The checker counts distinct HIR ope
 Rust's effective expectation identity, including macro expansion; widening a binding to cover a
 second operation fails even when Rust would regard the expectation as fulfilled.
 
-Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness,
+Task handles remove recurring status, freeze, metric and checkpoint lookups. Ingestor readiness,
 relay channels, buffered error delivery, domain selection and transport leasing use retained handles
 or immutable publications. Materialized writers own their mutable branch records and readers
 retain per-relay publications. Remote acknowledgement rows and admission waiters use fixed routing
@@ -2488,11 +2505,11 @@ after release. That map and async wait are outside Deloxide's observation. Owner
 recorded success and failure, including diagnostics, and `OutcomeUnknown(StillApplying)` for an
 unfinished commit; the public examples inspect the original transaction identity and applied operation.
 
-The registered `@pulsar_message_metadata` workloads cover source metadata in all three delivery
+The registered `@pulsar_message_metadata` workloads cover ingestor metadata in all three delivery
 modes, branch-local event-time windows, broker redelivery and independent broker-stored batches.
 The batch oracle checks member sequence and event-time precedence, envelope inheritance and exact
 member positions. Its bounded protocol publisher and the driver's synchronous batch expansion add
-no tracked lock. The source's checked metadata and
+no tracked lock. The ingestor's checked metadata and
 single pending read failure are instance-owned. Cancellation returns any gathered prefix without
 consuming the pending failure. Borrowed visitors add no synchronization or concurrent map. Deloxide
 observes the existing host state; foreign Pulsar driver channels, borrowed visitors and asynchronous
@@ -2681,9 +2698,9 @@ timer and socket scheduling remain outside the detector and are exercised by rea
 
 The WebSockets signaling handoff uses one bounded primitive mpsc channel only while signaling
 accepts data and while its completed frames drain. A full queue backpressures signaling within its
-TIMEOUT. The negotiating future owns the queue, and completion alone transfers it into source
+TIMEOUT. The negotiating future owns the queue, and completion alone transfers it into ingestor
 reads; cancellation or failure ends its exact lifetime. Suspension retains a completed queue and
-drains it before reconnecting. Once drained, the source drops the channel and steady socket reads
+drains it before reconnecting. Once drained, the ingestor drops the channel and steady socket reads
 reach only task-owned state. This async-only queue protocol adds no tracked blocking-lock owner;
 Deloxide does not establish its cancellation or capacity behavior. The three registered checks in
 `crates/connectors/websockets/src/connection/ingestor/handshake/shuttle_tests.rs` exercise successful FIFO/header
@@ -2773,7 +2790,7 @@ failed drains or full-hold engagement, and the restore installation workloads. T
 the blocking applied-state authority guard through staging failure, complete publication, runtime
 handle clearing and a delayed coordinator across leadership transfer and a successor's START.
 The large-generation scenarios cover two 20 MiB saves and forty 1 MiB saves on one and three nodes,
-failure after durable publication, cluster restart, branch isolation, saved source offsets and
+failure after durable publication, cluster restart, branch isolation, saved ingestor offsets and
 positive reclamation after resumed checkpoints and the state purge from module rebinding.
 The three-node many-save case retains one replica per state and observes reclamation of both
 owner and replica chunks.
@@ -2907,19 +2924,19 @@ its channels remain outside Deloxide's tracked locks. The registered `scenario.m
 and `stress.mqtt-finish-at-stop` workloads exercise that finish through one- and three-node STOP,
 including the host's tracked quiesce and teardown paths.
 
-An MQTT source connection has one mutable owner of its event loop: the driver task the source
-starts once its subscription is established. The driver hands every publish to the source through
+An MQTT ingestor connection has one mutable owner of its event loop: the driver task the ingestor
+starts once its subscription is established. The driver hands every publish to the ingestor through
 one bounded read-ahead, keyed by that one connection. In an `ACK` mode it reserves the entire
 Receive Maximum for acknowledged packet outcomes and permits at most 64 QoS 0 outcomes alongside
-them. A queued QoS 0 outcome owns a semaphore permit until the source takes it; acquiring a permit
+them. A queued QoS 0 outcome owns a semaphore permit until the ingestor takes it; acquiring a permit
 never waits, and a refusal drops and counts that publish before reading the next. QoS 0 traffic
 therefore cannot occupy an acknowledged outcome's capacity or stop polling. The host supplies a
 pre-resolved Prometheus counter handle, so a drop reaches no shared map and is counted while the
 host waits on downstream acknowledgement. Under `NO ACK` the queue holds 64 outcomes and applies
 backpressure. A peer exceeding the advertised Receive Maximum can also exhaust the queue. A full
-queue holds its next outcome and stops polling until the source reads one. The driver
+queue holds its next outcome and stops polling until the ingestor reads one. The driver
 publishes its progress as one immutable watch value: how many acknowledgements the event loop has
-written, and whether it polls, holds a publish for room, or ended. The source's acknowledgement
+written, and whether it polls, holds a publish for room, or ended. The ingestor's acknowledgement
 waits on that publication and on nothing else, and the wait ends without its writes as soon as
 the published value says the driver stopped polling, or once one keep-alive interval has passed,
 so neither side waits on the other. The queue, capacity semaphore, counter and watch value are
@@ -3084,12 +3101,12 @@ update. Every log guard ends before a callback awaits input, cancellation or a s
 These contracts retain the fixture's synchronization under compiler review; production
 connector and host synchronization keeps its own protocol contracts.
 
-#Canonical Kafka start selection is source initialization. The connector host's `reset` contract
+#Canonical Kafka start selection is ingestor initialization. The connector host's `reset` contract
 marks that admission before recurring polls; normal acknowledgements use the retained originator
 and `commit`. Each offered-body or pending-seed bulk admission resolves its native state and
 layout before retaining charged bytes; streaming those chunks performs no concurrent-map lookup.
-A one-unit source keeps direct native persistence. Distributed initializers share the startup
-mutex with ownership capture and the final offset writer, scoped to one source unit, while
+A one-unit ingestor keeps direct native persistence. Distributed initializers share the startup
+mutex with ownership capture and the final offset writer, scoped to one ingestor unit, while
 recorded-partition commits continue through the existing assignment fence. The start request has
 its sixty-second deadline, and bulk bytes retain their existing size, memory and progress bounds.
 
@@ -3098,10 +3115,10 @@ its sixty-second deadline, and bulk bytes retain their existing size, memory and
 The consensus log chunk owner releases its iterator allocation and Commands reservation in the
 same transition that hands out its final entry. Its Shuttle check races that transition with
 another reader's reservation and leaves the first consumer parked: the other reader and a small
-source control reservation must finish without another poll of the exhausted chunk. This is a
+ingestor control reservation must finish without another poll of the exhausted chunk. This is a
 control-plane memory-lifetime check, with no memory-ordering claim. The real-storage owner tests
 also check that a partially consumed chunk retains its charge, and the public WASM/Kafka restore
-outline checks source readiness and Commands-memory headroom after restoring onto a fresh cluster,
+outline checks ingestor readiness and Commands-memory headroom after restoring onto a fresh cluster,
 allowing the retirement reservations that live Kafka consumers retain.
 The semaphore waits are asynchronous and outside Deloxide's tracked-lock detection; the diagnostic
 restore workloads exercise the surrounding storage and restore lifecycle.
@@ -3111,7 +3128,7 @@ turns before asking its memory class, and a working set returns its bytes before
 Each Shuttle check holds one working set while a second admission waits for its turn and a progress
 charge races both, then ends the held working set: the progress charge finds room at every
 interleaving, the second working set is admitted, and the class ends with nothing reserved. The
-Commands check charges a source control call; the Bulk check charges snapshot progress. The real-storage owner tests
+Commands check charges an ingestor control call; the Bulk check charges snapshot progress. The real-storage owner tests
 hold a chunk with an unread entry while a log read and a storage job wait behind it, and require
 the control call's room while they wait. Like the chunk check, this is a control-plane admission
 check without a memory-ordering claim, and its waits are outside Deloxide's detection.
@@ -3132,12 +3149,12 @@ A family of names means each member runs independently through the recipe.
 | Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity, including optional state-read retention while the live relay class is full; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched` keeps a held connector call from consuming filesystem or consensus admission; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place` requires a job that waits for a place to take the first one freed and run before a job refused when full that asks after it; `shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge` returns a dropped waiter's charge and hands its place to the job waiting after it; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
 | Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
 | Ingestor intake (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_ingestor_observes_engagement_during_dispatch`, `shuttle_paced_ingestor_observes_engagement_during_dispatch`, and `shuttle_request_ingestor_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. `shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room` and `shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room` race the engagement or the stop against a retained payload's delivery waiting for a place the extension class never frees: the waiter registers before it reads, so the delivery always ends, and its payload is back at the front of the buffer counted as it was. `shuttle_a_new_quiesce_decides_again_on_a_live_payload_waiting_for_extension_room` and `shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room` race a `BUFFER` engagement or the stop against a live payload waiting for such a place: the wait always ends, a new decision becomes the one the payload is decided under next and its buffer retains it, counted with its bytes, and a stop leaves nothing retained. |
-| Broker source confirmation (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector.rs`, `src/runtime/ingestors/connector_acknowledgement.rs`, `src/runtime_ack.rs`) | `shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch` lets a drain read the domain's ownership-handoff count at any point while the graph resolves the two confirmed roots of one batch in either order and the source's transport takes a round trip to confirm the batch. Whenever the drain reads no outstanding work, every batch whose roots resolved has been confirmed, and the count returns to zero once it is. The check fails under a batch acknowledgement that releases the last root before the loop drops it, and under a root released as it resolves. |
-| Refused payload confirmation (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector.rs`, `src/runtime/ingestors/connector_acknowledgement.rs`, `src/runtime_ack.rs`) | `shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_payload` hands the broker loop a batch of one payload its codec refused, and a batch whose refused payload a dispatched one follows. The host consumes the refused payload through the production `BatchRoots`, which resolves its confirmed root at once, while the graph resolves the dispatched root, the source's transport takes a round trip to confirm the batch, and a drain reads the domain's ownership-handoff count at any point. Whenever the drain reads no outstanding work, every batch whose roots resolved has been confirmed; the batch is confirmed and never rejected, and the count returns to zero once it is. The check fails under a consumed root whose completion is released as it resolves. |
-| Broker source reconnect (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector.rs`) | `shuttle_a_reconnect_discards_rejections_the_broker_redelivers` loses the connection of a `broker_redelivered` source at any point, once or twice, while the host loop acknowledges two messages one at a time. The host never asks a connection to acknowledge or reject a delivery of a lost one. Every message is acknowledged exactly once, on the connection that delivered it, and each rejection a lost connection failed is discarded and counted exactly once. The check fails under a loop that retries the failed rejection after the reconnect. |
-| Broker source read interruption (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector_read.rs`, `src/runtime/ingestors/connector.rs`) | `shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took` lets a stop, or a suspension of intake, meet the broker loop at any point while its source gathers a batch of up to three messages from a transport that delivers two. The host cancels the read and awaits it rather than dropping it: every message the source took reaches the host's intake exactly once, and before the source is suspended or closed, and the source is never asked to read, suspend or close while a read the host dropped is still in flight. The check fails under a loop that drops the read it stops waiting for. |
+| Broker ingestor confirmation (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector.rs`, `src/runtime/ingestors/connector_acknowledgement.rs`, `src/runtime_ack.rs`) | `shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch` lets a drain read the domain's ownership-handoff count at any point while the graph resolves the two confirmed roots of one batch in either order and the ingestor's transport takes a round trip to confirm the batch. Whenever the drain reads no outstanding work, every batch whose roots resolved has been confirmed, and the count returns to zero once it is. The check fails under a batch acknowledgement that releases the last root before the loop drops it, and under a root released as it resolves. |
+| Refused payload confirmation (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector.rs`, `src/runtime/ingestors/connector_acknowledgement.rs`, `src/runtime_ack.rs`) | `shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_payload` hands the broker loop a batch of one payload its codec refused, and a batch whose refused payload a dispatched one follows. The host consumes the refused payload through the production `BatchRoots`, which resolves its confirmed root at once, while the graph resolves the dispatched root, the ingestor's transport takes a round trip to confirm the batch, and a drain reads the domain's ownership-handoff count at any point. Whenever the drain reads no outstanding work, every batch whose roots resolved has been confirmed; the batch is confirmed and never rejected, and the count returns to zero once it is. The check fails under a consumed root whose completion is released as it resolves. |
+| Broker ingestor reconnect (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector.rs`) | `shuttle_a_reconnect_discards_rejections_the_broker_redelivers` loses the connection of a `broker_redelivered` ingestor at any point, once or twice, while the host loop acknowledges two messages one at a time. The host never asks a connection to acknowledge or reject a delivery of a lost one. Every message is acknowledged exactly once, on the connection that delivered it, and each rejection a lost connection failed is discarded and counted exactly once. The check fails under a loop that retries the failed rejection after the reconnect. |
+| Broker ingestor read interruption (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector_read.rs`, `src/runtime/ingestors/connector.rs`) | `shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took` lets a stop, or a suspension of intake, meet the broker loop at any point while its ingestor gathers a batch of up to three messages from a transport that delivers two. The host cancels the read and awaits it rather than dropping it: every message the ingestor took reaches the host's intake exactly once, and before the ingestor is suspended or closed, and the ingestor is never asked to read, suspend or close while a read the host dropped is still in flight. The check fails under a loop that drops the read it stops waiting for. |
 | Relay dispatch gate and fan-out (`src/runtime/relay_channel_shuttle_tests.rs`) | `shuttle_dispatch_permits_never_overlap_a_quiescent_lease_and_release_frees_every_waiter`, `shuttle_overlapping_gate_leases_all_release_before_dispatch_resumes`, `shuttle_expired_gate_fence_frees_every_waiter_without_reporting_quiescence`, `shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence`, and `shuttle_dispatches_parked_behind_a_lease_wake_only_on_its_release` hold the fence, lease, expiry, cancellation, and waiter contract; in-flight dispatches drain before quiescence. `shuttle_capacity_shrink_keeps_buffered_batches_and_wakes_publishers_after_the_drain`, `shuttle_capacity_growth_admits_waiting_publishers_without_a_take`, `shuttle_publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave`, and `shuttle_losing_every_consumer_delivers_or_returns_the_waiting_batch` keep queued batches across capacity changes, release waiting publishers, and return or deliver each batch when receivers leave. |
-| Relay owner fan-out (`src/runtime/relay_boundary_shuttle_tests.rs`) | `shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves` keeps a live sibling from completing a source ACK while another attached consumer leaves under a schedule fence; after release, a retry reaches the live consumer. `shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery` races a batch another node routed here against an attached consumer registering here: every consumer the batch reaches holds a share of its own, so one that fails the batch fails the source ACK. |
+| Relay owner fan-out (`src/runtime/relay_boundary_shuttle_tests.rs`) | `shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves` keeps a live sibling from completing an ingestor ACK while another attached consumer leaves under a schedule fence; after release, a retry reaches the live consumer. `shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery` races a batch another node routed here against an attached consumer registering here: every consumer the batch reaches holds a share of its own, so one that fails the batch fails the ingestor ACK. |
 | Local drain observation (`src/runtime/local_drain_shuttle_tests.rs`) | `shuttle_a_batch_published_while_a_drain_observes_is_never_missing_from_it`, `shuttle_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it`, and `shuttle_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it` race a batch moving from a node into a relay, from a relay into a consumer's node, and from a relay's transit into its consumer's queue against one drain observation of the production read order: the observation shows the batch, or the relay's admission when the move went against the order of its reads. `shuttle_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complete` races a force flush that resumes a parked message and completes its obligation against the observation: one that sees the obligation complete sees the message as admitted work. |
 | Relay subscription definitions (`src/runtime/relay_subscription.rs`) | `shuttle_an_attachment_racing_a_redefinition_is_refused_or_closed_by_it` races a subscriber's attachment against a redeclaration of the relay with a field that became sensitive: the attachment is refused, or the redeclaration closes the receiver it attached, so no subscriber describes rows by a replaced definition. |
 | Materialized dependency waits (`src/runtime/materialized_read.rs`) | `shuttle_a_parked_message_is_woken_by_the_materialized_state_it_waits_for` races the arrival of the state a `REQUIRED WAIT` message is parked on against the processor branch reading it and parking: the wait registers before the read, and again before every retry, so the arrival always wakes it. |
@@ -3151,10 +3168,10 @@ A family of names means each member runs independently through the recipe.
 | Brokered emitter confirmation window (`crates/connector/src/confirmation_window_shuttle_tests.rs`) | Each check hands records to the production `ConfirmationWindow` while broker tasks answer them concurrently through channels of their own, each recording when its answer could be read, and the check notes which answers were given before the publish began to end. `shuttle_a_failure_settles_every_answer_its_broker_gave_before_it` ends the publish with the driver's failure: every record whose answer was given before it is delivered or rejected as answered, and a failed answer leaves its record unresolved. `shuttle_answers_racing_a_full_window_settle_each_record_exactly_once` hands five records through a window of two whose answers arrive in any order: the window holds fewer than two answers after each hand-over, and every record is settled exactly once as its answer says. `shuttle_an_expired_oldest_settles_the_answers_given_before_it` lets a check-triggered timeout expire the publish's deadlines at any point among the answers, which a Shuttle timeout does before it polls the answer: a missed deadline still settles every answer given before it, the oldest's own included. `shuttle_a_failed_oldest_answer_settles_the_younger_answers_given_before_it` ends the publish with the oldest's failed answer and still settles a younger answer given before the end. `shuttle_driver_backpressure_settles_below_max_in_flight` hands five records through MAX eight with a driver capacity of two, requests the oldest answer on demand as that capacity fills, and checks exact complete settlement and the driver-capacity bound while broker answers race those waits. |
 | Kafka producer retention (`crates/connectors/kafka/src/topic/delivery_shuttle_tests.rs`) | `shuttle_the_count_holds_every_record_until_its_report_is_served` hands three records to a task that serves their delivery reports as librdkafka's polling thread does, counting after each hand-over: no count exceeds the records handed over or misses a record whose report was not yet being served, and the count returns to zero once every report was served. `shuttle_a_publish_that_reads_a_report_finds_its_record_no_longer_retained` serves a confirmed record's report while the publish awaits it: a publish that reads the report never finds the record still counted. |
 | MQTT read cancellation (`crates/connectors/mqtt/src/topic/ingestor_shuttle_tests.rs`; `crates/connectors/mqtt/src/topic/ingestor.rs`) | `shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered` lets the host cancel an MQTT read at any point while a broker task delivers two publishes, or three that fill the batch, into the connection through the ingestor's publish seam, which keeps a publish it read for the next read as the connection's read-ahead does. Every publish the broker delivered reaches the host exactly once and in order, from the read or from the connection's next read, and a batch that is not full ends only because the host cancelled it. `shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish` also lets a clock expire the batch timeout at any point: every publish still reaches the host exactly once. The first check fails under a gathering that ignores the host's cancellation until its batch timeout passes. |
-| MQTT ingestor connection (`crates/connectors/mqtt/src/topic/ingestor/driver_shuttle_tests.rs`; `crates/connectors/mqtt/src/topic/ingestor/driver.rs`) | Each check drives the production connection and driver over a fake event loop that writes requested acknowledgements ahead of broker deliveries. `shuttle_an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_it_requested` acknowledges three publishes while two more arrive: writes are confirmed and every admitted packet is preserved. `shuttle_an_acknowledgement_stays_writable_during_qos_zero_overflow` holds one QoS 1 acknowledgement while 66 QoS 0 publishes and another QoS 1 publish arrive; the driver reaches the following packet without a source read, retains all 64 admitted QoS 0 publishes and both QoS 1 publishes in order, and writes both acknowledgements. The progress witness cannot make room in the queue. `shuttle_admitted_publishes_keep_order_while_the_first_acknowledgement_is_written` overlaps reads of an admitted prefix with its acknowledgement. `shuttle_an_acknowledgement_whose_connection_ends_fails_with_the_loss` retains the typed connection failure or confirms a write completed before the ending. `shuttle_a_cancelled_discard_preserves_acknowledgement_and_batch_order` races cancellation with an ordinary prefix and an oversized discard, requiring ACKs in receive order, one size outcome and the following publish. Semaphore and channel operations are modeled; the metric library's atomic implementation is outside the model, with exact exported overflow counts checked by the owner tests and public broker scenario. |
+| MQTT ingestor connection (`crates/connectors/mqtt/src/topic/ingestor/driver_shuttle_tests.rs`; `crates/connectors/mqtt/src/topic/ingestor/driver.rs`) | Each check drives the production connection and driver over a fake event loop that writes requested acknowledgements ahead of broker deliveries. `shuttle_an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_it_requested` acknowledges three publishes while two more arrive: writes are confirmed and every admitted packet is preserved. `shuttle_an_acknowledgement_stays_writable_during_qos_zero_overflow` holds one QoS 1 acknowledgement while 66 QoS 0 publishes and another QoS 1 publish arrive; the driver reaches the following packet without an ingestor read, retains all 64 admitted QoS 0 publishes and both QoS 1 publishes in order, and writes both acknowledgements. The progress witness cannot make room in the queue. `shuttle_admitted_publishes_keep_order_while_the_first_acknowledgement_is_written` overlaps reads of an admitted prefix with its acknowledgement. `shuttle_an_acknowledgement_whose_connection_ends_fails_with_the_loss` retains the typed connection failure or confirms a write completed before the ending. `shuttle_a_cancelled_discard_preserves_acknowledgement_and_batch_order` races cancellation with an ordinary prefix and an oversized discard, requiring ACKs in receive order, one size outcome and the following publish. Semaphore and channel operations are modeled; the metric library's atomic implementation is outside the model, with exact exported overflow counts checked by the owner tests and public broker scenario. |
 | SQS receive cancellation (`crates/connectors/sqs/src/queue/ingestor_shuttle_tests.rs`; `crates/connectors/sqs/src/queue/ingestor.rs`) | `shuttle_a_cancelled_read_hands_over_every_message_its_receives_took` lets the host cancel an SQS read at any point while a service task answers its receives through the ingestor's receive seam: a receive that brings a message, or one that brings nothing and a second that brings a message. Every message the service took off the queue for a receive reaches the host, and a cancelled read sends at most the one receive it had already decided to send. `shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget` lets a service take the read's receive and never answer it while the host cancels the read and a clock expires its deadlines at any point: the read ends only after the host cancelled it, with the typed unanswered-receive failure, or interrupted before it sent a receive. The first check fails under a read that abandons the receive it has in flight when the host cancels it. |
 | Redis command pool minimum (`crates/connectors/redis/src/pubsub/pool_minimum/shuttle_tests.rs`; `crates/connectors/redis/src/pubsub/pool_minimum.rs`) | `shuttle_a_connection_closing_while_the_keeper_reads_its_pool_is_restored` closes one of a pool's connections and signals its keeper at any point while the production keeper reads the pool, decides and waits; `shuttle_connections_closing_together_are_all_restored` closes two of three at once, one of them possibly while a restoration is in progress. The keeper registers for the closure signal before it reads the pool, so a closure after its reading wakes the wait that follows, and the pool returns to its minimum after the last closure in every schedule; a closure the keeper slept through leaves the check waiting forever, which fails it. The scripted pool stands in for `bb8`, whose checkouts and accounting are outside the claim; the Redis owner tests run the keeper against a counting Redis stand-in. |
-| Emitter batch payloads (`src/runtime/emitter_record_writes_shuttle_tests.rs`) | `shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter` and `shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry` fan two source messages out to a batching emitter and a sibling: each source acknowledgement completes once, successfully only after both emitters confirmed it, and the retry writes the retained payload's first bytes and hands the connector its envelope unchanged. `shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once` cuts an attempt short at any point and requires the next one to write only unanswered payloads and deliver each rejected member's message error once. `shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained` races a drain's reads against a stalled write and the force flush that repeats it. |
+| Emitter batch payloads (`src/runtime/emitter_record_writes_shuttle_tests.rs`) | `shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter` and `shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry` fan two ingestor messages out to a batching emitter and a sibling: each ingestor acknowledgement completes once, successfully only after both emitters confirmed it, and the retry writes the retained payload's first bytes and hands the connector its envelope unchanged. `shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once` cuts an attempt short at any point and requires the next one to write only unanswered payloads and deliver each rejected member's message error once. `shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained` races a drain's reads against a stalled write and the force flush that repeats it. |
 | Client ingestors (`src/runtime/client_ingestor_shuttle_tests.rs`) | `shuttle_racing_reservations_never_exceed_the_node_budget_and_return_every_byte` races opens that each need more than half the node's producer budget: at most one holds it at a time and every reservation returns its bytes. `shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_undispatched` races the admission fence against an engagement and its drain: no batch is dispatched after the drain concluded. `shuttle_a_closing_producer_answers_every_admitted_batch_once_before_its_release` and `shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_last` race a close or an endpoint end against the worker's admission reports and the batches' acknowledgements: every batch is answered exactly once, a close answers each with its real outcome before the release, and an end reports no admitted batch as not admitted and comes last. `shuttle_a_detach_racing_a_clearance_admits_only_a_cleared_batch_and_returns_its_slot` races a forwarded producer's detach against the clearance of its batch while a local producer waits for the window's one slot: the forwarded batch reaches the worker only after its clearance was recorded, and the local batch is admitted whichever comes first, so no slot leaks. `shuttle_an_end_racing_clearances_reports_a_batch_not_admitted_exactly_when_the_worker_never_took_it` races an endpoint end against the clearance of two batches while the worker holds the first without reporting it: each batch is answered once, not admitted exactly when the worker never took it, whether it was still being cleared or cleared and waiting for the worker, and of unknown outcome when it did. |
 | Rust client submission slots (`crates/client-core/src/producer/slots_shuttle_tests.rs`) | `shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit`, `shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit`, and `shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once` race a submission's resolution against the application's wait, an aborted wait followed by a new one, and a release: the outcome is taken at most once, a cancelled wait leaves it retrievable, and the credit comes back exactly once. |
 | Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. `shuttle_a_reply_racing_the_end_of_its_exchange_reports_the_gap_once` races a consumer's reply against the end of its exchange: the interruption is reported once, whichever observes the end first. `shuttle_a_read_parked_while_its_consumer_closes_does_not_outlive_the_close` races a read that parks for delivery against the close: the read ends with the close. `shuttle_a_submission_racing_its_producers_end_observes_the_end` races a submission's wait against its producer's end, and `shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change` (`subscriptions.rs`) races the application's next read against a subscription event the follower reports: each waiter subscribes before it reads, so neither waits for a later change. |
@@ -3361,7 +3378,7 @@ concurrency evidence; moving these owners requires current inventory paths, not 
 
 ## Independent Ingestor Units
 
-Source, quiesce, status, readiness and ACK-root registries are keyed by `DomainNodeUnitRef`. A host
+Ingestor, quiesce, status, readiness and ACK-root registries are keyed by `DomainNodeUnitRef`. A host
 resolves its exact entries during preparation and retains its handles on record paths. Each
 quiesce control owns one bounded scalar retained-payload buffer; no per-instance shared map is
 reached by intake. Route runtimes and branch checkpoints carry their `NodeUnitRef` owner.
@@ -3369,7 +3386,7 @@ reached by intake. Route runtimes and branch checkpoints carry their `NodeUnitRe
 A handoff's `Units` target freezes and drains only the selected units. A whole-model `Entities`
 target expands the installed unit declaration together with retained counters and ACK roots, so
 work remains visible across publication. Release retains the original controls and lease identity;
-late source teardown cannot retire a sibling or a replacement readiness handle.
+late ingestor teardown cannot retire a sibling or a replacement readiness handle.
 
 The fake-connector Shuttle check
 `shuttle_an_instance_handoff_leaves_a_sibling_running_and_cannot_release_its_replacement` explores

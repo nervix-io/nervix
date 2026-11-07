@@ -53,6 +53,10 @@ pub struct EnvelopeProperty {
     RkyvDeserialize,
 )]
 pub struct EmitterEnvelope {
+    /// `KEY <expression>`, retaining its exact STRING or BYTES value.
+    pub key: Option<Expression>,
+    /// `PARTITION FROM BRANCH`.
+    pub partition_from_branch: bool,
     /// `PERSISTENT`.
     pub persistent: bool,
     /// `MANDATORY`.
@@ -106,6 +110,8 @@ impl EmitterEnvelopeAlteration {
 /// One clause an envelope writes, with what the statement writes after its keywords.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeClause<'a> {
+    Key(&'a Expression),
+    PartitionFromBranch,
     Persistent,
     Mandatory,
     Retain,
@@ -123,6 +129,8 @@ pub enum EnvelopeClause<'a> {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum EnvelopeClauseValue {
+    Key(Expression),
+    PartitionFromBranch,
     Persistent,
     Mandatory,
     Retain,
@@ -140,6 +148,8 @@ impl EnvelopeClauseValue {
     /// The clause as an envelope writes it.
     pub fn clause(&self) -> EnvelopeClause<'_> {
         match self {
+            Self::Key(expression) => EnvelopeClause::Key(expression),
+            Self::PartitionFromBranch => EnvelopeClause::PartitionFromBranch,
             Self::Persistent => EnvelopeClause::Persistent,
             Self::Mandatory => EnvelopeClause::Mandatory,
             Self::Retain => EnvelopeClause::Retain,
@@ -161,11 +171,13 @@ impl<'a> EnvelopeClause<'a> {
     /// The expression the clause evaluates for every record, for a clause whose form is one.
     pub fn expression(self) -> Option<&'a Expression> {
         match self {
-            Self::Timestamp(expression)
+            Self::Key(expression)
+            | Self::Timestamp(expression)
             | Self::ReplyTo(expression)
             | Self::MessageId(expression)
             | Self::DeduplicationId(expression) => Some(expression),
-            Self::Persistent
+            Self::PartitionFromBranch
+            | Self::Persistent
             | Self::Mandatory
             | Self::Retain
             | Self::DeliverAfter(_)
@@ -175,6 +187,8 @@ impl<'a> EnvelopeClause<'a> {
 
     pub fn kind(self) -> EnvelopeClauseKind {
         match self {
+            Self::Key(_) => EnvelopeClauseKind::Key,
+            Self::PartitionFromBranch => EnvelopeClauseKind::PartitionFromBranch,
             Self::Persistent => EnvelopeClauseKind::Persistent,
             Self::Mandatory => EnvelopeClauseKind::Mandatory,
             Self::Retain => EnvelopeClauseKind::Retain,
@@ -288,6 +302,12 @@ impl EmitterEnvelope {
     /// Every clause this envelope writes, in the order a statement writes them.
     pub fn clauses(&self) -> Vec<EnvelopeClause<'_>> {
         let mut clauses = Vec::new();
+        if let Some(expression) = &self.key {
+            clauses.push(EnvelopeClause::Key(expression));
+        }
+        if self.partition_from_branch {
+            clauses.push(EnvelopeClause::PartitionFromBranch);
+        }
         if self.persistent {
             clauses.push(EnvelopeClause::Persistent);
         }
@@ -321,6 +341,8 @@ impl EmitterEnvelope {
     /// Writes `value`, in place of what this envelope wrote for its clause.
     pub fn set_clause(&mut self, value: &EnvelopeClauseValue) {
         match value {
+            EnvelopeClauseValue::Key(expression) => self.key = Some(expression.clone()),
+            EnvelopeClauseValue::PartitionFromBranch => self.partition_from_branch = true,
             EnvelopeClauseValue::Persistent => self.persistent = true,
             EnvelopeClauseValue::Mandatory => self.mandatory = true,
             EnvelopeClauseValue::Retain => self.retain = true,
@@ -344,6 +366,10 @@ impl EmitterEnvelope {
     /// Stops writing the clause `kind`, and says whether this envelope wrote it.
     pub fn drop_clause(&mut self, kind: EnvelopeClauseKind) -> bool {
         match kind {
+            EnvelopeClauseKind::Key => self.key.take().is_some(),
+            EnvelopeClauseKind::PartitionFromBranch => {
+                std::mem::take(&mut self.partition_from_branch)
+            }
             EnvelopeClauseKind::Persistent => std::mem::take(&mut self.persistent),
             EnvelopeClauseKind::Mandatory => std::mem::take(&mut self.mandatory),
             EnvelopeClauseKind::Retain => std::mem::take(&mut self.retain),

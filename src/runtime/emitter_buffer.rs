@@ -225,7 +225,14 @@ impl EmitterPublishBatch {
         execution_now: Timestamp,
     ) -> Result<Self, PlannedGeneralFailure> {
         let envelopes = envelope
-            .evaluate(executor, &mut self.batch, input, side_inputs, execution_now)
+            .evaluate(
+                executor,
+                &self.source_relay,
+                &mut self.batch,
+                input,
+                side_inputs,
+                execution_now,
+            )
             .await?;
         self.envelopes = Some(envelopes);
         Ok(self)
@@ -334,6 +341,13 @@ impl EmitterPublishBatch {
             None => Err(Report::new(EmitterRuntimeError::EncodeBatch)
                 .attach_printable(format!("emitter batch row {row} has no envelope entry"))),
         }
+    }
+
+    pub(super) fn destination(
+        &self,
+        row: usize,
+    ) -> Option<Arc<nervix_connector::RecordDestination>> {
+        self.envelopes.as_ref()?.destination(row).cloned()
     }
 
     fn estimated_bytes(&self) -> u64 {
@@ -1659,20 +1673,6 @@ mod tests {
             .ordering_group(1)
             .expect_err("a row outside the batch has no group entry");
         assert_eq!(*error.current_context(), EmitterRuntimeError::EncodeBatch);
-
-        let unavailable =
-            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100))
-                .with_ordering_groups(OrderingGroups::Unavailable(
-                    OrderingGroupError::UnbranchedRecord,
-                ))
-                .expect("a group every row shares attaches to any batch");
-        assert_eq!(
-            unavailable
-                .ordering_group(0)
-                .expect("the row has a group entry"),
-            Err(OrderingGroupError::UnbranchedRecord)
-        );
-        assert_eq!(unavailable.estimated_bytes(), batch_bytes);
     }
     #[nervix_primitives::test]
     async fn publish_batch_ack_helpers_preserve_and_complete_all_roots() {

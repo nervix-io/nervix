@@ -189,6 +189,13 @@ external_names! {
         example "readers";
 }
 
+impl KafkaTopicName {
+    /// Transfers the validated spelling into a fixed string allocation.
+    pub fn into_boxed_str(self) -> Box<str> {
+        self.0.into_boxed_str()
+    }
+}
+
 fn kafka_topic_rule(text: &str) -> Result<(), ExternalNameError> {
     require_length(text, KAFKA_TOPIC_MAX)?;
     let refused = text
@@ -305,6 +312,13 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
+            holds: "PARTITION FROM BRANCH native topic metadata response",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver("receive.message.max.bytes 100000000"),
+                overflow: BufferOverflow::FailPublish,
+            },
+        },
+        DeclaredBuffer {
             holds: "records the producer queues under ACK",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Driver(
@@ -331,6 +345,10 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     ],
     waits: &[
+        DeclaredWait {
+            wait: "PARTITION FROM BRANCH topic metadata, including connector executor admission",
+            bound: WaitBound::Driver("socket.timeout.ms, 60 s; maximum 300 s"),
+        },
         DeclaredWait {
             wait: "a produce request",
             bound: WaitBound::Driver("request.timeout.ms, 30 s"),
@@ -611,7 +629,11 @@ impl EmitterDeclaration for KafkaTopicEmitter {
         // persistence, routing or retention flag, no delayed delivery, no reply target and no
         // per-record message or deduplication identity, and its headers carry what properties
         // would.
-        envelope: &[EnvelopeClauseKind::Timestamp],
+        envelope: &[
+            EnvelopeClauseKind::Key,
+            EnvelopeClauseKind::PartitionFromBranch,
+            EnvelopeClauseKind::Timestamp,
+        ],
         properties: &[],
         bounds: KAFKA_EMITTER_BOUNDS,
     };

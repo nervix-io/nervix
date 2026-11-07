@@ -233,6 +233,7 @@ pub(super) fn emitter_config(
     }
     KafkaTopicEmitterConfig {
         config,
+        partition_from_branch: false,
         topic: KafkaTopicName::parse(TOPIC).expect("the test topic is a valid topic name"),
         mode,
     }
@@ -249,7 +250,12 @@ pub(super) fn confirmed(max_in_flight: usize, timeout: Duration) -> BrokerPublis
 pub(super) fn record(index: usize, key: &str, payload: Vec<u8>) -> EmitterRecord {
     EmitterRecord::new(
         EmitterRecordId::new(index),
-        Some(key.to_string()),
+        Some(nervix_primitives::sync::Arc::new(
+            nervix_connector::RecordDestination {
+                key: Some(nervix_connector::RecordKey::String(key.to_string())),
+                source_partition: None,
+            },
+        )),
         payload,
         Vec::new(),
         Timestamp::from_unix_nanos(0),
@@ -271,7 +277,7 @@ pub(super) fn awaited_hand_over(emitter: &KafkaTopicEmitter, record: EmitterReco
     let create_time =
         KafkaCreateTime::of(&record).expect("a test record's timestamp is a Kafka record time");
     emitter
-        .hand_over(&record, create_time, Some(answer))
+        .hand_over(&record, create_time, Some(answer), None)
         .expect("the producer takes the record");
     KafkaAnswer { report }
 }

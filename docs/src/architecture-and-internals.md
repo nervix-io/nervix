@@ -48,6 +48,9 @@ Use it for:
   aggregates and sketches, and adding a function](./vm-functions.md)
 - [SIMD kernels: typed buffer ownership, dispatch and build targets, exact results, caller
   catalog, qualification, and measured evidence](./simd-kernels.md)
+- [wire schema binding: each format's wire types, the binding rule and its matrix, `ENCODE` rules,
+  arrays, modes, the value models of the schemaful codecs, value fidelity, stored shapes and
+  failures](./wire-schema-binding.md)
 - runtime semantics that are easier to understand from the implementation side
 - relay/state internals
 

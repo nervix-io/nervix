@@ -389,6 +389,7 @@ fn every_registered_filler_lexes() {
         "timestamp",
         "deduplicate_on",
         "reorder_by",
+        "key_expression",
         "timestamp_expression",
         "value_expression",
     ] {

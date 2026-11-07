@@ -16,13 +16,13 @@ Python owns their lifetimes. The following chapters remain the owners of their r
 
 | Contract | Authoritative documentation |
 | --- | --- |
-| Source syntax, admission and source outcomes | [Ingestors](./ingestors.md#client-ingestors) |
+| Ingestor syntax, admission and ingestor outcomes | [Ingestors](./ingestors.md#client-ingestors) |
 | Emitter syntax, construction, batching and graph ACK boundary | [Emitters](./emitters.md#client-emitters) |
 | Public attachments, subscriptions and clock observation | [Sessions](./sessions.md) |
 | Rust handles and shared binding | [Rust Client Library](./client-library.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#using-the-shared-binding), with [its Python package rules](./client-implementation-manual.md#using-the-python-package) |
 | FlatBuffers, transport, correlation, cancellation and restoration | [Client Session Protocol](./client-session-protocol.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#producers) |
 | Model validation, typed revision construction and installation | [Execution Plans](./execution-plans.md) |
-| Native source/emitter composition and the common emitter host | [Connector Contract](./connector-contract.md#ingestor-boundary) |
+| Native ingestor/emitter composition and the common emitter host | [Connector Contract](./connector-contract.md#ingestor-boundary) |
 | Authenticated forwarding and cross-node failures | [Cluster Interconnect](./interconnect.md#client-producer-links) |
 | Failure classification and safe diagnostic content | [Errors And Diagnostics](./errors-and-diagnostics.md) |
 | Generation, execution snapshots, timestamp admission and deadlines | [Domain Clock](./domain-clock.md) |
@@ -49,7 +49,7 @@ The data plane executes plans without reading Models or reparsing executable Ple
 | --- | --- |
 | Vocabulary | Schemas, domain generations, endpoint contracts, typed attachment/delivery identities, limits and outcomes |
 | Language | `CLIENT PRODUCER INGESTOR` and `TO CLIENT` grammar, semantic Models, canonical rendering and composed completion |
-| Decisions | Validate the candidate graph and produce typed source, route, emitter and message-error plans |
+| Decisions | Validate the candidate graph and produce typed ingestor, route, emitter and message-error plans |
 | Data plane | One ingestor endpoint/admission owner; concrete branch route tasks; relay ownership; emitter host and competing-consumer attempt owner |
 | Control plane | Commit configuration, install revisions, establish generations, coordinate scoped holds and ownership handoff |
 | Edges | Authenticate sessions, reserve attachment capacity, correlate requests, route control/data and forward to the scheduled owner |
@@ -79,7 +79,7 @@ the WebSocket session and is a session gap.
 
 ### Concrete Branches And Forwarding
 
-Each ingestor has one scheduled execution and a shared source ACK window. Its routes construct
+Each ingestor has one scheduled execution and a shared ingestor ACK window. Its routes construct
 outgoing branch keys. A producer cannot choose a relay, inject a branch key as transport metadata,
 or create another execution by connecting again. Route buffering and downstream execution remain
 local to each concrete branch. Unbranched work has an absent branch key.
@@ -92,7 +92,7 @@ reference. The fingerprint exposes no branch-key values. Copy a required branch 
 field earlier in the graph and export that field explicitly.
 
 Remote producers use a shared, authenticated relay-class duplex link per serving/owning node pair.
-Before admitting a forwarded batch, the owner takes a source-window slot and sends `Admitting`.
+Before admitting a forwarded batch, the owner takes an ingestor-window slot and sends `Admitting`.
 The serving node records possible admission and answers `Clear`; only then may the owner dispatch
 the batch. This costs one additional link round trip. If the owner or link is lost, the serving
 node can truthfully report batches it never cleared as `NotAdmitted(ProducerEnded)`. Cleared,
@@ -207,7 +207,7 @@ sequenceDiagram
     C->>E: ACK current attempt
     E-->>C: Confirmed
     E-->>R: Resolve attached ACK share
-    R-->>I: Resolve source root when all shares finish
+    R-->>I: Resolve ingestor root when all shares finish
     I-->>P: Completed
 ```
 
@@ -216,7 +216,7 @@ sequenceDiagram
 The source schema describes input before construction; the emitter schema describes output after
 construction. Transforming routes start empty, use permitted `INHERIT` and ordered `SET`, and
 initialize every required output. Optional fields finalize as typed nulls. Filters and route
-predicates retain their ordinary scopes. Client sources have no header or connector-metadata
+predicates retain their ordinary scopes. Client ingestors have no header or connector-metadata
 scope; client emitters have no codec, header invocation or direct `VALUES` mode.
 
 Sensitivity is part of the public schema contract. Exporting a sensitive value requires explicit
@@ -274,7 +274,7 @@ A malformed native input is refused as a whole before any row enters the graph. 
 row errors follow their route policy and do not make the batch an atomic transaction. On an
 ingestor route, `IGNORE` acknowledges the failed row, `LOG` negatively acknowledges it, and
 `SEND TO` acknowledges it once its constructed error record is published to the error relay.
-An attached error emitter is therefore outside that source ACK chain. Error records use the
+An attached error emitter is therefore outside that ingestor ACK chain. Error records use the
 ordinary typed code, operation, affected fields, reference, occurrence time and non-sensitive
 message. Ingestor error targets are unbranched; other error targets preserve the failed execution's
 exact branch. Error construction never recursively invokes the same policy.
@@ -315,7 +315,7 @@ does not retarget a handle. Typed refusals leave no attachment or reservation.
 | `Client::open_ingestor` | Open a producer of a committed client ingestor |
 | `Producer::batch` / `ProducerBatch::from_record_batch` | Validate and write canonical IPC with the optional `arrow` feature |
 | `ProducerBatch::from_arrow_ipc` | Retain a stream written by application Arrow tooling |
-| `Producer::send` | Submit and wait for a terminal source outcome |
+| `Producer::send` | Submit and wait for a terminal ingestor outcome |
 | `Producer::submit` / `Producer::rejoin` | Retain a submission, then join its outcome without resending |
 | `pending_submissions` / `release` | Inspect retained identities/results or release interest; unresolved credit remains owned until its outcome resolves |
 | `Client::subscribe_emitter` | Open one competing worker of an emitter |
@@ -393,21 +393,21 @@ host's requirements.
 
 ## Completion, Attempts And Replay
 
-One submitted batch owns one ordinary source acknowledgement root. It receives exactly one
+One submitted batch owns one ordinary ingestor acknowledgement root. It receives exactly one
 terminal outcome:
 
 | Outcome | Established fact | Application action |
 | --- | --- | --- |
 | `NotAdmitted` | No row of this attempt entered the graph | Only `Suspended` and `Busy` retry automatically on declared physical backoff; other causes require an application decision |
-| `Completed` | Its source root resolved successfully under the configured graph policies | Retire input according to those policies and the application's durability requirements |
+| `Completed` | Its ingestor root resolved successfully under the configured graph policies | Retire input according to those policies and the application's durability requirements |
 | `ProcessingFailed` | Admitted ACK work failed as rejected or timed out; some effects may have happened | Retain input and reconcile or deliberately replay with idempotent effects |
 | `OutcomeUnknown` | A terminal processing result cannot be established after possible admission/interruption | Preserve the event identity and input; never infer non-admission or silently resend |
 
-`Completed` is precise about the graph's source root. Filtered rows, `REQUIRED SKIP`, explicit
+`Completed` is precise about the graph's ingestor root. Filtered rows, `REQUIRED SKIP`, explicit
 error handling and detached boundaries can resolve it without external delivery of the original
-row. Each acknowledging connector retains its own success boundary. Source ACK timeout measures
+row. Each acknowledging connector retains its own success boundary. Ingestor ACK timeout measures
 physical acknowledgement inactivity; downstream progress/keepalives can extend the wait. A timed-out
-source result does not cancel admitted work, which may still finish afterwards.
+ingestor result does not cancel admitted work, which may still finish afterwards.
 
 Consumers of one emitter compete fairly for available work. One attempt belongs to one worker;
 another worker receives it only after revocation. Consecutive batches of one branch may go to
@@ -417,7 +417,7 @@ allows effects and ACKs to complete out of order. Attaching more workers multipl
 window. Separate emitters from the same relay provide independent fan-out, each with its own ACK
 share. There is no total order across sources or branches, or worker affinity.
 
-Producers share the ingestor's single source window. A temporarily refused batch is sent again
+Producers share the ingestor's single acknowledgement window. A temporarily refused batch is sent again
 after backoff behind batches sent in the meantime.
 Several outstanding submissions can therefore produce output in a different order from their
 first sends. Keep one producer batch outstanding when that order is required.
@@ -553,7 +553,7 @@ changes require explicit application acceptance and a fresh open.
 For an alteration that pauses an ingestor and gates a shared downstream relay, the coordinator:
 
 1. Engages an ingestor-only admission hold across the live nodes and stops new admission.
-2. Force-flushes existing route work and drains admitted source ACK roots while relay gates stay
+2. Force-flushes existing route work and drains admitted ingestor ACK roots while relay gates stay
    open. Partial batches from every concrete branch can reach their acknowledging emitters.
 3. Engages the full subgraph hold before releasing the intake hold. Both holds own suspension, so
    releasing intake cannot briefly reopen admission.
@@ -604,7 +604,7 @@ new application open. Clock restoration proceeds independently.
 | Domain, schemas, endpoint Models and committed schedules | Persisted control-plane configuration |
 | START mapping/generation and scheduling authority | Persisted under their owning lifecycle contracts |
 | Materialized/processor/guest computation state | Only the state its own architecture contract persists; it is not a client payload journal |
-| Payloads, route buffers, source ACK roots and credit/result slots | In memory; no durable client recovery history |
+| Payloads, route buffers, ingestor ACK roots and credit/result slots | In memory; no durable client recovery history |
 | Consumer queues, prepared deliveries, attempt references and ACK maps | In memory; owner loss can require upstream replay |
 | Application outbox, event IDs and effect deduplication | Application-owned durability, independent of endpoint restoration |
 
@@ -651,7 +651,7 @@ recipes build the required binary or shared library. Each application opens cons
 submitting, uses the clock helper's projections for tick centers and admission, writes an input
 ledger and applies effects by stable reading ID before ACK. `--timestamps now` selects the
 comparison ingestor; `--invalid-every 3` exercises the error route. The rejection-notice consumer
-is outside the original source ACK chain, so the drivers separately wait for those notices.
+is outside the original ingestor ACK chain, so the drivers separately wait for those notices.
 
 For a running instance, save this compatible ingestor change as `alteration.plexus`; it demonstrates
 same-generation reopening with buffered input:
@@ -723,7 +723,7 @@ and interpretation. Transaction inspection separately exposes intake/full engage
 | Output waits with no consumer | Open a consumer with room for the declared maximum; use additional competing workers for processing capacity or separate emitters for copies |
 | Output has no expected branch field | Export the required value through schema-backed construction; the opaque fingerprint is metadata |
 | Invalid native stream | Check canonical schema, exact types/nullability, one batch, row/byte bounds, no compression/dictionaries/extensions/field metadata and valid column buffers |
-| Source processing failed | Read its rejected/timeout cause and route error policy; partial effects may already exist |
+| Ingestor processing failed | Read its rejected/timeout cause and route error policy; partial effects may already exist |
 | Stale ACK or uncertain settlement | Match the current attachment/attempt; reconcile idempotent effects instead of treating a replacement reference as the old one |
 | Paced admission rejects rows | Inspect reached centers, generation, exact event time and skew; a clock observation cannot extend the server's window |
 | ALTER cannot drain | Continue admitted outcome reads and application ACKs; inspect its actual scope/failure and shared physical deadline before accepting a replacement |

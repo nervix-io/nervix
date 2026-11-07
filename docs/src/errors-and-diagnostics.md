@@ -41,13 +41,20 @@ RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The 
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
 certificate/key pairing refusal remains independent of the scheme check.
 
+NATS authentication retains the maintained NKey codec's typed refusal beneath the existing
+length, encoding, user-kind or checksum context, including the original base32 decoding source.
+User-kind validation precedes the checksum, preserving the refusal when both are invalid.
+Credentials parsing retains the driver's typed missing/incomplete-section cause. Neither chain
+renders the JWT or seed. Signing, filesystem admission and retryable no-work refusals keep their
+existing owners and outcomes; the [Connector Contract](connector-contract.md) owns preparation.
+
 NATS stream metadata is decoded where a program requests it. A malformed acknowledgement
 subject retains the driver's parsing cause; a nonpositive sequence or delivery count and an
 out-of-range publication timestamp have distinct typed field causes. `IngestMetadataFailure`
 shares the immutable typed cause through capture and replay. The host projects it into a validation
 row outcome only for a read field, after `FILTER WHERE` and before event-time selection. A delivery
 retains its opaque transport acknowledgement independently; a missing acknowledgement remains a
-source-attempt failure. A computed Core reply subject
+ingestor-attempt failure. A computed Core reply subject
 that violates the publication-subject rule instead becomes a per-record rejection before hand-over.
 An invalid literal reply subject is refused by registry preflight with `NatsReplySubject` and the
 external-name validation cause, before the emitter starts.
@@ -157,7 +164,7 @@ chapter that owns its subsystem:
 | Missing values, distinct semantic states and the boundary that validates them | [Typed States And Validation Boundaries](./typed-states.md#validation-and-failure-boundaries) |
 | Row and batch errors of the expression VM, and each function's error contract | [VM Functions](./vm-functions.md#row-errors-and-batch-errors) and [Expression Functions](./filter-map-functions.md#errors) |
 | Guest result codes, rejected saved state and failed checkpoints | [WASM State And Recovery](./wasm-state.md#rejected-state-recovery) and [Rust WASM Guest SDK](./wasm-guest-sdk.md#error-handling) |
-| Source and emitter failures, per-record outcomes, retry and acknowledgement | [Connector Crates And The Connector Contract](./connector-contract.md#failure-and-observation) |
+| Ingestor and emitter failures, per-record outcomes, retry and acknowledgement | [Connector Crates And The Connector Contract](./connector-contract.md#failure-and-observation) |
 | Lookup outcomes and which caller owns a failed lookup | [Name Resolution](./name-resolution.md#failure-ownership) |
 | Exchange forms, remote failure classes on the wire and relay acknowledgements | [Cluster Interconnect](./interconnect.md#failure-ownership-and-persistence) |
 | Durable appends, uncertain writes and a failed consensus store | [Consensus Storage And Replication](./consensus-storage-and-replication.md#appended-batches) |
@@ -294,12 +301,12 @@ below says which outcomes of its boundary are ordinary.
 
 A failure of one row or one record is a typed value in its batch's outcome too. The expression VM
 returns the row errors of a batch beside its result, each a `SideError` with its reason and
-expression span. A emitter answers a write with the records it delivered, the records it rejected,
+expression span. An emitter answers a write with the records it delivered, the records it rejected,
 each with a structured message error, and at most one infrastructure failure of the attempt, which
 is a report; a record in neither list stays unresolved. Branch construction keeps the outcome of
 each row. None of these builds a report or formats a message per row: the typed value becomes a
 structured message error only where a route's policy reports it, and hot paths do not allocate a
-formatted diagnostic when the variant already names the failure. A source poll and a decode are
+formatted diagnostic when the variant already names the failure. An ingestor poll and a decode are
 the exceptions that carry reports. A poll returns the report of each record it could not read
 beside the messages it could, so the rest of one external response continues through intake. An
 ingest group returns the codec's report for each payload it refuses, with that payload's place in
@@ -379,13 +386,13 @@ tombstone removal or history reclamation with that whole chain.
 Reports remain typed until these reporting decisions; sensitivity rules continue to apply to every
 context. A boundary renders a failure once and reuses the text: a failed dead-letter dispatch
 renders its report once and uses that chain in both its runtime event and its negative
-acknowledgement. Clock arithmetic and attachment, source cadence and lifecycle, Kafka partition
+acknowledgement. Clock arithmetic and attachment, ingestor cadence and lifecycle, Kafka partition
 inspection, relay dispatch and acknowledgement delivery, and state checkpoint publication and
 replica catch-up preserve their causes at those boundaries. Nested message-error construction
 reports retain the VM or Arrow cause.
 
 Three renderings are not the whole chain, each by its owner's decision. An ingestor's transient
-status shows the most specific cause of a source failure, because the connector contract's own
+status shows the most specific cause of an ingestor failure, because the connector contract's own
 context names only the operation that failed. An emitter's transient status shows the description
 its emitter attached, which for the HTTP emitter is the description of the whole chain. A failed
 consensus proposal's message is its context followed by the storage or Raft error beneath it. A
@@ -437,10 +444,10 @@ subsections after the boundary table follow this order.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical Plexus cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | Plexus language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a budgeted buffer whose growth its class did not back (`BufferGrowthError::NotCharged`, with that `AdmissionError` beneath it) or that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced ingestor handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a budgeted buffer whose growth its class did not back (`BufferGrowthError::NotCharged`, with that `AdmissionError` beneath it) or that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced ingestor handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload an ingestor handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
-| Connector crates and host | Integration-specific configuration, decoding, external ingestor and emitter outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or emitter failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
+| Connector crates and host | Integration-specific configuration, decoding, external ingestor and emitter outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from an ingestor or emitter failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
 | Materialized state and lookups | Dependency resolution, field and schema checks, defaults, lookup evaluation, snapshot opening, and state exchange | Use a declared absence policy only for unavailable state; report a genuine failed read or invalid state. |
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
 | Client ingestor endpoint | Whether a submitted batch is a canonical Arrow IPC stream of the input schema (`ClientBatchError`), whether the node had capacity to validate it, and how its acknowledgement root resolved | Answer the batch as not admitted with its defect or a temporary refusal, or with its terminal outcome, and end a producer with the reason its attachment ended. |
@@ -456,7 +463,7 @@ subsections after the boundary table follow this order.
 Forced ownership installation retires changing relay channels before its dispatch fence waits.
 The remote delivery owner maps a cancelled or unconfirmed admission through its existing typed
 delivery failure and fails the record ACKs it retained, rather than reporting successful processing
-or a codec/message error. The acknowledged source can then retry through the newly published route.
+or a codec/message error. The acknowledged ingestor can then retry through the newly published route.
 An already admitted result keeps its record-ACK obligations; uncertainty can produce replay
 duplicates. Cancellation reconciliation keeps its five-second attempt budget independently of the
 entity gate deadline. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
@@ -498,7 +505,7 @@ conflict-clause error beneath a context naming its entity, since the clause is c
 stored `VALUES` mapping where the alteration applies.
 A Pulsar subscription `TYPE` that reads through one consumer with more than one instance is the
 registry's typed `ConnectorDeclarationIssue::PulsarSingleConsumerType`, which `CREATE` and every
-alteration reach through the same source validation, so `SET TYPE` and `SET FROM` also leave the
+alteration reach through the same ingestor validation, so `SET TYPE` and `SET FROM` also leave the
 stored definition unchanged.
 An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
@@ -639,7 +646,7 @@ Arrow field carries `RuntimeSchemaError::CborValueTypeMismatch` with its CBOR ki
 internal type. CBOR header inspection retains a typed read, syntax or depth cause if it cannot
 finish on a payload the value decoder otherwise accepts.
 An unfolding payload keeps the report of the message that failed and names its zero-based input and
-output position after it. The ingest group returns that report unchanged. A source host and an HTTP
+output position after it. The ingest group returns that report unchanged. An ingestor host and an HTTP
 or WebSocket endpoint render the whole chain once as the message of the decode rejection that
 replaces the refused payload, described in [Decode Rejections](#decode-rejections). A lookup line
 keeps it beneath the line it failed on, and an emitter keeps it beneath the record it rejects or the
@@ -660,9 +667,10 @@ the codec and field when one is known and never attach the rejected payload valu
 
 Registry validation checks each `ENCODE` rule against its internal field and declared wire
 representation. `RFC3339` applies to datetime text, and `BASE64` to byte text in JSON or AVRO
-strings; an AVRO native `bytes` field accepts no rule. A refusal names the codec and field, including
-unknown fields, duplicate rules and incompatible types. Canonical base64 decoding retains the typed
-binary-builder failure beneath the codec's field context without including the encoded input.
+strings; a CBOR or AVRO native `bytes` field accepts no rule. A refusal names the codec and field,
+including unknown fields, duplicate rules and incompatible types. Canonical base64 decoding retains
+the typed binary-builder failure beneath the codec's field context without including the encoded
+input.
 
 Codec jaq transformations are compiled during registry validation for every declared direction.
 A syntax error names the codec, domain, and direction and rejects the transaction before the model
@@ -681,7 +689,7 @@ or error detail enters that object. Decode rejection and route error policies st
 full typed report through their normal owner. Invalid request durations and ACK quiesce contracts
 are entrypoint-planning errors naming the ingestor and clause. A WebSocket ACK without a declared
 signaling protocol fails planning; an outbound format that cannot encode every outcome fails
-source composition with the protocol encoder's typed cause retained beneath the ingestor context.
+ingestor composition with the protocol encoder's typed cause retained beneath the ingestor context.
 
 ### Stored Shapes And Archives
 
@@ -706,7 +714,7 @@ the shared checkpoint-transfer deadline reports `KafkaStartDeadline`. Changed li
 assignment authority reports `Superseded`. The interconnect handler rejects a source node that
 does not match its authenticated peer before reading or changing state. Runtime admission also
 checks the current membership incarnation. These failures end that initialization attempt; the
-host retries through its existing source lifecycle without polling from substitute positions.
+host retries through its existing ingestor lifecycle without polling from substitute positions.
 
 An ingestor layout preparation retains invalid selections, source or checkpoint inventories,
 component kinds and allocation bounds beneath `OwnershipHandoffError::IngestorUnitLayout`.
@@ -830,9 +838,9 @@ carry `error_stack::Report` from the failing operation. A caller adds context at
 host ownership transition; it does not recreate the top-level error from its formatted text.
 Syslog TLS material reports keep the file, certificate or rustls cause, and stream frame reports
 remain beneath the connection failure. Its configured accept capability maps socket failures into
-`SyslogListenerError::StreamAccept` before the listener returns them to the source owner; the test
+`SyslogListenerError::StreamAccept` before the listener returns them to the ingestor owner; the test
 injector follows the same typed path. WebSocket signaling compilation and execution retain jaq,
-frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
+frame encoding and transport causes. The runtime's Syslog ingestor-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
 
 A Syslog listener that cannot decode the subject of a verified TLS client certificate keeps the
@@ -881,7 +889,7 @@ and attaches its safe message for diagnostics; an invalid request program never 
 A Prometheus query that fails is a `PrometheusQueryIngestorError` beneath `IngestorError::Read`: a request
 that could not be sent, a response whose announced length or body exceeds the ingestor's
 `MAX BODY SIZE`, a body that could not be read, a payload that does not decode, a query the API
-refuses, a status with nothing of the API's in its body, or a result a query source does not read.
+refuses, a status with nothing of the API's in its body, or a result a query ingestor does not read.
 The oversized response is `ResponseTooLarge`, which names the bound and never the body, such as
 `Prometheus query response exceeds MAX BODY SIZE 16MiB`. A refused query is `QueryRejected`, whose
 HTTP status, `errorType` and `error` are typed fields read from the answer, and whose `error` is as
@@ -918,8 +926,8 @@ Lapin runtime that could not be created; or a failed or overdue AMQP handshake, 
 broker host where one is involved. An overdue step keeps the elapsed `connect_timeout_ms` as its
 typed cause. The address refusal never repeats the address, which can carry credentials, and the
 CREATE-time check of the same address keeps the same typed reason beneath the client's key error. A step of opening the entity's channel that fails or runs out of the same deadline is
-reported beneath the source's or emitter's own context for that step, with the elapsed deadline as its
-typed cause and its text leading the report. The source keeps these beneath its connect and resume
+reported beneath the ingestor's or emitter's own context for that step, with the elapsed deadline as its
+typed cause and its text leading the report. The ingestor keeps these beneath its connect and resume
 contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the resolver's own lookup error or
 the deadline that ran out. The emitter changes them into a configuration failure for an invalid
 address, CA file, client identity or deadline key and an initialization failure otherwise, leading
@@ -972,7 +980,7 @@ STRING value`. The host reports a routing key that fails or produces no value fo
 
 Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
 their existing infrastructure contexts: `EmitterOpenError::Initialize` while a Syslog sender opens
-and `IngestorError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
+and `IngestorError::Resume` while a WebSocket ingestor connects or reconnects. The resolver's typed
 missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
 Address, TLS and WebSocket-upgrade failures remain connection outcomes. A WebSocket peer whose
 upgrade answer contradicts the request's subprotocol offer fails resume with the connector's typed
@@ -987,15 +995,15 @@ emitter host to retry. No caller waits on the connections a pool opens to restor
 `POOL SIZE MIN`, so the pool itself is the only witness of a restoration that fails: it reports
 `PoolMinimumError::NotRestored`, naming the minimum, above the checkout's `DeadlineElapsed` for
 `connect_timeout_ms`, at `debug`, and tries again.
-A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLookupError` beneath
+A Pub/Sub ingestor resolves before opening its dedicated stream and retains `DnsLookupError` beneath
 `RedisPubSubIngestorError::Resolve` and `IngestorError::Resume`. A refused address, failed TLS name
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
 
-A Redis source client must declare `subscription_buffer_messages` and `idle_timeout_ms`.
+A Redis ingestor client must declare `subscription_buffer_messages` and `idle_timeout_ms`.
 A missing key is `RedisPubSubIngestorError::MissingConfiguration`, naming only that key; a capacity
 outside the bounded channel's range is `InvalidBufferCapacity`, and an invalid idle deadline keeps
-`ClientConfigError::InvalidDeadline` beneath `InvalidIdleTimeout`. These are source configuration
+`ClientConfigError::InvalidDeadline` beneath `InvalidIdleTimeout`. These are ingestor configuration
 failures before a subscription opens, not record rejections.
 
 A Redis client's command-pool lifetimes, `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, are
@@ -1032,7 +1040,7 @@ Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
 the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
 and `IngestorError::Read`. The host displays that transient failure and reconnects on its existing
-policy. Reader task failures retain the typed join cause. A source explicitly ending its lifetime
+policy. Reader task failures retain the typed join cause. An ingestor explicitly ending its lifetime
 joins its reader; it owes no further read outcome after intake ends.
 
 A connection that runs out of the client's `connect_timeout_ms` keeps the connector contract's
@@ -1070,11 +1078,11 @@ An MQTT client configuration the vocabulary cannot carry is refused as an
 `MqttClientConfigError`, which names the key without its value: an empty or NUL-bearing identity, a
 string longer than MQTT's 65,535 bytes, a keep-alive that is not whole seconds within MQTT's range,
 or a `max_packet_size` above MQTT's largest packet; a schema refusal stays beneath its `Schema`
-variant. `CREATE MQTT CLIENT` reports it after rendering the configuration for instance 0. A source
+variant. `CREATE MQTT CLIENT` reports it after rendering the configuration for instance 0. An ingestor
 or emitter whose rendered configuration the vocabulary refuses at connection keeps it beneath the
 connector's `MqttClientOptionsError::Configuration`, and a TLS file it cannot read keeps the
 connector contract's `ClientConfigError` beneath `MqttClientOptionsError::TlsFile`, naming the
-file. A source keeps either beneath `MqttTopicIngestorError::ClientConfig`, and an emitter beneath
+file. An ingestor keeps either beneath `MqttTopicIngestorError::ClientConfig`, and an emitter beneath
 `EmitterOpenError::InvalidConfiguration`.
 
 An MQTT client's event loop reports a failed or lost broker connection as an
@@ -1084,10 +1092,10 @@ cause of its connection error. The connector finds it there and reports
 `MqttConnectionError::Resolve`, with the host and the resolver's `DnsLookupFailure` as typed fields
 and the `DnsLookupError` beneath it. Any other failure keeps the driver's own description, such as
 an address that refused the connection, a failed TLS handshake, including a certificate that does
-not name the configured host, or a refused MQTT handshake. A source keeps the error beneath
+not name the configured host, or a refused MQTT handshake. An ingestor keeps the error beneath
 `MqttTopicIngestorError::Connect` while it connects and `MqttTopicIngestorError::Receive` while it reads, and
 those beneath `IngestorError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
-error or the driver's description. The task that drives a ingestor's connection hands the lost
+error or the driver's description. The task that drives an ingestor's connection hands the lost
 connection to the ingestor's next read, or to an acknowledgement that finds the connection ended,
 which keeps it beneath `MqttTopicIngestorError::Acknowledge`; a task that fails without a report keeps its
 `JoinError` beneath `MqttTopicIngestorError::Driver`. An acknowledgement that meets the task holding a
@@ -1139,7 +1147,7 @@ Comparing a replacement's subscription retains URL parse causes beneath `PulsarT
 or uses `InvalidServiceAddress` for an unsupported service scheme or missing host, beneath the
 retirement context. A comparison failure preserves the subscription and is reported separately
 from any failure to start the replacement. A provisioned
-subscription that does not exist is `PulsarTopicIngestorError::MissingSubscription` beneath the source's
+subscription that does not exist is `PulsarTopicIngestorError::MissingSubscription` beneath the ingestor's
 resume context, which the ingestor's transient status shows by its subscription and topic; a check
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's
 error. A join the broker refuses is `SubscriptionRefused`, which holds the subscription, the topic
@@ -1173,39 +1181,39 @@ that gives up only after every record's report was served is no failure. A flush
 otherwise, or whose blocking task does not complete, keeps that cause beneath
 `EmitterFinishError::Flush`.
 
-A Kafka source classifies an unknown topic from a subscription or topic metadata as
+A Kafka ingestor classifies an unknown topic from a subscription or topic metadata as
 `KafkaTopicIngestorError::MissingTopic`, retaining the driver's typed `KafkaError` as an attachment.
 The named topic is the semantic failure shown in `DESCRIBE INGESTOR` until the operator provisions
 it. Partition watches recognize this variant as an empty topology; other inspection failures keep
 their existing reporting path. A Kafka client's attempt to set a host-owned key, such as
 `allow.auto.create.topics` or `delivery.report.only.error`, is
 `ClientConfigSchemaError::Reserved` beneath the registry's client context, naming the domain,
-client and owned key without its configured value. The source and both inspectors enforce `false`
+client and owned key without its configured value. The ingestor and both inspectors enforce `false`
 after pass-through configuration. A key librdkafka reads as another name for a property the
 client accepts under one name, such as `metadata.broker.list` for `bootstrap.servers`, is
 `ClientConfigSchemaError::DriverAlias`, naming the key and the accepted name. A key written under
 librdkafka's `topic.` prefix is `ClientConfigSchemaError::DriverPrefix`, naming the key and the
 prefix. Both refusals sit beneath the same client context and carry no configured value.
 
-A Kafka record timestamp outside the instants a `DATETIME` holds is not a source failure. The
+A Kafka record timestamp outside the instants a `DATETIME` holds is not an ingestor failure. The
 message hands it over as an unrepresentable `metadata.timestamp` value described by its
 milliseconds, never as a wrapped or absent instant, and the host refuses the record as a message
 error with code `validation` and operation `admit` only where a route or `TIMESTAMP AT` reads that
 field. A record at the last offset Kafka's signed offsets reach has no next position, which is
 `KafkaTopicIngestorError::OffsetOverflow`, naming the topic and partition, beneath
-`IngestorError::Read`: a source read failure, not a codec rejection. When a later record in a
-collected read fails that way, the source returns the valid gathered prefix first and keeps
+`IngestorError::Read`: an ingestor read failure, not a codec rejection. When a later record in a
+collected read fails that way, the ingestor returns the valid gathered prefix first and keeps
 exactly one report for its next admitted read. A cancelled read leaves that report pending.
 
-A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
+A Kafka ingestor keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
 does not answer within thirty seconds is `KafkaTopicIngestorError::CommitUnanswered`, and a blocking-pool
 job that ends without the answer keeps its `JoinError` beneath `KafkaTopicIngestorError::CommitTask`. The
 commit of an acknowledged batch fails beneath `IngestorError::Acknowledge`, so the ingestor's
 transient status in `DESCRIBE INGESTOR` shows the deepest cause, such as the driver's description of
-the refusal, and the host rejects the batch's positions, which the source reads again. The commit a
+the refusal, and the host rejects the batch's positions, which the ingestor reads again. The commit a
 `MODE NO ACK` consumer makes as it leaves its group fails beneath `IngestorError::Suspend` or
-`IngestorError::Close`, which the source loop reports as a runtime event. None rejects a record.
+`IngestorError::Close`, which the ingestor loop reports as a runtime event. None rejects a record.
 
 Kafka control-call admission keeps `AdmissionError` beneath `KafkaTopicIngestorError::ControlAdmission`,
 and a refused queue or failed admitted worker keeps `ExecutionError` beneath
@@ -1240,16 +1248,16 @@ driver the resolver's `DnsLookupError` as the failure of the lookup. The driver 
 cause of its connection error, and the connector finds it there by type and keeps it as the context
 beneath its existing infrastructure failure: `EmitterWriteError::Publish` for a ClickHouse insert or
 an SQS send, `EmitterOpenError::Initialize` while an SQS emitter looks up its queue, and the
-`SqsQueueIngestorError` of looking its queue up, receiving or deleting beneath the source's `IngestorError`.
-An SQS source looks its queue up when an instance resumes, so that failure is `IngestorError::Resume`
+`SqsQueueIngestorError` of looking its queue up, receiving or deleting beneath the ingestor's `IngestorError`.
+An SQS ingestor looks its queue up when an instance resumes, so that failure is `IngestorError::Resume`
 above the typed lookup failure: a queue the service does not have is `SqsQueueIngestorError::MissingQueue`,
-which names it, and the source host shows the deepest cause as the source's transient error and
+which names it, and the ingestor host shows the deepest cause as the ingestor's transient error and
 retries it. The failure's message names the host and the lookup failure, which `DESCRIBE EMITTER`
 and `DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a refused connection
 or a certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and carries neither credentials nor a record; a
 response from the service keeps its existing description. None is a record rejection, and none
-acknowledges input. A source read the host cancelled still waits for its receive in flight, and a
+acknowledges input. An ingestor read the host cancelled still waits for its receive in flight, and a
 service that has not answered it within 10 seconds of the cancellation ends the read with
 `SqsQueueIngestorError::CancelledReceiveUnanswered`, which names that budget, beneath `IngestorError::Read`.
 
@@ -1258,19 +1266,19 @@ An SQS receive whose system attribute cannot be represented in its declared meta
 The original integer-parse or timestamp-range cause remains inspectable in the report. The
 diagnostic prints no attribute value. An omitted attribute remains an optional metadata value;
 an invalid receive count or timestamp never becomes zero or null.
-The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
+The host shows it as the ingestor's transient error; nothing is rejected or acknowledged, and a message
 the receive was returning stays invisible until its visibility timeout.
 
 An SQS request that runs out of its client's `timeout_ms` keeps the connector contract's
 `DeadlineElapsed` as its innermost cause, naming the request, the key and its bound: the queue
 lookup, a receive after its long poll, a delete, a send or a batch send. It sits beneath the same
-context as any other failure of that request, so the source host shows it as the deepest cause, such
+context as any other failure of that request, so the ingestor host shows it as the deepest cause, such
 as `the SQS queue lookup did not finish within timeout_ms 5s`, and an emitter attaches its message
 last, which `DESCRIBE EMITTER` shows. An SQS client whose keys its connections cannot use is
 `InvalidSqsClientKey`, which names the key, above its cause: the contract's `ClientConfigError` for
 a missing key, an unreadable file or an invalid deadline, `TlsClientConfigError::ParseCaCertificate`
 or `AddCaCertificate` for a `tls_ca_file` rustls cannot take as a trust store, and `EmptyCaFile` for
-one without a certificate. The source reports it as `SqsQueueIngestorError::ClientConfig`, the
+one without a certificate. The ingestor reports it as `SqsQueueIngestorError::ClientConfig`, the
 emitter as `EmitterOpenError::InvalidConfiguration`, and `CREATE SQS CLIENT`, which reads the client
 the same way before it commits it, as `OfflineClientConfigError::InvalidKey`, whose public message
 names only the key.
@@ -1308,7 +1316,7 @@ the host before a later conversion or driver receive failure is reported on the 
 cancellation leaves that pending failure available. An unsupported present value never becomes a
 missing metadata field.
 
-A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
+A Pulsar ingestor classifies an acknowledgement or a redelivery request that did not take effect in
 `PulsarTopicIngestorError`, beneath `IngestorError::Acknowledge` or `IngestorError::Reject`. An
 acknowledgement the broker answered with a server error is `AcknowledgementRefused`, whose typed
 `PulsarRefusal` keeps the server error, absent for a code the client does not know, and the reason
@@ -1316,7 +1324,7 @@ the broker gave. An acknowledgement nothing answered is `AcknowledgementUnconfir
 redelivery request the consumer could not send is `RedeliveryRequestUnsent`; both carry a typed
 `PulsarUnresolvedRequest` naming whether the client's operation timeout passed, the connection
 closed or the consumer stopped first, because the broker may or may not have applied the request. A
-client failure the source does not classify keeps the driver's error as the typed cause beneath
+client failure the ingestor does not classify keeps the driver's error as the typed cause beneath
 `Acknowledge` or `NegativelyAcknowledge`. The innermost context is the reason `DESCRIBE INGESTOR`
 shows.
 
@@ -1324,7 +1332,7 @@ Both Pulsar directions connect through one builder, whose `PulsarClientError` sa
 not connect. `Configuration` keeps the client configuration or TLS cause beneath it. `Refused`
 carries the `PulsarRefusal` a broker answered the connection with, such as an `AuthenticationError`
 for a missing or rejected credential. `NotOpened` keeps the driver's `pulsar::Error` beneath it for
-a connection that never opened, including a TLS handshake that failed. A source reports it beneath
+a connection that never opened, including a TLS handshake that failed. An ingestor reports it beneath
 `PulsarTopicIngestorError::Connect`. An emitter reports `Configuration` beneath
 `EmitterOpenError::InvalidConfiguration` and the others beneath `EmitterOpenError::Initialize`, and
 attaches the failure's whole chain, so its transient status reads
@@ -1348,15 +1356,15 @@ preparation already projects credentials-file and seed failures through value-fr
 the driver connects. Public client-validation outcomes continue to expose only reviewed, value-free
 contexts.
 
-A NATS source whose client loses its connection to the server reports
+A NATS ingestor whose client loses its connection to the server reports
 `NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
-`IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error.
+`IngestorError::Resume`; the ingestor host shows the deepest cause as the ingestor's transient error.
 The driver's `ConnectError` remains beneath `Connect`, so a peer that closes before its initial
 INFO message is reported as `expected INFO, got nothing`. The driver's ordered header decoder
 keeps invalid UTF-8, header-name, header-value and checked-offset conversion failures as typed
 causes under `io::Error`; these remain transport failures, separate from projected delivery-field
-failures. A NATS STREAM source reports the
+failures. A NATS STREAM ingestor reports the
 server's answer that its stream or consumer does not exist as
 `NatsStreamIngestorError::MissingStream` or `MissingConsumer` beneath `IngestorError::Resume`,
 naming the stream and the consumer, and a consumer it cannot read as declared as `PushConsumer` or
@@ -1376,10 +1384,10 @@ connector's description of the failure for the emitter's transient error. A mess
 server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
 missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
 
-A ZeroMQ source keeps the driver's `ZmqError` as the typed cause of its `ZeroMqPullIngestorError`. `Bind`
+A ZeroMQ ingestor keeps the driver's `ZmqError` as the typed cause of its `ZeroMqPullIngestorError`. `Bind`
 and `Connect` name the configured address and sit beneath `IngestorError::Resume`, and `Receive` sits
 beneath `IngestorError::Read`. The rendered chain therefore names both the address and the driver's
-cause, and the source host shows the deepest cause as the ingestor's transient error, such as the
+cause, and the ingestor host shows the deepest cause as the ingestor's transient error, such as the
 operating system refusing a bind because another socket holds the address.
 
 ### Connector Status Observation
@@ -1390,7 +1398,7 @@ error beneath `IngestorError::Read`. A locally initiated close whose handshake e
 budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
 failure and its growing retry delay across successful reconnects until a batch is accepted. A
 broker ingestor's acknowledgement that its transport fails to confirm, and a rejection it fails to
-take back, become the ingestor's transient status with the innermost context of the source's
+take back, become the ingestor's transient status with the innermost context of the ingestor's
 report as the reason, and only a later confirmed acknowledgement clears it.
 
 A WebSockets connection's idle expiry keeps `DeadlineElapsed` with the explicit
@@ -1399,7 +1407,7 @@ beneath `IngestorError::Read`. The fieldless timer expiry is retained as a typed
 innermost context projected into `DESCRIBE` still names the actionable key or bound. Oversized
 frames or messages retain the driver's typed capacity failure and end that connection's read.
 
-Each source or emitter publishes its safe transient error and optional retry together. An emitter
+Each ingestor or emitter publishes its safe transient error and optional retry together. An emitter
 retains task-owned and connector-owned failures independently in one atomic publication. A publish
 or commit outcome clears the task failure; a retained connector's progress clears the connector
 failure. MQTT packet progress therefore preserves the host's unanswered-publish diagnostic until
@@ -1499,7 +1507,13 @@ An envelope clause or `PROPERTIES` key the entity does not declare is
 `EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
 reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
 not an exact, non-null, non-sensitive value of its type is `EnvelopeValue`, naming the clause or
-key and the expected type with the VM's compile failure beneath it. An `SQS QUEUE` emitter that
+key and the expected type with its typed inference or admission failure beneath it. `KEY` admits
+exactly `STRING` or `BYTES`; it neither casts another type nor turns a nullable expression into an
+absent transport key. Its `branch` binding retains the branch schema's sensitivity, including
+during `ALTER`. Omitting `KEY` carries no key. A per-record evaluation failure instead rejects
+that record through the emitter's message error policy, retaining the same outcome as other
+computed envelope values. `PARTITION FROM BRANCH` requires a named source branch before the
+emitter can become active. An `SQS QUEUE` emitter that
 writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, or a
 `DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
 `SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command
@@ -1545,10 +1559,10 @@ their key, client and domain without printing a value. The connector's offline c
 `tls_ca_file` without a certificate as `OfflineClientConfigError::NoCertificate`, whose public
 message names only the key, and a file it cannot read as `InvalidKey` above the contract's
 `ClientConfigError`. A certificate section it cannot parse stays
-`TlsClientConfigError::ParseCaCertificate` beneath `IngestorError::Open` when the source opens.
+`TlsClientConfigError::ParseCaCertificate` beneath `IngestorError::Open` when the ingestor opens.
 `WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
-cause if a ingestor cannot produce its validated header collection. Rendered client values are
+cause if an ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
 Canonical upgrade fields that exceed committed HTTP caps produce the registry's typed
 `ClusterParameterLimit` at model admission or parameter transition, naming the parameter and
@@ -1747,7 +1761,7 @@ after its cut's deadline therefore retains the installation refusal beneath the 
 
 ### Ingestors, Emitters And Generators
 
-Ingestor and reingestor planning has typed failures for an ingestor whose source is missing or
+Ingestor and reingestor planning has typed failures for an ingestor whose connector is missing or
 resolves to another kind or name, a missing codec, a route or input relay missing from the domain,
 a route whose declared branch is not the branch of its relay, reingestor inputs whose schemas
 differ, a node without inputs or routes, and a filter, route or branch construction that cannot be
@@ -1764,11 +1778,11 @@ failure renders the whole chain, ending with the VM's own `CompileError`.
 
 Starting an ingestor on a node returns an `IngestorStartError` report. An ingestor already running,
 a domain execution or codec the node has not instantiated, and a binding failure beneath the
-binding context are start failures of their own. Every failure to compose or open the source is
+binding context are start failures of their own. Every failure to compose or open the ingestor is
 `IngestorStartError::Initialize`, naming the ingestor and its domain, with the cause beneath it: a
 `IngestorConnectorStartError` for a missing node resolver, signaling protocol or endpoint, Kafka `DOMAIN`
 offsets this node does not own, or a delivery-mode duration that does not parse, or else the report
-of the client configuration, connector plan, source instance or domain cadence that failed. The
+of the client configuration, connector plan, ingestor instance or domain cadence that failed. The
 runtime keeps the whole report beneath its own context: the domain build's
 `RuntimeError::BuildDomainExecution`, or `RuntimeError::StartIngestors` when the session service
 starts the ingestors of a prepared revision. The ingestor's transient status shows the start
@@ -2044,19 +2058,19 @@ the processing cadence and avoids putting source payloads in reports.
 
 ### Decode Rejections
 
-A source payload its ingestor's codec refuses is the codec's own judgement of that payload, which
+An input payload its ingestor's codec refuses is the codec's own judgement of that payload, which
 presenting the payload again would only repeat. `PayloadDecodeFailure::Codec` carries that refusal,
 and `PayloadDecodeFailure::NotAdmitted` the executor's refusal to unfold the payload now, which
 judged nothing. The two are told apart by these typed variants, never by text. An ingest group that
 decodes a batch keeps decoding the payloads after a codec refusal and returns each refusal with the
 payload's place in its batch. An unfolding refusal takes the whole batch back out of the group and
-is returned as the batch's own failure, which the source host reports beneath its intake's dispatch
+is returned as the batch's own failure, which the ingestor host reports beneath its intake's dispatch
 failure.
 
-The source host, or the endpoint that received the payload, turns each codec refusal into a
+The ingestor host, or the endpoint that received the payload, turns each codec refusal into a
 `DecodeRejection`: a UUIDv7 reference, the code `validation`, the operation `decode`, the codec,
 the fields its `MissingField`, `UnexpectedField` and `ParseField` contexts name at fault, including
-those of a failed message an unfolding kept as a report of its own, the instant the source took the
+those of a failed message an unfolding kept as a report of its own, the instant the ingestor took the
 payload in, the transport position the payload's ingest metadata row names, and the codec report's
 whole chain rendered once as its message. The code and the operation are the same for every decode
 rejection, so the record does not store them. The record never holds the payload, and the codec's
@@ -2064,7 +2078,7 @@ contexts name the codec and the field, never a value. The ingestor's `ON GENERAL
 reports the rejection: `LOG` publishes `ingestor '<name>' general error in domain '<domain>': decode
 rejection <record>` as a runtime event and logs the reference, code, operation and codec as fields,
 and `IGNORE` reports nothing. Unlike a node failure under `LOG`, a decode rejection is never
-negatively acknowledged, because a source that presented the payload again would only be refused
+negatively acknowledged, because an ingestor that presented the payload again would only be refused
 again. In an acknowledged mode the host resolves the payload's acknowledgement root at once. In
 every mode it counts the payload in `nervix_ingestor_decode_rejections_total` and publishes the
 record as the ingestor's last decode rejection, which `DESCRIBE INGESTOR` reads from the node that
@@ -2076,7 +2090,7 @@ A batch payload's rejection becomes one message error per member, each a copy of
 structured error: the members share its reference, so an operator can see that they failed
 together, while each keeps its own occurrence time and branch. A prepared row request's rejection,
 such as an OTEL Export request the receiver refused, does the same for every row the request
-carried. A emitter answer that breaks the write contract, by naming a record the write did not carry
+carried. An emitter answer that breaks the write contract, by naming a record the write did not carry
 or answering twice for one, is not a message error of any member. Neither is a row request emitter's
 preparation that breaks its contract: one that answers for a row the write did not hand over,
 answers twice for a row, prepares rows out of source order, prepares a request that carries no row,
@@ -2214,7 +2228,7 @@ An ingest group's metadata builders refuse a message that hands over another num
 values than its entity declares, or a value of another type than its field's, with
 `IngestMetadataError::ExcessValues`, `MissingValues` or `ValueType`, which name the declared count
 or the field with its declared and handed type. Such a message is a connector defect: the ingest
-group retains the refusal below its `append ingest metadata` operation and the source's
+group retains the refusal below its `append ingest metadata` operation and the ingestor's
 general-error policy reports that chain. An ingestor whose programs and the declaration they were
 validated against disagree fails to bind with `EntrypointBindingError::ProjectMetadata` above
 `IngestMetadataError::UndeclaredField`, which names the field.
@@ -2325,7 +2339,7 @@ whose relay budget has no room for a batch's acknowledgement watches holds the b
 rather than failing it, because that lack of room is temporary. It reports `RemoteAckAdmission`,
 with the typed `AdmissionError` beneath it rather than rendered into its own text, only for watches
 larger than the whole budget or a hold still without room when the five-minute admission bound has
-passed, before runtime admission. These refusals judge no payload and preserve source retry
+passed, before runtime admission. These refusals judge no payload and preserve ingestor retry
 ownership. Ending a registered delivery before admission or shutting its owner down resolves its
 held shares negatively once. Stale generations and registrar runs are ordinary unmatched reports
 logged at `debug`, and never resolve current work.
@@ -2443,7 +2457,7 @@ answered with the chain rendered as the reason.
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
 acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
 forwarded it fails it once the receiver has reported nothing about it for fifteen seconds, with a
-reason that names the silent receiver, and the source retries the record as it retries any failed
+reason that names the silent receiver, and the ingestor retries the record as it retries any failed
 acknowledgement; see
 [Record Acknowledgements The Receiver Stops Reporting](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
 Local interconnect transport, typed request, and streaming-handler failures carry reports through
@@ -2679,11 +2693,13 @@ of any call: the Rust client reports it as a typed restoration failure carrying 
 message and the wait before it tries again, and reports a refused subscription reopening the same
 way. An attach the new session leaves unanswered past the request timeout ends that session instead,
 and the next session attaches the clock again; one it answers `DomainNotFound` ends the attachment
-as the server would. In the shared C binding a restoration failure carries only its domain, without
-the message or the wait. Each disposition's message is display text for a client that prints it; a
-client decides from the variant. The Rust client's `execute` turns any disposition but `Attached` or
-`Detached` into a `Failed` command outcome carrying that message, and its clock helper reports a
-stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
+as the server would. In the shared C binding both clock and subscription restoration failures
+expose their message as borrowed UTF-8 bytes and the next retry wait as unsigned nanoseconds;
+the wrong event kind returns `NX_ERROR_TYPE`. Each disposition's message is display text for a
+client that prints it; a client decides from the variant. The Rust client's `execute` turns any
+disposition but `Attached` or `Detached` into a `Failed` command outcome carrying that message,
+and its clock helper reports a stopped or uninstalled clock, or a projection outside the timestamp
+range, as a typed
 `DomainClockReadError`. When `execute` runs either statement, it fails with `NoActiveDomain` while
 no domain is selected and refuses the statement as client-local while a transaction is active,
 before it sends a request. Waiting for the next clock event returns a failure to reopen a session
@@ -2997,6 +3013,14 @@ restore may have been admitted. If a later archive read, missing console address
 expired execution reference ends it, that failure sits beneath `the console stopped before learning
 the outcome of a restore the leader may have admitted`; the dialog reports the outcome as unknown
 naming the execution reference. An already uncertain reply failure keeps its own typed context.
+For an unrecorded request failure, `RestoreEnd::Unresolved` retains the complete typed
+`CommandOutcome` until presentation consumes it through the existing command renderer. It leaves
+the earlier outcome unknown and appends `the outcome of restore '<reference>' is unknown` to the
+later request's original message.
+The terminal prints the original diagnostics, including statement diagnostics, with the same
+request-relative source spans as a known failure. Its matching identities do not settle an earlier
+possible admission. Initial refusals,
+recovered failures and failures carrying a restore step report keep their definitive classification.
 The dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
 could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
 restore's own outcome as the dispatcher renders any command's. A session reply whose
@@ -3621,7 +3645,7 @@ refuse, and unit tests beside each owner.
 | A parse or lex diagnostic locates its token in the submitted source, in any statement of a batch | `typed_error_qualification.feature`: the byte span and underlined text of a single statement, of a later statement of a batch, and of a rejected character |
 | A validation failure keeps its owning model and its specific cause | `typed_error_qualification.feature`: a VM compile failure names the model and the unknown function, a message-error branch mismatch names the node and route, and a rejected alteration names the model and the refused operation and changes nothing |
 | A message error keeps its concrete branch and omits sensitive input | `typed_error_qualification.feature`, with interleaved records of two branches, and `node_error_policies.feature` for the structured operation of a route filter |
-| A runtime event and a failed command render the whole chain | `runtime_report_chains.feature` for a source cadence above its clock arithmetic, `lookup.feature` for a domain build above a lookup, its line and its codec, and `lookup_hash_map.feature` for one internal error of a whole batch |
+| A runtime event and a failed command render the whole chain | `runtime_report_chains.feature` for an ingestor cadence above its clock arithmetic, `lookup.feature` for a domain build above a lookup, its line and its codec, and `lookup_hash_map.feature` for one internal error of a whole batch |
 | A cause appears once in a rendered chain | `inferencer.feature`: the cause of an unreadable ONNX model appears exactly once in the failed command's message |
 | A branch is named by its fingerprint | `wasm_processor.feature`: the server error of a branch with a sensitive key carries the fingerprint and not the key value. The runtime's unit tests hold every branch-local context to the same rendering |
 | A consensus failure keeps its class at a client mutation | `consensus_failure_reports.feature`: creating a domain or a user, cordoning and draining a node, and queueing a transaction statement each report the failure that rejected the proposal |
@@ -3751,7 +3775,7 @@ different construction partition structures and Kafka's required domain-offset m
 surrounding report identifies the domain and ingestor. Correct the declaration before activation.
 A count change uses the ownership-handoff preparation boundary to preserve the offset lifetime.
 Start planning separately validates the complete resolved unit declaration.
-`AlreadyRunning` and `IngestorNotRunning` name the exact source unit, allowing a sibling instance
+`AlreadyRunning` and `IngestorNotRunning` name the exact ingestor unit, allowing a sibling instance
 to start or stop independently.
 Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.
 `UnitIndexError` is the vocabulary's pure refusal for an instance ordinal outside its compact

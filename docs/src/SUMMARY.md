@@ -84,6 +84,7 @@
   - [Data-Plane Concurrency](./data-plane-concurrency.md)
   - [SIMD Kernels](./simd-kernels.md)
   - [VM Functions](./vm-functions.md)
+  - [Wire Schema Binding](./wire-schema-binding.md)
   - [Relay](./relay.md)
   - [WASM State And Recovery](./wasm-state.md)
   - [Backup And Restore Architecture](./backup-and-restore-architecture.md)

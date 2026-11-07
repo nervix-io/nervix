@@ -294,7 +294,7 @@ Inside a route expression, completion also offers ordinary VM builtins. For a ju
 `input.<field>` resolves through the input relay's declared schema, and a `SET` field resolves
 through the output relay's declared schema. Qualified `udf::<name>` calls use the domain's UDF
 models, including the session's queued changes. In an ingestor construction expression,
-`read_header` and `read_headers` are offered only when the selected source supports header reads.
+`read_header` and `read_headers` are offered only when the selected ingestor supports header reads.
 In an emitter `INVOKE` expression, `write_header` is offered only when the selected emitter supports
 header writes.
 
@@ -409,9 +409,9 @@ Plexus. It carries a semantic target, typed dependent selections, search text, a
 through 100, and an optional page cursor. Targets resolve domain pace, placement policy, and a
 domain's internal schemas, each wire-schema format, branches, relays, codecs, VHOSTs, signaling
 protocols, relay fields, codec output fields, resource catalogs, and completed resource versions.
-Ingestor controls additionally ask for a source reference by connector and entity, a decoding
+Ingestor controls additionally ask for an ingestor reference by connector and entity, a decoding
 codec, relays with exact branch declarations, and fields of a selected branch's key schema. Each
-source target requires a domain and returns what its entity reads through: clients of its
+ingestor target requires a domain and returns what its entity reads through: clients of its
 connector, or for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` the endpoints of that `TYPE`. The
 ingestor codec target requires a domain and filters out codecs without decoding.
 An unbranched relay target requires a domain and also supplies ingestor error relay choices, while

@@ -15,6 +15,7 @@ shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 [dependencies]
 arch-into = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 error-stack = { workspace = true }
 futures-util = { workspace = true }
 meticulous = { workspace = true }

@@ -735,6 +735,12 @@ pub(crate) enum InterconnectCredentialFault {
     ExpiredCertificate,
 }
 
+/// The database directory of one node of a stopped cluster, which no node holds open.
+pub(crate) struct StoppedNodeDatabase {
+    pub(crate) node: String,
+    pub(crate) path: PathBuf,
+}
+
 /// What a whole-cluster restart arms after every node has stopped and before any starts again.
 #[derive(Debug, Clone, Copy)]
 enum RestartArrangement<'a> {
@@ -2207,7 +2213,41 @@ impl Cluster {
         Ok(())
     }
 
+    /// Restarts every node as [`Cluster::restart`] does, handing `inspect` the database directory
+    /// of every node once all of them have stopped and before any starts again, so a step reads
+    /// exactly what each node stored when it stopped. `inspect` runs on a blocking task, and the
+    /// cluster starts again only once it has returned.
+    pub(crate) async fn restart_inspecting_stopped_databases<T, J>(
+        &mut self,
+        inspect: J,
+    ) -> io::Result<T>
+    where
+        T: Send + 'static,
+        J: FnOnce(Vec<StoppedNodeDatabase>) -> T + Send + 'static,
+    {
+        self.stop_every_node().await?;
+        let mut databases = Vec::with_capacity(self.nodes.len());
+        for (node, handle) in &self.nodes {
+            databases.push(StoppedNodeDatabase {
+                node: node.clone(),
+                path: handle.spec.db_path()?,
+            });
+        }
+        let inspected =
+            crate::common::runner_offload::off_the_runner(move || inspect(databases)).await;
+        self.start_stopped_nodes(RestartArrangement::Unchanged)
+            .await?;
+        Ok(inspected)
+    }
+
     async fn restart_arranged(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
+        self.stop_every_node().await?;
+        self.start_stopped_nodes(arrangement).await
+    }
+
+    /// Asks every node to stop and waits until each has, failing with the first node that did not
+    /// stop cleanly.
+    async fn stop_every_node(&mut self) -> io::Result<()> {
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let mut first_error = None;
 
@@ -2234,7 +2274,13 @@ impl Cluster {
         if let Some(error) = first_error {
             return Err(error);
         }
+        Ok(())
+    }
 
+    /// Starts every stopped node again as `arrangement` says and waits until the restarted cluster
+    /// has a consistent leader and, with several nodes, a full interconnect.
+    async fn start_stopped_nodes(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
+        let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let nodes_to_start = u32::try_from(node_ids.len())
             .assured("a test cluster is built from a handful of nodes, not billions");
         let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
@@ -2348,7 +2394,19 @@ impl Cluster {
         group: &str,
         expected: usize,
     ) -> io::Result<()> {
-        let deadline = Instant::now() + STATUS_WAIT_BUDGET;
+        self.wait_for_kafka_consumer_group_members_within(group, expected, STATUS_WAIT_BUDGET)
+            .await
+    }
+
+    /// Waits until the Kafka consumer group `group` has exactly `expected` members, for at most
+    /// `budget`.
+    pub(crate) async fn wait_for_kafka_consumer_group_members_within(
+        &self,
+        group: &str,
+        expected: usize,
+        budget: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + budget;
         loop {
             nervix_primitives::task::consume_budget().await;
             match kafka_consumer_group_member_count(&self.dependencies, group) {
@@ -7640,9 +7698,7 @@ pub(crate) async fn observe_kafka_through(
                             values
                         })
                         .unwrap_or_default();
-                    let key = message
-                        .key()
-                        .map(|key| String::from_utf8_lossy(key).to_string());
+                    let key = message.key().map(<[u8]>::to_vec);
                     let time = match message.timestamp() {
                         KafkaTimestamp::CreateTime(unix_millis) => {
                             Some(BrokerRecordTime::Created { unix_millis })
@@ -7654,6 +7710,7 @@ pub(crate) async fn observe_kafka_through(
                     };
                     let observed = BrokerMessage::from_bytes(bytes, headers)
                         .with_key(key)
+                        .with_partition(Some(message.partition()))
                         .with_time(time);
                     let _ = payload_tx.send(observed).await;
                 }
@@ -7665,10 +7722,41 @@ pub(crate) async fn observe_kafka_through(
     Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
+/// The broker's ordered partition-topic names, as the maintained SDK discovers them. A plain
+/// topic is its sole destination and needs no second lookup after the consumer opens it.
+async fn pulsar_partition_ordinals(
+    pulsar: &Pulsar<TokioExecutor>,
+    consumer: &pulsar::Consumer<Vec<u8>, TokioExecutor>,
+    topic: &str,
+) -> io::Result<BTreeMap<String, i32>> {
+    let topics = consumer.topics();
+    let topics = if topics.as_slice() == [topic] {
+        topics
+    } else {
+        pulsar
+            .lookup_partitioned_topic(topic)
+            .await
+            .map_err(io::Error::other)?
+            .into_iter()
+            .map(|(topic, _address)| topic)
+            .collect()
+    };
+    topics
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, topic)| {
+            i32::try_from(ordinal)
+                .map(|ordinal| (topic, ordinal))
+                .map_err(io::Error::other)
+        })
+        .collect()
+}
+
 /// An observer of what `consumer` reads, which it acknowledges. Dropping the observer drops the
 /// consumer, and the driver closes a consumer it drops.
 fn forward_pulsar_messages(
     mut consumer: pulsar::Consumer<Vec<u8>, TokioExecutor>,
+    partitions: BTreeMap<String, i32>,
 ) -> BrokerObserver {
     let (payload_tx, payload_rx) = mpsc::channel(16);
 
@@ -7695,8 +7783,12 @@ fn forward_pulsar_messages(
                 .map(|property| (property.key.clone(), property.value.clone()))
                 .collect::<Vec<_>>();
             properties.sort();
+            let key = message
+                .key_bytes()
+                .assured("the broker sends a valid partition key");
             let observed = BrokerMessage::from_bytes(&message.payload.data, properties)
-                .with_key(message.key())
+                .with_key(key)
+                .with_partition(partitions.get(&message.topic).copied())
                 .with_pulsar_times(times);
             let _ = consumer.ack(&message).await;
             if payload_tx.send(observed).await.is_err() {
@@ -7743,7 +7835,8 @@ async fn hold_pulsar_consumer(
         .build::<Vec<u8>>()
         .await
         .map_err(io::Error::other)?;
-    Ok(forward_pulsar_messages(held))
+    let partitions = pulsar_partition_ordinals(&pulsar, &held, &topic).await?;
+    Ok(forward_pulsar_messages(held, partitions))
 }
 
 async fn observe_pulsar(
@@ -7850,7 +7943,8 @@ async fn observe_pulsar_with_addr(
                 .build::<Vec<u8>>()
                 .await
                 .map_err(io::Error::other)?;
-            Ok(forward_pulsar_messages(consumer))
+            let partitions = pulsar_partition_ordinals(&pulsar, &consumer, &topic).await?;
+            Ok(forward_pulsar_messages(consumer, partitions))
         }
         .await;
 
