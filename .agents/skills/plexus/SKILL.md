@@ -80,6 +80,9 @@ the CLI's Completion section.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
 Listener certificates are node provisioning, configured outside Plexus statements.
+For TLS algorithm choices, read [Cryptography](../../../docs/src/cryptography.md#algorithm-policy):
+the interconnect uses its fixed provider, while native sessions and connectors use the outward
+provider and each connector's declared trust and identity keys.
 For authentication refusals and retry behavior, follow
 [Authentication](../../../docs/src/client-session-protocol.md#authentication); a response delay
 does not establish that a user exists.
