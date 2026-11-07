@@ -376,6 +376,29 @@ fn history_records_introductions_and_lowerings() {
 }
 
 #[test]
+fn lines_from_one_commit_anchor_the_excerpt_at_the_first_candidate_line() {
+    let repository = Repository::new();
+    let lines: Vec<_> = (1..=80)
+        .map(|number| format!("statement {number}\n"))
+        .collect();
+    let source = lines.concat();
+    repository.commit(
+        "2026-09-26",
+        "add a multi-line candidate",
+        &[("src/long.rs", &source)],
+    );
+    let candidate = repository.candidate("src/long.rs", 30, 60);
+    let result = repository.attribute(&candidate);
+    let data = result
+        .data()
+        .assured("the complete candidate was committed");
+    let expected: Vec<_> = (18..=42)
+        .map(|number| format!("statement {number}"))
+        .collect();
+    assert_eq!(data.after, expected);
+}
+
+#[test]
 fn a_lowering_that_removed_the_governed_spelling_is_suspected() {
     let repository = Repository::new();
     let result = repository.attribute(&repository.candidate("src/runtime/panes.rs", 2, 5));

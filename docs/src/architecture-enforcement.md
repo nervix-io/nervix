@@ -485,9 +485,10 @@ candidate's kind could have worked around, it records whether that commit introd
 count, whether its hunk, the rest of the candidate's file or the commit's other files removed the
 counter's governed spelling (such as `.entry(` for the lock counter, counted only in the files that
 counter read at the time), and whether the code predates the count. The report keeps the hunk's
-removed and added lines around the candidate's line. When the completing commit only carried the
-pattern forward, the earlier commits of the same lines are read for that evidence and the one found
-is recorded as the origin. `--pull-requests` also reads, through `gh`, the commits a squash merge
+removed and added lines around the candidate's line. When several candidate lines share the
+completing commit, the first line anchors the hunk and its excerpt. When the completing commit only
+carried the pattern forward, the earlier commits of the same lines are read for that evidence and
+the one found is recorded as the origin. `--pull-requests` also reads, through `gh`, the commits a squash merge
 folded away, finding its pull request by the number the subject names or, for a subject without one,
 by the merged commit, and records a commit that removed the spelling while writing one of the
 candidate's own lines. A read that ends with a server error or a dropped connection is attempted up

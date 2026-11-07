@@ -3,7 +3,10 @@
 //! Depends on: candidate facts, baseline history and the audit's cached Git/GitHub readers.
 //! Must not know: enforcement decisions or product runtime state.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
@@ -135,9 +138,11 @@ impl Attributor {
         if provenance.is_empty() || provenance.iter().any(|line| !line.committed()) {
             return Ok(Attribution::uncommitted());
         }
+        // Select the latest commit, keeping the first candidate line when its lines share a
+        // commit. That line anchors both the removed-spelling evidence and the report excerpt.
         let introducing = provenance
             .iter()
-            .max_by_key(|line| (line.author_time, line.sha))
+            .min_by_key(|line| Reverse((line.author_time, line.sha)))
             .verified("nonempty provenance has a most recent line");
         let sha = introducing.sha.to_owned();
         let subject = introducing.subject.to_owned();
