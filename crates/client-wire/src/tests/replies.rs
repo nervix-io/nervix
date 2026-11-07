@@ -592,11 +592,13 @@ fn subscription_lifecycle_replies_round_trip() {
         message: String::new(),
         diagnostics: Vec::new(),
     }));
-    assert_round_trips(ReplyBody::Subscribe(SubscribeOutcome {
-        disposition: SubscribeDisposition::Failed,
-        message: "relay 'orders' does not exist".to_string(),
-        diagnostics: diagnostics(),
-    }));
+    for &refusal in crate::reply::ALL_SUBSCRIPTION_REFUSALS {
+        assert_round_trips(ReplyBody::Subscribe(SubscribeOutcome {
+            disposition: SubscribeDisposition::Refused(refusal),
+            message: "relay 'orders' does not exist".to_string(),
+            diagnostics: diagnostics(),
+        }));
+    }
     assert_round_trips(ReplyBody::Unsubscribe(UnsubscribeOutcome {
         disposition: UnsubscribeDisposition::Deleted(subscription()),
         message: "deleted".to_string(),

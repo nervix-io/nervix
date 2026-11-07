@@ -1390,6 +1390,15 @@ test-client-wire *args:
 test-client-core *args:
     cargo test --package nervix-client-core --features arrow,autocomplete --lib -- {{ args }}
 
+# Run the C ABI's unit tests, which read every accessor as a host does through the header's types.
+test-client-ffi *args:
+    cargo test --package nervix-client-ffi --lib -- {{ args }}
+
+# Run the CLI's unit tests: argument parsing, statement dispatch and how it renders outcomes and
+# session events. Its public session behavior is covered by the `tools/` scenarios.
+test-nervix-cli *args:
+    cargo test --package nervix-cli --all-targets -- {{ args }}
+
 # Rewrite the client wire conformance corpus from the encoder's current output. Review the
 # regenerated `corpus.report` before committing it: every client implementation is held to it.
 update-client-wire-corpus:

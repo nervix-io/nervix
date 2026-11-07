@@ -1407,6 +1407,7 @@ impl TestSession {
             domain,
             statement: statement.to_string(),
             subscription_type: SubscriptionType::Row,
+            expected_schema: None,
         };
         let request_id = self.send_request(ClientRequest::Subscribe(request)).await?;
         let body = self.reply_to(request_id).await?;

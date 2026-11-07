@@ -21,7 +21,10 @@ use nervix_models::{
 };
 
 use super::fixtures::reference;
-use crate::{Diagnostic, LeaderRedirect, NodeEndpoints, RequestId, SourceSpan, SubscriptionHandle};
+use crate::{
+    Diagnostic, LeaderRedirect, NodeEndpoints, RequestId, RowBranch, RowSchema, SourceSpan,
+    SubscriptionHandle,
+};
 
 mod events;
 mod io;
@@ -89,6 +92,20 @@ impl<'a> WireValues<'a> {
             name: self.arbitrary.name(),
             generation: self.arbitrary.positive_u64(),
         }
+    }
+
+    /// A row schema of generated fields, branched by a generated key when `branched`.
+    pub(super) fn row_schema(&mut self, branched: bool) -> RowSchema {
+        let fields = self.arbitrary.schema_fields(0);
+        let branch = if branched {
+            Some(
+                RowBranch::new(self.arbitrary.name(), self.arbitrary.schema_fields(1))
+                    .assured("a generated branch key has at least one field"),
+            )
+        } else {
+            None
+        };
+        RowSchema { fields, branch }
     }
 
     pub(super) fn redirect(&mut self) -> LeaderRedirect {

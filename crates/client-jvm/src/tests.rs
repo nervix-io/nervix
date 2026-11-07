@@ -229,6 +229,7 @@ fn restoration_events_keep_the_complete_message_and_physical_wait() {
     vm().attach_current_thread(|env| -> jni::errors::Result<()> {
         let clock = DomainClockEvent::RestorationFailed(DomainClockRestorationFailure {
             domain: "example".try_into().assured("the domain name is valid"),
+            cause: nervix_client_core::DomainClockRestorationCause::InTransaction,
             message: "restore refused: precise cause".into(),
             retry_after: std::time::Duration::from_nanos(7_000_000_009),
         });
@@ -245,6 +246,7 @@ fn restoration_events_keep_the_complete_message_and_physical_wait() {
                 generation: std::num::NonZeroU64::new(u64::MAX)
                     .assured("the generation is nonzero"),
             },
+            cause: nervix_client_core::SubscriptionRestorationCause::Unavailable,
             message: "restore refused: precise cause".into(),
             retry_after: std::time::Duration::from_nanos(7_000_000_009),
         });

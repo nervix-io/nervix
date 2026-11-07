@@ -172,14 +172,14 @@ impl ClockDisplay {
             }
             DomainClockAttachDisposition::AlreadyAttached(_)
             | DomainClockAttachDisposition::DomainNotFound(_)
-            | DomainClockAttachDisposition::Failed
+            | DomainClockAttachDisposition::Refused(_)
                 if automatic =>
             {
                 self.refuse(requested, outcome.message.clone());
             }
             DomainClockAttachDisposition::AlreadyAttached(_)
             | DomainClockAttachDisposition::DomainNotFound(_)
-            | DomainClockAttachDisposition::Failed => {}
+            | DomainClockAttachDisposition::Refused(_) => {}
         }
     }
 
@@ -375,7 +375,7 @@ mod tests {
 
     use leptos::prelude::Owner;
     use meticulous::ResultExt as _;
-    use nervix_client_wire::DomainClockAttachOutcome;
+    use nervix_client_wire::{DomainClockAttachOutcome, DomainClockAttachRefusal};
     use nervix_models::{
         DomainClockPeriod, DomainClockSkew, DomainClockState, DomainTimeRate, PacedDomainClock,
     };
@@ -522,7 +522,9 @@ mod tests {
         display.attach_outcome(
             &domain,
             &DomainClockAttachOutcome {
-                disposition: DomainClockAttachDisposition::Failed,
+                disposition: DomainClockAttachDisposition::Refused(
+                    DomainClockAttachRefusal::InTransaction,
+                ),
                 message: "transaction is active".to_string(),
             },
             true,
