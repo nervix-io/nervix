@@ -17,6 +17,7 @@
 
 mod c_abi_endpoints;
 mod c_abi_probe;
+mod c_abi_upload;
 
 use std::{
     collections::BTreeMap, env, fmt, io, path::PathBuf, process::Stdio, str::FromStr,
@@ -67,7 +68,7 @@ pub(crate) enum ProbeRuntime {
     Cpp,
     /// CPython over the Python package, `nervix_client`, on pyo3.
     Python,
-    /// Java over the shared Rust binding, through the Foreign Function and Memory API.
+    /// Java 21 over the shared Rust binding, through JNI.
     Java,
     /// Ruby over the shared Rust binding, through Fiddle.
     Ruby,
@@ -237,6 +238,8 @@ pub(crate) enum ProbeExercise {
     /// publishes typed batches and settles their output, holds one delivery while the scenario
     /// ends the probe's session, and finishes on the restored attachments.
     Endpoints { ingestor: String, emitter: String },
+    /// Repeats a prepared local upload, then changes its source file under the same identity.
+    ResourceUpload { query: String, payload: PathBuf },
     /// Connects through a live seed after an unavailable initial address, then checks that
     /// session-local execution is a new request rather than durable outcome recovery.
     Connection,
@@ -251,6 +254,7 @@ impl ProbeExercise {
             Self::Subscription { .. } => None,
             Self::DomainClock => Some("clock"),
             Self::Endpoints { .. } => Some("io"),
+            Self::ResourceUpload { .. } => Some("upload"),
             Self::Connection => Some("connection"),
             Self::Restoration { .. } => Some("restoration"),
         }
@@ -262,6 +266,7 @@ impl ProbeExercise {
             Self::Subscription { .. } => false,
             Self::DomainClock
             | Self::Endpoints { .. }
+            | Self::ResourceUpload { .. }
             | Self::Connection
             | Self::Restoration { .. } => true,
         }
@@ -310,6 +315,10 @@ impl ProbeTarget {
             ProbeExercise::Endpoints { ingestor, emitter } => {
                 environment.insert("NERVIX_PROBE_INGESTOR", ingestor.clone());
                 environment.insert("NERVIX_PROBE_EMITTER", emitter.clone());
+            }
+            ProbeExercise::ResourceUpload { query, payload } => {
+                environment.insert("NERVIX_PROBE_UPLOAD_QUERY", query.clone());
+                environment.insert("NERVIX_PROBE_UPLOAD_FILE", payload.display().to_string());
             }
         }
         environment

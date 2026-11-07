@@ -25,14 +25,15 @@ use nervix_models::{
     ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     CommandExecutionReference, DomainClockObservation, DomainClockObservedState,
     DomainClockTickObservation, ModelKind, ModelName, NodeRef, ParseAsType, PlacementPolicy,
-    RequestedResourceVersion, RestoreArchive, RestoreMode, RestoreReport, RestoreStep,
-    RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaField, Timestamp,
+    RequestedResourceVersion, ResourceUploadIdentity, RestoreArchive, RestoreMode, RestoreReport,
+    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaField,
+    Timestamp,
 };
 
 use super::{
     fixtures::{limits, name, non_zero, request},
     samples::{
-        client_messages, command_outcome, domain_clock_observations, leader, producer,
+        client_messages, command_outcome, diagnostics, domain_clock_observations, leader, producer,
         producer_description, producer_fields, row_schema, rows_frame, subscription,
     },
 };
@@ -47,14 +48,16 @@ use crate::{
     DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked, DomainPaceChoice,
     EmitterBatchReceived, EmitterCloseDisposition, EmitterOpened, EmitterSettlement,
     LeaderRedirect, NodeEndpoints, NoticeKind, NoticeLevel, OpenEmitterDisposition,
-    OpenEmitterOutcome, OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged,
-    ProducerEnded, ProducerOpened, ReadEmitterBatchOutcome, ReadEmitterDisposition, Reply,
-    ReplyBody, ReplyDelivery, RequestRejected, RequestRejection, RestoreDisposition, RestoreFrame,
-    RestoreMessage, RestoreReply, RestoreReplyFrame, RestoreStart, RestoreUploadFailure, RowSchema,
-    ServerEvent, ServerFrame, ServerMessage, ServerNotice, SettleEmitterBatchOutcome,
-    SubmissionOutcome, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
-    SubscriptionEnded, SubscriptionOpened, SubscriptionRefusal, SubscriptionType, SuggestOutcome,
-    Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame,
+    OpenEmitterOutcome, OpenIngestorDisposition, OpenIngestorOutcome, OutcomeOrigin,
+    ProducerAdmissionChanged, ProducerEnded, ProducerOpened, ReadEmitterBatchOutcome,
+    ReadEmitterDisposition, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
+    RestoreDisposition, RestoreFrame, RestoreMessage, RestoreReply, RestoreReplyFrame,
+    RestoreStart, RestoreUploadFailure, RowSchema, ServerEvent, ServerFrame, ServerMessage,
+    ServerNotice, SettleEmitterBatchOutcome, SubmissionOutcome, SubscribeDisposition,
+    SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened,
+    SubscriptionRefusal, SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind,
+    SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadChunk, UploadDisposition, UploadFailure,
+    UploadFrame, UploadMessage, UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
     producer::wire_refusal, restore::RestoreChunk, wire,
 };
 
@@ -203,6 +206,21 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     }
     .encode(&limits())
     .assured("a corpus tick frame fits the default limits");
+    let upload_identity = || {
+        ResourceUploadIdentity::parse("corpus-upload")
+            .assured("the corpus upload identity is valid")
+    };
+    let upload_reply = |request_id, disposition, message: &str| {
+        UploadReply {
+            request_id,
+            disposition,
+            message: message.to_string(),
+            diagnostics: diagnostics(),
+        }
+        .encode(&limits())
+        .assured("a corpus upload reply fits the default limits")
+        .into_bytes()
+    };
     vec![
         (
             "backup_download_chunk.nxbd",
@@ -749,6 +767,91 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                     continuation: Some("next-page".to_string()),
                 }),
             ),
+        ),
+        (
+            "upload_chunk.nxum",
+            UploadChunk::encode(&[0x00, 0x7f, 0x80, 0xff], &limits())
+                .assured("a corpus upload chunk fits the default limits")
+                .into_bytes(),
+        ),
+        (
+            "upload_failed_identity_conflict.nxur",
+            upload_reply(
+                Some(request(u64::MAX)),
+                UploadDisposition::Failed {
+                    upload_identity: Some(upload_identity()),
+                    failure: UploadFailure::IdentityConflict,
+                    assigned_version: Some(NonZeroU64::MAX),
+                },
+                "the identity already names another archive",
+            ),
+        ),
+        (
+            "upload_failed_invalid_stream.nxur",
+            upload_reply(
+                None,
+                UploadDisposition::Failed {
+                    upload_identity: None,
+                    failure: UploadFailure::InvalidStream,
+                    assigned_version: None,
+                },
+                "the stream has no start",
+            ),
+        ),
+        (
+            "upload_installed.nxur",
+            upload_reply(
+                Some(request(1)),
+                UploadDisposition::Installed {
+                    upload_identity: upload_identity(),
+                    version: NonZeroU64::MAX,
+                    origin: OutcomeOrigin::Executed,
+                },
+                "installed",
+            ),
+        ),
+        (
+            "upload_recovered.nxur",
+            upload_reply(
+                Some(request(2)),
+                UploadDisposition::Installed {
+                    upload_identity: upload_identity(),
+                    version: non_zero(1),
+                    origin: OutcomeOrigin::Recovered,
+                },
+                "recovered",
+            ),
+        ),
+        (
+            "upload_redirect.nxur",
+            upload_reply(
+                Some(request(3)),
+                UploadDisposition::NotLeader(LeaderRedirect {
+                    leader: Some(leader()),
+                }),
+                "retry on the leader",
+            ),
+        ),
+        (
+            "upload_redirect_unknown.nxur",
+            upload_reply(
+                None,
+                UploadDisposition::NotLeader(LeaderRedirect { leader: None }),
+                "no leader is known",
+            ),
+        ),
+        (
+            "upload_start.nxum",
+            UploadStart {
+                request_id: request(u64::MAX),
+                domain: name("tenant"),
+                resource: name("bundle"),
+                upload_identity: upload_identity(),
+                total_bytes: NonZeroU64::MAX,
+            }
+            .encode(&limits())
+            .assured("a corpus upload start fits the default limits")
+            .into_bytes(),
         ),
     ]
 }
@@ -1608,6 +1711,82 @@ fn render_restore_report(report: &RestoreReport, lines: &mut Vec<String>) {
     }
 }
 
+fn render_upload(message: &UploadMessage, lines: &mut Vec<String>) {
+    match message {
+        UploadMessage::Start(start) => lines.push(format!(
+            "UPLOAD_START request={} domain={} resource={} identity={} total_bytes={}",
+            start.request_id,
+            start.domain,
+            start.resource,
+            start.upload_identity,
+            start.total_bytes,
+        )),
+        UploadMessage::Chunk(chunk) => {
+            lines.push(format!("UPLOAD_CHUNK bytes={}", hex(chunk.bytes())))
+        }
+    }
+}
+
+fn render_upload_reply(reply: &UploadReply, lines: &mut Vec<String>) {
+    let request = match reply.request_id {
+        Some(request) => request.to_string(),
+        None => "none".to_string(),
+    };
+    let disposition = match &reply.disposition {
+        UploadDisposition::Installed {
+            upload_identity,
+            version,
+            origin,
+        } => format!("INSTALLED identity={upload_identity} version={version} origin={origin:?}"),
+        UploadDisposition::Failed {
+            upload_identity,
+            failure,
+            assigned_version,
+        } => {
+            let identity = match upload_identity {
+                Some(identity) => identity.as_str(),
+                None => "none",
+            };
+            let version = match assigned_version {
+                Some(version) => version.to_string(),
+                None => "none".to_string(),
+            };
+            format!("FAILED identity={identity} failure={failure:?} version={version}")
+        }
+        UploadDisposition::NotLeader(LeaderRedirect {
+            leader: Some(leader),
+        }) => {
+            let uri = |uri: &Option<url::Url>| match uri {
+                Some(uri) => uri.as_str().to_string(),
+                None => "none".to_string(),
+            };
+            format!(
+                "NOT_LEADER leader={} grpc={} console={}",
+                leader.node,
+                uri(&leader.grpc_uri),
+                uri(&leader.web_console_uri)
+            )
+        }
+        UploadDisposition::NotLeader(LeaderRedirect { leader: None }) => {
+            "NOT_LEADER leader=none".to_string()
+        }
+    };
+    lines.push(format!(
+        "UPLOAD_REPLY {request} {disposition} message={}",
+        text(&reply.message)
+    ));
+    for diagnostic in &reply.diagnostics {
+        let span = match diagnostic.span {
+            Some(span) => format!("{}..{}", span.start(), span.end()),
+            None => "none".to_string(),
+        };
+        lines.push(format!(
+            "DIAGNOSTIC span={span} message={}",
+            text(&diagnostic.message)
+        ));
+    }
+}
+
 fn render_restore(message: &RestoreMessage, lines: &mut Vec<String>) {
     match message {
         RestoreMessage::Start(start) => lines.push(format!(
@@ -1694,7 +1873,17 @@ fn report_of(frames: &[(&'static str, Bytes)]) -> String {
     let mut lines = Vec::new();
     for (file, bytes) in frames {
         lines.push(format!("FRAME {file}"));
-        if file.ends_with(".nxbq") {
+        if file.ends_with(".nxum") {
+            let frame = VerifiedFrame::<UploadFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus upload frame verifies");
+            let message = UploadMessage::decode(&frame).assured("a corpus upload frame decodes");
+            render_upload(&message, &mut lines);
+        } else if file.ends_with(".nxur") {
+            let frame = VerifiedFrame::<UploadReplyFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus upload reply verifies");
+            let reply = UploadReply::decode(&frame).assured("a corpus upload reply decodes");
+            render_upload_reply(&reply, &mut lines);
+        } else if file.ends_with(".nxbq") {
             let frame =
                 VerifiedFrame::<BackupDownloadRequestFrame>::verify(bytes.clone(), &limits())
                     .assured("a corpus download request verifies");

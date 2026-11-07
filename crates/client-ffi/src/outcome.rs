@@ -1,12 +1,13 @@
 //! `nx_outcome`: what became of a command, as a host reads it.
 //!
+//! Layer: edges.
 //! - **Owns.** Reading an outcome's disposition, message, diagnostics, execution reference,
-//!   opened subscription, backup archive and restore report, and freeing it.
+//!   upload failure, opened subscription, backup archive and restore report, and freeing it.
 //! - **Depends on.** The shared outcome, the Rust client's command outcome, the schema handle and
 //!   the C ABI boundary.
 //! - **Must not know.** How the command was sent, retried or redirected.
 
-use nervix_client_host::{Disposition, Failure, FailureKind, Outcome, Schema};
+use nervix_client_host::{Disposition, Failure, FailureKind, Outcome, Schema, UploadFailure};
 
 use crate::abi;
 
@@ -17,6 +18,24 @@ use crate::abi;
 pub unsafe extern "C" fn nx_outcome_disposition(outcome: *const Outcome) -> Disposition {
     // SAFETY: the header requires a live outcome.
     unsafe { abi::accessor(outcome) }.disposition()
+}
+
+/// # Safety
+///
+/// `outcome` is live; a non-null `failure` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_outcome_upload_failure(
+    outcome: *const Outcome,
+    failure: *mut UploadFailure,
+) -> bool {
+    // SAFETY: the header requires a live outcome.
+    let outcome = unsafe { abi::accessor(outcome) };
+    let Some(reason) = outcome.upload_failure() else {
+        return false;
+    };
+    // SAFETY: the header requires a writable non-null out-parameter.
+    unsafe { abi::write(failure, reason) };
+    true
 }
 
 /// # Safety

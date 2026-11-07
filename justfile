@@ -764,6 +764,13 @@ test-explicit-commit-recovery: build-web-console wasm-processor-guests download-
         --tags '@explicit_commit_recovery or @transaction_failed_resume' \
         --concurrency 1 --retry 0
 
+# Exercise upload identity conflicts and retained completion through the public session API.
+test-resource-upload-identity-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/cluster/resource_describe.feature \
+        --name 'Upload retry reports one assigned version|An upload whose installing call loses its reply reports its one assigned version' \
+        --concurrency 2 --retry 0
+
 # Exercise multi-span cluster durations with only the in-process server's prerequisites.
 test-cluster-duration-scenarios: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
@@ -1583,6 +1590,10 @@ build-client-conformance-tests: tests-deps build-client-conformance
 # expression, for example `just test-client-conformance '@client_probe_python or @client_probe_java'`.
 test-client-conformance tags="@client_conformance_toolchain" *args: build-client-conformance-tests
     just test-client-conformance-run {{ quote(tags) }} {{ args }}
+
+# Exercise upload completion, retained retries and typed identity conflicts in every binding host.
+test-client-upload-conflict-conformance: build-web-console wasm-processor-guests download-onnxruntime build-client-conformance
+    just test-client-conformance-run '@client_upload_failure' --concurrency 2 --retry 0
 
 # Run the conformance scenarios from what `build-client-conformance-tests` built.
 test-client-conformance-run tags="@client_conformance_toolchain" *args:

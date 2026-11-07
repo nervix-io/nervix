@@ -2805,6 +2805,10 @@ boundary; an already pending Java exception is preserved. Checked native exports
 unwinds at that boundary. Restoration events expose the shared client's message and retry wait.
 
 Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
+Reusing an upload identity for another archive returns the typed `UploadFailure::IdentityConflict`
+and the version already assigned to that identity. The diagnostic keeps the digest conflict's
+context, while native clients and host bindings classify the refusal from its typed outcome.
+The conflicting call changes neither the durable outcome nor the version sequence.
 Failure and cancellation abandon the partial temporary archive; they perform no destructor
 finalization that could replace the cause, panic, or start asynchronous cleanup. If the enclosing
 command deadline cancels local construction, the caller receives its typed `RetryDeadline`.

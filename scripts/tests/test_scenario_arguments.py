@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -19,6 +20,78 @@ COVERAGE_RECIPES = ("coverage-scenarios", "coverage-scenarios-append")
 
 
 class ScenarioArgumentTests(unittest.TestCase):
+    def test_upload_recipes_select_their_public_cases_and_keep_failure(self) -> None:
+        cases = (
+            (
+                "test-resource-upload-identity-scenarios",
+                "tests/features/cluster/resource_describe.feature",
+                None,
+                "Upload retry reports one assigned version|An upload whose installing call loses its reply reports its one assigned version",
+                4,
+                {
+                    "Upload retry reports one assigned version",
+                    "An upload whose installing call loses its reply reports its one assigned version",
+                },
+            ),
+            (
+                "test-client-upload-conflict-conformance",
+                "tests/features/runtime/client_conformance.feature",
+                "@client_upload_failure",
+                None,
+                12,
+                {"A <runtime> client distinguishes an upload identity conflict from its completed retry"},
+            ),
+        )
+        with tempfile.TemporaryDirectory(prefix="upload identity arguments ") as directory:
+            root = Path(directory)
+            capture = root / "arguments.json"
+            cargo = root / "cargo"
+            cargo.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, pathlib, sys\n"
+                "pathlib.Path(os.environ['SCENARIO_ARGUMENT_CAPTURE']).write_text(\n"
+                "    json.dumps(sys.argv[1:]))\n"
+                "sys.exit(37)\n"
+            )
+            cargo.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = str(root) + os.pathsep + environment["PATH"]
+            environment["SCENARIO_ARGUMENT_CAPTURE"] = str(capture)
+            from scripts.deloxide_lane import parse_scenarios
+
+            for recipe, feature, tag, pattern, count, names in cases:
+                with self.subTest(recipe=recipe):
+                    completed = subprocess.run(
+                        ["just", "--no-deps", recipe],
+                        cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn("exit code 37", completed.stderr)
+                    observed = json.loads(capture.read_text())
+                    expected = [
+                        "test", "--package", "nervix-scenarios", "--test", "scenarios", "--",
+                        "--input", feature,
+                    ]
+                    if tag is not None:
+                        expected.extend(("--tags", tag))
+                    if pattern is not None:
+                        expected.extend(("--name", pattern))
+                    expected.extend(("--concurrency", "2", "--retry", "0"))
+                    self.assertEqual(observed, expected)
+                    self.assertFalse("--tags" in observed and "--name" in observed,
+                                     "Cucumber's name and tag selectors are mutually exclusive")
+                    text = (ROOT / feature).read_text()
+                    if tag is None:
+                        # A name selector ranges over the whole feature, including untagged cases.
+                        text = "@recipe_inventory\n" + text
+                        tag = "@recipe_inventory"
+                    tagged = parse_scenarios(feature, text, frozenset({tag}))
+                    selected = tagged
+                    if pattern is not None:
+                        selected = [scenario for scenario in tagged if re.search(pattern, scenario.name)]
+                    self.assertEqual(sum(scenario.runs for scenario in selected), count)
+                    self.assertEqual({scenario.name for scenario in selected}, names)
+
     def test_recipes_keep_the_scenario_build_dependencies(self) -> None:
         dumped = subprocess.run(
             ["just", "--dump", "--dump-format", "json"],

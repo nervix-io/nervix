@@ -174,6 +174,8 @@ Build configuration in dependency order:
 2. Register and upload resources before statements that reference their versions or mounted files.
    Resources are domain-owned, so declare and upload them in the domain that references them.
    For pending replica diagnosis and upload completion, follow the resource lifecycle guidance.
+   Classify upload refusals by their typed failure; follow the Client Session Protocol's Resource
+   Uploads contract for identity conflicts and recovery.
    VHOST TLS, protobuf codec, protobuf signaling protocol, inferencer, WASM processor, hash map, and
    client mount bindings require `VERSION <n>` or `VERSION LATEST`. `LATEST` resolves to the highest
    completed version when the statement is applied (at `COMMIT` for queued statements) and the

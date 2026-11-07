@@ -68,6 +68,13 @@ public final class Nervix {
         public int code() { return code; }
         static Disposition of(int code) { return decode(values(), code); }
     }
+    /** Why a resource upload failed. */
+    public enum UploadFailure implements Coded {
+        INVALID_STREAM(1), RESOURCE_NOT_DECLARED(2), SIZE_MISMATCH(3), QUOTA_EXCEEDED(4), INSTALLATION_FAILED(5), IDENTITY_CONFLICT(6);
+        private final int code;
+        UploadFailure(int code) { this.code = code; }
+        public int code() { return code; }
+    }
     public enum EventKind implements Coded {
         ROWS(1), DELIVERY_LOST(2), ROWS_SKIPPED(3), ENDED(4), INTERRUPTED(5), CONSUMER_OVERFLOW(6), RESTORATION_FAILED(7);
         private final int code;
@@ -587,6 +594,8 @@ public final class Nervix {
     public static final class Outcome extends Handle {
         private Outcome(long pointer) { super(pointer); }
         public Disposition disposition() { return read(p -> Disposition.of(Native.outcomeDisposition(p))); }
+        /** The typed upload failure, or null for a completed upload or another command. */
+        public UploadFailure uploadFailure() { return read(p -> optional(UploadFailure.values(), Native.outcomeUploadFailure(p))); }
         public String message() { return read(Native::outcomeMessage); }
         public String executionReference() { return read(Native::outcomeReference); }
         public List<Diagnostic> diagnostics() { return read(p -> values(Native.outcomeDiagnostics(p), Diagnostic.class)); }
