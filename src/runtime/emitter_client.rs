@@ -45,6 +45,10 @@ pub(super) struct ClientPayload {
 impl PreparedContent for ClientPayload {
     type Written = ClientEmitterPayload;
 
+    fn prepared_bytes(&self) -> usize {
+        self.payload.body.len()
+    }
+
     fn written(&self, _record: EmitterRecordId, _occurred_at: Timestamp) -> Self::Written {
         self.payload.clone()
     }
@@ -161,6 +165,7 @@ impl ClientConsumerConnector {
     /// exceeds the IPC byte bound is halved; one oversized row follows the message-error policy.
     fn prepare(
         &self,
+        context: &EmitterConnectorContext,
         batches: &[EmitterPublishBatch],
     ) -> EmitterRuntimeResult<(
         Vec<PreparedPayload<ClientPayload>>,
@@ -219,6 +224,7 @@ impl ClientConsumerConnector {
                         next += 1;
                         break (&pending[0..0], Bytes::new());
                     }
+                    context.interactions.record_splits(1);
                     end = next + rows.len().div_ceil(2);
                 };
                 if rows.is_empty() {
@@ -305,9 +311,12 @@ impl EmitterConnector for ClientConsumerConnector {
             client_payloads,
             ..
         } = publication;
-        let (prepared, rejected) = self.prepare(batches)?;
+        let (prepared, rejected) = self.prepare(context, batches)?;
         for payload in prepared {
+            let messages = payload.members.len().arch_into();
+            let bytes = payload.content.prepared_bytes().arch_into();
             client_payloads.retain(payload, batches)?;
+            context.interactions.record_payload(messages, bytes, bytes);
         }
         finish_rejected_records(context, batches, rejected, MessageErrorOperation::Encode).await?;
         if client_payloads.is_empty() {

@@ -1979,6 +1979,12 @@ as `AppError::ApplyStartupRuntime`; the last two name the domain. Each keeps the
 runtime's report beneath it, so the node's exit renders the whole chain rather than the top context
 of the failure.
 
+Emitter inspection reads its Model and referenced codec from one short-lived storage snapshot.
+It retains `RegistryError::ReadValue`, archive decoding and `StoredModelKindMismatch` causes beneath
+`LoadStoredModels`; a missing codec is `MissingReference`. Inspection never substitutes a default
+format for unreadable configuration. A node without the stored emitter resolves both Models from
+one validated schedule publication instead.
+
 ## Cluster Parameter Refusals
 
 Parameter definitions own positive duration and numeric range errors, and structured assignments

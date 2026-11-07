@@ -10,7 +10,11 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "nervix-connector-fake/shuttle",
+  "nervix-connector/shuttle",
+  "nervix-primitives/shuttle",
+]
 
 [dependencies]
 ahash = { workspace = true }
@@ -33,3 +37,4 @@ url = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+nervix-connector-fake = { workspace = true }

@@ -726,6 +726,7 @@ impl EmitterDeclaration for MqttTopicEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         // Each broker declares its Maximum Packet Size when the client connects, and the emitter
         // rejects a larger publish before handing it to the client.
         batch: EmitterBatchLegality::Optional { maximum: None },

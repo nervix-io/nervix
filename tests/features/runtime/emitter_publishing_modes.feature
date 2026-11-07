@@ -359,6 +359,7 @@ Feature: Emitter publishing modes
       quiesce: none
       envelope: none
       batch: none
+      batch container: JSON record
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       """
@@ -394,6 +395,7 @@ Feature: Emitter publishing modes
       quiesce: none
       envelope: none
       batch: MAX MESSAGES 2 MAX SIZE 1MiB
+      batch container: JSONEachRow insert
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       """

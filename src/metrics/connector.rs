@@ -1,9 +1,9 @@
 //! Process-local observations of a host's connector interactions.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Interaction families, zero registration, retained children and wall-rate inspection.
+//! - **Owns.** Interaction and payload families, zero registration, retained children and inspection.
 //! - **Depends on.** Vocabulary identities, the existing atomic rate owner and Prometheus.
-//! - **Must not know.** Connector drivers, payloads, delivery policy or graph execution.
+//! - **Must not know.** Connector drivers, payload values, delivery policy or graph execution.
 
 #![cfg_attr(
     nervix_lint,
@@ -27,6 +27,8 @@ use super::{CounterSeries, RuntimeMetrics, format_number, format_optional, physi
 
 mod ingestor;
 pub(crate) use ingestor::IngestorInteractionMetrics;
+mod payloads;
+pub(crate) use payloads::{EmitterWork, EmitterWorkKind};
 
 #[cfg(test)]
 mod interaction_metrics;
@@ -96,6 +98,7 @@ pub(super) struct ConnectorInteractionMetrics {
     emitters: DashMap<DomainNodeRef, HashMap<EmitterSeriesKey, EmitterInteractionMetrics>>,
     attempts: IntCounterVec,
     durations: HistogramVec,
+    payloads: payloads::PayloadFamilies,
 }
 
 impl ConnectorInteractionMetrics {
@@ -134,6 +137,7 @@ impl ConnectorInteractionMetrics {
             emitters: DashMap::new(),
             attempts,
             durations,
+            payloads: payloads::PayloadFamilies::register(registry),
         }
     }
 
@@ -170,6 +174,7 @@ impl ConnectorInteractionMetrics {
                 let metrics = EmitterInteractionMetrics {
                     series: Arc::new(EmitterInteractions {
                         selector: EmitterInteractions::selector(&values),
+                        payloads: self.payloads.emitter(&values),
                         publish: OperationMetrics::register(
                             self,
                             &values,
@@ -257,6 +262,7 @@ struct EmitterInteractions {
     selector: String,
     publish: OperationMetrics,
     commit: OperationMetrics,
+    payloads: payloads::PayloadMetrics,
 }
 
 impl EmitterInteractions {
@@ -319,6 +325,9 @@ impl EmitterInteractionMetrics {
         ] {
             metrics.describe_lines(&self.series.selector, operation, &mut lines);
         }
+        self.series
+            .payloads
+            .describe_lines(&self.series.selector, &mut lines);
         lines
     }
 }

@@ -14,9 +14,11 @@
 )]
 
 mod emitter;
+mod emitter_host;
 mod ingestor;
 
 pub use emitter::*;
+pub use emitter_host::*;
 pub use ingestor::*;
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "loom"))))]

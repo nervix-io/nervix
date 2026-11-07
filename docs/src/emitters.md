@@ -735,6 +735,16 @@ is validated against that emitter too.
 unit it was written in. `DESCRIBE EMITTER` reports it on its `batch:` line, as
 `batch: MAX MESSAGES 500 MAX SIZE 1MiB` or `batch: none`.
 
+Its `batch container:` line identifies the effective format and container, including a codec's
+`ON EMITTING BATCH` transformation, a protobuf batch message, a native database write, an OTEL export
+or an Iceberg Parquet file. A protobuf batch retains its declared message type when a transformation
+constructs its value. The shared typed presentation and canonical configuration read the same
+validated policy; CLI and native-client commands use the existing inspection interface.
+The destination section separates source records, encoded payload preparations and retained work;
+see [Emitter payload preparation](metrics-and-observability.md#emitter-payload-preparation) for
+the exact units and retry counting. `FLUSH` memory bytes and sent Arrow bytes remain separate from
+encoded payload bytes.
+
 The complete contract for batch payloads — packing, containers per wire format, exact size
 measurement and failure attribution for every emitter — is defined in
 [Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).

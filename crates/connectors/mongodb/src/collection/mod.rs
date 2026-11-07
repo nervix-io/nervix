@@ -118,6 +118,7 @@ pub enum MongoDbConflictAction {
 
 /// The MongoDB emitter, which encodes each mapped row as one BSON document.
 pub struct MongoDbCollectionEmitter {
+    host: EmitterHost,
     client: Box<dyn MongoDbClientProvider>,
     database: String,
     collection: MongoDbCollectionName,
@@ -261,7 +262,7 @@ impl MongoDbCollectionEmitter {
     pub fn new(
         config: MongoDbCollectionEmitterConfig,
         client: Box<dyn MongoDbClientProvider>,
-        _host: EmitterHost,
+        host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let MongoDbCollectionEmitterConfig {
             config,
@@ -282,6 +283,7 @@ impl MongoDbCollectionEmitter {
             collection,
             conflict_action,
             limits: RowRequestLimits::from(batch),
+            host,
         })
     }
 
@@ -330,6 +332,7 @@ impl MongoDbCollectionEmitter {
                 request: (),
             });
         if requests.subdivisions > 0 {
+            self.host.record_payload_subdivisions(requests.subdivisions);
             debug!(
                 collection = self.collection.as_str(),
                 subdivisions = requests.subdivisions,
@@ -339,7 +342,16 @@ impl MongoDbCollectionEmitter {
         for request in requests.requests {
             nervix_primitives::task::consume_budget().await;
             let written = match request {
-                RowRequest::Write { members, .. } => members,
+                RowRequest::Write { members, size, .. } => {
+                    self.host.record_prepared_payload(
+                        nervix_connector::EmitterPayloadMeasurement::sized(
+                            u64::try_from(members.len())
+                                .assured("a request's row count fits the addressable range"),
+                            size,
+                        ),
+                    );
+                    members
+                }
                 RowRequest::Oversize { member, oversize } => {
                     let document = &documents[member];
                     outcome.reject(oversize.rejected(
@@ -408,6 +420,7 @@ impl MongoDbCollectionEmitter {
                 request: (),
             });
         if requests.subdivisions > 0 {
+            self.host.record_payload_subdivisions(requests.subdivisions);
             debug!(
                 collection = self.collection.as_str(),
                 subdivisions = requests.subdivisions,
@@ -417,7 +430,16 @@ impl MongoDbCollectionEmitter {
         for request in requests.requests {
             nervix_primitives::task::consume_budget().await;
             let written = match request {
-                RowRequest::Write { members, .. } => members,
+                RowRequest::Write { members, size, .. } => {
+                    self.host.record_prepared_payload(
+                        nervix_connector::EmitterPayloadMeasurement::sized(
+                            u64::try_from(members.len())
+                                .assured("a request's row count fits the addressable range"),
+                            size,
+                        ),
+                    );
+                    members
+                }
                 RowRequest::Oversize { member, oversize } => {
                     let upsert = upserts[member]
                         .as_ref()

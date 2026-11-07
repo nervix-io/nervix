@@ -530,6 +530,62 @@ destination:
   nervix_emitter_publish_duration_seconds{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish"} count=2 sum_seconds=0.003
 ```
 
+### Emitter payload preparation
+
+Payload observations use the same five identity labels as destination attempts. They have no
+branch-key, record, request or error-text label. Every child exists at zero when its emitter starts.
+`DESCRIBE EMITTER` includes the same totals in its owner-routed `destination:` section.
+
+| Family | Unit and meaning |
+| --- | --- |
+| `nervix_emitter_payloads_total` | Successfully encoded or sized logical payload preparations. |
+| `nervix_emitter_payload_source_messages_total` | Source-record memberships in those preparations. |
+| `nervix_emitter_payload_encoded_bytes_total` | Exact encoded bytes at the payload's documented measurement boundary. |
+| `nervix_emitter_payload_size_bound_bytes_total` | The corresponding exact size bounds; these equal measured encoded bytes because Nervix measures rather than estimates. |
+| `nervix_emitter_prepared_bytes_total` | Prepared content bytes, including connector preparation such as a Sentry envelope, counted once per preparation. |
+| `nervix_emitter_messages_per_payload` | Histogram of source records per prepared payload. |
+| `nervix_emitter_payload_splits_total` | Candidate halvings caused by an encoded-size limit, excluding count and metadata boundaries. |
+| `nervix_emitter_work_messages` | Current source rows by `state="buffered"`, `prepared`, `in_flight` or `staged`. |
+| `nervix_emitter_prepared_payloads` | Logical payloads whose bytes and membership the host retains for an answer. |
+| `nervix_emitter_prepared_bytes` | Bytes of the prepared content the host currently retains. |
+
+For codec emitters, encoded bytes mean the codec's completed record or container before connector
+preparation. Keys, headers and transport framing are excluded, as they are from `MAX SIZE`.
+HTTP measures its codec body, or zero for `WITHOUT BODY`; native client emitters measure Arrow IPC;
+OTEL measures the prepared export request. Database emitters use the exact insert or document
+boundary in [Database writes](emitters.md#database-writes). Iceberg counts the rows and physical
+Parquet bytes of each prepared data file. These quantities keep their own units: the existing
+`nervix_bytes_total` remains the emitter's Arrow and metadata estimate of delivered source records.
+Prepared content is measured before a driver's framing or compression. A Sentry envelope can
+therefore increase prepared bytes beyond the codec bytes bounded by `MAX SIZE`, while most codec
+emitters prepare their bytes unchanged. Native row emitters use their documented measured request
+boundary for both quantities.
+
+A preparation is observed before its destination outcome. It can subsequently succeed, be rejected
+or remain uncertain, and therefore does not mean delivery. A retained record, HTTP request, OTEL
+export or client IPC payload is observed once: resending its bytes does not increase preparation
+totals or the membership histogram. A native row emitter that reconstructs a request on retry
+observes that new preparation. Driver request grouping and row isolation do not turn a logical
+payload into several observations; these families describe the sized candidates, rather than
+protocol calls or bytes on a socket. Use destination attempt outcomes alongside sent source-record
+totals to distinguish retries and confirmed progress.
+
+A native row publish loop observes each sized request when it visits that request for submission.
+Requests left unvisited by an interrupted loop add no preparation observation.
+
+A row refused before a bounded payload is produced adds no successful payload preparation.
+A later destination rejection can follow a successful preparation and does not decrement
+that measurement. Structured message errors and existing error-relay traffic remain the rejection
+evidence; payload counters do not define a second error classification or count those rows as sent.
+
+Work states overlap. `buffered` counts rows of Arrow carriers the host still holds, including rows
+already prepared or partly answered until those carriers leave the buffer. `prepared` counts the
+source members of retained payloads. `in_flight` counts source rows handed to a connector in an
+active write; a native row write can have in-flight rows without host-retained prepared bytes.
+`staged` counts rows waiting for a separate commit. Do not sum these states. Owner destruction
+withdraws its gauge contribution, including cancellation and terminal teardown, while counters keep
+their process-local history across task restarts.
+
 ## DESCRIBE Metrics
 
 `DESCRIBE` commands include metric summaries for the described target when metrics exist. For a

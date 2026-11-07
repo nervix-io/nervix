@@ -349,6 +349,13 @@ test-emitter-destinations *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/emitter_destinations*.feature") }} {{ quote(args) }}
 
+# Qualify SYSLOG's existing batch outline and exact single-message and singleton-batch bytes.
+test-syslog-encoding *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{emitter_batch_containers,syslog_encoding}.feature") }} --tags '@emitter_batch_syslog or @syslog_encoding' {{ quote(args) }}
+
 # These checks reuse the scenario executable for both embedded nodes and a server process.
 test-inferencer-state *args: build-deps
     #!/usr/bin/env bash
@@ -362,6 +369,20 @@ test-processor-partitions *args: build-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/processor_partitions.feature {{ quote(args) }}
+
+# Observe batching through the public session and the owning node's metric endpoint.
+test-emitter-batch-metrics *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{emitter_batch_metrics,emitter_batch_metrics}.feature") }} {{ quote(args) }}
+
+# Native measurements keep their existing real transport and payload assertions.
+test-emitter-native-metrics *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{client_emitters,emitter_batch_databases,http_emitter,iceberg_emission,otel_export_retries}.feature") }} --tags '@emitter_payload_observations' {{ quote(args) }}
 
 # Exercise NATS authentication through real brokers and one-/three-node public graphs.
 test-nats-authentication *args: build-deps

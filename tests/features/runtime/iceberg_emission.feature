@@ -515,7 +515,7 @@ Feature: Iceberg emission
       | 1            |
       | 3            |
 
-  @iceberg_batch_bounds @deloxide_stress
+  @iceberg_batch_bounds @deloxide_stress @emitter_payload_observations
   Scenario Outline: Iceberg BATCH MAX MESSAGES rolls one produced row batch into bounded data files
     Given Iceberg dependencies are running
     And a <cluster_size> node nervix cluster is started
@@ -569,6 +569,19 @@ Feature: Iceberg emission
       | 43      | close  |
       | 44      | done   |
     Then within "30s" the Iceberg table "row_bounded_{{test_id}}" has 2 data files holding 4 rows, each with at most 2 rows and 1048576 bytes
+    And within "30s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+      """
+      batch container: Parquet data file
+      """
+    And within "30s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+      """
+      payloads: 2 source_messages=4
+      """
+    And the last command output owner is saved as placeholder "metrics_owner"
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_payload_encoded_bytes_total" with labels eventually reaches at least 1
+      """
+      emitter="iceberg_notifications"
+      """
 
     Examples:
       | cluster_size |

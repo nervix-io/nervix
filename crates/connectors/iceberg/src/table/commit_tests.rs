@@ -218,6 +218,7 @@ fn mapped_schema() -> StdArc<arrow_schema::Schema> {
 async fn fixture_emitter(catalog: StdArc<dyn Catalog>, executor: Executor) -> IcebergTableEmitter {
     let table = create_table(catalog.as_ref()).await;
     IcebergTableEmitter {
+        host: nervix_connector_fake::FakeEmitterHost::on(executor.clone()).host(),
         client: IcebergTableEmitterClient {
             catalog,
             table,
@@ -676,6 +677,8 @@ async fn rows_staged_after_a_refused_append_are_written_before_they_are_acknowle
         refused: AtomicBool::new(false),
     });
     let mut connector = fixture_emitter(StdArc::clone(&catalog), Executor::default()).await;
+    let observations = nervix_connector_fake::FakeEmitterHost::on(connector.executor.clone());
+    connector.host = observations.host();
     let first = StdArc::new(RecordedAcknowledgements::default());
     stage(&mut connector, &[1, 2], &first).await;
     let refused = connector
@@ -693,6 +696,10 @@ async fn rows_staged_after_a_refused_append_are_written_before_they_are_acknowle
     );
 
     // The host stages what its buffer gathered before it retries the commit.
+    let measured = observations.observations();
+    assert_eq!(measured.payloads.len(), 1);
+    assert_eq!(measured.payloads[0].source_messages, 2);
+    assert!(measured.payloads[0].encoded_bytes > 0);
     let second = StdArc::new(RecordedAcknowledgements::default());
     stage(&mut connector, &[3], &second).await;
     let report = connector
@@ -708,6 +715,10 @@ async fn rows_staged_after_a_refused_append_are_written_before_they_are_acknowle
     assert_eq!(first.rejected() + second.rejected(), 0);
     assert!(connector.staged_batches.is_empty());
     assert_eq!(connector.staged_rows, 0);
+    let retried = observations.observations();
+    assert_eq!(retried.payloads.len(), 2);
+    assert_eq!(retried.payloads[0], measured.payloads[0]);
+    assert_eq!(retried.payloads[1].source_messages, 1);
 }
 
 #[nervix_primitives::test]

@@ -265,6 +265,19 @@ the completed outcome under the original statement and reference. No product fau
 
 ## What Runs Where
 
+`just test-emitter-batch-metrics` prepares the in-process server prerequisites and runs only
+`emitter_batch_metrics.feature`, forwarding each caller argument intact. Its one- and three-node
+examples compare source records, exact encoded payload bytes, subdivision and oversize outcomes
+through public producers, owner-routed `DESCRIBE` and Prometheus. A one-shot lost connector answer
+forces the retained-payload path; the preparation counters must remain unchanged by its retry.
+`just test-emitter-native-metrics` uses the same prerequisites and selects
+`@emitter_payload_observations` in the existing native scenarios: database request division,
+OTLP lost answers, physical Iceberg files, client IPC and HTTP bodies. Their original transport
+assertions remain the oracle for what each observed preparation carries.
+Both recipes use absolute feature patterns to keep discovery out of generated build artifacts.
+The single-feature recipe repeats its literal alternative so the walker starts in that feature's
+parent directory and selects only that file.
+
 The emitter assembly outline observes the emitter's public received-message total before each
 switch between its two source relays. It waits for all three initial A rows before posting B, and
 both B rows before returning to A. An endpoint's `NO ACK` response confirms intake admission;

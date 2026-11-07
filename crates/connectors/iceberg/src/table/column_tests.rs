@@ -64,7 +64,9 @@ fn fixture_emitter(
     table: Table,
     mapped: &arrow_schema::Schema,
 ) -> IcebergTableEmitter {
+    let executor = Executor::default();
     IcebergTableEmitter {
+        host: nervix_connector_fake::FakeEmitterHost::on(executor.clone()).host(),
         client: IcebergTableEmitterClient {
             catalog,
             table,
@@ -80,7 +82,7 @@ fn fixture_emitter(
         },
         batch_policy: None,
         staging_dir: tempfile::tempdir().assured("the staging directory is created"),
-        executor: Executor::default(),
+        executor,
         staging_sequence: 0,
         staging_files: BTreeMap::new(),
         appending_to: None,
