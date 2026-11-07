@@ -24,7 +24,7 @@ Feature: Committed runtime installation recovers without another configuration c
         structured_data STRING OPTIONAL,
         message STRING
       );
-      CREATE CODEC retry_codec FROM SYSLOG TO SCHEMA retry_event;
+      CREATE SYSLOG CODEC retry_codec TO SCHEMA retry_event;
       CREATE RELAY retry_events SCHEMA retry_event UNBRANCHED;
       CREATE SYSLOG CLIENT retry_listener
         CONFIG {

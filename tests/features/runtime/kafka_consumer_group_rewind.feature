@@ -21,7 +21,7 @@ Feature: Kafka consumer-group rewinds across a rebalance
       """
       CREATE SCHEMA rewind_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA rewind_wire MODE STRICT ( event_id string );
-      CREATE CODEC rewind_codec FROM WIRE JSON SCHEMA rewind_wire TO SCHEMA rewind_event;
+      CREATE WIRE JSON CODEC rewind_codec FROM WIRE SCHEMA rewind_wire TO SCHEMA rewind_event;
       CREATE RELAY rewind_records SCHEMA rewind_event UNBRANCHED;
       CREATE KAFKA CLIENT rewind_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -102,7 +102,7 @@ Feature: Kafka consumer-group rewinds across a rebalance
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA floor_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA floor_wire MODE STRICT ( event_id string );
-      CREATE CODEC floor_codec FROM WIRE JSON SCHEMA floor_wire TO SCHEMA floor_event;
+      CREATE WIRE JSON CODEC floor_codec FROM WIRE SCHEMA floor_wire TO SCHEMA floor_event;
       CREATE RELAY floor_records SCHEMA floor_event UNBRANCHED;
       CREATE KAFKA CLIENT floor_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',

@@ -17,8 +17,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -78,8 +78,8 @@ Feature: Kafka ingestion
       CREATE WIRE JSON SCHEMA forwarding_event_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC forwarding_event_codec
-        FROM WIRE JSON SCHEMA forwarding_event_wire
+      CREATE WIRE JSON CODEC forwarding_event_codec
+        FROM WIRE SCHEMA forwarding_event_wire
         TO SCHEMA forwarding_event;
       CREATE RELAY forwarding_events SCHEMA forwarding_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
@@ -138,8 +138,8 @@ Feature: Kafka ingestion
       CREATE WIRE JSON SCHEMA grouped_event_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC grouped_event_codec
-        FROM WIRE JSON SCHEMA grouped_event_wire
+      CREATE WIRE JSON CODEC grouped_event_codec
+        FROM WIRE SCHEMA grouped_event_wire
         TO SCHEMA grouped_event;
       CREATE RELAY grouped_events SCHEMA routed_grouped_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
@@ -191,8 +191,8 @@ Feature: Kafka ingestion
         tenant string,
         user_id integer
       );
-      CREATE CODEC mixed_event_codec
-        FROM WIRE JSON SCHEMA mixed_event_wire
+      CREATE WIRE JSON CODEC mixed_event_codec
+        FROM WIRE SCHEMA mixed_event_wire
         TO SCHEMA mixed_event;
       CREATE RELAY mixed_events SCHEMA mixed_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
@@ -254,8 +254,8 @@ Feature: Kafka ingestion
         tenant <tenant_wire_type>,
         matrix array
       );
-      CREATE CODEC nested_event_codec
-        FROM WIRE <wire_format> SCHEMA nested_event_wire
+      CREATE WIRE <wire_format> CODEC nested_event_codec
+        FROM WIRE SCHEMA nested_event_wire
         TO SCHEMA nested_event;
       CREATE SCHEMA nested_tenant ( tenant STRING );
       CREATE BRANCH by_nested_tenant SCHEMA nested_tenant TTL 5m;
@@ -323,8 +323,8 @@ Feature: Kafka ingestion
         tenant string,
         user_id integer
       );
-      CREATE CODEC poison_event_codec
-        FROM WIRE JSON SCHEMA poison_event_wire
+      CREATE WIRE JSON CODEC poison_event_codec
+        FROM WIRE SCHEMA poison_event_wire
         TO SCHEMA poison_event;
       CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
@@ -401,8 +401,8 @@ Feature: Kafka ingestion
         tenant string,
         user_id integer
       );
-      CREATE CODEC poison_event_codec
-        FROM WIRE JSON SCHEMA poison_event_wire
+      CREATE WIRE JSON CODEC poison_event_codec
+        FROM WIRE SCHEMA poison_event_wire
         TO SCHEMA poison_event;
       CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
@@ -463,7 +463,7 @@ Feature: Kafka ingestion
     When these Plexus commands are executed
       """
       CREATE SCHEMA unfolded_event ( user_id I64 );
-      CREATE CODEC unfolded_codec FROM JSON TO SCHEMA unfolded_event
+      CREATE JAQ JSON CODEC unfolded_codec TO SCHEMA unfolded_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY unfolded_events SCHEMA unfolded_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
@@ -531,8 +531,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -590,7 +590,7 @@ Feature: Kafka ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA down_event ( seq I64 );
       CREATE WIRE JSON SCHEMA down_wire MODE STRICT ( seq integer );
-      CREATE CODEC down_codec FROM WIRE JSON SCHEMA down_wire TO SCHEMA down_event;
+      CREATE WIRE JSON CODEC down_codec FROM WIRE SCHEMA down_wire TO SCHEMA down_event;
       CREATE RELAY down_events SCHEMA down_event UNBRANCHED;
       CREATE KAFKA CLIENT down_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
@@ -636,8 +636,8 @@ Feature: Kafka ingestion
       """
       CREATE SCHEMA refused_commit_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA refused_commit_wire MODE STRICT ( event_id integer );
-      CREATE CODEC refused_commit_codec
-        FROM WIRE JSON SCHEMA refused_commit_wire TO SCHEMA refused_commit_event;
+      CREATE WIRE JSON CODEC refused_commit_codec
+        FROM WIRE SCHEMA refused_commit_wire TO SCHEMA refused_commit_event;
       CREATE RELAY refused_commit_records SCHEMA refused_commit_event UNBRANCHED;
       CREATE KAFKA CLIENT refused_commit_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}'
@@ -692,8 +692,8 @@ Feature: Kafka ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retired_event ( seq I64 );
       CREATE WIRE JSON SCHEMA retired_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC retired_event_codec
-        FROM WIRE JSON SCHEMA retired_event_wire TO SCHEMA retired_event;
+      CREATE WIRE JSON CODEC retired_event_codec
+        FROM WIRE SCHEMA retired_event_wire TO SCHEMA retired_event;
       CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
       CREATE KAFKA CLIENT retiring_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}'
@@ -786,8 +786,8 @@ Feature: Kafka ingestion
         tenant integer,
         level integer
       );
-        CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+        CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant I64 );
         CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -881,8 +881,8 @@ Feature: Kafka ingestion
       CREATE WIRE JSON SCHEMA sourced_event_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC sourced_event_codec
-        FROM WIRE JSON SCHEMA sourced_event_wire
+      CREATE WIRE JSON CODEC sourced_event_codec
+        FROM WIRE SCHEMA sourced_event_wire
         TO SCHEMA sourced_event;
       CREATE RELAY sourced_events SCHEMA routed_sourced_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
@@ -955,8 +955,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1014,8 +1014,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1074,8 +1074,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1134,8 +1134,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1186,8 +1186,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1245,8 +1245,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1307,8 +1307,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1380,8 +1380,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1461,8 +1461,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE RELAY notifications SCHEMA notification UNBRANCHED;
         CREATE KAFKA CLIENT kafka_main
@@ -1547,8 +1547,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE RELAY notifications SCHEMA notification UNBRANCHED;
         CREATE KAFKA CLIENT kafka_main

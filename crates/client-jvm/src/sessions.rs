@@ -268,6 +268,19 @@ fn outcome_disposition<'local>(
         value!(handle).outcome()?.disposition(),
     ))
 }
+native!(outcome_upload_failure(handle: long) -> int);
+
+fn outcome_upload_failure<'local>(
+    _env: &mut jni::Env<'local>,
+    _class: jni::objects::JClass<'local>,
+    handle: jlong,
+) -> Result<jint, crate::error::Error> {
+    match value!(handle).outcome()?.upload_failure() {
+        Some(failure) => Ok(marshal::upload_failure(failure)),
+        None => Ok(0),
+    }
+}
+
 native!(outcome_message(handle: long) -> JString);
 
 fn outcome_message<'local>(
@@ -411,6 +424,7 @@ pub(crate) const METHODS: &[jni::NativeMethod] = &[
     next_clock_event::METHOD,
     domain_clock::METHOD,
     outcome_disposition::METHOD,
+    outcome_upload_failure::METHOD,
     outcome_message::METHOD,
     outcome_reference::METHOD,
     outcome_schema::METHOD,

@@ -21,8 +21,7 @@ schema, with the program inline:
 ```plexus
 BEGIN;
 
-CREATE CODEC partner_order_codec
-  FROM JSON
+CREATE JAQ JSON CODEC partner_order_codec
   TO SCHEMA order_record
   WITH JAQ TRANSFORMATIONS ON INGESTION $jaq$
   {
@@ -87,8 +86,7 @@ yields becomes its own message, so a program that iterates an array unfolds one 
 record per element:
 
 ```plexus
-CREATE CODEC partner_batch_codec
-  FROM JSON
+CREATE JAQ JSON CODEC partner_batch_codec
   TO SCHEMA order_record
   WITH JAQ TRANSFORMATIONS ON INGESTION $jaq$
   .orders[] | {

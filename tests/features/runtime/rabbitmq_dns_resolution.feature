@@ -31,7 +31,7 @@ Feature: RabbitMQ name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}'<tls_config>
@@ -96,7 +96,7 @@ Feature: RabbitMQ name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{rabbitmq_tls_dns_addr}}',
@@ -142,7 +142,7 @@ Feature: RabbitMQ name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
@@ -210,8 +210,8 @@ Feature: RabbitMQ name resolution
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
@@ -285,7 +285,7 @@ Feature: RabbitMQ name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'

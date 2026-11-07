@@ -17,8 +17,8 @@ Feature: RabbitMQ emission
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -91,8 +91,8 @@ Feature: RabbitMQ emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -168,8 +168,8 @@ Feature: RabbitMQ emission
       """
       CREATE SCHEMA returned_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA returned_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC returned_event_codec
-        FROM WIRE JSON SCHEMA returned_event_wire
+      CREATE WIRE JSON CODEC returned_event_codec
+        FROM WIRE SCHEMA returned_event_wire
         TO SCHEMA returned_event;
       CREATE RELAY returned_events SCHEMA returned_event UNBRANCHED;
       CREATE VHOST edge returned-{{test_id}}.example.com;

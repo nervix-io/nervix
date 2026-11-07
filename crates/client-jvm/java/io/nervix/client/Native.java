@@ -136,6 +136,7 @@ final class Native {
     static native long nextClockEvent(long session, long token);
     static native long domainClock(long session, String domain);
     static native int outcomeDisposition(long handle);
+    static native int outcomeUploadFailure(long handle);
     static native String outcomeMessage(long handle);
     static native String outcomeReference(long handle);
     static native long outcomeSchema(long handle);

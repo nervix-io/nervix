@@ -88,6 +88,9 @@ For authentication refusals and retry behavior, follow
 does not establish that a user exists.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
+For batching inspection, read [Emitter payload preparation](../../../docs/src/metrics-and-observability.md#emitter-payload-preparation)
+alongside Emitters: check the effective container and distinguish encoded payload measurements,
+retained work, retries and confirmed source records before interpreting a throughput figure.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session
@@ -171,6 +174,8 @@ Build configuration in dependency order:
 2. Register and upload resources before statements that reference their versions or mounted files.
    Resources are domain-owned, so declare and upload them in the domain that references them.
    For pending replica diagnosis and upload completion, follow the resource lifecycle guidance.
+   Classify upload refusals by their typed failure; follow the Client Session Protocol's Resource
+   Uploads contract for identity conflicts and recovery.
    VHOST TLS, protobuf codec, protobuf signaling protocol, inferencer, WASM processor, hash map, and
    client mount bindings require `VERSION <n>` or `VERSION LATEST`. `LATEST` resolves to the highest
    completed version when the statement is applied (at `COMMIT` for queued statements) and the
@@ -456,7 +461,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Read `Schemas And Codecs` → `Wire Schemas` for each format's vocabulary and exact
-  binding matrix. Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
+  binding matrix, and `Codecs` for the family and format heads. Select the complete head before
+  writing the body; a WIRE codec and a JAQ codec of the same format have different contracts.
+  Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
   datetime in a JSON or AVRO `string` or a CBOR `text`, and `ENCODE <field> AS BASE64` for bytes
   in a JSON or AVRO `string`.
   An AVRO array names its item type (`array<long>`, `array<array<double>>`); a JSON or CBOR
@@ -801,7 +808,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Use only connector kinds listed in the current Ingestors and Emitters documentation. Treat
   connector syntax retained in older examples or configurations as invalid.
 - For syslog, read the dedicated `Common` → `Syslog` documentation entry. Reference the predefined
-  singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
+  singleton wire schema with a `SYSLOG CODEC` head, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` ingestor
   and `NO ACK` emitter forms.
 - For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and a positive

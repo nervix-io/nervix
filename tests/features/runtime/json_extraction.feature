@@ -31,8 +31,7 @@ Feature: Typed JSON extraction
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC raw_event_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC raw_event_batch_codec
         TO SCHEMA raw_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY raw_events SCHEMA raw_event UNBRANCHED;
@@ -127,8 +126,7 @@ Feature: Typed JSON extraction
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC raw_document_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC raw_document_batch_codec
         TO SCHEMA raw_document
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY raw_documents SCHEMA raw_document UNBRANCHED;
@@ -230,8 +228,7 @@ Feature: Typed JSON extraction
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC routed_document_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC routed_document_batch_codec
         TO SCHEMA routed_document
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY routed_documents SCHEMA routed_document UNBRANCHED;

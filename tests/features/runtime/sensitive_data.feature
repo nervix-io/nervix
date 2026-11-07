@@ -20,8 +20,8 @@ Feature: Sensitive data
         action string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
@@ -93,8 +93,8 @@ Feature: Sensitive data
         action string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
@@ -210,12 +210,12 @@ Feature: Sensitive data
         action string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE CODEC emitted_notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC emitted_notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA emitted_notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;

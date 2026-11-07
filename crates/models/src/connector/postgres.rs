@@ -325,6 +325,7 @@ impl EmitterDeclaration for PostgresTableEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Postgres),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::BinaryArrays,
         batch: EmitterBatchLegality::Required {
             maximum: Some(POSTGRES_MESSAGE_SIZE_MAXIMUM),
         },

@@ -61,7 +61,7 @@ impl Fixture {
         for source in [
             "CREATE SCHEMA event (value I64)",
             "CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value integer)",
-            "CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event",
+            "CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event",
             "CREATE RELAY events SCHEMA event UNBRANCHED",
             "CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' }",
             &source_statement,

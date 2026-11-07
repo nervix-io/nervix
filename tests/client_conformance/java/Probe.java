@@ -5,6 +5,8 @@ import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -1146,11 +1148,32 @@ public final class Probe {
         checkCollectedRelease(retained, printed, schema); checkRetention(retained, printed, schema);
         report("CHECKS ok"); report("CLOSED " + closed.disposition());
     }
+    static void runUpload(Session session) throws java.io.IOException {
+        try (var prepared = session.handle.prepare(System.getenv("NERVIX_PROBE_UPLOAD_QUERY"), null)) {
+            for (String line : List.of("UPLOAD completed", "RETRY completed")) {
+                try (var outcome = session.handle.execute(prepared, null)) {
+                    require(outcome.disposition() == Nervix.Disposition.COMPLETED, "upload completion");
+                    require(outcome.uploadFailure() == null, "successful upload has no refusal");
+                    report(line);
+                }
+            }
+            Files.writeString(Path.of(System.getenv("NERVIX_PROBE_UPLOAD_FILE")),
+                              "different archive\n", StandardCharsets.UTF_8);
+            try (var outcome = session.handle.execute(prepared, null)) {
+                require(outcome.disposition() == Nervix.Disposition.FAILED, "conflicting upload fails");
+                require(outcome.uploadFailure() == Nervix.UploadFailure.IDENTITY_CONFLICT,
+                        "upload has its typed identity conflict");
+                report("CONFLICT IdentityConflict");
+            }
+        }
+    }
+
     public static void main(String[] arguments) {
         String domain = System.getenv("NERVIX_PROBE_DOMAIN");
         try (var session = new Session(System.getenv("NERVIX_PROBE_GRPC_URI"), domain,
                 System.getenv("NERVIX_PROBE_USERNAME"), System.getenv("NERVIX_PROBE_PASSWORD")); var outcomes = new Scope()) {
-            if (arguments.length > 0 && arguments[0].equals("io")) new Endpoints(session, domain).run();
+            if (arguments.length > 0 && arguments[0].equals("upload")) runUpload(session);
+            else if (arguments.length > 0 && arguments[0].equals("io")) new Endpoints(session, domain).run();
             else if (arguments.length > 0 && arguments[0].equals("clock")) runClock(session, domain, outcomes);
             else runRows(session, outcomes);
             report("PASS");

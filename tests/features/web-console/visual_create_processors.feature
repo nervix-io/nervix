@@ -179,7 +179,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_route_event (message STRING, result STRING OPTIONAL);
       CREATE WIRE JSON SCHEMA visual_route_wire MODE STRICT (message string, result string OPTIONAL);
-      CREATE CODEC visual_route_codec FROM WIRE JSON SCHEMA visual_route_wire TO SCHEMA visual_route_event;
+      CREATE WIRE JSON CODEC visual_route_codec FROM WIRE SCHEMA visual_route_wire TO SCHEMA visual_route_event;
       CREATE RELAY visual_route_input SCHEMA visual_route_event UNBRANCHED;
       CREATE RELAY visual_route_output SCHEMA visual_route_event UNBRANCHED;
       CREATE VHOST visual_route_host route-{{test_id}}.example.com;
@@ -242,7 +242,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE SCHEMA visual_partition_key (tenant STRING);
       CREATE BRANCH visual_by_tenant SCHEMA visual_partition_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_partition_wire MODE STRICT (tenant string, message string);
-      CREATE CODEC visual_partition_codec FROM WIRE JSON SCHEMA visual_partition_wire TO SCHEMA visual_partition_event;
+      CREATE WIRE JSON CODEC visual_partition_codec FROM WIRE SCHEMA visual_partition_wire TO SCHEMA visual_partition_event;
       CREATE RELAY visual_partition_input SCHEMA visual_partition_event UNBRANCHED;
       CREATE RELAY visual_partition_output SCHEMA visual_partition_event BRANCHED BY visual_by_tenant;
       CREATE VHOST visual_partition_host partition-{{test_id}}.example.com;
@@ -317,7 +317,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE SCHEMA visual_sensitive_input (message STRING, secret STRING SENSITIVE);
       CREATE SCHEMA visual_sensitive_output (message STRING, secret STRING);
       CREATE WIRE JSON SCHEMA visual_sensitive_wire MODE STRICT (message string, secret string);
-      CREATE CODEC visual_sensitive_codec FROM WIRE JSON SCHEMA visual_sensitive_wire TO SCHEMA visual_sensitive_input;
+      CREATE WIRE JSON CODEC visual_sensitive_codec FROM WIRE SCHEMA visual_sensitive_wire TO SCHEMA visual_sensitive_input;
       CREATE RELAY visual_sensitive_in SCHEMA visual_sensitive_input UNBRANCHED;
       CREATE RELAY visual_sensitive_out SCHEMA visual_sensitive_output UNBRANCHED;
       CREATE VHOST visual_sensitive_host sensitive-{{test_id}}.example.com;

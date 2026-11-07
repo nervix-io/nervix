@@ -93,8 +93,6 @@ const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
 const KEY_CLUSTER_PARAMETERS: &str = "cluster_parameters";
 const KEY_TERMINATING: &str = "terminating";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
-/// The runtime revision through which every domain clock the node holds is the committed one.
-const KEY_DOMAIN_CLOCK_REVISION_INSTALLED: &str = "domain_clock_revision_installed";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
 const CLUSTER_EVENT_CAPACITY: usize = 256;
 const GOSSIP_QUEUE_CAPACITY: usize = 1024;
@@ -1626,53 +1624,6 @@ impl ClusterHandle {
         chitchat.self_node_state().get(KEY_TERMINATING).is_some()
     }
 
-    /// Advertises that every domain clock this node holds, authority fence included, is the
-    /// committed one of runtime `revision`.
-    pub async fn set_local_domain_clock_revision_installed(&self, revision: u64) {
-        let chitchat_handle = self.chitchat.clone();
-        let mut chitchat = chitchat_handle.lock().await;
-        advance_revision(
-            chitchat.self_node_state(),
-            KEY_DOMAIN_CLOCK_REVISION_INSTALLED,
-            revision,
-        );
-    }
-
-    /// The incarnations whose domain clocks match runtime `revision` or a later one.
-    pub async fn nodes_with_domain_clocks_installed(
-        &self,
-        revision: u64,
-    ) -> BTreeSet<ClusterNodeIdentity> {
-        self.nodes_at_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
-            .await
-    }
-
-    async fn nodes_at_revision(&self, key: &str, revision: u64) -> BTreeSet<ClusterNodeIdentity> {
-        let chitchat_handle = self.chitchat.clone();
-        let chitchat = chitchat_handle.lock().await;
-        let self_id = chitchat.self_chitchat_id().clone();
-        let mut ready = BTreeSet::new();
-
-        if let Some(state) = chitchat.node_state(&self_id)
-            && revision_is_at_least(state, key, revision)
-            && let Some(identity) = cluster_node_identity(&self_id)
-        {
-            ready.insert(identity);
-        }
-        for node_id in chitchat.live_nodes() {
-            if *node_id == self_id {
-                continue;
-            }
-            if let Some(state) = chitchat.node_state(node_id)
-                && revision_is_at_least(state, key, revision)
-                && let Some(identity) = cluster_node_identity(node_id)
-            {
-                ready.insert(identity);
-            }
-        }
-        ready
-    }
-
     /// Makes this node's advertised interest in `relay` match `interested`, which is read while
     /// the node's gossip state is locked.
     ///
@@ -1878,23 +1829,6 @@ fn subscription_interest_from_key(key: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((domain, relay))
-}
-
-fn revision_is_at_least(state: &NodeState, key: &str, revision: u64) -> bool {
-    let Some(value) = state.get(key) else {
-        return false;
-    };
-    let Ok(ready_revision) = value.parse::<u64>() else {
-        return false;
-    };
-    ready_revision >= revision
-}
-
-fn advance_revision(state: &mut NodeState, key: &str, revision: u64) {
-    if revision_is_at_least(state, key, revision) {
-        return;
-    }
-    state.set(key, revision.to_string());
 }
 
 fn cluster_node_identity(node_id: &ChitchatId) -> Option<ClusterNodeIdentity> {

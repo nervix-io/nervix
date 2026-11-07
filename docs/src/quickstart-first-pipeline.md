@@ -67,8 +67,8 @@ CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
   quantity integer
 );
 
-CREATE CODEC order_codec
-  FROM WIRE JSON SCHEMA order_wire
+CREATE WIRE JSON CODEC order_codec
+  FROM WIRE SCHEMA order_wire
   TO SCHEMA order_record;
 ```
 
@@ -205,8 +205,8 @@ CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
   quantity integer
 );
 
-CREATE CODEC order_codec
-  FROM WIRE JSON SCHEMA order_wire
+CREATE WIRE JSON CODEC order_codec
+  FROM WIRE SCHEMA order_wire
   TO SCHEMA order_record;
 
 CREATE RELAY orders SCHEMA order_record UNBRANCHED;

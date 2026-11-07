@@ -308,6 +308,10 @@ fn test_session_service(
             client_producers,
             client_consumers,
             interconnect,
+            domain_clock_attachments: super::domain_clock::DomainClockAttachments::new(
+                application_progress.identity(),
+            )
+            .0,
             application_progress,
             service_tasks: super::service_tasks::ServiceTasks::default(),
             authentication_pacing: SessionServiceImpl::new_authentication_pacing(),
@@ -317,7 +321,7 @@ fn test_session_service(
             transaction_executions: DashMap::with_hasher(RandomState::new()),
             transaction_recovery: Default::default(),
             ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
-            resource_upload_executions: DashMap::with_hasher(RandomState::new()),
+            resource_upload_executions: Default::default(),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             retained_backups: Default::default(),
             captured_backup_sections: Default::default(),

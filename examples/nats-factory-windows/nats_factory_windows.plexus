@@ -44,8 +44,8 @@ CREATE WIRE JSON SCHEMA machine_signal_wire MODE STRICT (
   seq INTEGER
 );
 
-CREATE CODEC machine_signal_codec
-  FROM WIRE JSON SCHEMA machine_signal_wire
+CREATE WIRE JSON CODEC machine_signal_codec
+  FROM WIRE SCHEMA machine_signal_wire
   TO SCHEMA machine_signal
   ENCODE ts AS RFC3339;
 
@@ -87,8 +87,8 @@ CREATE WIRE JSON SCHEMA signal_window_wire MODE STRICT (
   value_percentiles ARRAY
 );
 
-CREATE CODEC signal_window_codec
-  FROM WIRE JSON SCHEMA signal_window_wire
+CREATE WIRE JSON CODEC signal_window_codec
+  FROM WIRE SCHEMA signal_window_wire
   TO SCHEMA signal_window
   ENCODE first_ts AS RFC3339, last_ts AS RFC3339;
 

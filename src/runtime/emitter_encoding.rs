@@ -162,10 +162,18 @@ impl EmitterConnector for EncodedRecordEmitter {
         for mut payload in packed {
             nervix_primitives::task::consume_budget().await;
             let bytes = std::mem::take(&mut payload.content.payload);
+            let encoded_bytes: u64 = bytes.len().arch_into();
             match self.connector.prepare_payload(bytes, payload.occurred_at) {
                 Ok(bytes) => {
+                    let source_messages = payload.members.len().arch_into();
+                    let prepared_bytes = bytes.len().arch_into();
                     payload.content.payload = bytes;
                     prepared.retain(payload, batches)?;
+                    context.interactions.record_payload(
+                        source_messages,
+                        encoded_bytes,
+                        prepared_bytes,
+                    );
                 }
                 Err(error) => {
                     for position in payload.members {
@@ -472,6 +480,7 @@ async fn pack_batch_records(
     )
     .await?;
     if packing.subdivisions > 0 {
+        context.interactions.record_splits(packing.subdivisions);
         tracing::debug!(
             emitter = %context.emitter,
             subdivisions = packing.subdivisions,
@@ -795,7 +804,7 @@ mod tests {
                 batch,
             };
             let mut batches = vec![one_row(1)];
-            let mut prepared = PreparedPayloads::default();
+            let mut prepared = PreparedPayloads::observed(&context.interactions);
             let Err(stalled) = connector
                 .publish_batches(
                     &context,
@@ -812,6 +821,19 @@ mod tests {
                 panic!("the first scripted publish must leave its payload unresolved");
             };
             assert!(emitter_publish_error_is_retryable(&stalled));
+            let encoded = if batch.is_some() { 13 } else { 11 };
+            let expected = format!(
+                "payloads: 1 source_messages=1 encoded_bytes={encoded} size_bound_bytes={encoded} \
+                 prepared_bytes={} ",
+                encoded + 11
+            );
+            assert!(
+                context
+                    .interactions
+                    .describe_lines()
+                    .iter()
+                    .any(|line| line.starts_with(&expected))
+            );
             batches.push(one_row(2));
             connector
                 .publish_batches(
@@ -834,6 +856,30 @@ mod tests {
             assert!(writes[1][0].starts_with(b"prepared-1:"));
             assert!(writes[1][1].starts_with(b"prepared-2:"));
             assert!(prepared.is_empty());
+            let expected = format!(
+                "payloads: 2 source_messages=2 encoded_bytes={} size_bound_bytes={} \
+                 prepared_bytes={} ",
+                encoded * 2,
+                encoded * 2,
+                (encoded + 11) * 2
+            );
+            assert!(
+                context
+                    .interactions
+                    .describe_lines()
+                    .iter()
+                    .any(|line| line.starts_with(&expected))
+            );
+            assert!(
+                context
+                    .interactions
+                    .describe_lines()
+                    .iter()
+                    .any(|line| line.starts_with(
+                        "work: buffered=0 prepared=0 in_flight=0 staged=0 prepared_payloads=0 \
+                         prepared_bytes=0 "
+                    ))
+            );
         }
     }
 

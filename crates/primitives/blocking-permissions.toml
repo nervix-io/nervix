@@ -19,6 +19,13 @@
 # thread count, work and lifetime bound here.
 
 [[permission]]
+bound = "At most eight scoped history-read workers and eight local Git children in one read group; a finite input index is claimed once, the work lock is released before Git runs, and all workers join before the group returns."
+items = ["thread::scope"]
+owner = "The audit's bounded Git blame and line-history reads."
+path = "tools/nervix-lint/ratchet/src/audit/git.rs"
+reason = "The command-line audit is outside every node and its executor. Scoped workers preserve the existing eight-read concurrency and keep pipe reads draining while Git produces output; no worker outlives the audit read group."
+
+[[permission]]
 bound = "Three modeled contenders per Shuttle execution, each completing two synchronous keyed transactions and joined before the execution ends."
 items = ["thread::spawn"]
 owner = "The rate-limit key-store production-owner check."
@@ -269,6 +276,13 @@ items = ["thread::spawn"]
 owner = "Application progress Shuttle checks."
 path = "src/application/completion/progress.rs"
 reason = "Model participants exercise the progress owner concurrently outside a node executor under the selected scheduler."
+
+[[permission]]
+bound = "At most two modeled participants, an observer and replacement handler or two attachment handlers, race the calling participant's finite attachment, availability observation and stop operations and are joined in every schedule; DFS explores at most 1,000 schedules under the model runner's step and wall bounds."
+items = ["thread::spawn"]
+owner = "Domain clock attachment observation, replacement and stop Shuttle checks."
+path = "src/application/domain_clock/attachments/tests.rs"
+reason = "The observer drives the production watch and lifetime owner under Shuttle rather than running node work through the executor."
 
 [[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."

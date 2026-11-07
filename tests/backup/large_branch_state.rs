@@ -66,11 +66,11 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          CREATE SCHEMA payment ( tenant STRING, transaction_id STRING, amount I64 );
          CREATE WIRE JSON SCHEMA payment_wire MODE STRICT ( tenant string, transaction_id string, \
          amount integer );
-         CREATE CODEC payment_codec FROM WIRE JSON SCHEMA payment_wire TO SCHEMA payment;
+         CREATE WIRE JSON CODEC payment_codec FROM WIRE SCHEMA payment_wire TO SCHEMA payment;
          CREATE SCHEMA metric ( tenant STRING, latency I64, note STRING );
          CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( tenant string, latency integer, note \
          string );
-         CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+         CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
          CREATE SCHEMA key_summary ( tenant STRING, amount I64, key_bytes I64 );
          CREATE SCHEMA metric_summary ( tenant STRING, samples I64, total I64 OPTIONAL, \
          first_latency I64 OPTIONAL, last_latency I64 OPTIONAL, smallest I64 OPTIONAL, largest \

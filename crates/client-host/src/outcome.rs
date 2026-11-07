@@ -1,7 +1,8 @@
 //! What became of a command.
 //!
+//! Layer: edges.
 //! - **Owns.** The dispositions a host reads, the schema of a subscription the command opened,
-//!   and the summary of a restore's report.
+//!   typed upload failures and the summary of a restore's report.
 //! - **Depends on.** The Rust client's command outcome.
 //! - **Must not know.** How the command was sent, retried or redirected.
 
@@ -46,6 +47,31 @@ impl From<&CommandDisposition> for Disposition {
     }
 }
 
+/// Why a resource upload failed, with the stable values every host binding reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum UploadFailure {
+    InvalidStream = 1,
+    ResourceNotDeclared = 2,
+    SizeMismatch = 3,
+    QuotaExceeded = 4,
+    InstallationFailed = 5,
+    IdentityConflict = 6,
+}
+
+impl From<nervix_client_core::UploadFailure> for UploadFailure {
+    fn from(failure: nervix_client_core::UploadFailure) -> Self {
+        match failure {
+            nervix_client_core::UploadFailure::InvalidStream => Self::InvalidStream,
+            nervix_client_core::UploadFailure::ResourceNotDeclared => Self::ResourceNotDeclared,
+            nervix_client_core::UploadFailure::SizeMismatch => Self::SizeMismatch,
+            nervix_client_core::UploadFailure::QuotaExceeded => Self::QuotaExceeded,
+            nervix_client_core::UploadFailure::InstallationFailed => Self::InstallationFailed,
+            nervix_client_core::UploadFailure::IdentityConflict => Self::IdentityConflict,
+        }
+    }
+}
+
 /// What a restore did, or would do for a dry run, summed over the domains its report lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestoreSummary {
@@ -79,6 +105,12 @@ impl Outcome {
 
     pub fn command(&self) -> &CommandOutcome {
         &self.outcome
+    }
+
+    /// The typed upload failure, absent for completed uploads and other commands.
+    pub fn upload_failure(&self) -> Option<UploadFailure> {
+        let upload = self.outcome.resource_upload.as_ref()?;
+        upload.failure.map(UploadFailure::from)
     }
 
     /// The schema of the subscription the command opened, or `None` when it opened none.

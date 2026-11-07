@@ -243,7 +243,7 @@ Feature: Pulsar subscription types
       """
       CREATE SCHEMA keyed_item (key_id I64, sequence I64);
       CREATE WIRE JSON SCHEMA keyed_item_wire MODE STRICT (key_id integer, sequence integer);
-      CREATE CODEC keyed_item_codec FROM WIRE JSON SCHEMA keyed_item_wire TO SCHEMA keyed_item;
+      CREATE WIRE JSON CODEC keyed_item_codec FROM WIRE SCHEMA keyed_item_wire TO SCHEMA keyed_item;
       CREATE RELAY keyed_output SCHEMA keyed_item UNBRANCHED;
       CREATE SUBSCRIPTION observed TO keyed_output;
       CREATE PULSAR TOPIC INGESTOR events
@@ -346,7 +346,7 @@ Feature: Pulsar subscription types
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item (user_id I64);
       CREATE WIRE JSON SCHEMA item_wire MODE STRICT (user_id integer);
-      CREATE CODEC item_codec FROM WIRE JSON SCHEMA item_wire TO SCHEMA item;
+      CREATE WIRE JSON CODEC item_codec FROM WIRE SCHEMA item_wire TO SCHEMA item;
       CREATE RELAY output SCHEMA item UNBRANCHED;
       CREATE PULSAR CLIENT broker CONFIG {'addr' = 'pulsar://127.0.0.1:1'};
       CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events'

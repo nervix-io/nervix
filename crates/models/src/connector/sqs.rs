@@ -547,6 +547,7 @@ impl EmitterDeclaration for SqsQueueEmitter {
         ),
         reference: EmitterReferenceKind::Client(ConnectorKind::Sqs),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         // A batch payload is one SQS message, so it fits within the message size SQS admits.
         batch: EmitterBatchLegality::Optional {
             maximum: Some(SQS_MESSAGE_SIZE_MAXIMUM),

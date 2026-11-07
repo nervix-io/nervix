@@ -11,7 +11,7 @@ Feature: VM functions remain valid through public graph changes
       CREATE SCHEMA function_input (id STRING, value STRING);
       CREATE SCHEMA function_output (id STRING, result STRING);
       CREATE WIRE JSON SCHEMA function_wire MODE STRICT (id string, value string);
-      CREATE CODEC function_codec FROM WIRE JSON SCHEMA function_wire TO SCHEMA function_input;
+      CREATE WIRE JSON CODEC function_codec FROM WIRE SCHEMA function_wire TO SCHEMA function_input;
       CREATE RELAY function_inputs SCHEMA function_input UNBRANCHED;
       CREATE RELAY function_outputs SCHEMA function_output UNBRANCHED;
       CREATE VHOST edge vm-replan-{{test_id}}.example.com;
@@ -51,7 +51,7 @@ Feature: VM functions remain valid through public graph changes
       ALTER SCHEMA function_input ALTER FIELD value SET TYPE I64;
       ALTER SCHEMA function_output ALTER FIELD result SET TYPE I64;
       DROP CODEC function_codec;
-      CREATE CODEC function_codec FROM WIRE JSON SCHEMA function_wire TO SCHEMA function_input;
+      CREATE WIRE JSON CODEC function_codec FROM WIRE SCHEMA function_wire TO SCHEMA function_input;
       DROP JUNCTION transform;
       CREATE JUNCTION transform
         FROM function_inputs
@@ -93,7 +93,7 @@ Feature: VM functions remain valid through public graph changes
       CREATE SCHEMA pattern_input (id STRING, text STRING);
       CREATE SCHEMA pattern_output (id STRING, result STRING);
       CREATE WIRE JSON SCHEMA pattern_wire MODE STRICT (id string, text string);
-      CREATE CODEC pattern_codec FROM WIRE JSON SCHEMA pattern_wire TO SCHEMA pattern_input;
+      CREATE WIRE JSON CODEC pattern_codec FROM WIRE SCHEMA pattern_wire TO SCHEMA pattern_input;
       CREATE RELAY pattern_inputs SCHEMA pattern_input UNBRANCHED;
       CREATE RELAY pattern_outputs SCHEMA pattern_output UNBRANCHED;
       CREATE VHOST edge vm-pattern-{{test_id}}.example.com;

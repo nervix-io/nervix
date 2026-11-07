@@ -6,7 +6,7 @@ Feature: OTEL Export requests through unknown outcomes
   both OTLP transports. A request the receiver refused routes every record it carried through ON
   MESSAGE ERROR with one shared reference and is never sent again.
 
-  @otel_export_retries
+  @otel_export_retries @emitter_payload_observations
   Scenario Outline: An OTEL Export request whose answer was lost is sent again byte for byte
     Given OTLP receiver "collector" is running for "<protocol>"
     # The receiver accepts the first request, refuses the second, and closes the connection after
@@ -32,7 +32,7 @@ Feature: OTEL Export requests through unknown outcomes
         error_code STRING,
         operation STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
@@ -93,6 +93,24 @@ Feature: OTEL Export requests through unknown outcomes
       "seq":4 | "error_code":"external" | "operation":"publish"
       """
     And OTLP receiver "collector" has captured exactly 4 export requests
+    And within "30s" DESCRIBE EMITTER "retried_logs" on the leader node contains
+      """
+      batch container: OTLP Export request
+      """
+    And within "30s" DESCRIBE EMITTER "retried_logs" on the leader node contains
+      """
+      payloads: 3 source_messages=5
+      """
+    And the last command output owner is saved as placeholder "metrics_owner"
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_payload_encoded_bytes_total" with labels eventually reaches at least 1
+      """
+      emitter="retried_logs"
+      """
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_work_messages" with labels eventually equals 0
+      """
+      emitter="retried_logs"
+      state="prepared"
+      """
 
     Examples:
       | cluster_size | protocol      |
@@ -119,7 +137,7 @@ Feature: OTEL Export requests through unknown outcomes
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, body STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge otel-timeout-{{test_id}}.example.com;

@@ -15,6 +15,7 @@ PyCapsule interface on the way.
 import gc
 import json
 import os
+from pathlib import Path
 import struct
 import sys
 import threading
@@ -1126,6 +1127,20 @@ class Endpoints:
         report("PASS")
 
 
+def run_upload(session, report):
+    execution = session.prepare(os.environ["NERVIX_PROBE_UPLOAD_QUERY"])
+    for line in ("UPLOAD completed", "RETRY completed"):
+        outcome = session.execute(execution)
+        assert outcome.disposition == nx.Disposition.COMPLETED
+        assert outcome.upload_failure is None
+        report(line)
+    Path(os.environ["NERVIX_PROBE_UPLOAD_FILE"]).write_bytes(b"different archive\n")
+    outcome = session.execute(execution)
+    assert outcome.disposition == nx.Disposition.FAILED
+    assert outcome.upload_failure == nx.UploadFailure.IDENTITY_CONFLICT
+    report("CONFLICT IdentityConflict")
+
+
 def main():
     environment = os.environ
     domain = environment["NERVIX_PROBE_DOMAIN"]
@@ -1136,6 +1151,10 @@ def main():
         password=environment["NERVIX_PROBE_PASSWORD"],
     )
     report = lambda line: print(line, flush=True)
+    if sys.argv[1:] == ["upload"]:
+        run_upload(session, report)
+        report("PASS")
+        return
     if sys.argv[1:] == ["clock"]:
         run_clock(session, domain, report)
         return

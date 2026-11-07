@@ -20,6 +20,7 @@ use error_stack::ResultExt as _;
 use nervix_connector::RecordEnvelope;
 
 use super::{emitter_task::branch_retention::EmitterBranchRetirements, *};
+use crate::metrics::{EmitterWork, EmitterWorkKind};
 
 /// What one emitter still holds: the batches its own buffer collected, and the rows an emitter that
 /// publishes on its commit boundary staged out of that buffer.
@@ -731,12 +732,13 @@ pub(super) struct EmitterBatchBuffer {
     /// The requests an HTTP emitter was handed and has not answered for.
     requests: PreparedPayloads<PreparedHttpRequest>,
     /// The requests a row request emitter prepared and has not answered for. An emitter publishes
-    /// through one connector, so at most one of the three holds anything.
+    /// through one connector, so at most one prepared store holds anything.
     row_requests: PreparedPayloads<RowRequestBody>,
     pending_messages: u64,
     pending_bytes: u64,
     cadence: BranchBufferTimer,
     buffered_messages: Arc<EmitterBufferedMessages>,
+    observations: Option<EmitterWork>,
 }
 
 /// What one flush hands the emitter's connector: the buffered batches, and the batch payloads, HTTP
@@ -758,26 +760,33 @@ impl EmitterBatchBuffer {
         Self {
             flush_policy: context.parse_flush_policy(flush_policy),
             pending: Vec::new(),
-            payloads: PreparedPayloads::default(),
-            client_payloads: PreparedPayloads::default(),
-            requests: PreparedPayloads::default(),
-            row_requests: PreparedPayloads::default(),
+            payloads: PreparedPayloads::observed(&context.interactions),
+            client_payloads: PreparedPayloads::observed(&context.interactions),
+            requests: PreparedPayloads::observed(&context.interactions),
+            row_requests: PreparedPayloads::observed(&context.interactions),
             pending_messages: 0,
             pending_bytes: 0,
             cadence: BranchBufferTimer::default(),
             buffered_messages,
+            observations: Some(context.interactions.work()),
         }
     }
 
-    fn update_buffered_messages(&self) {
+    fn update_buffered_messages(&mut self) {
         self.buffered_messages
             .set_buffered(self.pending_messages.arch_into());
+        if let Some(work) = &mut self.observations {
+            work.set(EmitterWorkKind::Buffered, self.pending_messages);
+        }
     }
 
     /// Publishes what an emitter that commits separately still holds, which a drain reads together
     /// with this buffer's own pending batches.
-    pub(super) fn report_staged_messages(&self, messages: u64) {
+    pub(super) fn report_staged_messages(&mut self, messages: u64) {
         self.buffered_messages.set_staged(messages.arch_into());
+        if let Some(work) = &mut self.observations {
+            work.set(EmitterWorkKind::Staged, messages);
+        }
     }
 
     pub(super) fn reconfigure(
@@ -856,6 +865,7 @@ impl EmitterBatchBuffer {
             pending_bytes: 0,
             cadence: BranchBufferTimer::default(),
             buffered_messages,
+            observations: None,
         }
     }
 
@@ -993,6 +1003,7 @@ impl EmitterBatchBuffer {
             pending_bytes,
             cadence,
             buffered_messages,
+            observations,
         } = self;
         let mut positions = (0..first).map(Some).collect::<Vec<_>>();
         positions.reserve(
@@ -1034,6 +1045,9 @@ impl EmitterBatchBuffer {
             cadence.clear();
         }
         buffered_messages.set_buffered((*pending_messages).arch_into());
+        if let Some(work) = observations {
+            work.set(EmitterWorkKind::Buffered, *pending_messages);
+        }
     }
 
     /// What a flush that just completed published: every row its emitter delivered while this buffer
@@ -2000,7 +2014,7 @@ mod tests {
         let context = emitter_context();
         let reported_messages = Arc::new(AtomicUsize::new(0));
         let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
-        let buffer =
+        let mut buffer =
             EmitterBatchBuffer::new(&context, &FlushPolicy::Immediate, buffered_messages.clone());
         buffer.report_staged_messages(3);
         assert_eq!(reported_messages.load(Ordering::Acquire), 3);

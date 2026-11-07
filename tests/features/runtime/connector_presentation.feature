@@ -11,7 +11,7 @@ Feature: Connector entities share their declared presentation
       """
       CREATE SCHEMA event (seq I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE PROMETHEUS CLIENT reader CONFIG { 'addr' = 'http://127.0.0.1:9090', 'timeout_ms' = '1000' };
       CREATE PROMETHEUS QUERY INGESTOR incoming FROM reader QUERY 'up' <body_limit> EVERY 1s
@@ -46,7 +46,7 @@ Feature: Connector entities share their declared presentation
       """
       CREATE SCHEMA event (seq I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC EMITTER outgoing FROM events TO broker TOPIC 'Orders'
@@ -79,7 +79,7 @@ Feature: Connector entities share their declared presentation
       """
       CREATE SCHEMA event (seq I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC EMITTER outgoing FROM events TO broker TOPIC 'Orders'

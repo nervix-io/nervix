@@ -343,6 +343,7 @@ impl EmitterDeclaration for RedisPubSubEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Redis),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         // The server enforces proto-max-bulk-len; this transport learns no size ceiling.
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,

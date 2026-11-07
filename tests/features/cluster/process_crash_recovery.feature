@@ -11,7 +11,7 @@ Feature: Real process crash recovery
       CREATE SCHEMA window_input (tenant STRING, value I64);
       CREATE SCHEMA window_output (tenant STRING, samples I64);
       CREATE WIRE JSON SCHEMA window_wire MODE STRICT (tenant string, value integer);
-      CREATE CODEC window_codec FROM WIRE JSON SCHEMA window_wire TO SCHEMA window_input;
+      CREATE WIRE JSON CODEC window_codec FROM WIRE SCHEMA window_wire TO SCHEMA window_input;
       CREATE SCHEMA window_tenant (tenant STRING);
       CREATE BRANCH by_window_tenant SCHEMA window_tenant TTL 5m;
       CREATE RELAY window_inputs SCHEMA window_input BRANCHED BY by_window_tenant;
@@ -94,7 +94,7 @@ Feature: Real process crash recovery
       CREATE SCHEMA reading (tenant STRING, value I64);
       CREATE SCHEMA reading_window (tenant STRING, samples I64, total I64);
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT (tenant string, value integer);
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA reading_tenant (tenant STRING);
       CREATE BRANCH by_reading_tenant SCHEMA reading_tenant TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant;
@@ -214,8 +214,8 @@ Feature: Real process crash recovery
         user_id integer,
         tenant string
       );
-      CREATE CODEC crash_event_codec
-        FROM WIRE JSON SCHEMA crash_event_wire
+      CREATE WIRE JSON CODEC crash_event_codec
+        FROM WIRE SCHEMA crash_event_wire
         TO SCHEMA crash_event;
       CREATE SCHEMA crash_tenant (
         tenant STRING

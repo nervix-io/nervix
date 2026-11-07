@@ -99,6 +99,32 @@ three selections on one and three nodes. Its saturated-log counterpart, which ke
 command applying while its transaction commits, adds no tracked acquisition and stays outside
 them; its owner test and public scenario cover it.
 
+## Resource Upload Execution Ownership
+
+Resource installation, imported-version installation, reconciliation and waiting retries share
+one async mutex per typed upload key. The local execution registry counts live attempt leases
+under the same entry guard that registers them. A lease is retained while its attempt waits or
+holds the mutex; cancellation and every return path release it. The async mutex guard drops before
+the lease, and the final lease removes the entry while holding that entry's guard. A later attempt
+therefore either joins the registered mutex or creates one after every earlier attempt ended.
+Cleanup never splits waiting attempts between two owners of the same key.
+
+A recovery probe checks the mutex under its entry guard without waiting. A busy probe performs
+one map lookup and creates no attempt lease; a successful probe registers its lease before the
+entry guard is released. Retirement therefore cannot replace a mutex the probe has acquired.
+
+This registry is a cold control-plane boundary, separate from the durable upload record. A deferred
+or interrupted recovery retains its durable `Applying` state and can obtain a new local owner on
+the next reconciliation. Local entries retain neither outcomes nor archive payloads and live only
+as long as active or waiting attempts. The concurrent-map ledger records their disposal boundary.
+
+The production-owner Shuttle check covers admission racing retirement, mutual exclusion of
+waiting attempts, cancellation and complete removal after the final attempt. Its map and async
+mutex operations are scheduler-visible; it makes no reference-count or weak-memory ordering
+claim. DashMap internals and async synchronization are outside Deloxide's tracked-lock detector.
+The surrounding installation and storage paths keep their existing lifecycle evidence; this owner
+adds no tracked lock.
+
 ## Unit Allowance Transactions
 
 `nervix-rate-limit::Limiter` belongs to one execution unit. Admission takes `&mut self`, and its
@@ -365,6 +391,7 @@ writer.
 | Subscription interest | The cluster live-state watcher rebuilds an immutable index from domain and relay to interested node incarnations and advertisement versions whenever gossip changes. | A relay owner performs borrowed lookups in one published index. It neither formats gossip keys nor waits on the gossip mutex per batch. Subscription creation waits until every live node has observed the exact subscriber incarnation and at least the current advertisement version before reporting success. |
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
 | Accepted clock progress | Each runtime domain publishes its newest accepted generation, tick id, logical boundary, and authority UTC observation through a watch. | The watch serializes comparison and replacement, so concurrent progress deliveries cannot regress the id or its authority UTC observation. Generation changes and stops publish absence. A session observer subscribes before reading, retains a sender for as long as its attachment lives, so removing the domain wakes it instead of closing its wait, and uses an execution snapshot only to add its serving node's logical reading to a tick frame. |
+| Clock delivery attachments | The single clock controller publishes an immutable domain index, and each locally held authority publishes its accepted receiver attachments through its own watch. Each attachment has an exact incarnation, installed revision and cancellation lifetime. Replacement cancels the preceding lifetime before publishing the new target; authority replacement or removal cancels every preceding target. | A producer retains its domain slot and registers its attachment version before reading availability and membership. It checks that version under the attachment value guard before pruning; a concurrent attachment preserves its notification and causes a fresh observation. The read phase shares that guard: its first overlapping duplicate invalidates the snapshot without replacing the lifetime, and later or idle duplicates send no redundant notification. A delayed handler cannot replace an accepted newer incarnation. An attachment wakes only that domain's producer, and cancelling a retained lifetime ends its in-flight request or retry. Inactive committed members retain only bounded attachment metadata, one incarnation per member name. No record, batch or acknowledgement path reaches the attachment table. The production-owner Shuttle checks explore attachment, replacement and stop racing observation, plus stale availability snapshots and delayed handlers; watch and cancellation remain outside Deloxide's detector. |
 | Committed domain installation | Each node's runtime counts its installations of the committed domain states through a watch. An installation advances the count only after it has inserted, updated, or removed every domain. | A session attach waits for the first count before it looks up a domain, so a node that is still starting never refuses a domain the cluster has. Because the count advances after the domains are in place, the wait never releases before they are observable. |
 | Application progress | Each node publishes its process incarnation's progress record through a watch. Its writers, the consensus applied revision, the runtime applicator and the domain clock installer, only advance a phase, and an advance that moves nothing publishes nothing. The progress reports a node holds while it leads are a second watch over one map keyed by incarnation; each held report replaces it under the watch's lock, merging the incarnation's phases without moving one back and keeping only the incarnations the availability view holds live besides the reporter. | A revision barrier subscribes to both watches before it reads the record or the held reports, so an advance or a report after that read wakes it. The reporter registers on the record watch and the Raft leadership watch before it reads, and keeps one report in flight carrying the record it read last. No record, batch or acknowledgement path reaches either watch. A production-owner Shuttle check explores reports and advances racing a waiting barrier; the async watch waits remain outside Deloxide's detector. |
 | Forced-recovery destination installation | A recovery subscribes to the domain installation watch before looking for its execution, and selects its matching node under the schedule application mutex. | The watch retains a publication racing the absence check; the mutex orders selection after graph construction, even when domain lifecycle publication occurred first. The existing preparation deadline bounds both waits. The mutex is released before checkpoint transfer and guest restoration. A production-owner Shuttle check explores installation racing selection; async mutex and watch waits remain outside Deloxide's detector. |
@@ -522,6 +549,16 @@ memory-ordering implementation.
 Emitter confirmation guards retain one counter resolved at startup, and task teardown removes its
 registry interest.
 
+Emitter preparation measurements retain the existing interaction handle. Each buffer, prepared
+store and write scope owns its gauge contribution and subtracts that contribution when it ends,
+including cancellation. Replacement owners therefore cannot clear each other's work. These
+observations add no delivery fence, wait, shared-map access or acknowledgment transition. The
+Prometheus library's counters are observations outside the modeled protocol; ordinary owner tests
+check their balance and public scenarios check preparation totals across retained retries.
+During branch compaction, a temporary observation owns payloads still held by the moving iterator,
+and the store owns the survivors already reinserted. Cancelling that future withdraws the
+temporary contribution without clearing the surviving store's work.
+
 An Iceberg emitter retains the first table's `FileIO` while replacing catalog metadata. Its storage
 factory initializes one operator for the configured object-store root; data, manifest and metadata
 files use that same initialized storage after refreshes, successful commits and ambiguous-result
@@ -607,7 +644,7 @@ authority-only reassignment ahead of graph installation. Each installed domain r
 committed revision of its lifecycle, which keeps an older graph installation from restoring a
 superseded fence. A graph installation held on a departed node therefore stalls neither the
 replacement authority nor a receiver. Each remote delivery loop starts after its receiver
-advertises installation of that revision's domain clocks. An obsolete producer still retires
+attaches with its installed-clock phase for that revision. An obsolete producer still retires
 before its successor starts, and a leader proposes an authority that did not commit again on a
 fixed interval instead of waiting for the next state change. The takeover Cucumber scenarios in
 `domain_clock_contract.feature` exercise this ownership path in the active, order and lifecycle
@@ -1905,6 +1942,11 @@ driver or callback boundary; it does not exempt compiler-visible local callback 
 
 Emitter branch retirement carries this contract for its synchronous sent-count observer. The buffer
 reports only rows already delivered, and the compiler still analyzes the task's local observer body.
+
+The prepared-content length trait declares recurring execution: payload ownership transitions read
+the retained encoding's length without allocating or acquiring synchronization. The recording test
+host's snapshot method is an observer used by assertions outside emitter execution; its append and
+subdivision callbacks retain their bounded recurring contracts.
 
 The NATS stream metadata visitor carries this contract on its field helper: a synchronous callback
 projects the borrowed delivery metadata into the requested scalar sink. Its per-visit `OnceCell`

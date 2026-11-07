@@ -69,8 +69,8 @@ CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT (
   region string OPTIONAL
 );
 
-CREATE CODEC zip_code_entry_codec
-  FROM WIRE JSON SCHEMA zip_code_entry_wire
+CREATE WIRE JSON CODEC zip_code_entry_codec
+  FROM WIRE SCHEMA zip_code_entry_wire
   TO SCHEMA zip_code_entry;
 
 CREATE HASH MAP zip_codes_by_zip

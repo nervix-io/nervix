@@ -26,8 +26,8 @@ use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Propose
 use nervix_interconnect::Transport;
 use nervix_models::{
     BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
-    RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadKey, ResourceVersionStatus,
-    SemanticReference, Statement, TransactionPosition,
+    RequestedResourceVersion, ResourceId, ResourceName, ResourceVersionStatus, SemanticReference,
+    Statement, TransactionPosition,
 };
 use nervix_plexus::{
     Token, Word,
@@ -59,8 +59,8 @@ use super::{
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::command_error,
     resource::{
-        completed_resource_version_suggestions, resource_named_before_version,
-        resource_ref_suggestions, resource_version_suggestions,
+        ResourceUploadExecutions, completed_resource_version_suggestions,
+        resource_named_before_version, resource_ref_suggestions, resource_version_suggestions,
     },
     restore::ServerRestoreArchives,
     runtime_admission::RuntimeAdmission,
@@ -182,6 +182,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// This incarnation's application progress and the reports it holds while it leads. Also held
     /// by the revision and report handlers, the reporter and the authoritative writer.
     pub(in crate::application) application_progress: ApplicationProgressState,
+    /// Receiver subscriptions to this node's installed clock authorities.
+    pub(in crate::application) domain_clock_attachments:
+        super::domain_clock::DomainClockAttachments,
     /// Attaches the producers of this node's sessions, locally or through the node that executes
     /// their ingestor.
     pub(in crate::application) client_producers: ClientProducerRouter,
@@ -206,8 +209,7 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) ownership_handoff_operations: AsyncMutex<()>,
     /// Also held by a request while it installs. Calls with one durable identity share the lock,
     /// so only one of them can build and publish that assigned version on this leader.
-    pub(in crate::application) resource_upload_executions:
-        DashMap<ResourceUploadKey, StdArc<AsyncMutex<()>>, RandomState>,
+    pub(in crate::application) resource_upload_executions: ResourceUploadExecutions,
     /// A reconciliation request holds this lock through download, verification and promotion.
     /// Repeated observations of the same missing version join that one installation.
     pub(in crate::application) resource_replication_executions:

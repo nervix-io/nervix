@@ -46,7 +46,7 @@ Feature: Domain clock attachment
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( sequence integer, occurred_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge attached-clock-{{test_id}}.example.com;

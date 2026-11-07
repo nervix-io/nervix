@@ -26,8 +26,8 @@ Feature: Expression function semantics
         id string,
         raw string
       );
-      CREATE CODEC greeting_codec
-        FROM WIRE JSON SCHEMA greeting_wire
+      CREATE WIRE JSON CODEC greeting_codec
+        FROM WIRE SCHEMA greeting_wire
         TO SCHEMA greeting;
       CREATE RELAY greetings SCHEMA greeting UNBRANCHED;
       CREATE RELAY normalized_greetings SCHEMA normalized_greeting UNBRANCHED;
@@ -100,8 +100,8 @@ Feature: Expression function semantics
         left_text string,
         right_text string
       );
-      CREATE CODEC measurement_codec
-        FROM WIRE JSON SCHEMA measurement_wire
+      CREATE WIRE JSON CODEC measurement_codec
+        FROM WIRE SCHEMA measurement_wire
         TO SCHEMA measurement;
       CREATE RELAY measurements SCHEMA measurement UNBRANCHED;
       CREATE RELAY compared_measurements SCHEMA compared_measurement UNBRANCHED;
@@ -187,8 +187,8 @@ Feature: Expression function semantics
         raw string,
         pattern string
       );
-      CREATE CODEC note_codec
-        FROM WIRE JSON SCHEMA note_wire
+      CREATE WIRE JSON CODEC note_codec
+        FROM WIRE SCHEMA note_wire
         TO SCHEMA note;
       CREATE RELAY notes SCHEMA note UNBRANCHED;
       CREATE RELAY matched_notes SCHEMA matched_note UNBRANCHED;
@@ -288,8 +288,8 @@ Feature: Expression function semantics
         id string,
         exponent number
       );
-      CREATE CODEC growth_codec
-        FROM WIRE JSON SCHEMA growth_wire
+      CREATE WIRE JSON CODEC growth_codec
+        FROM WIRE SCHEMA growth_wire
         TO SCHEMA growth;
       CREATE RELAY growths SCHEMA growth UNBRANCHED;
       CREATE RELAY grown_values SCHEMA grown_value UNBRANCHED;
@@ -368,8 +368,8 @@ Feature: Expression function semantics
         id string,
         samples array
       );
-      CREATE CODEC reading_codec
-        FROM WIRE JSON SCHEMA reading_wire
+      CREATE WIRE JSON CODEC reading_codec
+        FROM WIRE SCHEMA reading_wire
         TO SCHEMA reading;
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE RELAY reading_totals SCHEMA reading_total UNBRANCHED;
@@ -449,8 +449,7 @@ Feature: Expression function semantics
         source_id STRING,
         error_message STRING
       );
-      CREATE CODEC sizing_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC sizing_batch_codec
         TO SCHEMA sizing
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY sizings SCHEMA sizing UNBRANCHED;

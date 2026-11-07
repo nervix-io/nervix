@@ -21,13 +21,13 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE SCHEMA rejected_request (event_id STRING, message STRING);
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
@@ -98,13 +98,13 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
@@ -184,13 +184,13 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE SCHEMA rejected_request (event_id STRING, message STRING);
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
@@ -258,13 +258,13 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE SCHEMA routed_event (user_id I64, event_id STRING OPTIONAL, message STRING OPTIONAL);
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY observed SCHEMA routed_event UNBRANCHED;
@@ -330,10 +330,10 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA rejected_request (event_id STRING, message STRING);
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
@@ -391,13 +391,13 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
@@ -474,13 +474,13 @@ Feature: HTTP client transport contract
     And these Plexus commands are executed
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
@@ -556,13 +556,13 @@ Feature: HTTP client transport contract
     And these Plexus commands are executed
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
@@ -634,13 +634,13 @@ Feature: HTTP client transport contract
     And these Plexus commands are executed
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
@@ -699,7 +699,7 @@ Feature: HTTP client transport contract
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
@@ -734,7 +734,7 @@ Feature: HTTP client transport contract
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
@@ -776,7 +776,7 @@ Feature: HTTP client transport contract
       """
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}/private/{{test_id}}?token=secret-{{test_id}}',

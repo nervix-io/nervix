@@ -146,6 +146,7 @@ impl ConnectionFailureReason {
             | TransportError::Http(_)
             | TransportError::RequestTimeout { .. }
             | TransportError::ProgressTimeout { .. }
+            | TransportError::PeerProcessChanged { .. }
             | TransportError::Closed(_) => Self::Setup,
             TransportError::InvalidHandshake(_)
             | TransportError::StaleRoute { .. }
@@ -213,6 +214,7 @@ impl StreamResetReason {
             | TransportError::Tls(_)
             | TransportError::Http2(_)
             | TransportError::Closed(_)
+            | TransportError::PeerProcessChanged { .. }
             | TransportError::Resolution { .. }
             | TransportError::RemoteRejected { .. }
             | TransportError::RelayCancelled

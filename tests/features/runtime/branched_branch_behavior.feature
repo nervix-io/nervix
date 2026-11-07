@@ -21,8 +21,8 @@ Feature: Branched branch behavior
         body string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA tenant_user_branch (
@@ -86,8 +86,8 @@ Feature: Branched branch behavior
         transaction_id string,
         amount integer
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;
@@ -169,8 +169,8 @@ Feature: Branched branch behavior
         tenant string,
         latency number
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -243,8 +243,8 @@ Feature: Branched branch behavior
         tenant string,
         source string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA tenant_branch TTL 5m;
@@ -325,8 +325,8 @@ Feature: Branched branch behavior
         tenant string,
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );

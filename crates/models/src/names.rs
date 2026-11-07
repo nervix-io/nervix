@@ -294,7 +294,7 @@ declare_names! {
     SchemaName => Allowed,
     /// A wire schema declared with `CREATE JSON`, `CBOR`, or `AVRO WIRE SCHEMA`.
     WireSchemaName => Allowed,
-    /// A codec declared with `CREATE CODEC`.
+    /// A codec declared with its family and format in the Plexus statement head.
     CodecName => Allowed,
     /// A connector client declared with a Plexus `<CONNECTOR> CLIENT` head.
     ClientName => Allowed,

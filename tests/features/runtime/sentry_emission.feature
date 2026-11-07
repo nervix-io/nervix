@@ -8,7 +8,7 @@ Feature: Sentry emission
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA declared_event (message STRING);
-      CREATE CODEC declared_codec FROM JSON TO SCHEMA declared_event
+      CREATE JAQ JSON CODEC declared_codec TO SCHEMA declared_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '.';
       CREATE RELAY errors SCHEMA declared_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
@@ -120,8 +120,8 @@ Feature: Sentry emission
         level string,
         environment string
       );
-      CREATE CODEC error_event_codec
-      FROM WIRE JSON SCHEMA error_event_wire
+      CREATE WIRE JSON CODEC error_event_codec
+      FROM WIRE SCHEMA error_event_wire
       TO SCHEMA error_event;
       CREATE RELAY errors SCHEMA error_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
@@ -189,9 +189,9 @@ Feature: Sentry emission
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA retry_event (message STRING, environment STRING);
-      CREATE CODEC retry_ingest FROM JSON TO SCHEMA retry_event
+      CREATE JAQ JSON CODEC retry_ingest TO SCHEMA retry_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC retry_codec FROM JSON TO SCHEMA retry_event
+      CREATE JAQ JSON CODEC retry_codec TO SCHEMA retry_event
         WITH JAQ TRANSFORMATIONS ON EMITTING '.' ON EMITTING BATCH '.[0]';
       CREATE RELAY errors SCHEMA retry_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
@@ -256,9 +256,9 @@ Feature: Sentry emission
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA retry_event (message STRING, environment STRING, event_id STRING, timestamp STRING, platform STRING);
-      CREATE CODEC retry_ingest FROM JSON TO SCHEMA retry_event
+      CREATE JAQ JSON CODEC retry_ingest TO SCHEMA retry_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC retry_codec FROM JSON TO SCHEMA retry_event
+      CREATE JAQ JSON CODEC retry_codec TO SCHEMA retry_event
         WITH JAQ TRANSFORMATIONS ON EMITTING '.' ON EMITTING BATCH '.[0]';
       CREATE RELAY errors SCHEMA retry_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;

@@ -9,7 +9,7 @@ Feature: Web console visual client, vhost and endpoint creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_payload (message STRING);
       CREATE WIRE JSON SCHEMA visual_payload_wire MODE STRICT (message string);
-      CREATE CODEC visual_payload_codec FROM WIRE JSON SCHEMA visual_payload_wire TO SCHEMA visual_payload;
+      CREATE WIRE JSON CODEC visual_payload_codec FROM WIRE SCHEMA visual_payload_wire TO SCHEMA visual_payload;
       CREATE RELAY visual_inbox SCHEMA visual_payload UNBRANCHED;
       """
     And the web console is opened on the leader node

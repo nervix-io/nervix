@@ -65,7 +65,7 @@ pub(super) fn CodecEditor(
                 } />
         </label>
         <fieldset class="create-choice-group create-codec-format">
-            <legend>"Wire format"</legend>
+            <legend>"Codec family and format"</legend>
             <div class="create-choice-buttons">
                 <For each=move || CodecFormatKind::ALL.to_vec()
                     key=|kind| kind.key()

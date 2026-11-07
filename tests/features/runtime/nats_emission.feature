@@ -15,7 +15,7 @@ Feature: NATS emission
       """
       CREATE SCHEMA notification ( id STRING, user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( id string, user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -91,7 +91,7 @@ Feature: NATS emission
       CREATE SCHEMA notification ( id STRING );
       CREATE SCHEMA rejection ( error_code STRING, operation STRING, error_message STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( id string );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY rejections SCHEMA rejection UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
@@ -150,7 +150,7 @@ Feature: NATS emission
       """
       CREATE SCHEMA notification ( id STRING, user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( id string, user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -207,9 +207,9 @@ Feature: NATS emission
       CREATE SCHEMA core_loss_input ( sequence I64 );
       CREATE SCHEMA core_loss_event ( sequence I64, padding STRING );
       CREATE WIRE JSON SCHEMA core_loss_wire MODE STRICT ( sequence integer, padding string );
-      CREATE CODEC core_loss_input_codec FROM JSON TO SCHEMA core_loss_input
+      CREATE JAQ JSON CODEC core_loss_input_codec TO SCHEMA core_loss_input
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC core_loss_codec FROM WIRE JSON SCHEMA core_loss_wire TO SCHEMA core_loss_event;
+      CREATE WIRE JSON CODEC core_loss_codec FROM WIRE SCHEMA core_loss_wire TO SCHEMA core_loss_event;
       CREATE RELAY core_loss_events SCHEMA core_loss_event UNBRANCHED;
       CREATE NATS CLIENT core_loss_in CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR core_loss_ingestor
@@ -268,9 +268,9 @@ Feature: NATS emission
       CREATE SCHEMA core_loss_input ( sequence I64 );
       CREATE SCHEMA core_loss_event ( sequence I64, padding STRING );
       CREATE WIRE JSON SCHEMA core_loss_wire MODE STRICT ( sequence integer, padding string );
-      CREATE CODEC core_loss_input_codec FROM JSON TO SCHEMA core_loss_input
+      CREATE JAQ JSON CODEC core_loss_input_codec TO SCHEMA core_loss_input
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC core_loss_codec FROM WIRE JSON SCHEMA core_loss_wire TO SCHEMA core_loss_event;
+      CREATE WIRE JSON CODEC core_loss_codec FROM WIRE SCHEMA core_loss_wire TO SCHEMA core_loss_event;
       CREATE RELAY core_loss_events SCHEMA core_loss_event UNBRANCHED;
       CREATE NATS CLIENT core_loss_in CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR core_loss_ingestor
@@ -362,8 +362,8 @@ Feature: NATS emission
         metric_09 integer
       );
 
-      CREATE CODEC columnar_event_codec
-        FROM WIRE JSON SCHEMA columnar_event_wire
+      CREATE WIRE JSON CODEC columnar_event_codec
+        FROM WIRE SCHEMA columnar_event_wire
         TO SCHEMA columnar_event;
 
       CREATE SCHEMA tenant_branch (tenant STRING);
@@ -467,8 +467,8 @@ Feature: NATS emission
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -550,8 +550,8 @@ Feature: NATS emission
         service string
       );
 
-      CREATE CODEC narrow_event_codec
-        FROM WIRE JSON SCHEMA narrow_event_wire
+      CREATE WIRE JSON CODEC narrow_event_codec
+        FROM WIRE SCHEMA narrow_event_wire
         TO SCHEMA narrow_event;
 
       CREATE RELAY narrow_events SCHEMA narrow_event UNBRANCHED CAPACITY 64;
@@ -632,8 +632,8 @@ Feature: NATS emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -720,10 +720,10 @@ Feature: NATS emission
       CREATE SCHEMA window_input ( sequence I64 );
       CREATE SCHEMA window_record ( sequence I64, padding STRING );
       CREATE WIRE JSON SCHEMA window_record_wire MODE STRICT ( sequence integer, padding string );
-      CREATE CODEC window_input_codec FROM JSON TO SCHEMA window_input
+      CREATE JAQ JSON CODEC window_input_codec TO SCHEMA window_input
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC window_record_codec
-        FROM WIRE JSON SCHEMA window_record_wire
+      CREATE WIRE JSON CODEC window_record_codec
+        FROM WIRE SCHEMA window_record_wire
         TO SCHEMA window_record;
       CREATE RELAY window_records SCHEMA window_record UNBRANCHED;
       CREATE NATS CLIENT nats_in CONFIG { 'addr' = '{{nats_addr}}' };
@@ -792,9 +792,9 @@ Feature: NATS emission
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC held_events_codec FROM JSON TO SCHEMA held_event
+      CREATE JAQ JSON CODEC held_events_codec TO SCHEMA held_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE WIRE JSON CODEC held_event_codec FROM WIRE SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-nats-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';

@@ -27,10 +27,10 @@ use nervix_interconnect::{
 use nervix_models::{
     BranchSelection, CanonicalPlexusError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
-    CreateReorderer, CreateWindowProcessor, EmitterBody, FieldPath, HeaderModel,
-    IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor,
-    KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, NodeUnitRef,
-    PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName,
+    CreateReorderer, CreateWindowProcessor, EmitterBody, EmitterPayloadPresentation, FieldPath,
+    HeaderModel, IcebergTableEmitter, IngestTimestampSource, IngestorEntity, IngestorInput,
+    KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef,
+    NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName,
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
     ResourceUsage, ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection,
     expression_to_plexus,
@@ -959,6 +959,7 @@ pub(in crate::application) fn format_reorderer_describe_output(
 pub(in crate::application) fn format_emitter_describe_output(
     name: impl Into<ModelName>,
     emitter: &CreateEmitter,
+    payload: &EmitterPayloadPresentation,
     scheduled_node: Option<&ScheduledNode>,
     status: Option<&DataflowNodeStatusEnvelope>,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
@@ -978,6 +979,7 @@ pub(in crate::application) fn format_emitter_describe_output(
         Some(batch) => format!("batch: {batch}"),
         None => "batch: none".to_owned(),
     });
+    lines.push(format!("batch container: {payload}"));
     if matches!(
         emitter.connector.as_ref(),
         nervix_models::EmitterEntity::Iceberg(_)

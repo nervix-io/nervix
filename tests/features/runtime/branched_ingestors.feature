@@ -29,8 +29,8 @@ Feature: Ingestor branch consistency
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m;
@@ -103,8 +103,8 @@ Feature: Ingestor branch consistency
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS BRANCH by_mqtt_notifications_secondary SCHEMA tenant_user_branch TTL 5m;

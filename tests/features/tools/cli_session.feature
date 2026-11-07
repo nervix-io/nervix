@@ -140,7 +140,7 @@ Feature: CLI public session dispatch
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
@@ -166,7 +166,7 @@ Feature: CLI public session dispatch
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';

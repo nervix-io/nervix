@@ -15,7 +15,7 @@ Feature: Syslog listener transport metadata
       CREATE SCHEMA syslog_payload (message STRING);
       CREATE SCHEMA received_syslog (message STRING, peer_addr STRING OPTIONAL, transport STRING OPTIONAL, tls_peer STRING);
       CREATE WIRE JSON SCHEMA syslog_payload_wire MODE STRICT (message string);
-      CREATE CODEC payload_json FROM WIRE JSON SCHEMA syslog_payload_wire TO SCHEMA syslog_payload;
+      CREATE WIRE JSON CODEC payload_json FROM WIRE SCHEMA syslog_payload_wire TO SCHEMA syslog_payload;
       CREATE RELAY events SCHEMA received_syslog UNBRANCHED;
       CREATE SYSLOG CLIENT metadata_listener CONFIG {'protocol' = 'udp', 'addr' = '{{syslog_ingest_addr}}'};
       CREATE SYSLOG LISTENER INGESTOR intake
@@ -66,7 +66,7 @@ Feature: Syslog listener transport metadata
       CREATE SCHEMA syslog_payload (message STRING);
       CREATE SCHEMA received_syslog (message STRING, peer_addr STRING OPTIONAL, transport STRING OPTIONAL, tls_peer STRING);
       CREATE WIRE JSON SCHEMA syslog_payload_wire MODE STRICT (message string);
-      CREATE CODEC payload_json FROM WIRE JSON SCHEMA syslog_payload_wire TO SCHEMA syslog_payload;
+      CREATE WIRE JSON CODEC payload_json FROM WIRE SCHEMA syslog_payload_wire TO SCHEMA syslog_payload;
       CREATE RELAY events SCHEMA received_syslog UNBRANCHED;
       CREATE SYSLOG CLIENT metadata_listener CONFIG {'protocol' = 'tcp', 'addr' = '{{syslog_ingest_addr}}'};
       CREATE SYSLOG LISTENER INGESTOR intake
@@ -137,7 +137,7 @@ Feature: Syslog listener transport metadata
       CREATE SCHEMA syslog_payload (message STRING);
       CREATE SCHEMA received_syslog (message STRING, peer_addr STRING OPTIONAL, transport STRING OPTIONAL, tls_peer STRING);
       CREATE WIRE JSON SCHEMA syslog_payload_wire MODE STRICT (message string);
-      CREATE CODEC payload_json FROM WIRE JSON SCHEMA syslog_payload_wire TO SCHEMA syslog_payload;
+      CREATE WIRE JSON CODEC payload_json FROM WIRE SCHEMA syslog_payload_wire TO SCHEMA syslog_payload;
       CREATE RELAY events SCHEMA received_syslog UNBRANCHED;
       CREATE SYSLOG CLIENT metadata_listener MOUNT syslog_tls VERSION 1 CONFIG {
         'protocol' = 'tls',

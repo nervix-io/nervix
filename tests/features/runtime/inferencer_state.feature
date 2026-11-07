@@ -11,7 +11,7 @@ Feature: Stateful inferencer tensors
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       CREATE SCHEMA features ( vector ARRAY<F32, 2> SENSITIVE );
       CREATE SCHEMA scored ( score ARRAY<F32, 1> SENSITIVE );
-      CREATE CODEC features_codec FROM JSON TO SCHEMA features
+      CREATE JAQ JSON CODEC features_codec TO SCHEMA features
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
@@ -51,7 +51,7 @@ Feature: Stateful inferencer tensors
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       CREATE SCHEMA features ( vector <vector_type> SENSITIVE );
       CREATE SCHEMA scored ( score <score_type> <sensitivity> );
-      CREATE CODEC features_codec FROM JSON TO SCHEMA features
+      CREATE JAQ JSON CODEC features_codec TO SCHEMA features
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
@@ -138,7 +138,7 @@ Feature: Stateful inferencer tensors
       CREATE SCHEMA scored ( score <output_type> );
       CREATE SCHEMA audited ( model_score <output_type> );
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
-      CREATE CODEC features_codec FROM WIRE JSON SCHEMA features_wire TO SCHEMA features;
+      CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
@@ -224,7 +224,7 @@ Feature: Stateful inferencer tensors
       CREATE SCHEMA features ( id STRING, amount STRING, other STRING, wanted BOOL );
       CREATE SCHEMA scored ( score <score_type> );
       CREATE SCHEMA rejected ( failed_id STRING, message STRING );
-      CREATE CODEC features_codec FROM JSON TO SCHEMA features
+      CREATE JAQ JSON CODEC features_codec TO SCHEMA features
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
@@ -323,7 +323,7 @@ Feature: Stateful inferencer tensors
       CREATE SCHEMA features ( id STRING, vector <vector_type> );
       CREATE SCHEMA scored ( score <score_type> );
       CREATE SCHEMA rejected ( failed_id STRING );
-      CREATE CODEC features_codec FROM JSON TO SCHEMA features
+      CREATE JAQ JSON CODEC features_codec TO SCHEMA features
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;

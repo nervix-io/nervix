@@ -15,11 +15,11 @@ CREATE WIRE JSON SCHEMA benchmark_summary_wire MODE STRICT (
   record_count integer{% if parameters.sketch_enabled %},
   distinct_estimate integer{% endif %}
 );
-CREATE CODEC benchmark_record_codec
-  FROM WIRE JSON SCHEMA benchmark_record_wire
+CREATE WIRE JSON CODEC benchmark_record_codec
+  FROM WIRE SCHEMA benchmark_record_wire
   TO SCHEMA benchmark_record;
-CREATE CODEC benchmark_summary_codec
-  FROM WIRE JSON SCHEMA benchmark_summary_wire
+CREATE WIRE JSON CODEC benchmark_summary_codec
+  FROM WIRE SCHEMA benchmark_summary_wire
   TO SCHEMA benchmark_summary;
 CREATE KAFKA CLIENT kafka_input
   CONFIG {

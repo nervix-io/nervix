@@ -14,7 +14,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( partition I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( partition integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR spread_ingestor
@@ -74,7 +74,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR spread_ingestor
@@ -112,7 +112,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( phase I64, partition I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( phase integer, partition integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR spread_ingestor

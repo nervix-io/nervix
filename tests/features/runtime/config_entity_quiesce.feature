@@ -13,8 +13,8 @@ Feature: Config entity quiesce classification
       CREATE SCHEMA config_event ( seq I64 );
       CREATE WIRE JSON SCHEMA config_event_wire MODE STRICT ( seq integer );
       CREATE WIRE JSON SCHEMA config_event_wire_v2 MODE STRICT ( seq integer );
-      CREATE CODEC config_event_codec
-        FROM WIRE JSON SCHEMA config_event_wire
+      CREATE WIRE JSON CODEC config_event_codec
+        FROM WIRE SCHEMA config_event_wire
         TO SCHEMA config_event;
       CREATE RELAY config_events SCHEMA config_event UNBRANCHED;
 
@@ -66,8 +66,8 @@ Feature: Config entity quiesce classification
       """
       BEGIN;
       DROP CODEC config_event_codec;
-      CREATE CODEC config_event_codec
-        FROM WIRE JSON SCHEMA config_event_wire_v2
+      CREATE WIRE JSON CODEC config_event_codec
+        FROM WIRE SCHEMA config_event_wire_v2
         TO SCHEMA config_event;
       COMMIT;
       """

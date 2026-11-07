@@ -20,8 +20,7 @@ Feature: Filter selections
         tenant STRING,
         error_message STRING
       );
-      CREATE CODEC reading_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC reading_batch_codec
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_branch (tenant STRING);

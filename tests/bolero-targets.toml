@@ -132,6 +132,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/audit/tests/__fuzz__/audit__tests__representations__bolero_complete_audit_report_round_trip/corpus"
+domain_version = 1
+features = []
+id = "typed-audit-report"
+invariant = "Every current audit candidate kind, identity, span, expansion, configuration, nullable context, rule event, rewrite, attribution origin, suggestion and summary survives complete JSON round trips unchanged; deterministic bytes and Markdown remain identical."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/audit/tests/representations.rs"
+test = "audit::tests::representations::bolero_complete_audit_report_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__clickhouse__tests__bolero_clickhouse_tls_pairing_matches_the_transport_contract/corpus"
 domain_version = 1
 features = []
@@ -373,7 +388,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 53
+domain_version = 54
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -388,7 +403,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 55
+domain_version = 56
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -628,7 +643,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 54
+domain_version = 55
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -658,7 +673,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 53
+domain_version = 54
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -673,7 +688,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 53
+domain_version = 54
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -688,7 +703,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 52
+domain_version = 53
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -1063,7 +1078,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 53
+domain_version = 54
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1148,6 +1163,21 @@ package = "nervix-interconnect"
 random_iterations = 256
 source = "crates/interconnect/src/request/progress_properties.rs"
 test = "request::progress_properties::bolero_application_progress_messages_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/request/__fuzz__/request__clock_attachment_properties__bolero_domain_clock_attachments_round_trip/corpus"
+domain_version = 1
+features = []
+id = "domain-clock-attachment-wire"
+invariant = "Every current domain clock attachment request and receipt preserves its complete domain, receiver incarnation, installed revision, generation and authority fence through the production typed-request payload encoder and decoder unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/request/clock_attachment_properties.rs"
+test = "request::clock_attachment_properties::bolero_domain_clock_attachments_round_trip"
 test_target = "lib"
 
 [[target]]
@@ -1389,6 +1419,52 @@ random_iterations = 256
 source = "crates/connectors/rabbitmq/src/publisher/properties_tests.rs"
 test = "publisher::properties_tests::bolero_amqp_properties_preserve_every_declared_value_through_the_wire"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__syslog__encoding_tests__properties__bolero_syslog_messages_preserve_complete_fields_and_wire_bytes/corpus"
+domain_version = 1
+features = []
+id = "syslog-message-encoding"
+invariant = "All fixed SYSLOG fields preserve their complete RFC 5424 encoding, including exact nil fields, UTC microsecond timestamp spelling, structured-data order and escapes and BOM-free message bytes; an independent parser agrees on every semantic field, and representable canonical records round trip through Arrow unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/syslog_encoding_properties.rs"
+test = "runtime_schema::syslog::encoding_tests::properties::bolero_syslog_messages_preserve_complete_fields_and_wire_bytes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__syslog__encoding_tests__properties__bolero_syslog_rows_members_and_frames_respect_exact_byte_limits/corpus"
+domain_version = 1
+features = []
+id = "syslog-encoding-bounds"
+invariant = "A SYSLOG row, retained member and batch frame complete with exactly their full bytes if and only if those bytes fit MAX SIZE; frames retain every complete member in order, use the first timestamp, combine identical headers and distinguish a changed header."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/syslog_encoding_properties.rs"
+test = "runtime_schema::syslog::encoding_tests::properties::bolero_syslog_rows_members_and_frames_respect_exact_byte_limits"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__syslog__encoding_tests__properties__bolero_syslog_malformed_messages_do_not_publish_partial_rows/corpus"
+domain_version = 1
+features = []
+id = "syslog-message-malformed"
+invariant = "Bounded arbitrary RFC 5424 tails either append one complete row or return a typed decode error without publishing a partial row or changing the preceding complete row."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/syslog_encoding_properties.rs"
+test = "runtime_schema::syslog::encoding_tests::properties::bolero_syslog_malformed_messages_do_not_publish_partial_rows"
+test_target = "lib"
+
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__syslog__tests__bolero_structured_data_and_headers_match_the_per_byte_reading/corpus"
@@ -1467,7 +1543,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
-domain_version = 48
+domain_version = 49
 features = []
 id = "registry-archived-models"
 invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
@@ -1662,7 +1738,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__streams__bolero_stream_frames_keep_values_and_chunk_ownership/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "client-streams"
 invariant = "Every upload, restore and backup stream root preserves complete typed values and retained chunk ownership."
@@ -4300,3 +4376,18 @@ random_iterations = 256
 source = "crates/connectors/nats/src/client/authentication/tests.rs"
 test = "client::authentication::tests::bolero_malformed_authentication_keeps_typed_value_free_refusals"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__codec_draft__tests__bolero_codec_drafts_preserve_complete_models_and_family_heads/corpus"
+domain_version = 1
+features = []
+id = "console-codec-drafts"
+invariant = "Every codec family's browser draft renders its composed head and reparses to the complete Model, preserving conditional creation, exact wire-schema kind, resource version, ordered encoding rules and all directed transformation text."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-web-console"
+random_iterations = 128
+source = "crates/web-console/src/create_dialog/codec_draft.rs"
+test = "create_dialog::codec_draft::tests::bolero_codec_drafts_preserve_complete_models_and_family_heads"
+test_target = "bin:nervix-web-console"

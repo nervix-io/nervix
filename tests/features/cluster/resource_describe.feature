@@ -256,7 +256,7 @@ Feature: Resource lifecycle
       CREATE RESOURCE zip_codes;
       CREATE SCHEMA zip_entry (zip STRING, city STRING);
       CREATE WIRE JSON SCHEMA zip_wire MODE STRICT (zip string, city string);
-      CREATE CODEC zip_codec FROM WIRE JSON SCHEMA zip_wire TO SCHEMA zip_entry;
+      CREATE WIRE JSON CODEC zip_codec FROM WIRE SCHEMA zip_wire TO SCHEMA zip_entry;
       """
     Given client "uploader" is connected to the leader node
     When client "uploader" selects domain "{{domain}}"
@@ -428,6 +428,7 @@ Feature: Resource lifecycle
       """
     And the last client upload recovered version 1 from an earlier upload
     When client "uploader" upload of resource "proto" from "{{different_proto_dir}}" with identity "retry-one" fails with "already assigned version 1 with digest"
+    Then the last client upload refused version 1 with typed failure "IdentityConflict"
     When client "uploader" executes these Plexus commands
       """
       DESCRIBE RESOURCE proto;
@@ -487,6 +488,7 @@ Feature: Resource lifecycle
       """
     And the last client upload recovered version 1 from an earlier upload
     When client "uploader" upload of resource "proto" from "{{different_proto_dir}}" with identity "lost-reply" fails with "already assigned version 1 with digest"
+    Then the last client upload refused version 1 with typed failure "IdentityConflict"
     When client "uploader" executes these Plexus commands
       """
       DESCRIBE RESOURCE proto;

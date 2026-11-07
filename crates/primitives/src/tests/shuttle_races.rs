@@ -206,6 +206,53 @@ fn shuttle_subscribing_before_reading_never_misses_a_send() {
     shuttle::check_dfs(subscribe_then_read, None);
 }
 
+fn read_then_mark_seen() {
+    let watched = Watched::new();
+    let mut receiver = watched.value.subscribe();
+    let publisher = watched.start_publisher();
+    block_on(async {
+        let done = watched.done.load(Ordering::SeqCst);
+        receiver.mark_unchanged();
+        if !done {
+            receiver
+                .changed()
+                .await
+                .assured("the watched state holds its sender");
+        }
+    });
+    publisher.join().assured(PUBLISHER_JOINS);
+}
+
+fn mark_seen_then_read() {
+    let watched = Watched::new();
+    let mut receiver = watched.value.subscribe();
+    let publisher = watched.start_publisher();
+    block_on(async {
+        receiver.mark_unchanged();
+        let done = watched.done.load(Ordering::SeqCst);
+        if !done {
+            receiver
+                .changed()
+                .await
+                .assured("the watched state holds its sender");
+        }
+    });
+    publisher.join().assured(PUBLISHER_JOINS);
+}
+
+#[test]
+fn shuttle_reaches_a_send_between_a_read_and_marking_the_value_seen() {
+    assert!(
+        some_schedule_deadlocks(read_then_mark_seen),
+        "marking a value seen after reading must miss a send in some schedule"
+    );
+}
+
+#[test]
+fn shuttle_marking_the_value_seen_before_reading_never_misses_a_send() {
+    shuttle::check_dfs(mark_seen_then_read, None);
+}
+
 /// The state a waiting task reads, and the waker registration its publisher wakes after changing
 /// it.
 #[derive(Default)]

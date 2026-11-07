@@ -155,8 +155,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA handoff_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA handoff_wire MODE STRICT ( event_id integer );
-      CREATE CODEC handoff_codec
-        FROM WIRE JSON SCHEMA handoff_wire TO SCHEMA handoff_event;
+      CREATE WIRE JSON CODEC handoff_codec
+        FROM WIRE SCHEMA handoff_wire TO SCHEMA handoff_event;
       CREATE RELAY handoff_records SCHEMA handoff_event UNBRANCHED CAPACITY 1;
       CREATE KAFKA CLIENT handoff_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -239,8 +239,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA flush_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA flush_wire MODE STRICT ( event_id integer );
-      CREATE CODEC flush_codec
-        FROM WIRE JSON SCHEMA flush_wire TO SCHEMA flush_event;
+      CREATE WIRE JSON CODEC flush_codec
+        FROM WIRE SCHEMA flush_wire TO SCHEMA flush_event;
       CREATE RELAY flush_records SCHEMA flush_event UNBRANCHED CAPACITY 1;
       CREATE KAFKA CLIENT flush_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -338,8 +338,8 @@ Feature: Graceful shutdown
         transaction_id string,
         amount integer
       );
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -480,8 +480,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA shutdown_ack_event ( id I64 );
       CREATE WIRE JSON SCHEMA shutdown_ack_wire MODE STRICT ( id integer );
-      CREATE CODEC shutdown_ack_codec
-        FROM WIRE JSON SCHEMA shutdown_ack_wire
+      CREATE WIRE JSON CODEC shutdown_ack_codec
+        FROM WIRE SCHEMA shutdown_ack_wire
         TO SCHEMA shutdown_ack_event;
       CREATE RELAY shutdown_ack_input SCHEMA shutdown_ack_event UNBRANCHED;
       CREATE RELAY shutdown_ack_output SCHEMA shutdown_ack_event UNBRANCHED;
@@ -551,8 +551,8 @@ Feature: Graceful shutdown
       """
       CREATE SCHEMA held_event ( sequence I64, tenant STRING );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer, tenant string );
-      CREATE CODEC held_event_codec
-        FROM WIRE JSON SCHEMA held_event_wire
+      CREATE WIRE JSON CODEC held_event_codec
+        FROM WIRE SCHEMA held_event_wire
         TO SCHEMA held_event;
       CREATE RELAY held_ingested SCHEMA held_event UNBRANCHED;
       CREATE RELAY held_routed SCHEMA held_event UNBRANCHED;
@@ -617,7 +617,7 @@ Feature: Graceful shutdown
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE WIRE JSON CODEC held_event_codec FROM WIRE SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-finish-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
@@ -690,8 +690,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA shutdown_order ( order_id I64, tenant STRING );
       CREATE WIRE JSON SCHEMA shutdown_order_wire MODE STRICT ( order_id integer, tenant string );
-      CREATE CODEC shutdown_order_codec
-        FROM WIRE JSON SCHEMA shutdown_order_wire
+      CREATE WIRE JSON CODEC shutdown_order_codec
+        FROM WIRE SCHEMA shutdown_order_wire
         TO SCHEMA shutdown_order;
       CREATE SCHEMA shutdown_tenant ( tenant STRING );
       CREATE BRANCH by_shutdown_tenant SCHEMA shutdown_tenant TTL 5m;
@@ -782,8 +782,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA confirm_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA confirm_wire MODE STRICT ( event_id integer );
-      CREATE CODEC confirm_codec
-        FROM WIRE JSON SCHEMA confirm_wire TO SCHEMA confirm_event;
+      CREATE WIRE JSON CODEC confirm_codec
+        FROM WIRE SCHEMA confirm_wire TO SCHEMA confirm_event;
       CREATE RELAY confirm_records SCHEMA confirm_event UNBRANCHED;
       CREATE KAFKA CLIENT confirm_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -833,8 +833,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA handoff_confirm_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA handoff_confirm_wire MODE STRICT ( event_id integer );
-      CREATE CODEC handoff_confirm_codec
-        FROM WIRE JSON SCHEMA handoff_confirm_wire TO SCHEMA handoff_confirm_event;
+      CREATE WIRE JSON CODEC handoff_confirm_codec
+        FROM WIRE SCHEMA handoff_confirm_wire TO SCHEMA handoff_confirm_event;
       CREATE RELAY handoff_confirm_records SCHEMA handoff_confirm_event UNBRANCHED;
       CREATE KAFKA CLIENT handoff_confirm_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -888,8 +888,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA refused_stop_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA refused_stop_wire MODE STRICT ( event_id integer );
-      CREATE CODEC refused_stop_codec
-        FROM WIRE JSON SCHEMA refused_stop_wire TO SCHEMA refused_stop_event;
+      CREATE WIRE JSON CODEC refused_stop_codec
+        FROM WIRE SCHEMA refused_stop_wire TO SCHEMA refused_stop_event;
       CREATE RELAY refused_stop_records SCHEMA refused_stop_event UNBRANCHED;
       CREATE KAFKA CLIENT refused_stop_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
@@ -955,8 +955,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA eligible_event ( sequence I64, tenant STRING );
       CREATE WIRE JSON SCHEMA eligible_event_wire MODE STRICT ( sequence integer, tenant string );
-      CREATE CODEC eligible_event_codec
-        FROM WIRE JSON SCHEMA eligible_event_wire
+      CREATE WIRE JSON CODEC eligible_event_codec
+        FROM WIRE SCHEMA eligible_event_wire
         TO SCHEMA eligible_event;
       CREATE RELAY eligible_ingested SCHEMA eligible_event UNBRANCHED;
       CREATE RELAY eligible_routed SCHEMA eligible_event UNBRANCHED;
@@ -1030,8 +1030,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA everyone_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA everyone_event_wire MODE STRICT ( event_id integer );
-      CREATE CODEC everyone_event_codec
-        FROM WIRE JSON SCHEMA everyone_event_wire
+      CREATE WIRE JSON CODEC everyone_event_codec
+        FROM WIRE SCHEMA everyone_event_wire
         TO SCHEMA everyone_event;
       CREATE RELAY everyone_ingested SCHEMA everyone_event UNBRANCHED;
       CREATE RELAY everyone_routed SCHEMA everyone_event UNBRANCHED;
@@ -1108,7 +1108,7 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA peer_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA peer_wire MODE STRICT ( event_id integer );
-      CREATE CODEC peer_codec FROM WIRE JSON SCHEMA peer_wire TO SCHEMA peer_event;
+      CREATE WIRE JSON CODEC peer_codec FROM WIRE SCHEMA peer_wire TO SCHEMA peer_event;
       CREATE RELAY peer_records SCHEMA peer_event UNBRANCHED;
       CREATE KAFKA CLIENT peer_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -1188,8 +1188,8 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA unactivated_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA unactivated_wire MODE STRICT ( event_id integer );
-      CREATE CODEC unactivated_codec
-        FROM WIRE JSON SCHEMA unactivated_wire TO SCHEMA unactivated_event;
+      CREATE WIRE JSON CODEC unactivated_codec
+        FROM WIRE SCHEMA unactivated_wire TO SCHEMA unactivated_event;
       CREATE RELAY unactivated_records SCHEMA unactivated_event UNBRANCHED;
       CREATE KAFKA CLIENT unactivated_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -1287,11 +1287,11 @@ Feature: Graceful shutdown
       CREATE SCHEMA tenant_total ( tenant STRING, total I64 );
       CREATE WIRE JSON SCHEMA tenant_amount_wire MODE STRICT ( amount integer, tenant string );
       CREATE WIRE JSON SCHEMA tenant_total_wire MODE STRICT ( tenant string, total integer );
-      CREATE CODEC tenant_amount_codec
-        FROM WIRE JSON SCHEMA tenant_amount_wire
+      CREATE WIRE JSON CODEC tenant_amount_codec
+        FROM WIRE SCHEMA tenant_amount_wire
         TO SCHEMA tenant_amount;
-      CREATE CODEC tenant_total_codec
-        FROM WIRE JSON SCHEMA tenant_total_wire
+      CREATE WIRE JSON CODEC tenant_total_codec
+        FROM WIRE SCHEMA tenant_total_wire
         TO SCHEMA tenant_total;
       CREATE SCHEMA generated_tenant ( tenant STRING );
       CREATE BRANCH by_generated_tenant SCHEMA generated_tenant TTL 5m;
@@ -1364,8 +1364,8 @@ Feature: Graceful shutdown
       """
       CREATE SCHEMA wait_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
-      CREATE CODEC wait_event_codec
-        FROM WIRE JSON SCHEMA wait_event_wire
+      CREATE WIRE JSON CODEC wait_event_codec
+        FROM WIRE SCHEMA wait_event_wire
         TO SCHEMA wait_event;
       CREATE RELAY wait_state SCHEMA wait_event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -1455,8 +1455,8 @@ Feature: Graceful shutdown
       """
       CREATE SCHEMA stalled_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA stalled_event_wire MODE STRICT ( event_id integer );
-      CREATE CODEC stalled_event_codec
-        FROM WIRE JSON SCHEMA stalled_event_wire
+      CREATE WIRE JSON CODEC stalled_event_codec
+        FROM WIRE SCHEMA stalled_event_wire
         TO SCHEMA stalled_event;
       CREATE RELAY stalled_events SCHEMA stalled_event UNBRANCHED;
       CREATE KAFKA CLIENT stalled_kafka CONFIG {
@@ -1527,8 +1527,8 @@ Feature: Graceful shutdown
         amount integer
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );

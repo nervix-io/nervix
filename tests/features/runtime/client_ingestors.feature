@@ -52,7 +52,7 @@ Feature: Client ingestors
       CREATE WIRE JSON SCHEMA order_body_wire MODE STRICT (
         order_id string, amount_cents integer, card string
       );
-      CREATE CODEC order_body_codec FROM WIRE JSON SCHEMA order_body_wire TO SCHEMA order_body;
+      CREATE WIRE JSON CODEC order_body_codec FROM WIRE SCHEMA order_body_wire TO SCHEMA order_body;
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
@@ -303,7 +303,7 @@ Feature: Client ingestors
       CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
         region string, order_id string, amount integer, card string
       );
-      CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_in;
+      CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_in;
       CREATE VHOST edge orders-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/orders';
       CREATE HTTP ENDPOINT INGESTOR orders_http

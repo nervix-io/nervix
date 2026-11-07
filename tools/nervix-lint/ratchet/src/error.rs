@@ -1,11 +1,18 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: typed refusals of compiler orchestration and evidence validation.
+//! Owns: typed refusals of compiler orchestration, evidence validation and audit provenance.
 //! Depends on: paths and report-bearing errors.
 //! Must not know: rendered driver diagnostics or product failure policy.
 
 use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, error_stack::Report<Error>>;
+
+/// A captured external command diagnostic, retained below the audit's semantic context.
+#[derive(Debug, thiserror::Error)]
+#[error("{stderr}")]
+pub(crate) struct ProcessDiagnostic {
+    pub(crate) stderr: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -47,6 +54,37 @@ pub enum Error {
     QueueLocked,
     #[error("cannot start or supervise the analysis driver")]
     Driver,
+    #[error("git {arguments:?} failed with status {status:?}")]
+    AuditGit {
+        arguments: Vec<String>,
+        status: Option<i32>,
+    },
+    #[error("invalid {record} audit record")]
+    AuditRecord { record: AuditRecord },
+    #[error("origin {remote} is not a GitHub repository")]
+    AuditRemote { remote: String },
+    #[error("gh api {path} failed after {attempts} attempt(s)")]
+    AuditGithub { path: String, attempts: usize },
+    #[error("the compiler analysis did not complete")]
+    AuditIncomplete,
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+pub enum AuditRecord {
+    #[error("UTF-8 text")]
+    Text,
+    #[error("baseline")]
+    Baseline,
+    #[error("commit")]
+    Commit,
+    #[error("blame")]
+    Blame,
+    #[error("hunk")]
+    Hunk,
+    #[error("candidate")]
+    Candidate,
+    #[error("report")]
+    Report,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]

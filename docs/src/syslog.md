@@ -22,8 +22,7 @@ Pairing the format and transport pieces creates a conventional syslog receiver o
 Reference the predefined wire schema directly from a codec:
 
 ```plexus
-CREATE CODEC syslog_codec
-  FROM SYSLOG
+CREATE SYSLOG CODEC syslog_codec
   TO SCHEMA syslog_event;
 ```
 
@@ -48,7 +47,7 @@ name, type, and optionality shown here.
 | `structured_data` | `STRING OPTIONAL` | Exact RFC 5424 `STRUCTURED-DATA` text | Validated and emitted verbatim, or `-` when null or undeclared |
 | `message` | `STRING` | `MSG`, including an empty message | Required for encoding |
 
-A field outside this contract, or a field with different type or optionality, makes `CREATE CODEC`
+A field outside this contract, or a field with different type or optionality, makes `CREATE SYSLOG CODEC`
 fail and identifies the offending field and expected shape. Fields may be marked `SENSITIVE` in
 the target schema; normal sensitivity propagation and explicit external-leakage rules still apply.
 
@@ -70,8 +69,7 @@ CREATE SCHEMA syslog_event (
   message STRING
 );
 
-CREATE CODEC syslog_codec
-  FROM SYSLOG
+CREATE SYSLOG CODEC syslog_codec
   TO SCHEMA syslog_event;
 ```
 
@@ -100,6 +98,16 @@ lists the missing fields.
 
 Timestamps are rendered in UTC. Nanosecond values are truncated to RFC 5424's maximum six
 fractional digits, and trailing fractional zeroes are omitted.
+
+The codec owns the RFC 5424 writer for both a record and a batch frame. It preserves validated
+structured data verbatim, including element and parameter order and escape spelling, and writes
+directly into the caller's bounded output. An empty message keeps its separating space; a leading
+message BOM is omitted. The transport applies its framing separately.
+
+The complete frame counts toward an emitter's payload byte limit. A batch frame also counts the
+JSON escaping around each complete member message; its header carries the first member's
+timestamp. See [batch containers](schemas-and-codecs.md#batch-containers) for the shared batching
+contract.
 
 Record-specific encoding failures follow the emitter's `ON MESSAGE ERROR` policy. These include:
 

@@ -17,8 +17,8 @@ Feature: Reingestor output flushing
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+      CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event;
       CREATE SCHEMA tenant_seq_branch (
         tenant STRING,

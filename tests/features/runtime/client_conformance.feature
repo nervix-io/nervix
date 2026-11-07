@@ -16,6 +16,63 @@ Feature: Cross-language client conformance
   float sign and subnormal bits, the extreme DATETIME nanoseconds, a redacted sensitive field and
   two interleaved concrete branches. Strings and bytes are reported as hex, floats as their bits.
 
+  @client_upload_failure
+  Scenario Outline: A <runtime> client distinguishes an upload identity conflict from its completed retry
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE upload_bundle;
+      """
+    And node "node-1" has resource directory "upload_probe_directory" containing
+      """
+      {"payload.txt":"first archive\n"}
+      """
+    When the "<runtime>" client probe retries resource "upload_bundle" from directory "upload_probe_directory" on a follower when available
+    Then within "180s" the client probe reports
+      """
+      UPLOAD completed
+      RETRY completed
+      CONFLICT IdentityConflict
+      PASS
+      """
+
+    @client_probe_in_process
+    Examples: the shared Rust binding's C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C
+      | runtime | cluster_size |
+      | c       | 1            |
+      | c       | 3            |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++
+      | runtime | cluster_size |
+      | c++     | 1            |
+      | c++     | 3            |
+
+    @client_conformance_toolchain @client_probe_python
+    Examples: Python
+      | runtime | cluster_size |
+      | python  | 1            |
+      | python  | 3            |
+
+    @client_conformance_toolchain @client_probe_java
+    Examples: Java
+      | runtime | cluster_size |
+      | java    | 1            |
+      | java    | 3            |
+
+    @client_conformance_toolchain @client_probe_ruby
+    Examples: Ruby
+      | runtime | cluster_size |
+      | ruby    | 1            |
+      | ruby    | 3            |
+
   Scenario Outline: A <runtime> client round-trips an operation, typed rows, an error and a closure
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -61,8 +118,8 @@ Feature: Cross-language client conformance
         maybe integer OPTIONAL,
         secret string
       );
-      CREATE CODEC typed_row_codec
-        FROM WIRE JSON SCHEMA typed_row_wire
+      CREATE WIRE JSON CODEC typed_row_codec
+        FROM WIRE SCHEMA typed_row_wire
         TO SCHEMA typed_row
         ENCODE at AS RFC3339, raw AS BASE64;
       CREATE SCHEMA tenant_key ( tenant STRING );
@@ -596,6 +653,7 @@ Feature: Cross-language client conformance
       | ruby    | 1            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
       | ruby    | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
 
+  @client_wire_corpus
   Scenario Outline: A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote
     When the "<runtime>" client probe decodes the conformance corpus
     Then within "60s" the client probe reports the conformance corpus

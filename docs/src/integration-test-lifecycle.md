@@ -11,6 +11,17 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+`just test-domain-clock-delivery` runs the one- and three-node receiver attachment scenarios:
+clock installation while gossip exchanges are blocked, session tick delivery and receiver restart.
+It prepares the console assets, WASM guests and ONNX runtime required by the in-process nodes;
+these cases start no CLI, paced simulation or Python driver. Arguments pass to the ordinary
+scenario runner, whose startup, execution, parallelism and teardown budgets stay unchanged.
+
+After a peer stops, these scenarios observe its unavailability through the cluster-status
+warning from the same availability view the clock authority reads. The warning stays observable
+after discovery retires the peer's interconnect row. Observation keeps the existing status budget,
+and the surviving session must still receive increasing ticks within ten seconds.
+
 The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
 system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
 address explicitly and presents the node's fixture certificate. The redirect scenario launches a
@@ -244,6 +255,19 @@ caller; the recipe does not expand their contents as shell code. The reuse recip
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
 
+`just test-resource-upload-identity-scenarios` prepares the in-process server's console assets,
+WASM guests and ONNX runtime, then runs the four `@resource_upload_idempotency` examples in
+`resource_describe.feature`, on one and three nodes with two concurrent scenarios and no retries.
+They check the installed and recovered origins, the typed conflict and its assigned version, and
+that a conflicting archive creates no additional version. This focused recipe builds no unrelated
+client tools; broad qualification stays with the ordinary scenario suite.
+
+`just test-client-upload-conflict-conformance` builds the binding probes and runs the twelve
+`@client_upload_failure` examples in `client_conformance.feature`, on one and three nodes with two
+concurrent scenarios and no retries. The C ABI in process, C, C++, Python, Java and Ruby each reuse
+one prepared upload handle, repeat its completed archive and read the typed conflict after changing
+that archive. The full client conformance lane qualifies the remaining client behavior in CI.
+
 `just test-endpoint-heads` selects `kinded_endpoint_heads.feature` for its in-process endpoint
 inspection and reference-kind refusal cases. It prepares the console, ONNX and guest assets,
 Plexus formatter, CLI and diagnostic report tool those cases use. The paced-driver steps own their
@@ -263,7 +287,37 @@ transport failure. The original restore call must remain uncertain when its next
 open the archive. The fixture restores the exact bytes only after that call ends, then recovers
 the completed outcome under the original statement and reference. No product fault hook is used.
 
+`just build-codec-parser-heads` prepares the focused codec parser/completion integration target.
+`just coverage-codec-heads [output]` collects those assertions as ordinary line coverage, including
+complete canonical Model equality for every codec head and conditional creation. Its report is
+focused owner evidence; the ordinary workspace coverage merge remains CI's integrity verdict.
+`just build-codec-tools` prepares the formatter, native CLI and diagnostic-report helper together
+so Cargo unifies their shared dependencies in one native graph.
+`just build-codec-heads` prepares current release console assets, the formatter, native CLI,
+diagnostic-report helper and scenario binary without executing scenarios. These preparation
+commands allow compilation to be bounded separately from test execution.
+`just test-codec-heads` uses the latter preparation and selects
+`tests/features/runtime/kinded_codec_heads.feature` through the ordinary scenario binary, with
+two concurrent cases, no retries and `ORT_DYLIB_PATH` set. The ordinary asset builder continues
+to produce release assets by default. The one- and three-node outlines exercise codec creation,
+canonical inspection and native-session completion under the ordinary harness lifecycle budgets.
+`just test-codec-scenarios <input> [args...]` selects related codec round trips or browser cases
+with the same preparation, quoting each input and extra argument intact for the ordinary runner.
+
 ## What Runs Where
+
+`just test-emitter-batch-metrics` prepares the in-process server prerequisites and runs only
+`emitter_batch_metrics.feature`, forwarding each caller argument intact. Its one- and three-node
+examples compare source records, exact encoded payload bytes, subdivision and oversize outcomes
+through public producers, owner-routed `DESCRIBE` and Prometheus. A one-shot lost connector answer
+forces the retained-payload path; the preparation counters must remain unchanged by its retry.
+`just test-emitter-native-metrics` uses the same prerequisites and selects
+`@emitter_payload_observations` in the existing native scenarios: database request division,
+OTLP lost answers, physical Iceberg files, client IPC and HTTP bodies. Their original transport
+assertions remain the oracle for what each observed preparation carries.
+Both recipes use absolute feature patterns to keep discovery out of generated build artifacts.
+The single-feature recipe repeats its literal alternative so the walker starts in that feature's
+parent directory and selects only that file.
 
 The emitter assembly outline observes the emitter's public received-message total before each
 switch between its two source relays. It waits for all three initial A rows before posting B, and

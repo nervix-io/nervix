@@ -480,6 +480,34 @@ impl EmitterStagingDirectory for EmitterConnectorContext {
     }
 }
 
+impl nervix_connector::EmitterPayloadObserver for EmitterConnectorContext {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "records native measurements through the retained metric handle"
+        )
+    )]
+    fn record_prepared_payload(&self, measurement: nervix_connector::EmitterPayloadMeasurement) {
+        self.interactions.record_payload(
+            measurement.source_messages,
+            measurement.encoded_bytes,
+            measurement.prepared_bytes,
+        );
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "records native subdivisions without resolving labels"
+        )
+    )]
+    fn record_payload_subdivisions(&self, subdivisions: u64) {
+        self.interactions.record_splits(subdivisions);
+    }
+}
+
 impl EmitterBoundedExecution for EmitterConnectorContext {
     fn executor(&self) -> Executor {
         self.runtime.executor().clone()

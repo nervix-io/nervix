@@ -10,6 +10,12 @@ sequences and malformed generations. Both retain typed `error_stack::Report` con
 fingerprints have a value-free `Debug` implementation, and the engine never receives original
 key values. Host policy and public message-error mapping belong to the caller.
 
+A typed interconnect request bound to a peer process returns `RequestError::PeerProcessChanged`
+when its selected connection lease belongs to another authenticated process epoch. The node,
+request, expected epoch and observed epoch remain typed, with the original
+`TransportError::PeerProcessChanged` underneath. The refusal sends no request and does not claim
+a remote handler rejection; the owner follows a replacement attachment instead.
+
 Native session TLS provisioning fails before a node opens its stores or listeners. Missing
 certificate/key paths and TLS files supplied in HTTP mode are distinct application errors. File
 reads retain their `io::Error` beneath `TlsMaterialError::ReadFile`, including the certificate or
@@ -466,6 +472,7 @@ subsections after the boundary table follow this order.
 | Deadlock detector and diagnostic run | A detector that cannot be installed or is installed twice (`InstallError`), a diagnostic run that cannot install it or record its starting evidence (`DiagnosticError`), and evidence that does not encode, decode, fit its bounds, write or read (`EvidenceError`) | Refuse to start a diagnostic process, or refuse a whole evidence file naming the check that failed. A deadlock finding is not one of these errors: it is a diagnostic result that ends the process with its own status. |
 | Native client and its edges | A call that could not connect, was refused or cancelled, was answered outside the protocol, or lost its session (`ClientError`), above the transport status, the codec's report, a local archive's I/O error, or the failure that left a command or upload uncertain | Retry, recover the session, recover an uncertain command or upload by its reference or identity, or display the whole chain; the CLI and the C binding classify from the current context. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
+| Architecture audit tooling | An incomplete matrix, failed Git operation with its arguments and exit status, malformed UTF-8 text, provenance or candidate projection, unsupported GitHub origin, exhausted GitHub read attempts, or report I/O/JSON failure (`nervix_ratchet::error::Error`) | End the command with a nonzero status. UTF-8, I/O and JSON causes remain beneath typed contexts. Captured Git/GitHub stderr is a typed external diagnostic cause beneath the audit operation, so the CLI's full-chain rendering retains every failed-read diagnostic at the `lint audit` boundary. Suggestions in a completed report are review evidence, not errors or enforcement decisions. |
 
 Forced ownership installation retires changing relay channels before its dispatch fence waits.
 The remote delivery owner maps a cancelled or unconfirmed admission through its existing typed
@@ -1979,6 +1986,12 @@ as `AppError::ApplyStartupRuntime`; the last two name the domain. Each keeps the
 runtime's report beneath it, so the node's exit renders the whole chain rather than the top context
 of the failure.
 
+Emitter inspection reads its Model and referenced codec from one short-lived storage snapshot.
+It retains `RegistryError::ReadValue`, archive decoding and `StoredModelKindMismatch` causes beneath
+`LoadStoredModels`; a missing codec is `MissingReference`. Inspection never substitutes a default
+format for unreadable configuration. A node without the stored emitter resolves both Models from
+one validated schedule publication instead.
+
 ## Cluster Parameter Refusals
 
 Parameter definitions own positive duration and numeric range errors, and structured assignments
@@ -2798,6 +2811,10 @@ boundary; an already pending Java exception is preserved. Checked native exports
 unwinds at that boundary. Restoration events expose the shared client's message and retry wait.
 
 Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
+Reusing an upload identity for another archive returns the typed `UploadFailure::IdentityConflict`
+and the version already assigned to that identity. The diagnostic keeps the digest conflict's
+context, while native clients and host bindings classify the refusal from its typed outcome.
+The conflicting call changes neither the durable outcome nor the version sequence.
 Failure and cancellation abandon the partial temporary archive; they perform no destructor
 finalization that could replace the cause, panic, or start asynchronous cleanup. If the enclosing
 command deadline cancels local construction, the caller receives its typed `RetryDeadline`.

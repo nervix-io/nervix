@@ -7022,6 +7022,7 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-connector",
+ "nervix-execution",
  "nervix-models",
  "nervix-primitives",
 ]
@@ -7080,6 +7081,7 @@ dependencies = [
  "iceberg-catalog-rest",
  "meticulous",
  "nervix-connector",
+ "nervix-connector-fake",
  "nervix-dns",
  "nervix-execution",
  "nervix-models",
@@ -7198,6 +7200,7 @@ dependencies = [
  "mysql_common",
  "nervix-arbitrary",
  "nervix-connector",
+ "nervix-connector-fake",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
@@ -7284,6 +7287,7 @@ dependencies = [
  "faster-hex",
  "meticulous",
  "nervix-connector",
+ "nervix-connector-fake",
  "nervix-models",
  "nervix-primitives",
  "serde_json",
@@ -8083,6 +8087,7 @@ dependencies = [
  "hyper-util",
  "imbl",
  "indexmap 2.14.2",
+ "jiff",
  "memmap2",
  "meticulous",
  "multer",
@@ -8162,6 +8167,7 @@ dependencies = [
  "sorted-vec",
  "storekey",
  "strum 0.26.3",
+ "syslog_rfc5424",
  "tar",
  "tempfile",
  "thiserror 2.0.21",
@@ -12593,6 +12599,16 @@ dependencies = [
  "quote",
  "sealed",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "syslog_rfc5424"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "909628010ce00835517125bf1b71bfe17df49d3a3d194d77568032ab662a74c7"
+dependencies = [
+ "thiserror 2.0.21",
+ "time",
 ]
 
 [[package]]

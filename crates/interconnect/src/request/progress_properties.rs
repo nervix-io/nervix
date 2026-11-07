@@ -132,7 +132,7 @@ where
     decoded
 }
 
-async fn assert_round_trips<R, M>(executor: &Executor, message: M)
+pub(super) async fn assert_round_trips<R, M>(executor: &Executor, message: M)
 where
     R: InterconnectRequest,
     M: RkyvMessage + Clone + Debug + PartialEq,

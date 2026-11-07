@@ -14,8 +14,8 @@ Feature: Kafka emission
       """
       CREATE SCHEMA queue_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA queue_wire MODE STRICT ( sequence integer );
-      CREATE CODEC queue_codec FROM WIRE JSON SCHEMA queue_wire TO SCHEMA queue_event;
-      CREATE CODEC queue_ingest_codec FROM JSON TO SCHEMA queue_event
+      CREATE WIRE JSON CODEC queue_codec FROM WIRE SCHEMA queue_wire TO SCHEMA queue_event;
+      CREATE JAQ JSON CODEC queue_ingest_codec TO SCHEMA queue_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY queue_events SCHEMA queue_event UNBRANCHED;
       CREATE VHOST edge small-queue-{{test_id}}.example.com;
@@ -87,7 +87,7 @@ Feature: Kafka emission
         occurred_at string,
         blob string
       );
-      CREATE CODEC incoming_codec FROM WIRE JSON SCHEMA incoming_wire TO SCHEMA incoming_event
+      CREATE WIRE JSON CODEC incoming_codec FROM WIRE SCHEMA incoming_wire TO SCHEMA incoming_event
         ENCODE occurred_at AS RFC3339, blob AS BASE64;
       CREATE SCHEMA outgoing_event (
         clean STRING,
@@ -103,7 +103,7 @@ Feature: Kafka emission
         occurred_at string,
         blob string
       );
-      CREATE CODEC outgoing_codec FROM WIRE JSON SCHEMA outgoing_wire TO SCHEMA outgoing_event
+      CREATE WIRE JSON CODEC outgoing_codec FROM WIRE SCHEMA outgoing_wire TO SCHEMA outgoing_event
         ENCODE occurred_at AS RFC3339, blob AS BASE64;
       CREATE RELAY events SCHEMA incoming_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -166,8 +166,8 @@ Feature: Kafka emission
         active boolean
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA emitted_notification (
@@ -182,8 +182,8 @@ Feature: Kafka emission
         normalized string
       );
 
-      CREATE CODEC emitted_notification_codec
-        FROM WIRE JSON SCHEMA emitted_notification_wire
+      CREATE WIRE JSON CODEC emitted_notification_codec
+        FROM WIRE SCHEMA emitted_notification_wire
         TO SCHEMA emitted_notification;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -267,8 +267,8 @@ Feature: Kafka emission
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -339,8 +339,8 @@ Feature: Kafka emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -407,8 +407,8 @@ Feature: Kafka emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
@@ -477,8 +477,8 @@ Feature: Kafka emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
@@ -559,7 +559,7 @@ Feature: Kafka emission
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE WIRE JSON CODEC held_event_codec FROM WIRE SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-stop-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
@@ -645,7 +645,7 @@ Feature: Kafka emission
       """
       CREATE SCHEMA unsent_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA unsent_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC unsent_event_codec FROM WIRE JSON SCHEMA unsent_event_wire TO SCHEMA unsent_event;
+      CREATE WIRE JSON CODEC unsent_event_codec FROM WIRE SCHEMA unsent_event_wire TO SCHEMA unsent_event;
       CREATE RELAY unsent_events SCHEMA unsent_event UNBRANCHED;
       CREATE VHOST edge unsent-stop-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT unsent_ingress ON edge PATH '/events';
@@ -727,7 +727,7 @@ Feature: Kafka emission
       """
       CREATE SCHEMA swap_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA swap_wire MODE STRICT ( sequence integer );
-      CREATE CODEC swap_codec FROM WIRE JSON SCHEMA swap_wire TO SCHEMA swap_event;
+      CREATE WIRE JSON CODEC swap_codec FROM WIRE SCHEMA swap_wire TO SCHEMA swap_event;
       CREATE RELAY swap_events SCHEMA swap_event UNBRANCHED;
       CREATE VHOST edge swap-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT swap_ingress ON edge PATH '/events';
@@ -808,8 +808,8 @@ Feature: Kafka emission
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retired_event ( seq I64 );
       CREATE WIRE JSON SCHEMA retired_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC retired_event_codec
-        FROM WIRE JSON SCHEMA retired_event_wire TO SCHEMA retired_event;
+      CREATE WIRE JSON CODEC retired_event_codec
+        FROM WIRE SCHEMA retired_event_wire TO SCHEMA retired_event;
       CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
       CREATE VHOST edge retire-out-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
@@ -906,7 +906,7 @@ Feature: Kafka emission
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, event_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE event_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
@@ -1005,7 +1005,7 @@ Feature: Kafka emission
       """
       CREATE SCHEMA event ( seq I64, event_at DATETIME );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, event_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE event_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge timestamp-retry-{{test_id}}.example.com;
@@ -1067,7 +1067,7 @@ Feature: Kafka emission
       """
       CREATE SCHEMA event ( seq I64, event_at DATETIME );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, event_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE event_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge timestamp-altered-{{test_id}}.example.com;

@@ -1,9 +1,10 @@
 //! A session a Python host holds, the commands it prepares and runs, and what became of them.
 //!
+//! Layer: edges.
 //! - **Owns.** Opening a session with the connection options a host passes, preparing and
 //!   executing commands, waiting for subscription and domain clock events, reading the clock of a
 //!   followed domain, completion pages, opening producers and consumers, and reading a command's
-//!   outcome, diagnostics, subscription, backup archive and restore report.
+//!   outcome, diagnostics, upload failure, subscription, backup archive and restore report.
 //! - **Depends on.** The host session runtime's session, outcome and completion page, the
 //!   cancellation token, and the event, clock, schema and endpoint classes it returns.
 //! - **Must not know.** How the session reaches its server, retries or recovers; the Rust client
@@ -26,7 +27,7 @@ use url::Url;
 use crate::{
     clock::{ClockEvent, DomainClock},
     endpoint::{Consumer, Producer},
-    enums::{CompletionKind, CompletionStatus, Disposition, Tls},
+    enums::{CompletionKind, CompletionStatus, Disposition, Tls, UploadFailure},
     errors,
     event::{Event, Subscription},
     schema::{Fields, Schema},
@@ -526,6 +527,12 @@ impl Outcome {
     #[getter]
     fn disposition(&self) -> Disposition {
         Disposition::from(self.outcome.disposition())
+    }
+
+    /// The typed upload failure, or `None` for a completed upload or another command.
+    #[getter]
+    fn upload_failure(&self) -> Option<UploadFailure> {
+        self.outcome.upload_failure().map(UploadFailure::from)
     }
 
     #[getter]

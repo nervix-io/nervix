@@ -276,6 +276,7 @@ impl EmitterDeclaration for ClientConsumerEmitter {
         headers: None,
         reference: EmitterReferenceKind::Schema,
         body: EmitterBodyForm::Native,
+        payload: super::EmitterPayloadFormat::ArrowIpc,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: ClientConsumerPublishingMode::KINDS,

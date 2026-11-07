@@ -16,7 +16,7 @@ Feature: Kafka record keys, timestamps and tombstones
       CREATE SCHEMA timed_event ( tenant STRING, value I64, event_time DATETIME OPTIONAL );
       CREATE SCHEMA summary ( tenant STRING, total I64, first_time DATETIME OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA timed_event BRANCHED BY by_tenant;
@@ -80,7 +80,7 @@ Feature: Kafka record keys, timestamps and tombstones
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA observed ( seq I64, key_hex STRING, record_time DATETIME OPTIONAL, time_type STRING OPTIONAL, tombstone BOOL OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE KAFKA CLIENT source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR records FROM source TOPIC 'metadata_{{test_id}}'
@@ -133,7 +133,7 @@ Feature: Kafka record keys, timestamps and tombstones
       """
       CREATE SCHEMA event ( marker STRING );
       CREATE SCHEMA observed ( marker STRING, record_offset I64 OPTIONAL, tombstone BOOL OPTIONAL );
-      CREATE CODEC empty_codec FROM TOML TO SCHEMA event
+      CREATE JAQ TOML CODEC empty_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '{marker: "seen"}';
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE KAFKA CLIENT source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
@@ -179,7 +179,7 @@ Feature: Kafka record keys, timestamps and tombstones
       """
       CREATE SCHEMA reading ( value I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( value integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA observed_reading ( value I64, source STRING, record_time DATETIME OPTIONAL, time_type STRING OPTIONAL );
       CREATE SCHEMA refused_reading ( value I64, source STRING, code STRING, operation STRING, message STRING );
       CREATE RELAY readings SCHEMA observed_reading UNBRANCHED;

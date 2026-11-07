@@ -13,7 +13,7 @@ Feature: Pulsar message identity and times
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA observed ( seq I64, topic STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE PULSAR CLIENT source CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC INGESTOR records FROM source TOPIC 'metadata_{{test_id}}'

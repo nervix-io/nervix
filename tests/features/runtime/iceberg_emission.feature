@@ -17,7 +17,7 @@ Feature: Iceberg emission
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_ingress CONFIG {
         'addr' = '{{mqtt_addr}}',
@@ -131,7 +131,7 @@ Feature: Iceberg emission
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-gcs-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT notification_endpoint ON edge PATH '/notifications';
@@ -206,8 +206,8 @@ Feature: Iceberg emission
         denominator integer,
         action string
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
@@ -362,8 +362,8 @@ Feature: Iceberg emission
         action string,
         created_at string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE created_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -449,8 +449,8 @@ Feature: Iceberg emission
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-batch-{{test_id}}.example.com;
@@ -515,7 +515,7 @@ Feature: Iceberg emission
       | 1            |
       | 3            |
 
-  @iceberg_batch_bounds @deloxide_stress
+  @iceberg_batch_bounds @deloxide_stress @emitter_payload_observations
   Scenario Outline: Iceberg BATCH MAX MESSAGES rolls one produced row batch into bounded data files
     Given Iceberg dependencies are running
     And a <cluster_size> node nervix cluster is started
@@ -569,6 +569,19 @@ Feature: Iceberg emission
       | 43      | close  |
       | 44      | done   |
     Then within "30s" the Iceberg table "row_bounded_{{test_id}}" has 2 data files holding 4 rows, each with at most 2 rows and 1048576 bytes
+    And within "30s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+      """
+      batch container: Parquet data file
+      """
+    And within "30s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+      """
+      payloads: 2 source_messages=4
+      """
+    And the last command output owner is saved as placeholder "metrics_owner"
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_payload_encoded_bytes_total" with labels eventually reaches at least 1
+      """
+      emitter="iceberg_notifications"
+      """
 
     Examples:
       | cluster_size |
@@ -756,7 +769,7 @@ Feature: Iceberg emission
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (user_id I64, observed <nested_type>);
-      CREATE CODEC notification_codec FROM JSON TO SCHEMA notification
+      CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_ingress CONFIG {
@@ -821,8 +834,8 @@ Feature: Iceberg emission
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-provisioning-{{test_id}}.example.com;
@@ -959,7 +972,7 @@ Feature: Iceberg emission
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (user_id I64, action STRING, attempts U16, readings <readings_type>);
-      CREATE CODEC notification_codec FROM JSON TO SCHEMA notification
+      CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_ingress CONFIG {
@@ -1094,8 +1107,8 @@ Feature: Iceberg emission
         user_id integer,
         action string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -1193,8 +1206,8 @@ Feature: Iceberg emission
         user_id integer,
         action string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -1279,8 +1292,8 @@ Feature: Iceberg emission
         user_id integer,
         action string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -1361,8 +1374,8 @@ Feature: Iceberg emission
         user_id integer,
         action string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -1445,8 +1458,8 @@ Feature: Iceberg emission
         user_id integer,
         action string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -1529,7 +1542,7 @@ Feature: Iceberg emission
       """
       CREATE SCHEMA notification (user_id I64, action STRING);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-memory-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
@@ -1601,7 +1614,7 @@ Feature: Iceberg emission
       """
       CREATE SCHEMA notification (user_id I64, action STRING);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-encrypted-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
@@ -1773,7 +1786,7 @@ Feature: Iceberg emission
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA large_message (value I64, message STRING);
       CREATE WIRE JSON SCHEMA large_message_wire MODE STRICT (value integer, message string);
-      CREATE CODEC large_message_codec FROM WIRE JSON SCHEMA large_message_wire TO SCHEMA large_message;
+      CREATE WIRE JSON CODEC large_message_codec FROM WIRE SCHEMA large_message_wire TO SCHEMA large_message;
       CREATE RELAY large_messages SCHEMA large_message UNBRANCHED;
       CREATE VHOST edge iceberg-oversized-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT large_messages_endpoint ON edge PATH '/messages';

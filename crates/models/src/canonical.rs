@@ -10,10 +10,12 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+mod emitter_payload;
 mod entity_presentation;
 
-use std::{fmt::Display, num::NonZeroU64};
+use std::{borrow::Cow, fmt::Display, num::NonZeroU64};
 
+pub use emitter_payload::{EmitterPayloadContainer, EmitterPayloadPresentation};
 pub use entity_presentation::EntityPresentation;
 pub(crate) use entity_presentation::{request_headers_to_plexus, upgrade_headers_to_plexus};
 use error_stack::Report;
@@ -1692,27 +1694,27 @@ fn jaq_program_list_to_plexus(programs: &[String]) -> String {
 impl<Version: Display> CreateCodec<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = Vec::new();
-        let transformations = match &self.wire_format {
+        let (head, transformations) = match &self.wire_format {
             CodecWireFormat::Json { wire_schema } => {
                 clauses.push(Clause::line(format!(
-                    "FROM WIRE JSON SCHEMA {}",
+                    "FROM WIRE SCHEMA {}",
                     wire_schema.as_str()
                 )));
-                String::new()
+                (Cow::Borrowed("WIRE JSON"), String::new())
             }
             CodecWireFormat::Cbor { wire_schema } => {
                 clauses.push(Clause::line(format!(
-                    "FROM WIRE CBOR SCHEMA {}",
+                    "FROM WIRE SCHEMA {}",
                     wire_schema.as_str()
                 )));
-                String::new()
+                (Cow::Borrowed("WIRE CBOR"), String::new())
             }
             CodecWireFormat::Avro { wire_schema } => {
                 clauses.push(Clause::line(format!(
-                    "FROM WIRE AVRO SCHEMA {}",
+                    "FROM WIRE SCHEMA {}",
                     wire_schema.as_str()
                 )));
-                String::new()
+                (Cow::Borrowed("WIRE AVRO"), String::new())
             }
             CodecWireFormat::Syslog => {
                 if !self.encoding_rules.is_empty() {
@@ -1720,20 +1722,23 @@ impl<Version: Display> CreateCodec<Version> {
                         codec: self.name.clone(),
                     }));
                 }
-                clauses.push(Clause::line("FROM SYSLOG"));
-                String::new()
+                (Cow::Borrowed("SYSLOG"), String::new())
             }
             CodecWireFormat::JaqNative {
                 format,
                 transformations,
             } => {
-                clauses.push(Clause::line(format!("FROM {}", format.as_ref())));
-                codec_jaq_transformations_to_plexus(&self.name, transformations)?
+                let transformations =
+                    codec_jaq_transformations_to_plexus(&self.name, transformations)?;
+                (
+                    Cow::Owned(format!("JAQ {}", format.as_ref())),
+                    transformations,
+                )
             }
             CodecWireFormat::Protobuf(config) => {
                 // The configuration map is a block of its own; the messages follow it on one line.
                 clauses.push(Clause::line(format!(
-                    "FROM PROTOBUF USING RESOURCE {} VERSION {}",
+                    "USING RESOURCE {} VERSION {}",
                     config.resource.as_str(),
                     config.resource_version,
                 )));
@@ -1749,7 +1754,9 @@ impl<Version: Display> CreateCodec<Version> {
                     "MESSAGE {}{batch_message}",
                     string_literal(&config.message)
                 )));
-                codec_jaq_transformations_to_plexus(&self.name, &config.transformations)?
+                let transformations =
+                    codec_jaq_transformations_to_plexus(&self.name, &config.transformations)?;
+                (Cow::Borrowed("PROTOBUF"), transformations)
             }
         };
         let encoding_rules = if self.encoding_rules.is_empty() {
@@ -1773,7 +1780,7 @@ impl<Version: Display> CreateCodec<Version> {
         }
 
         Ok(clause_statement(
-            format!("CREATE CODEC {}", self.name.as_str()),
+            format!("CREATE {head} CODEC {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -4115,7 +4122,8 @@ mod tests {
         };
         assert_eq!(
             codec.to_canonical_plexus().expect("must render"),
-            "CREATE CODEC orders_codec\n  FROM WIRE JSON SCHEMA orders_wire\n  TO SCHEMA orders;"
+            "CREATE WIRE JSON CODEC orders_codec\n  FROM WIRE SCHEMA orders_wire\n  TO SCHEMA \
+             orders;"
         );
 
         let syslog_codec: CreateCodec = CreateCodec {
@@ -4126,7 +4134,7 @@ mod tests {
         };
         assert_eq!(
             syslog_codec.to_canonical_plexus().expect("must render"),
-            "CREATE CODEC syslog_codec\n  FROM SYSLOG\n  TO SCHEMA syslog_event;"
+            "CREATE SYSLOG CODEC syslog_codec\n  TO SCHEMA syslog_event;"
         );
 
         let codec_with_encoding: CreateCodec = CreateCodec {
@@ -4144,7 +4152,8 @@ mod tests {
             codec_with_encoding
                 .to_canonical_plexus()
                 .expect("must render"),
-            "CREATE CODEC orders_codec\n  FROM WIRE JSON SCHEMA orders_wire\n  TO SCHEMA orders\n  ENCODE created_at AS RFC3339;"
+            "CREATE WIRE JSON CODEC orders_codec\n  FROM WIRE SCHEMA orders_wire\n  TO SCHEMA \
+             orders\n  ENCODE created_at AS RFC3339;"
         );
 
         let codec_with_jaq: CreateCodec = CreateCodec {
@@ -4162,8 +4171,8 @@ mod tests {
         };
         assert_eq!(
             codec_with_jaq.to_canonical_plexus().expect("must render"),
-            "CREATE CODEC orders_codec\n  FROM JSON\n  TO SCHEMA orders\n  WITH JAQ \
-             TRANSFORMATIONS ON INGESTION '.payload' ON EMITTING '{payload: .}';"
+            "CREATE JAQ JSON CODEC orders_codec\n  TO SCHEMA orders\n  WITH JAQ TRANSFORMATIONS \
+             ON INGESTION '.payload' ON EMITTING '{payload: .}';"
         );
 
         let ingestion_codec: CreateCodec = CreateCodec {
@@ -4181,7 +4190,7 @@ mod tests {
         };
         assert_eq!(
             ingestion_codec.to_canonical_plexus().expect("must render"),
-            "CREATE CODEC orders_ingestion\n  FROM JSON\n  TO SCHEMA orders\n  WITH JAQ \
+            "CREATE JAQ JSON CODEC orders_ingestion\n  TO SCHEMA orders\n  WITH JAQ \
              TRANSFORMATIONS ON INGESTION '.payload';"
         );
 
@@ -4200,8 +4209,8 @@ mod tests {
         };
         assert_eq!(
             cbor_codec.to_canonical_plexus().expect("must render"),
-            "CREATE CODEC orders_cbor\n  FROM CBOR\n  TO SCHEMA orders\n  WITH JAQ \
-             TRANSFORMATIONS ON INGESTION '.' ON EMITTING '.';"
+            "CREATE JAQ CBOR CODEC orders_cbor\n  TO SCHEMA orders\n  WITH JAQ TRANSFORMATIONS ON \
+             INGESTION '.' ON EMITTING '.';"
         );
 
         let protobuf_codec: CreateCodec = CreateCodec {
@@ -4226,7 +4235,7 @@ mod tests {
         };
         assert_eq!(
             protobuf_codec.to_canonical_plexus().expect("must render"),
-            "CREATE CODEC orders_proto\n  FROM PROTOBUF USING RESOURCE proto_bundle VERSION 3\n  \
+            "CREATE PROTOBUF CODEC orders_proto\n  USING RESOURCE proto_bundle VERSION 3\n  \
              CONFIG {\n    'file' = 'order.proto'\n  }\n  MESSAGE 'nervix.test.Order'\n  TO \
              SCHEMA orders\n  WITH JAQ TRANSFORMATIONS ON INGESTION '.payload' ON EMITTING \
              '{payload: .}';"
@@ -4253,7 +4262,7 @@ mod tests {
             batching_protobuf_codec
                 .to_canonical_plexus()
                 .expect("must render"),
-            "CREATE CODEC orders_proto\n  FROM PROTOBUF USING RESOURCE proto_bundle VERSION 3\n  \
+            "CREATE PROTOBUF CODEC orders_proto\n  USING RESOURCE proto_bundle VERSION 3\n  \
              CONFIG {}\n  MESSAGE 'nervix.test.Order' BATCH MESSAGE 'nervix.test.OrderBatch'\n  \
              TO SCHEMA orders\n  WITH JAQ TRANSFORMATIONS ON EMITTING '{payload: .}' ON EMITTING \
              BATCH '{orders: .}';"

@@ -189,7 +189,7 @@ Feature: Web console backup and restore
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
-      CREATE CODEC zip_code_entry_codec FROM WIRE JSON SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
+      CREATE WIRE JSON CODEC zip_code_entry_codec FROM WIRE SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
       CREATE HASH MAP zip_codes_by_zip KEY zip FROM RESOURCE zip_codes VERSION 1 PATH 'lookup.jsonl' DECODE USING zip_code_entry_codec;
       """
     Then the current leader node is saved as placeholder "leader"
@@ -326,7 +326,7 @@ Feature: Web console backup and restore
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( tenant STRING, latency I64 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( tenant string, latency integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA metric_summary ( tenant STRING, samples I64, latency_p0 F64 OPTIONAL );
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;

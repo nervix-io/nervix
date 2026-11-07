@@ -27,8 +27,7 @@ Feature: Protobuf codec
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM PROTOBUF
+        CREATE PROTOBUF CODEC notification_codec
         USING RESOURCE proto_bundle VERSION 1
         CONFIG {'file' = 'notification.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Notification'
@@ -90,9 +89,8 @@ Feature: Protobuf codec
       """
       CREATE SCHEMA reading ( sensor I64, level F64, levels <levels_type> );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( sensor integer, level number, levels array );
-      CREATE CODEC exact_reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
-      CREATE CODEC transforming_reading_codec
-        FROM PROTOBUF
+      CREATE WIRE JSON CODEC exact_reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
+      CREATE PROTOBUF CODEC transforming_reading_codec
         USING RESOURCE proto_bundle VERSION 1
         CONFIG {'file' = 'reading.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Reading'

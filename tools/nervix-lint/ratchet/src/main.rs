@@ -1,5 +1,5 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: the analysis-runner and Cargo-workspace-wrapper command boundary.
+//! Owns: the analysis, gate, audit and Cargo-workspace-wrapper command boundary.
 //! Depends on: the ratchet library and command-line parsing.
 //! Must not know: compiler internals or product graph execution.
 
@@ -18,6 +18,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Operation {
     Analyze(nervix_ratchet::matrix::Analyze),
+    Audit(nervix_ratchet::audit::Options),
     PrepareContracts(nervix_ratchet::contracts::PrepareContracts),
     QualifyCache(nervix_ratchet::cache::QualifyCache),
     Gate(nervix_ratchet::gate::Options),
@@ -32,8 +33,8 @@ fn main() -> anyhow::Result<()> {
             Some(Entry::Explicit)
         }
         Some(
-            "analyze" | "prepare-contracts" | "qualify-cache" | "gate" | "crap" | "--help" | "-h"
-            | "help" | "--version" | "-V",
+            "analyze" | "audit" | "prepare-contracts" | "qualify-cache" | "gate" | "crap"
+            | "--help" | "-h" | "help" | "--version" | "-V",
         )
         | None => None,
         // Cargo supplies the actual rustc path as the first wrapper argument. A wrapper path
@@ -47,6 +48,13 @@ fn main() -> anyhow::Result<()> {
         }
     } else {
         match Cli::parse().command {
+            Operation::Audit(options) => match options.run() {
+                Ok(()) => Ok(0),
+                Err(error) => {
+                    eprintln!("lint audit: {error:#}");
+                    Ok(1)
+                }
+            },
             Operation::Analyze(options) => options
                 .run()
                 .map(|_| 0)

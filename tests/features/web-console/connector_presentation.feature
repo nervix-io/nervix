@@ -134,7 +134,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (seq I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE WEBSOCKETS CLIENT reader CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       """
@@ -194,7 +194,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (seq I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = 'amqp://127.0.0.1:5672' };
       """
