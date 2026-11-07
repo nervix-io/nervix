@@ -2142,3 +2142,7 @@ mod tests;
 #[cfg(test)]
 #[path = "connector_pulsar_tests.rs"]
 mod pulsar_tests;
+
+#[cfg(test)]
+#[path = "connector_syslog_tests.rs"]
+mod syslog_tests;
