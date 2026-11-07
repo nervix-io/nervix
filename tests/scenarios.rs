@@ -4837,6 +4837,11 @@ fn client_probe_target(
         websocket_uri: websocket_uri.to_string(),
         username: TEST_AUTH_USERNAME.to_string(),
         password: TEST_AUTH_PASSWORD.to_string(),
+        ca_pem: (world.cluster_config.grpc_mode == InternalTransportMode::Https).then(|| {
+            std::fs::read_to_string(workspace_root().join("tls/dev/ca.pem"))
+                .expect("the conformance fixture CA exists")
+        }),
+        seed_uri: None,
         domain: world.domain.clone(),
         execution_reference: Uuid::now_v7().to_string(),
         exercise,
@@ -4910,6 +4915,56 @@ async fn when_client_probe_subscribes(
         .placeholders
         .insert("client_probe_redirect_report".to_string(), redirect_report);
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
+}
+
+#[when(
+    expr = "the {string} client probe connects through a seed after its first gRPC address is \
+            unavailable"
+)]
+async fn when_client_probe_connects_through_seed(world: &mut ScenarioWorld, runtime: String) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a binding probe runtime");
+    let node_id = "node-1";
+    let mut target = client_probe_target(world, node_id, ProbeExercise::Connection);
+    target.seed_uri = Some(target.grpc_uri.clone());
+    let scheme = if world.cluster_config.grpc_mode == InternalTransportMode::Https {
+        "https"
+    } else {
+        "http"
+    };
+    target.grpc_uri = format!("{scheme}://127.0.0.1:1");
+    start_client_probe(world, runtime, node_id, target, "CONNECTED seed").await;
+}
+
+#[when(
+    expr = "the {string} client probe subscribes for restoration through the forwarded gRPC \
+            endpoint of node {string}"
+)]
+async fn when_client_probe_subscribes_for_restoration(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a binding probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let forwarded = world
+        .placeholders
+        .get("forwarded_grpc")
+        .verified("a preceding step forwarded the node's gRPC endpoint")
+        .clone();
+    let mut target = client_probe_target(
+        world,
+        &node_id,
+        ProbeExercise::Restoration {
+            relay: "watched".to_string(),
+            subscription: "watching".to_string(),
+        },
+    );
+    target.grpc_uri = forwarded;
+    start_client_probe(world, runtime, &node_id, target, "SUBSCRIBED").await;
 }
 
 /// Starts a probe that follows the domain's clock through the TCP forwarder a preceding step stood

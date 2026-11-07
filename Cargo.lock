@@ -6843,6 +6843,7 @@ dependencies = [
  "nervix-primitives",
  "serde_json",
  "tonic 0.13.1",
+ "url",
  "uuid",
 ]
 

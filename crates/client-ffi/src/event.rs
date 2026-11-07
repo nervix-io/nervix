@@ -1,5 +1,7 @@
 //! `nx_event`: a subscription event a host holds, and bulk access to the rows it carries.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** The shared ownership of an event a host retains and releases, and the calls that
 //!   copy a column into memory the host passes or borrow one value from the frame.
 //! - **Depends on.** The shared event, the schema handle and the C ABI boundary.
@@ -49,6 +51,48 @@ pub unsafe extern "C" fn nx_event_subscription(
 pub unsafe extern "C" fn nx_event_row_count(event: *const Event) -> u64 {
     // SAFETY: the header requires a live event.
     unsafe { abi::accessor(event) }.row_count()
+}
+
+/// # Safety
+///
+/// `event` is live; `message` and `message_len` are writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_event_restoration_message(
+    event: *const Event,
+    message: *mut *const u8,
+    message_len: *mut usize,
+) -> *mut Failure {
+    // SAFETY: the caller guarantees a live event and writable out-parameters.
+    abi::outcome((|| unsafe {
+        abi::require_out(message, "message")?;
+        abi::require_out(message_len, "message_len")?;
+        let value = abi::handle(event, "event")?.restoration_message()?;
+        abi::write_bytes(message, message_len, value.as_bytes());
+        Ok(())
+    })())
+}
+
+/// # Safety
+///
+/// `event` is live; `retry_after_nanos` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_event_restoration_retry_after(
+    event: *const Event,
+    retry_after_nanos: *mut u64,
+) -> *mut Failure {
+    // SAFETY: the caller guarantees a live event and a writable out-parameter.
+    abi::outcome((|| unsafe {
+        abi::require_out(retry_after_nanos, "retry_after_nanos")?;
+        let value = abi::handle(event, "event")?.restoration_retry_after()?;
+        let nanos = u64::try_from(value.as_nanos()).map_err(|_| {
+            Failure::new(
+                nervix_client_host::FailureKind::Protocol,
+                "restoration wait exceeds u64 nanoseconds",
+            )
+        })?;
+        abi::write(retry_after_nanos, nanos);
+        Ok(())
+    })())
 }
 
 /// # Safety
