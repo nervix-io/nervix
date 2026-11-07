@@ -355,6 +355,7 @@ where
 struct DeclaredEmitter {
     name: EmitterName,
     from: ProcessorInputs,
+    mode: AckMode,
     materialized_state: Vec<MaterializedStateDependency>,
     destination: ParsedDestination<EmitterEntity>,
 }
@@ -372,13 +373,15 @@ where
         .ignore_then(emitter_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(ack_mode().or_not())
         .then(materialized_state_dependencies())
         .then_ignore(kw(Identifier::To))
         .then(with_batch::<S, _>(definition))
         .map(
-            |(((name, from), materialized_state), parsed)| DeclaredEmitter {
+            |((((name, from), mode), materialized_state), parsed)| DeclaredEmitter {
                 name,
                 from,
+                mode: mode.unwrap_or_default(),
                 materialized_state,
                 destination: ParsedDestination {
                     destination: parsed.destination.into(),
@@ -397,14 +400,13 @@ pub fn create_emitter_parser<'src>()
 {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then(declared_creation())
         .then(flush_each())
         .then(message_error_policy())
         .then(general_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
-            |(((((if_not_exists, mode), declared), flush_policy), message), general)| {
+            |((((if_not_exists, declared), flush_policy), message), general)| {
                 let parsed = declared.destination;
                 CreateStatement::new(
                     CreateEmitter {
@@ -416,7 +418,7 @@ pub fn create_emitter_parser<'src>()
                         envelope: Box::new(parsed.envelope),
                         batch: parsed.batch,
                         construction: parsed.construction.unwrap_or_default(),
-                        mode: mode.unwrap_or(AckMode::Attached),
+                        mode: declared.mode,
                         flush_policy,
                         error_policies: ErrorPolicies { message, general },
                     },

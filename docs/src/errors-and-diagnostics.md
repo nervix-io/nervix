@@ -24,6 +24,13 @@ private-key role; malformed PEM and key mismatch retain the material owner's typ
 contents. The [Client Session Protocol](client-session-protocol.md#native-grpc) owns the TLS
 listener's startup and rotation contract.
 
+Interconnect TLS construction retains `nervix-crypto`'s `InterconnectAlgorithmError`, including the
+exact cipher suite or key exchange group, beneath `TlsConfigError::AlgorithmPolicy`. This checks
+the fixed algorithm set without claiming FIPS module validation. Handshake refusals remain typed
+rustls failures. Ed25519 key preparation and signing retain AWS-LC's typed cause beneath the
+cryptography context; the NATS owner adds its configuration context or hands the complete report
+to the driver's authentication callback error, without rendering credentials.
+
 Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
 client/domain context. The server's changed-model binding validation runs connector-owned offline
 checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed

@@ -38,8 +38,9 @@ Feature: Clause keywords written inside expressions
       """
     Then the last command output contains
       """
-      CREATE ATTACHED JUNCTION peak_readings
+      CREATE JUNCTION peak_readings
         FROM sensors WHERE max(input.readings) > 10
+        ATTACHED
         UNBRANCHED
         TO peaks
           INHERIT ALL
@@ -52,9 +53,10 @@ Feature: Clause keywords written inside expressions
       """
     Then the last command output contains
       """
-      CREATE ATTACHED CORRELATOR suffix_matches
+      CREATE CORRELATOR suffix_matches
         LEFT FROM sensors WHERE right(left.name, 2) = 'ab'
         RIGHT FROM labels
+        ATTACHED
         CORRELATE WHERE left.id = right.id
         MATCH EARLIEST
         MAX TIME 5s
@@ -71,16 +73,18 @@ Feature: Clause keywords written inside expressions
       """
       DROP JUNCTION peak_readings;
       DROP CORRELATOR suffix_matches;
-      CREATE ATTACHED JUNCTION peak_readings
+      CREATE JUNCTION peak_readings
         FROM sensors WHERE max(input.readings) > 10
+        ATTACHED
         UNBRANCHED
         TO peaks
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE ATTACHED CORRELATOR suffix_matches
+      CREATE CORRELATOR suffix_matches
         LEFT FROM sensors WHERE right(left.name, 2) = 'ab'
         RIGHT FROM labels
+        ATTACHED
         CORRELATE WHERE left.id = right.id
         MATCH EARLIEST
         MAX TIME 5s
@@ -140,8 +144,9 @@ Feature: Clause keywords written inside expressions
       """
     Then the last command output contains
       """
-      CREATE ATTACHED DEDUPLICATOR distinct_peaks
+      CREATE DEDUPLICATOR distinct_peaks
         FROM sensors
+        ATTACHED
         DEDUPLICATE ON coalesce(max(input.readings), 0)
         MAX TIME 10m
         UNBRANCHED
@@ -156,8 +161,9 @@ Feature: Clause keywords written inside expressions
       """
     Then the last command output contains
       """
-      CREATE ATTACHED REORDERER peaks_in_order
+      CREATE REORDERER peaks_in_order
         FROM sensors
+        ATTACHED
         BY coalesce(max(input.readings), 0)
         MAX TIME 10s
         UNBRANCHED
@@ -175,8 +181,9 @@ Feature: Clause keywords written inside expressions
       """
     Then the last command output contains
       """
-      CREATE DETACHED JUNCTION peak_readings
+      CREATE JUNCTION peak_readings
         FROM sensors
+        DETACHED
         FILTER WHERE concat(input.name, replace(input.name, 'a', 'b')) != ''
         UNBRANCHED
         TO peaks

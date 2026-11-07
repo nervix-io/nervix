@@ -87,6 +87,16 @@ needs. These cases start no CLI, paced simulation or Python driver, so the recip
 those tools. Its arguments reach the scenario runner unchanged, such as `--name`, `--concurrency`
 and `--retry`. Broad `just test-scenarios` and CI keep their complete tool prerequisites.
 
+## Focused Acknowledgement Clause Scenarios
+
+`just test-acknowledgement-clauses` runs the one- and three-node examples in
+`tests/features/runtime/acknowledgement_clause.feature` through the ordinary harness, with four
+run slots and no retries. It verifies each processor/emitter family's `SHOW CREATE` body mode,
+the junction's `DESCRIBE` and `ALTER SET ATTACHED` contract, and real resource bindings for
+inferencers and WASM processors. The recipe prepares the ONNX fixtures/runtime, WASM guests,
+console assets and test CLI used for resource uploads. Additional arguments reach the ordinary
+runner unchanged; broad scenario and CI runs retain their full prerequisites.
+
 ## Delayed Consensus Heartbeat Answers
 
 The leader-lease regression uses a testing-only control on each follower's consensus probe. The

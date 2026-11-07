@@ -17,7 +17,7 @@
 
 use std::{collections::BTreeSet, io, net::IpAddr, path::Path};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     ClusterNodeName, PrerequisiteTimings, RaftLogDurability, TrustRootFingerprint,
@@ -26,7 +26,6 @@ use nervix_primitives::sync::StdArc;
 use percent_encoding::percent_decode_str;
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
-    crypto::CryptoProvider,
     pki_types::{CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
 };
@@ -236,7 +235,7 @@ impl TlsConfigBundle {
         key_path: impl AsRef<Path>,
         clock: TransportClock,
     ) -> Result<Self, Report<TlsConfigError>> {
-        super::install_rustls_crypto_provider();
+        nervix_crypto::tls::install_default_provider();
 
         let ca_certs = load_certificates(ca_cert_path.as_ref(), TlsPemFileKind::CaCertificate)?;
         let cert_chain = load_certificates(cert_path.as_ref(), TlsPemFileKind::NodeCertificate)?;
@@ -262,7 +261,7 @@ impl TlsConfigBundle {
         key_pem: &[u8],
         clock: TransportClock,
     ) -> Result<Self, Report<TlsConfigError>> {
-        super::install_rustls_crypto_provider();
+        nervix_crypto::tls::install_default_provider();
 
         let ca_certs = load_certificates_from_pem(ca_cert_pem, TlsPemFileKind::CaCertificate)?;
         let cert_chain = load_certificates_from_pem(cert_pem, TlsPemFileKind::NodeCertificate)?;
@@ -288,8 +287,8 @@ impl TlsConfigBundle {
         for cert in ca_certs {
             roots.add(cert).map_err(TlsConfigError::from)?;
         }
-        let crypto = CryptoProvider::get_default()
-            .verified("every public constructor installs the process crypto provider first");
+        let crypto = nervix_crypto::tls::interconnect_provider()
+            .change_context(TlsConfigError::AlgorithmPolicy)?;
 
         let mut client_config =
             ClientConfig::builder_with_details(StdArc::clone(crypto), clock.provider())

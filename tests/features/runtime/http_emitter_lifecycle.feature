@@ -36,7 +36,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -114,7 +115,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -191,7 +193,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'POST' PATH '/coded'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         INHERIT id INVOKE write_header('X-Mode', 'coded')
@@ -264,7 +267,8 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'GET' PATH '/refused'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         INHERIT id
@@ -281,7 +285,8 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'DELETE' PATH '/refused'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -309,7 +314,8 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'DELETE' PATH '/empty'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING optional_codec
         INVOKE write_header('X-Mode', 'replacement')
@@ -492,7 +498,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'POST' PATH concat('/events/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -550,7 +557,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'POST' PATH concat('/events/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -612,7 +620,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO first_api METHOD 'POST' PATH concat('/first/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

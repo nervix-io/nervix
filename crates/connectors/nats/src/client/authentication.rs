@@ -2,10 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** NATS user identity selection and the driver auth callback.
-//! - **Depends on.** AWS-LC signing, maintained NKey/credentials codecs and primitive shared ownership.
+//! - **Depends on.** The cryptography boundary, maintained NKey/credentials codecs and primitive ownership.
 //! - **Must not know.** Models, graph routing, connector lifecycle or TLS policy.
-//!
-//! AWS-LC signing moves to `nervix-crypto` when that boundary is established (FIPS Prep 02).
 
 #![cfg_attr(
     nervix_lint,
@@ -13,9 +11,9 @@
 )]
 
 use async_nats::{Auth, AuthError, ConnectOptions, auth_utils::UserCredentials};
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
+use nervix_crypto::ed25519::Ed25519SigningKey;
 use nervix_primitives::sync::StdArc;
 use nkeys_codec::{KeyPairType, error::ErrorKind};
 use thiserror::Error;
@@ -37,7 +35,7 @@ pub(super) enum NatsAuthenticationError {
 }
 
 struct SigningIdentity {
-    key: Ed25519KeyPair,
+    key: Ed25519SigningKey,
     public: String,
 }
 
@@ -45,13 +43,12 @@ impl SigningIdentity {
     fn from_seed(seed: &str) -> Result<Self, Report<NatsAuthenticationError>> {
         let raw =
             nkeys_codec::decode_seed_for(seed, KeyPairType::User).map_err(Self::seed_error)?;
-        let key = Ed25519KeyPair::from_seed_unchecked(raw.as_ref())
+        let key = Ed25519SigningKey::from_seed(raw.as_ref())
             .change_context(NatsAuthenticationError::SigningKey)?;
         let public = key
             .public_key()
-            .as_ref()
             .try_into()
-            .assured("an AWS-LC Ed25519 public key has exactly 32 bytes");
+            .assured("the cryptography boundary returns a 32-byte Ed25519 public key");
         let public = nkeys_codec::encode(&KeyPairType::User, public);
         Ok(Self { key, public })
     }
@@ -98,13 +95,13 @@ impl AuthenticationIdentity {
                 (signer, auth)
             }
         };
-        // AuthError is the driver's required callback result. Its opaque AWS-LC cause has no
-        // credential material; decoding and file failures retain their typed reports above it.
+        // AuthError is the driver's required callback result. Preserve the boundary's typed
+        // signing report, which contains no credential material.
         auth.signature = Some(
             signer
                 .key
-                .try_sign(nonce)
-                .map_err(AuthError::new)?
+                .sign(nonce)
+                .map_err(|error| AuthError::new(error.into_error()))?
                 .as_ref()
                 .to_vec(),
         );

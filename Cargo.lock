@@ -6802,6 +6802,7 @@ dependencies = [
  "indexmap 2.14.2",
  "meticulous",
  "nervix-client-wire",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -6809,7 +6810,6 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "nervix-test-environment",
- "rustls",
  "serde",
  "serde_json",
  "shuttle",
@@ -6960,6 +6960,7 @@ dependencies = [
  "error-stack",
  "humantime",
  "meticulous",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-execution",
  "nervix-model-harness",
@@ -7039,6 +7040,7 @@ dependencies = [
  "hyper-util",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-models",
  "nervix-primitives",
@@ -7209,7 +7211,6 @@ version = "0.1.0-dev"
 dependencies = [
  "async-nats",
  "async-trait",
- "aws-lc-rs",
  "bolero",
  "bytes",
  "crc",
@@ -7219,6 +7220,7 @@ dependencies = [
  "meticulous",
  "nervix-arbitrary",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
@@ -7345,6 +7347,7 @@ dependencies = [
  "lapin",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7425,6 +7428,7 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7455,6 +7459,7 @@ dependencies = [
  "memchr",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7555,6 +7560,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-crypto"
+version = "0.1.0-dev"
+dependencies = [
+ "aws-lc-rs",
+ "error-stack",
+ "meticulous",
+ "nervix-primitives",
+ "nervix-recovery",
+ "rustls",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nervix-dataflow-graph"
 version = "0.1.0-dev"
 dependencies = [
@@ -7601,6 +7619,7 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.2",
  "meticulous",
+ "nervix-crypto",
  "nervix-primitives",
  "nervix-test-environment",
  "reqwest 0.12.28",
@@ -7664,6 +7683,7 @@ dependencies = [
  "imbl",
  "meticulous",
  "nervix-arbitrary",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-execution",
  "nervix-model-harness",
@@ -7969,6 +7989,7 @@ dependencies = [
  "nervix-client-wire",
  "nervix-connector-kafka",
  "nervix-consensus",
+ "nervix-crypto",
  "nervix-deadlock",
  "nervix-dns",
  "nervix-execution",
@@ -8093,6 +8114,7 @@ dependencies = [
  "nervix-connector-websockets",
  "nervix-connector-zeromq",
  "nervix-consensus",
+ "nervix-crypto",
  "nervix-dataflow-graph",
  "nervix-deadlock",
  "nervix-dns",
