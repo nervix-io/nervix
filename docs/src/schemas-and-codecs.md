@@ -249,7 +249,8 @@ ALTER SCHEMA notification
 DROP CODEC notification_codec;
 CREATE CODEC notification_codec
   FROM WIRE JSON SCHEMA notification_wire
-  TO SCHEMA notification;
+  TO SCHEMA notification
+  ENCODE created_at AS RFC3339;
 COMMIT;
 ```
 
@@ -274,16 +275,9 @@ that they must be recreated against the current schema.
 
 ## Codecs
 
-A codec maps one transport payload format to one internal schema.
-
-```plexus
-CREATE IF NOT EXISTS CODEC notification_codec
-  FROM WIRE JSON SCHEMA notification_wire
-  TO SCHEMA notification;
-```
-
-Schemaful codecs are type-strict. A JSON `string` wire field does not implicitly decode
-into an internal `DATETIME` field. Declare the wire conversion explicitly:
+A codec maps one transport payload format to one internal schema. Schemaful codecs are
+type-strict: a JSON `string` wire field does not implicitly decode into an internal `DATETIME`
+field, so the codec declares the wire conversion explicitly:
 
 ```plexus
 CREATE IF NOT EXISTS CODEC notification_codec
