@@ -1548,7 +1548,7 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
-      # The thirty-nine probe scenarios took 18 seconds in Check run 42325403607, and the two host
+      # The forty-seven probe scenarios took 17 seconds in Check run 42325403607, and the two host
       # suite scenarios, which start first, bound their runners at ten minutes. A short budget leaves
       # the builds before them up to 40 minutes of the job limit instead of the suite job's 25.
       NERVIX_TEST_SUITE_BUDGET: "15m"

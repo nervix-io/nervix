@@ -3515,8 +3515,8 @@ The step that reads the run waits for the runner to end, for the duration the st
 longer than 600 seconds, so a suite that stops making progress fails with its own report inside the
 `client-conformance` job's 15-minute suite budget. A whole tier of tests that each open their own
 sessions over TLS fits that bound: the Python cluster tier took up to 471 seconds on a development
-host where every committed command took about ten seconds, and the job ran its thirty-nine probe
-scenarios in 18 seconds in Check run 42325403607. A suite's own waits are its tests' `Cancel`
+host where every committed command took about ten seconds, and the job ran its forty-seven probe
+scenarios in 17 seconds in Check run 42325403607. A suite's own waits are its tests' `Cancel`
 deadlines, of 120 seconds for anything the cluster does. Each example declares `@long_running`,
 because a cluster tier runs for minutes, so it starts beside the probes rather than after them, and
 weighs one slot: its runner and cluster use no more CPU while they run than a probe and its cluster.

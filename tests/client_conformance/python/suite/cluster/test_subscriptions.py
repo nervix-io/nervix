@@ -242,7 +242,7 @@ def test_a_relay_redefined_while_the_session_was_lost_ends_the_subscription(
         # The relay comes back under its name, announcing another schema.
         completed(session, f"DROP RELAY {redefined};")
         completed(session, f"CREATE SCHEMA other_{unique} ( value I64 );")
-        completed(session, f"CREATE RELAY {redefined} SCHEMA other_{unique};")
+        completed(session, f"CREATE RELAY {redefined} SCHEMA other_{unique} UNBRANCHED;")
         relay.restore()
         event = watching.next_event(cancel=deadline())
         assert event.kind == nx.EventKind.ENDED
