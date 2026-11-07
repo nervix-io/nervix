@@ -20,7 +20,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge explicit-keys-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM intake MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -91,7 +91,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge keyed-batches-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM intake MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -143,7 +143,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge explicit-partitions-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM intake MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -199,7 +199,7 @@ Feature: Explicit emitter record keys and destination partitions
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge key-routing-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM intake MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -250,8 +250,8 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE RELAY first_events SCHEMA event BRANCHED BY tenant_source;
       CREATE RELAY second_events SCHEMA event BRANCHED BY location_source;
       CREATE VHOST edge source-destinations-{{test_id}}.example.com;
-      CREATE ENDPOINT first_intake ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT second_intake ON edge PATH '/b' TYPE HTTP;
+      CREATE HTTP ENDPOINT first_intake ON edge PATH '/a';
+      CREATE HTTP ENDPOINT second_intake ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR first_source FROM first_intake MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO first_events INHERIT ALL BRANCHED BY tenant_source SET tenant = message.tenant
@@ -404,8 +404,8 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE RELAY first_events SCHEMA event BRANCHED BY tenant_source;
       CREATE RELAY second_events SCHEMA event BRANCHED BY location_source;
       CREATE VHOST edge explicit-group-{{test_id}}.example.com;
-      CREATE ENDPOINT first_intake ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT second_intake ON edge PATH '/b' TYPE HTTP;
+      CREATE HTTP ENDPOINT first_intake ON edge PATH '/a';
+      CREATE HTTP ENDPOINT second_intake ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR first_source FROM first_intake MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO first_events INHERIT ALL BRANCHED BY tenant_source SET tenant = message.tenant

@@ -36,10 +36,9 @@ Feature: Branched branch behavior
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/notifications'
-        TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR ingestor_notifications
+        PATH '/notifications'; CREATE HTTP ENDPOINT INGESTOR ingestor_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -95,10 +94,9 @@ Feature: Branched branch behavior
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -179,10 +177,9 @@ Feature: Branched branch behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/metrics'
-        TYPE HTTP;
+        PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -255,14 +252,12 @@ Feature: Branched branch behavior
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress_one
+        CREATE HTTP ENDPOINT ingress_one
         ON edge
-        PATH '/ingest-a'
-        TYPE HTTP;
-        CREATE ENDPOINT ingress_two
+        PATH '/ingest-a';
+        CREATE HTTP ENDPOINT ingress_two
         ON edge
-        PATH '/ingest-b'
-        TYPE HTTP;
+        PATH '/ingest-b';
         CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -342,10 +337,9 @@ Feature: Branched branch behavior
         CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

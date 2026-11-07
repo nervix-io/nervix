@@ -50,7 +50,7 @@ Reuse the vhost from [HTTP Ingestion](./quickstart-http-ingestion.md) with a sec
 ```plexus
 CREATE RELAY partner_orders SCHEMA order_record UNBRANCHED;
 
-CREATE ENDPOINT partner_ingress ON edge PATH '/partner-orders' TYPE HTTP;
+CREATE HTTP ENDPOINT partner_ingress ON edge PATH '/partner-orders';
 
 CREATE HTTP ENDPOINT INGESTOR partner_order_source
   FROM partner_ingress MODE NO ACK

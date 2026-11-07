@@ -165,9 +165,9 @@ impl EndpointIntakeStartPlan {
             ));
         };
         if let EndpointRequestPlan::Ack { retry_after, .. } = &mode
-            && route.endpoint_type == EndpointType::Websockets
+            && route.kind.endpoint_type() == EndpointType::Websockets
         {
-            let Some(protocol) = &route.signaling_protocol else {
+            let Some(protocol) = route.kind.signaling_protocol() else {
                 return Err(ingestor.connector_start_failure(
                     IngestorConnectorStartError::EndpointAcknowledgementProtocolMissing {
                         endpoint,
@@ -370,8 +370,7 @@ pub(super) mod tests {
                             name: endpoint.clone(),
                             on_vhost: vhost,
                             path: "/events".to_string(),
-                            endpoint_type: EndpointType::Http,
-                            signaling_protocol: None,
+                            kind: nervix_models::EndpointKind::Http,
                         })),
                         scheduled_model(Model::Ingestor(CreateIngestor {
                             name: ingestor.clone(),

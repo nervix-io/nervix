@@ -38,10 +38,13 @@ fn key(host: u8, path: u8) -> HttpRouteKey {
 }
 
 fn endpoint(endpoint_type: EndpointType) -> RoutedEndpoint {
-    RoutedEndpoint {
-        endpoint_type,
-        signaling_protocol: None,
-    }
+    let kind = match endpoint_type {
+        EndpointType::Http => nervix_models::EndpointKind::Http,
+        EndpointType::Websockets => nervix_models::EndpointKind::Websockets {
+            signaling_protocol: None,
+        },
+    };
+    RoutedEndpoint { kind }
 }
 
 fn intakes(route: &EndpointIntakeRoute<usize>) -> Vec<usize> {
@@ -273,8 +276,9 @@ fn a_retained_route_keeps_its_selected_signaling_allocation() {
         vec![(
             key.clone(),
             RoutedEndpoint {
-                endpoint_type: EndpointType::Websockets,
-                signaling_protocol: Some(protocol.clone()),
+                kind: nervix_models::EndpointKind::Websockets {
+                    signaling_protocol: Some(protocol.clone()),
+                },
             },
         )],
     );

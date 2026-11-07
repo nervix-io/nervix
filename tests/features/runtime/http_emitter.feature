@@ -430,7 +430,7 @@ Feature: HTTP REQUEST emitter
         TO SCHEMA event_body;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
@@ -526,7 +526,7 @@ Feature: HTTP REQUEST emitter
         TO SCHEMA outbound_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
@@ -594,7 +594,7 @@ Feature: HTTP REQUEST emitter
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -673,7 +673,7 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -809,7 +809,7 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -912,7 +912,7 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -1023,8 +1023,8 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT routes_ingress ON edge PATH '/routes' TYPE HTTP;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT routes_ingress ON edge PATH '/routes';
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR routes_ingestor
         FROM routes_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
@@ -1143,7 +1143,7 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -1415,7 +1415,7 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -1525,7 +1525,7 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event BRANCHED BY by_tenant;
       CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -1625,8 +1625,8 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY source_b SCHEMA outbound_event BRANCHED BY by_tenant;
       CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
+      CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR from_a
         FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -1766,7 +1766,7 @@ Feature: HTTP REQUEST emitter
         WITH JAQ TRANSFORMATIONS ON EMITTING '. + {encoded_at: now}';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -1844,8 +1844,8 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT routes_ingress ON edge PATH '/routes' TYPE HTTP;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT routes_ingress ON edge PATH '/routes';
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR routes_ingestor
         FROM routes_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
@@ -1953,7 +1953,7 @@ Feature: HTTP REQUEST emitter
       CREATE CODEC account_body_codec FROM WIRE JSON SCHEMA account_body_wire TO SCHEMA account_body;
       CREATE RELAY accounts SCHEMA account_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT accounts_ingress ON edge PATH '/accounts' TYPE HTTP;
+      CREATE HTTP ENDPOINT accounts_ingress ON edge PATH '/accounts';
       CREATE HTTP ENDPOINT INGESTOR accounts_ingestor
         FROM accounts_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING account_events_codec

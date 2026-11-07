@@ -19,9 +19,9 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecName, CodecProtobufConfig,
     CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, DomainName, EndpointName,
-    EndpointType, Model, RelayName, ResolvedBranching, ResolvedCodecWireFormat, ResourceId,
-    ScheduledNodes, SchemaName, SignalingProtocolName, SignalingProtocolOnConnect,
-    SignalingWireFormat, VhostName, WireSchemaLookup, WireSchemaName, parse_duration_text,
+    Model, RelayName, ResolvedBranching, ResolvedCodecWireFormat, ResourceId, ScheduledNodes,
+    SchemaName, SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat, VhostName,
+    WireSchemaLookup, WireSchemaName, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -163,8 +163,7 @@ pub(crate) struct PlannedEndpoint {
     pub(crate) name: EndpointName,
     pub(crate) path: String,
     pub(crate) hostnames: Vec<String>,
-    pub(crate) endpoint_type: EndpointType,
-    pub(crate) signaling_protocol: Option<SignalingProtocolName>,
+    pub(crate) kind: nervix_models::EndpointKind,
 }
 
 /// One pure decision for all surfaces a domain installs on a live node. The same plan is valid
@@ -312,7 +311,7 @@ impl DomainActivationPlan {
                             vhost: endpoint.on_vhost.clone(),
                         })
                     })?;
-                    if let Some(protocol) = endpoint.signaling_protocol.as_ref()
+                    if let Some(protocol) = endpoint.kind.signaling_protocol()
                         && !plan.signaling_protocols.contains_key(protocol)
                     {
                         return Err(Report::new(
@@ -332,8 +331,7 @@ impl DomainActivationPlan {
                                 .iter()
                                 .map(|host| host.to_ascii_lowercase())
                                 .collect(),
-                            endpoint_type: endpoint.endpoint_type,
-                            signaling_protocol: endpoint.signaling_protocol.clone(),
+                            kind: endpoint.kind.clone(),
                         },
                     );
                 }
@@ -540,8 +538,9 @@ mod tests {
                 name: named("receive"),
                 on_vhost: named("edge"),
                 path: "/ingest".to_string(),
-                endpoint_type: EndpointType::Websockets,
-                signaling_protocol: Some(named("handshake")),
+                kind: nervix_models::EndpointKind::Websockets {
+                    signaling_protocol: Some(named("handshake")),
+                },
             }),
         ]);
         let branched_node = scheduled
@@ -600,8 +599,10 @@ mod tests {
             vec!["api.example.com".to_string()]
         );
         assert_eq!(
-            plan.endpoints["receive"].signaling_protocol,
-            Some(named("handshake"))
+            plan.endpoints["receive"].kind,
+            nervix_models::EndpointKind::Websockets {
+                signaling_protocol: Some(named("handshake"))
+            }
         );
         assert_eq!(
             plan.vhosts["edge"].tls,
@@ -715,8 +716,7 @@ mod tests {
             name: named("receive"),
             on_vhost: named("missing"),
             path: "/ingest".to_string(),
-            endpoint_type: EndpointType::Http,
-            signaling_protocol: None,
+            kind: nervix_models::EndpointKind::Http,
         })]);
         let error = DomainActivationPlan::from_scheduled_nodes(&domain, &endpoint_nodes)
             .expect_err("the endpoint VHOST is required");
@@ -735,8 +735,9 @@ mod tests {
                 name: named("receive"),
                 on_vhost: named("edge"),
                 path: "/ingest".to_string(),
-                endpoint_type: EndpointType::Websockets,
-                signaling_protocol: Some(named("missing")),
+                kind: nervix_models::EndpointKind::Websockets {
+                    signaling_protocol: Some(named("missing")),
+                },
             }),
         ]);
         let error = DomainActivationPlan::from_scheduled_nodes(&domain, &endpoint_nodes)

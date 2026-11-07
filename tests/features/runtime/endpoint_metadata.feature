@@ -27,7 +27,7 @@ Feature: Endpoint request metadata
       CREATE RELAY tenant_requests SCHEMA request_event UNBRANCHED;
       CREATE RELAY other_requests SCHEMA request_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-metadata.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       """
     When these Plexus statements are executed
       """
@@ -84,7 +84,7 @@ Feature: Endpoint request metadata
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY tenant_events SCHEMA tenant_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-header.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       """
     When these Plexus statements are executed
       """
@@ -122,7 +122,7 @@ Feature: Endpoint request metadata
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY tenant_events SCHEMA tenant_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-invalid-header.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       """
     When these Plexus statements are executed
       """
@@ -172,7 +172,7 @@ Feature: Endpoint request metadata
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY requests SCHEMA request_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-acknowledged.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       """
     When these Plexus statements are executed
       """
@@ -224,8 +224,7 @@ Feature: Endpoint request metadata
       CREATE VHOST edge ws-{{test_id}}-metadata.example.com;
       CREATE SIGNALING PROTOCOL greeting FORMAT JSON
         ON CONNECT ACCEPT DATA SEND JAQ '{"ready":true}' WAIT JAQ '.ready == true' TIMEOUT 30s;
-      CREATE ENDPOINT stream ON edge PATH '/stream'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL greeting;
+      CREATE WEBSOCKETS ENDPOINT stream ON edge PATH '/stream' WITH SIGNALING PROTOCOL greeting;
       """
     When these Plexus statements are executed
       """
@@ -296,7 +295,7 @@ Feature: Endpoint request metadata
       CREATE CODEC event_codec_v2 FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY requests SCHEMA request_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-buffered.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR buffered_in
         FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO requests

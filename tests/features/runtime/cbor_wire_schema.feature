@@ -23,7 +23,7 @@ Feature: CBOR wire schemas use CBOR values
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge cbor-wire-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

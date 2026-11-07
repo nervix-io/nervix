@@ -302,7 +302,7 @@ declare_names! {
     VhostName => Allowed,
     /// A branch declared with `CREATE BRANCH`.
     BranchName => Allowed,
-    /// A listening endpoint declared with `CREATE ENDPOINT`.
+    /// A listening endpoint declared with `CREATE HTTP ENDPOINT` or `CREATE WEBSOCKETS ENDPOINT`.
     EndpointName => Allowed,
     /// A signaling protocol declared with `CREATE SIGNALING PROTOCOL`.
     SignalingProtocolName => Allowed,

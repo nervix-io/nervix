@@ -70,7 +70,7 @@ Feature: Web console visual relay and subscription creation
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR notifications_ingestor FROM notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -136,7 +136,7 @@ Feature: Web console visual relay and subscription creation
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -189,7 +189,7 @@ Feature: Web console visual relay and subscription creation
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -229,7 +229,7 @@ Feature: Web console visual relay and subscription creation
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR notifications_ingestor FROM notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """

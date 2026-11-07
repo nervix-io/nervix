@@ -39,10 +39,13 @@ fn key(path: &str) -> HttpRouteKey {
 }
 
 fn endpoint(endpoint_type: EndpointType) -> RoutedEndpoint {
-    RoutedEndpoint {
-        endpoint_type,
-        signaling_protocol: None,
-    }
+    let kind = match endpoint_type {
+        EndpointType::Http => nervix_models::EndpointKind::Http,
+        EndpointType::Websockets => nervix_models::EndpointKind::Websockets {
+            signaling_protocol: None,
+        },
+    };
+    RoutedEndpoint { kind }
 }
 
 fn publication_keeps_every_route_of_a_domain_in_one_revision() {

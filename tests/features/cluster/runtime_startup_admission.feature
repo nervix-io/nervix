@@ -34,10 +34,9 @@ Feature: Runtime startup admission
       CREATE RELAY admission_output SCHEMA admission_event UNBRANCHED;
 
       CREATE VHOST admission_edge http-admission-{{test_id}}.example.com;
-      CREATE ENDPOINT admission_ingress
+      CREATE HTTP ENDPOINT admission_ingress
         ON admission_edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
 
       CREATE HTTP ENDPOINT INGESTOR admission_ingestor
         FROM admission_ingress MODE NO ACK
