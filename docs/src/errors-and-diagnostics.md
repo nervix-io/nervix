@@ -667,9 +667,10 @@ the codec and field when one is known and never attach the rejected payload valu
 
 Registry validation checks each `ENCODE` rule against its internal field and declared wire
 representation. `RFC3339` applies to datetime text, and `BASE64` to byte text in JSON or AVRO
-strings; an AVRO native `bytes` field accepts no rule. A refusal names the codec and field, including
-unknown fields, duplicate rules and incompatible types. Canonical base64 decoding retains the typed
-binary-builder failure beneath the codec's field context without including the encoded input.
+strings; a CBOR or AVRO native `bytes` field accepts no rule. A refusal names the codec and field,
+including unknown fields, duplicate rules and incompatible types. Canonical base64 decoding retains
+the typed binary-builder failure beneath the codec's field context without including the encoded
+input.
 
 Codec jaq transformations are compiled during registry validation for every declared direction.
 A syntax error names the codec, domain, and direction and rejects the transaction before the model
