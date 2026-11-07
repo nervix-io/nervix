@@ -88,6 +88,18 @@ mutually authenticated TLS 1.3 and HTTP/2. The listener is independent of Raft l
 placement, so every live node can receive every class of interconnect operation. TLS provides
 confidentiality and integrity as well as peer authentication.
 
+The provider comes from `nervix-crypto`, independently of the outward TLS process default. Its
+fixed set is TLS 1.3 AES-256-GCM/SHA-384 and AES-128-GCM/SHA-256, with P-256, P-384 and
+X25519MLKEM768 key exchange, in the pinned AWS-LC provider's relative preference order. Each
+client/server bundle checks this membership at construction; a policy failure retains its typed
+cause beneath the TLS configuration error. A peer offering only ChaCha20 or standalone X25519
+fails the rustls handshake. [Cryptography](cryptography.md#algorithm-policy) owns the algorithm
+classification and distinguishes this preparation from a validated FIPS build.
+
+This TLS restriction permits a rolling restart with the preceding full AWS-LC algorithm set:
+both sides offer AES-GCM and P-256. The independent interconnect wire fingerprint and cluster join
+requirements still apply. Outward session and connector TLS keep their existing algorithms.
+
 Cluster discovery supplies the current node identity, incarnation, and advertised endpoint for each
 peer. A bootstrap seed, configured or recovered, is the exception: the initiating node knows the
 endpoint before it knows the remote node identifier, then obtains and authenticates that identifier

@@ -58,8 +58,9 @@ consumer acknowledged the reading's output. Its batches never mix sensors, becau
 never combines concrete branches:
 
 ```plexus
-CREATE ATTACHED CLIENT CONSUMER EMITTER observed_readings
+CREATE CLIENT CONSUMER EMITTER observed_readings
   FROM readings
+  ATTACHED
   TO SCHEMA observed_reading
     MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
   INHERIT ALL

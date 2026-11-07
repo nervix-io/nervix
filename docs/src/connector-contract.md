@@ -125,6 +125,12 @@ connector crate.
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
 URLs, resource mounts, and physical time. It must not name the registry, runtime, relays, branches, schedules, or a driver.
+TLS provider selection belongs to `nervix-crypto`. Shared connector TLS uses its outward process
+default, keeping the full AWS-LC algorithms and a provider installed by an embedding host. SQS
+projects the boundary's typed outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher
+filtering. The interconnect has an independent fixed provider, so its algorithm restrictions do not
+change connector TLS. [Cryptography](cryptography.md#algorithm-policy) owns this policy; connectors
+still own trust roots, identities and protocol negotiation.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
@@ -989,6 +995,13 @@ composed head and canonical rendering use the vocabulary's connector kind; a con
 that same head. Pool bounds, when declared, precede the optional resource mount. WebSocket
 signaling precedes its mount. This syntax does not change which layer interprets configuration or
 how clients connect, pool or execute.
+
+Emitter heads name the connector and entity: `CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> EMITTER
+<name>`. The shared input grammar owns the optional `ATTACHED | DETACHED` body clause after the
+complete relay list and its optional `COLLECT FOR`, before materialized-state dependencies and
+`TO`. Its default is `AckMode::default()` (`ATTACHED`); canonical rendering writes it explicitly
+there. This input acknowledgement contract is separate from each entity's declared publishing
+`MODE`, and its Model field, plan interpretation and runtime completion point keep the same meaning.
 
 Client keys are lowercase and case-sensitive. The pure registry refuses unknown, repeated,
 missing-required or mistyped Nervix-owned keys, mutually exclusive keys and incomplete TLS

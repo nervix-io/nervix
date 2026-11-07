@@ -44,8 +44,9 @@ An emitter defines:
 Every Plexus emitter names its connector and entity before `EMITTER`:
 
 ```plexus,ignore
-CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] <CONNECTOR> <ENTITY> EMITTER <name>
+CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> EMITTER <name>
   FROM <relays> [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
+  [ATTACHED | DETACHED]
   TO <reference> [<LOCATOR> '<external name>'] [<entity options>]
     MODE <entity publishing policy>
     <ENCODE USING codec | VALUES {...} | WITHOUT BODY>
@@ -66,6 +67,11 @@ Nervix resolves S3, GCS or Azure Blob from that client's kind. Its `NAMESPACE`, 
 `COMMIT EACH` options precede `MODE`. OTEL metrics retain `METRIC '<name>' UNIT ...` before
 `MODE`; `VALUES`, `ATTRIBUTES`, `RESOURCE` and `SCOPE` form their payload section after it.
 Database conflict clauses follow `VALUES`.
+
+The optional input acknowledgement clause follows the complete `FROM` list and its collection
+policy, before materialized-state dependencies and `TO`. Omitting it selects `ATTACHED`.
+Canonical Plexus and `SHOW CREATE EMITTER` always write the mode explicitly in that position.
+`ALTER <CONNECTOR> <ENTITY> EMITTER ... SET ATTACHED | SET DETACHED` changes the same input contract.
 
 External locators are string literals and retain their exact spelling, including case. Each
 entity validates its own name: Kafka and Pulsar topics, RabbitMQ and SQS queues, RabbitMQ
@@ -391,8 +397,9 @@ CREATE HTTP CLIENT api CONFIG {
   'timeout_ms' = 5000
 };
 
-CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
+CREATE HTTP REQUEST EMITTER deliver_event
   FROM outgoing
+  ATTACHED
   TO api
     METHOD input.request_method
     PATH input.request_path

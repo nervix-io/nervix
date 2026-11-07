@@ -234,7 +234,7 @@ fn amqps_address(port: u16) -> String {
 
 #[nervix_primitives::test]
 async fn amqps_connections_present_the_client_identity_their_broker_requires() {
-    nervix_connector::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let authority = Authority::issue();
     let listener = loopback_listener(broker_address()).await;
@@ -275,7 +275,7 @@ async fn amqps_connections_present_the_client_identity_their_broker_requires() {
 
 #[nervix_primitives::test]
 async fn amqps_connections_without_an_identity_present_no_certificate() {
-    nervix_connector::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let authority = Authority::issue();
     let listener = loopback_listener(broker_address()).await;
@@ -415,7 +415,7 @@ async fn client_identity_files_that_cannot_be_presented_are_configuration_failur
 
 #[nervix_primitives::test]
 async fn a_broker_that_requires_a_client_certificate_refuses_a_connection_that_presents_none() {
-    nervix_connector::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let authority = Authority::issue();
     let listener = loopback_listener(broker_address()).await;
@@ -484,7 +484,7 @@ async fn a_client_identity_missing_its_certificate_or_key_is_a_configuration_fai
 #[nervix_primitives::test]
 async fn a_broker_certificate_the_client_does_not_trust_fails_the_handshake_rather_than_a_refusal()
 {
-    nervix_connector::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let broker_authority = Authority::issue();
     let client_authority = Authority::issue();
@@ -526,7 +526,7 @@ async fn a_broker_certificate_the_client_does_not_trust_fails_the_handshake_rath
 
 #[nervix_primitives::test]
 async fn a_tls12_broker_that_requires_a_client_certificate_refuses_the_handshake() {
-    nervix_connector::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let authority = Authority::issue();
     let listener = loopback_listener(broker_address()).await;

@@ -35,8 +35,9 @@ Feature: Altering deduplicators and reorderers
       """
     Then the last command output contains
       """
-      CREATE DETACHED DEDUPLICATOR dedup_events
+      CREATE DEDUPLICATOR dedup_events
         FROM incoming_a, incoming_b WHERE input.key > 0 COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        DETACHED
         FILTER WHERE input.alternate > 0
         DEDUPLICATE ON input.alternate, input.key
         MAX TIME 20m
@@ -93,8 +94,9 @@ Feature: Altering deduplicators and reorderers
       """
     Then the last command output contains
       """
-      CREATE DETACHED REORDERER order_events
+      CREATE REORDERER order_events
         FROM incoming_a, incoming_b WHERE input.primary_key > 0 COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        DETACHED
         FILTER WHERE input.secondary_key > 0
         BY input.secondary_key, input.primary_key
         MAX TIME 20m
