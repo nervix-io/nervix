@@ -24,7 +24,10 @@ use nervix_client_core::{
     DomainClockTickObservation, DomainName, PacedDomainClock,
 };
 
-use crate::failure::{Failure, FailureKind};
+use crate::{
+    event::RestorationCause,
+    failure::{Failure, FailureKind},
+};
 
 /// What a domain clock event reports, with its stable values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +172,19 @@ impl ClockEvent {
             | DomainClockEvent::Ticked(_)
             | DomainClockEvent::Interrupted(_)
             | DomainClockEvent::RestorationFailed(_) => Err(self.carries_no("end reason")),
+        }
+    }
+
+    /// Why the attempt a restoration failure reports attached nothing.
+    pub fn restoration_cause(&self) -> Result<RestorationCause, Failure> {
+        match &self.event {
+            DomainClockEvent::RestorationFailed(failure) => {
+                Ok(RestorationCause::from(failure.cause))
+            }
+            DomainClockEvent::Observed(_)
+            | DomainClockEvent::Ticked(_)
+            | DomainClockEvent::Ended(_)
+            | DomainClockEvent::Interrupted(_) => Err(self.carries_no("restoration cause")),
         }
     }
 

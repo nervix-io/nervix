@@ -227,13 +227,14 @@ impl ClockEvent {
         }
     }
 
-    /// The refusal of a restoration the server refused, or `None` for every other event.
+    /// The refusal of a restoration the server refused for now, or `None` for every other event.
     #[getter]
     fn restoration_failure(&self) -> Option<RestorationFailure> {
         let DomainClockEvent::RestorationFailed(failure) = self.event.domain_clock_event() else {
             return None;
         };
         Some(RestorationFailure::new(
+            host::RestorationCause::from(failure.cause),
             &failure.message,
             failure.retry_after,
         ))

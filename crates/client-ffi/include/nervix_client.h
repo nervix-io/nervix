@@ -208,18 +208,49 @@ typedef enum nx_event_kind {
     NX_EVENT_DELIVERY_LOST = 2,
     /* Rows were skipped and the subscription stays open; `nx_event_row_count` is how many. */
     NX_EVENT_ROWS_SKIPPED = 3,
-    /* The server ended the subscription's generation, because its relay was redefined or removed.
-       It is the generation's last event, and the session never opens the generation again. */
+    /* The server ended the subscription's generation, because its relay was redefined or removed,
+       or a new session refused to open it again for the same reason; `nx_event_end_reason`
+       tells which. It is the generation's last event, and the session never opens the
+       generation again. */
     NX_EVENT_ENDED = 4,
     /* The session was lost, leaving a gap before the subscription is restored. */
     NX_EVENT_INTERRUPTED = 5,
     /* The session could not retain more events for this subscription. */
     NX_EVENT_CONSUMER_OVERFLOW = 6,
-    /* Reopening the interrupted subscription failed while the session stayed open. The client
-       tries again after the reported wait. An unanswered reopening ends the session
-       at its request deadline; the waiting event reader opens the next session instead. */
+    /* The session refused for now to open the interrupted subscription again, for the cause
+       `nx_event_restoration_cause` reads; the subscription stays interrupted and the session
+       tries again after the reported wait. An unanswered reopening ends the session at its
+       request deadline; the waiting event reader opens the next session instead. */
     NX_EVENT_RESTORATION_FAILED = 7
 } nx_event_kind;
+
+/* Why a subscription's generation ended. */
+typedef enum nx_end_reason {
+    /* The relay, or the domain that held it, no longer exists. */
+    NX_END_RELAY_REMOVED = 1,
+    /* The relay was redefined, so the schema the subscription announced no longer describes its
+       rows. Subscribing again reads them under the current schema. */
+    NX_END_RELAY_CHANGED = 2
+} nx_end_reason;
+
+/* Why a session refused for now to open an interrupted subscription again, or to attach an
+   interrupted clock again. A clock's restoration reports only IN_TRANSACTION, REJECTED or FAILED. */
+typedef enum nx_restoration_cause {
+    /* The session holds a transaction, which refuses session-local requests until it ends. */
+    NX_RESTORATION_IN_TRANSACTION = 1,
+    /* The server refused the subscription's statement. */
+    NX_RESTORATION_INVALID_STATEMENT = 2,
+    /* The session already holds a subscription of that name. */
+    NX_RESTORATION_NAME_IN_USE = 3,
+    /* The subscription's filter does not compile against its relay's definition. */
+    NX_RESTORATION_INVALID_FILTER = 4,
+    /* The serving node could not open the subscription now. */
+    NX_RESTORATION_UNAVAILABLE = 5,
+    /* The session rejected the request without serving it. */
+    NX_RESTORATION_REJECTED = 6,
+    /* The library could not send the request, or could not use its reply. */
+    NX_RESTORATION_FAILED = 7
+} nx_restoration_cause;
 
 /* What a domain clock event reports. */
 typedef enum nx_clock_event_kind {
@@ -237,10 +268,10 @@ typedef enum nx_clock_event_kind {
        next session, and the clock that attachment reports follows as a STATE event; changes in
        between are not reported. */
     NX_CLOCK_EVENT_INTERRUPTED = 4,
-    /* The session refused to attach the interrupted clock again; the attachment stays interrupted
-       and the session tries again later. An attach the session leaves unanswered past the request
-       timeout is not reported this way: it ends that session, and the next session attaches the
-       clock again. */
+    /* The session refused for now to attach the interrupted clock again, for the cause
+       `nx_clock_event_restoration_cause` reads; the attachment stays interrupted and the session
+       tries again later. An attach the session leaves unanswered past the request timeout is not
+       reported this way: it ends that session, and the next session attaches the clock again. */
     NX_CLOCK_EVENT_RESTORATION_FAILED = 5
 } nx_clock_event_kind;
 
@@ -564,6 +595,12 @@ void nx_event_subscription(const nx_event *event, const uint8_t **name, size_t *
 /* The rows a ROWS event carries, the rows a DELIVERY_LOST or ROWS_SKIPPED event counts, and zero
    for every other event. */
 uint64_t nx_event_row_count(const nx_event *event);
+/* Why the generation an ENDED event reports ended. Fails with NX_ERROR_TYPE for an event of
+   another kind, and with NX_ERROR_INVALID_ARGUMENT for a NULL `reason`. */
+nx_error *nx_event_end_reason(const nx_event *event, nx_end_reason *reason);
+/* Why the attempt a RESTORATION_FAILED event reports opened nothing. Fails with NX_ERROR_TYPE for
+   an event of another kind, and with NX_ERROR_INVALID_ARGUMENT for a NULL `cause`. */
+nx_error *nx_event_restoration_cause(const nx_event *event, nx_restoration_cause *cause);
 /* Only RESTORATION_FAILED carries these fields. The message is borrowed until the event is
    released; the wait is nanoseconds. Another kind returns NX_ERROR_TYPE. A missing out-parameter
    returns NX_ERROR_INVALID_ARGUMENT. */
@@ -660,6 +697,10 @@ nx_error *nx_clock_event_tick(const nx_clock_event *event, uint64_t *tick_id,
                               int64_t *serving_logical);
 /* Why the server ended the attachment an ENDED event reports. */
 nx_error *nx_clock_event_end_reason(const nx_clock_event *event, nx_clock_end_reason *reason);
+/* Why the attempt a RESTORATION_FAILED event reports attached nothing: IN_TRANSACTION, REJECTED
+   or FAILED. */
+nx_error *nx_clock_event_restoration_cause(const nx_clock_event *event,
+                                           nx_restoration_cause *cause);
 /* Adds a reference. Every reference, including the one nx_session_next_clock_event returned, is
    released once with nx_clock_event_release; the event is freed with the last one. */
 nx_clock_event *nx_clock_event_retain(nx_clock_event *event);
