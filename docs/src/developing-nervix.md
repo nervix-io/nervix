@@ -406,6 +406,15 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
+NATS authentication has a focused public entry point,
+`just test-nats-authentication --concurrency 2 --retry 0`, selecting its real-broker one- and
+three-node scenarios and preparing only the tools those scenarios need. The maintained dependency
+forks can be qualified from their source checkouts with `just test-nkeys-codec <checkout>` for the
+format-only graph, `just test-nkeys-signing <checkout>` for the default/XKey APIs, and
+`just test-nats-driver <checkout> auth_utils::tests` for borrowed credentials parsing.
+`just fmt-nkeys-codec <checkout>` formats that dependency without changing this repository's
+package selection. Ordinary Nervix connector tests exercise the immutable dependency pins.
+
 ### CI runners
 
 Each CI job's `runs-on` label picks one of three kinds of machine.

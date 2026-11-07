@@ -958,10 +958,8 @@ impl LatestSnapshotWriter {
             let placement_key = namespace.key(placement)?;
             // A periodic encode can finish after the backup's forced publication. Preserve the
             // greater revision even when storage workers complete in the opposite order.
-            if self
-                .latest_lsm(placement)?
-                .is_some_and(|current| current > lsm || require_newer && current == lsm)
-            {
+            let current_lsm = self.latest_lsm(placement)?;
+            if current_lsm.is_some_and(|current| current > lsm || require_newer && current == lsm) {
                 return Ok(false);
             }
             let entry = PersistedRuntimeStateEntry {
@@ -969,16 +967,21 @@ impl LatestSnapshotWriter {
                 payload: payload.to_vec(),
             };
             let encoded = StoredCheckpoint::Inline(entry).encode()?;
-            self.latest
-                .insert(placement_key.clone(), encoded)
-                .map_err(|cause| {
-                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
-                })?;
-            self.lsm_index
-                .insert(index_key(&placement_key, lsm), placement_key)
-                .map_err(|cause| {
-                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
-                })?;
+            let mut batch = self.db.batch();
+            batch.insert(&self.latest, placement_key.clone(), encoded);
+            if let Some(previous_lsm) = current_lsm
+                && previous_lsm != lsm
+            {
+                batch.remove(&self.lsm_index, index_key(&placement_key, previous_lsm));
+            }
+            batch.insert(
+                &self.lsm_index,
+                index_key(&placement_key, lsm),
+                placement_key,
+            );
+            batch.commit().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })?;
             Ok(true)
         })
     }
@@ -2269,6 +2272,52 @@ impl RuntimeStateStore {
         batch
             .commit()
             .map_err(|cause| Report::new(cause).change_context(RuntimePersistenceError::WriteValue))
+    }
+}
+
+/// What one domain's selected namespace holds in a runtime state store: the checkpoints it selects,
+/// one for every placement it stores, and the revision-index entries kept beside them.
+#[cfg(feature = "testing")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredRevisionIndex {
+    /// The selected checkpoints, one for every stored placement.
+    pub checkpoints: usize,
+    /// The revision-index entries beside those checkpoints.
+    pub index_entries: usize,
+}
+
+#[cfg(feature = "testing")]
+impl RuntimeStateStore {
+    /// Counts what `domain`'s selected namespace holds, reading both counts from one view.
+    pub(in crate::runtime) fn stored_revision_index(
+        &self,
+        domain: &DomainName,
+    ) -> error_stack::Result<StoredRevisionIndex, RuntimePersistenceError> {
+        let view = self.db.snapshot();
+        let namespace = backup::active_namespace(&view, &self.restore_publications, domain)?;
+        let prefix = namespace.prefix(domain);
+        let checkpoints = Self::count_keys(&view, &self.latest, &prefix)?;
+        let index_entries = Self::count_keys(&view, &self.lsm_index, &prefix)?;
+        Ok(StoredRevisionIndex {
+            checkpoints,
+            index_entries,
+        })
+    }
+
+    fn count_keys(
+        view: &fjall::Snapshot,
+        keyspace: &Keyspace,
+        prefix: &[u8],
+    ) -> error_stack::Result<usize, RuntimePersistenceError> {
+        let mut count = 0_usize;
+        for item in view.prefix(keyspace, prefix) {
+            item.key()
+                .change_context(RuntimePersistenceError::ReadValue)?;
+            count = count
+                .checked_add(1)
+                .assured("a database holds fewer keys than a usize counts");
+        }
+        Ok(count)
     }
 }
 

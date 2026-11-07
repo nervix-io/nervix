@@ -232,8 +232,11 @@ current connection, retry and deadline limits.
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
   WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`. SYSLOG is a predefined singleton wire
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
-- CBOR wire fields use exactly `integer`, `float`, `boolean`, `text`, `bytes`, or `array`. `bytes`
-  carries native CBOR byte strings; `DATETIME` binds `text` with `ENCODE field AS RFC3339`.
+- JSON wire fields use exactly `string`, `number`, `integer`, `boolean`, or `array`; CBOR fields
+  `integer`, `float`, `boolean`, `text`, `bytes`, or `array`, where `bytes` carries native CBOR byte
+  strings; AVRO fields `boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, or
+  `array<item>`. `DATETIME` binds a JSON or AVRO `string` or a CBOR `text` with `ENCODE field AS
+  RFC3339`, and AVRO `int` and `long` bind only `I32` and `I64`.
 - AVRO arrays declare their item type, `array<item>`, nested exactly as deep as the internal
   `ARRAY`/`VEC` layers, and the item binds the innermost element as a scalar field would. JSON and
   CBOR arrays stay bare; a `DATETIME` element in any format and a `BYTES` element carried as text
@@ -325,8 +328,8 @@ current connection, retry and deadline limits.
   response, is retried with the same bytes and records rather than prepared again. A batching
   Sentry emitter places its members inside one event in one envelope, and a `SYSLOG` codec places
   complete member messages in one frame's JSON-array `MSG`.
-  SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
-  only with branched input.
+  Check SQS `.fifo` queue and group-expression requirements against the
+  [SQS emitter contract](../../../../docs/src/emitters.md#sqs), including branch-field scope.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above
   that range is rejected through `ON MESSAGE ERROR` instead of being written or used as an
   `ON CONFLICT` target, so map such a column to `STRING` when the full unsigned range must reach

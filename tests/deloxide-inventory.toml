@@ -5251,6 +5251,36 @@ selections = [
 ]
 
 [[workload]]
+coverage = "Session completion pages on one and three nodes through the server's statement grammar; the assignment grammar itself takes no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.completion-unassigned"
+invariant = "Completing a parameter change offers only the parameters it has not assigned."
+invocation = "cluster-parameters"
+scenario = "Completing a parameter change offers only the parameters it has not assigned on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A named client's command is refused by the server's statement grammar on one and three nodes before admission; parsing takes no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.repeat-refusal"
+invariant = "A parameter change refuses a repeated parameter at the word that repeats it, naming the parameter."
+invocation = "cluster-parameters"
+scenario = "A parameter change refuses a repeated parameter where the repeat is written on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
 coverage = "Public native producer opens observe a raised and lowered policy while admitted credit remains attached."
 examples = 2
 feature = "tests/features/cluster/cluster_parameters.feature"

@@ -161,7 +161,7 @@ impl PreparedSqsRecord {
         // delay and the deduplication id.
         let EmitterRecord {
             id: record,
-            key: _,
+            destination: _,
             payload,
             headers: _,
             typed_headers,

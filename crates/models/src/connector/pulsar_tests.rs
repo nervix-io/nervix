@@ -24,8 +24,8 @@ use crate::{
     IngestorEntityKind,
 };
 
-/// A Pulsar producer sets exactly these two clauses per message, and its emitter declares no
-/// property.
+/// A Pulsar producer declares its key, source partition selection and message times, with no
+/// properties.
 #[test]
 fn the_topic_emitter_declares_the_event_time_and_the_delivery_time_it_writes() {
     let emit = EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic).capabilities();
@@ -33,6 +33,8 @@ fn the_topic_emitter_declares_the_event_time_and_the_delivery_time_it_writes() {
     assert_eq!(
         emit.envelope,
         &[
+            EnvelopeClauseKind::Key,
+            EnvelopeClauseKind::PartitionFromBranch,
             EnvelopeClauseKind::Timestamp,
             EnvelopeClauseKind::DeliverAfter,
         ]

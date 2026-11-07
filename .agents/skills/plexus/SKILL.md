@@ -145,6 +145,8 @@ defines each status.
 For `RESTORE`, retain the same archive bytes as well as the statement and execution reference after
 status `3`, including an invalid reply after upload. Follow the Rust client guide's
 [Restoring](https://docs.nervix.io/client-library.html#restoring) contract when recovering it.
+For browser restore recovery, read [the web console's Backup And Restore section](../../../docs/src/client-tools-web-console.md#backup-and-restore)
+before interpreting a later request failure as the result of an earlier possibly admitted restore.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
 URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
@@ -319,10 +321,10 @@ During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain avail
 Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
 for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
 selected domain. Read `Domains And Time` → `Duration Literals` for duration spelling, and
-`Node Settings` for the complete parameter set, positive duration bounds,
-existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
-belong only to the first bootstrap, including when their value equals the default. Later starts,
-including the returning bootstrap node, omit them.
+`Node Settings` for the complete parameter set, one assignment per parameter, positive duration
+bounds, existing-model cap refusals, live installation and committed-versus-running inspection.
+Seed flags belong only to the first bootstrap, including when their value equals the default.
+Later starts, including the returning bootstrap node, omit them.
 `HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect
 literal HTTP polling headers, at model creation and when a later cap is lowered.
 
@@ -452,7 +454,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Read `Schemas And Codecs` → `Wire Schemas` for each format's vocabulary and exact
   binding matrix. Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
-  datetime in a JSON or AVRO `string`, and `ENCODE <field> AS BASE64` for bytes in one.
+  datetime in a JSON or AVRO `string` or a CBOR `text`, and `ENCODE <field> AS BASE64` for bytes
+  in a JSON or AVRO `string`.
   An AVRO array names its item type (`array<long>`, `array<array<double>>`); a JSON or CBOR
   `array` is bare. A list field's `ENCODE` rule governs its innermost elements: read `List Fields`.
   Read `Value Fidelity` before relying on non-finite floats.
@@ -632,8 +635,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   protobuf export request by successful source-record count and uncompressed encoded size, and an
   OTEL request never combines records of two Arrow carriers; see
   [Emitters](../../../docs/src/emitters.md#batching).
-  For SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
-  queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
+  For Kafka/Pulsar record keys, destination partitions and SQS FIFO group expressions, read
+  [Emitters → Envelope Clauses](../../../docs/src/emitters.md#envelope-clauses) and the connector's
+  section before choosing the expression and externally provisioned topic or queue.
 - Give every client resource mount an explicit `MOUNT <resource> VERSION <u64>|LATEST` clause. Put
   database pool bounds before the mount, and keep a WebSocket client's `WITH SIGNALING PROTOCOL`
   clause before the mount. `LATEST` is resolved when the statement is applied; the stored client
