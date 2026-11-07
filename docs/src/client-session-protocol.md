@@ -1641,8 +1641,18 @@ attachment it was restoring when a new session answers it so, as it does after
 
 The CLI's `domain-clock` subcommand uses the Rust client's typed attach reply and clock event
 stream. It prints the reply and then the same state, tick, interruption, and end lines as its REPL,
-including the fresh state after the client restores an attachment. Ctrl-C sends a detach request
-before the process exits; an attach refusal exits nonzero with its typed reason.
+including the fresh state after the client restores an attachment. A read that cannot restore a
+session within one retry deadline prints the same continuation notice as the REPL and reads
+again. A permanent attachment end exits with status `0`; a terminal `SessionClosed` exits with
+status `1`. Ctrl-C detaches an attachment last reported held; while an interruption or failed
+restoration is outstanding it exits without reconnecting solely to detach. An attach refusal
+exits nonzero with its typed reason.
+
+The dedicated `subscribe` subcommand observes the completion of its existing event reader, so it
+does not compete with that reader for events. It prints the final end notice and exits with status
+`0` when the server ends its subscription, including a permanent end discovered during
+restoration. Other CLI modes keep observing unrelated subscriptions and server notices. Their
+bounded terminal queue, line limits and dropped-line notices are unchanged.
 
 ## Producers
 

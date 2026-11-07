@@ -5779,6 +5779,27 @@ async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expect
     }
 }
 
+#[then(expr = "the CLI subscription process exits successfully")]
+async fn then_cli_subscription_exits_successfully(world: &mut ScenarioWorld) {
+    let process = world
+        .cli_subscription_process
+        .as_mut()
+        .verified("the preceding step started the CLI subscription process");
+    let status = nervix_primitives::time::timeout(Duration::from_secs(10), process.wait())
+        .await
+        .unwrap_or_else(|_| {
+            panic!("the CLI subscription process did not stop after its stream ended")
+        })
+        .unwrap_or_else(|error| {
+            panic!("the CLI subscription process could not be reaped: {error}")
+        });
+    assert!(
+        status.success(),
+        "the CLI subscription process exited with {status}"
+    );
+    world.cli_subscription_process = None;
+}
+
 #[when(expr = "the CLI follows the clock of domain {string} on node {string}")]
 fn when_cli_follows_domain_clock(world: &mut ScenarioWorld, domain: String, node: String) {
     let domain = expand_placeholders(world, &domain);
