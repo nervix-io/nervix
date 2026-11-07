@@ -65,7 +65,7 @@ in:
 
 | Context | Window aggregates | `read_header`, `read_headers` | `LOOKUP_HASH_MAP` | `now()`, `uuid_v4()`, `uuid_v7()` |
 | --- | --- | --- | --- | --- |
-| Ingestor `FILTER WHERE` and route `INHERIT`, `SET`, and `WHERE` | No | On a header-capable source | Yes | Yes |
+| Ingestor `FILTER WHERE` and route `INHERIT`, `SET`, and `WHERE` | No | On a header-capable ingestor | Yes | Yes |
 | `BRANCHED BY ... SET` on ingestors and reingestors | No | No | Yes | Yes |
 | Processor `FROM ... WHERE` and `FILTER WHERE`, and the routes of junctions, deduplicators, reorderers, reingestors, inferencers, and WASM processors | No | No | Yes | Yes |
 | Window route `SET` | Yes, and only here | No | No | Yes |

@@ -879,19 +879,19 @@ For an attached acknowledgement, progress also carries a monotonic sequence and 
 remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that retains their rows. Each upstream node parks or reactivates its
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
-source or persist an acknowledgement. Admission progress carries no parked state.
+ingestor or persist an acknowledgement. Admission progress carries no parked state.
 
 Before admission the receiver reports nothing about a delivery's records: their acknowledgement
 watches start only once it has admitted them. Until then the sending node holds the records on their
-sources' behalf, so it reports them alive to their sources itself, every 100 milliseconds the
+ingestors' behalf, so it reports them alive to their ingestors itself, every 100 milliseconds the
 delivery is still under way, whether it waits for the relay's dispatch gate, its channel, the
 storage of its records, a grant or the receiver's admission. This applies to a delivery to the
 relay's owner and to one from the owner to a consumer on another node. A delivery admitted within
-its first 100 milliseconds reports nothing. A source's `ACK TIMEOUT` therefore measures how long its
+its first 100 milliseconds reports nothing. An ingestor's `ACK TIMEOUT` therefore measures how long its
 records make no progress, not how long their delivery takes to reach the next node. A record still
 on its way when that timeout would have passed is not read again and emitted twice. The bounds
 above still end a delivery: five seconds without progress, or five minutes from storing its records
-to its admission, fails it, and the source's retry takes over.
+to its admission, fails it, and the ingestor's retry takes over.
 
 Progress and terminal acknowledgements share the bounded application receive queue. The application
 keeps consuming progress while terminal delivery waits for queue capacity. The one-slot transport
@@ -918,8 +918,8 @@ registered after that run ended: a record acknowledgement whose downstream work 
 sending node restarted is the common case. Such an outcome is rejected and logged at `debug`. It
 never resolves the admission or record acknowledgement the current run holds under the same number,
 so a success reported for an earlier run can never acknowledge a record, and so commit it at its
-source, before its own delivery completed. The earlier run's entries ended with its process, and
-its sources redeliver the records they had not committed.
+ingestor, before its own delivery completed. The earlier run's entries ended with its process, and
+its ingestors redeliver the records they had not committed.
 
 A receiver issues a grant only when the admission registration names the authenticated sending
 node. Admission bookkeeping on both ends is keyed by the peer and the whole registration, so a
@@ -944,7 +944,7 @@ under load does, is neither reported to nor given up while it is missing. The re
 acknowledgement, including a terminal outcome reached meanwhile, and reports it as soon as the run
 is back. It stops only when the run has stayed missing for the registering node's fifteen-second
 silence bound and one more sweep, because by then a registering node whose run goes on has failed
-the acknowledgement itself. A shorter gap in the live view therefore costs the source neither the
+the acknowledgement itself. A shorter gap in the live view therefore costs the ingestor neither the
 acknowledgement nor a resend.
 
 The registering node therefore waits for an acknowledgement only while the receiver keeps reporting
@@ -960,17 +960,17 @@ does not fail acknowledgements whose reports it could not receive meanwhile.
 A failed acknowledgement resolves negatively exactly once. The sweep and report transitions use
 the exact delivery generation's guard, so a report that arrives first keeps the acknowledgement
 pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
-sweep nothing to fail. The source attempt fails with it and redelivers the record along the current
+sweep nothing to fail. The ingestor attempt fails with it and redelivers the record along the current
 routes, so an emitter that already completed the record can receive it again. A report or outcome that
 arrives after its acknowledgement failed finds no entry and is rejected at `debug`.
 
 Every node on a record's path applies the same bound. A relay owner that routed a record to the
-node of an attached consumer reports the record alive to the source's node for as long as the
+node of an attached consumer reports the record alive to the ingestor's node for as long as the
 record's acknowledgement tree is unresolved. Without the bound, a terminal outcome lost between the
-consumer's node and the relay owner would keep the source's acknowledgement alive, and its
+consumer's node and the relay owner would keep the ingestor's acknowledgement alive, and its
 `ACK TIMEOUT` from ever passing, for the rest of the relay owner's run. With it, the relay owner
 fails the acknowledgement fifteen seconds after the consumer's node fell silent, stops reporting
-the record, and the source's retry takes over. Each sweep that failed acknowledgements logs, at
+the record, and the ingestor's retry takes over. Each sweep that failed acknowledgements logs, at
 `warn`, one line per receiver with the number it failed.
 
 ### Bounded Correlation And Peer Owners
@@ -994,7 +994,7 @@ task; a wide frame therefore does not allocate one task per acknowledgement. Pen
 progress every 100 milliseconds, below the registrar's fifteen-second silence bound even when two
 reports each exhaust their dispatch deadline. The same cadence keeps local emitter and
 message-error acknowledgements alive while a connector request is pending, giving a one-second
-source `ACK TIMEOUT` multiple chances to observe progress. Record storage waits for room before the
+ingestor `ACK TIMEOUT` multiple chances to observe progress. Record storage waits for room before the
 delivery's body is encoded, as [Held Deliveries](#held-deliveries) describes; refusing it is typed
 and occurs before the delivery is sent. Cancellation before admission resolves every held share
 negatively and returns its position. Completion of the last record returns the delivery storage and
@@ -1005,7 +1005,7 @@ While the relay budget has no room for them, typically because the watches of ea
 still reporting their rows, the receiver holds the batch back instead of refusing it. The batch
 stays unadmitted, so the transport keeps reporting it alive and its sender keeps waiting within the
 five-second progress and five-minute total admission bounds; the sender's channel carries nothing
-else meanwhile, which pushes back on the source that fills it. The held batch keeps the reservation
+else meanwhile, which pushes back on the ingestor that fills it. The held batch keeps the reservation
 of its grant. Every 10 milliseconds the receiver reads the budget and takes the charge once it
 fits. It never waits in the budget's queue, because a place there takes every byte the class
 releases until it is satisfied, which would keep the node's other relay work, including forwarding
@@ -1111,10 +1111,10 @@ larger than the whole budget, or one still without room when the delivery's boun
 refused, as `CorrelationMemory` with the budget's typed `AdmissionError` beneath it.
 
 One five-minute bound covers the whole delivery: storing its records, holding its grant, and
-waiting for its admission. A delivery still held when the bound passes fails as before: a source in
-`MODE NO ACK` loses its rows and an acknowledged source delivers them again.
-[Source loops while a delivery is held](./connector-contract.md#source-loops-while-a-delivery-is-held)
-describes what a held delivery means for the source that produced it.
+waiting for its admission. A delivery still held when the bound passes fails as before: an ingestor in
+`MODE NO ACK` loses its rows and an acknowledged ingestor delivers them again.
+[Ingestor loops while a delivery is held](./connector-contract.md#ingestor-loops-while-a-delivery-is-held)
+describes what a held delivery means for the ingestor that produced it.
 
 A receiver keeps a granted delivery's reservation until the runtime has taken the batch in, and a
 relay owner's runtime takes a batch in only once its buffer has room. Two relay owners that fan out
@@ -1178,7 +1178,7 @@ it is still unadmitted finds the channel busy, and one that skips a position rem
 Relay attempts, grants, watermarks, admission state, and record-acknowledgement owners are in-memory
 hot-path state. A receiver process-epoch change therefore makes an unresolved delivery
 indeterminate. The transport does not replay it automatically against the new process. If the
-source's policy calls for another attempt, that attempt opens a new channel incarnation and is a new
+ingestor's policy calls for another attempt, that attempt opens a new channel incarnation and is a new
 delivery identity.
 
 ### Cancellation And Branch Changes
@@ -1207,7 +1207,7 @@ A committed forced ownership change also retires changing relay routes' precedin
 generation before the local graph installer waits for dispatch quiescence. The sender interrupts
 its admission wait and uses the same cancellation operation and five-second reconciliation budget.
 It need not wait for the fenced former owner to resume. An admitted result keeps the receiver's
-record-ACK obligation; an unconfirmed or cancelled delivery fails its held record ACKs for source
+record-ACK obligation; an unconfirmed or cancelled delivery fails its held record ACKs for ingestor
 retry, with possible replay duplicates. No transport message or automatic replay contract changes.
 The installer publishes successor routes only after completing the local swap, so another dispatch
 cannot open a fresh channel toward a preceding consumer while that fence is held.
@@ -1219,7 +1219,7 @@ swap. It acquires a dispatch permit before reading the local and remote consumer
 that permit through fan-out, attachment of the consumer ACK shares, and resolution of the owner's
 share. A swap closes the gate
 and waits for existing permits before changing those sets. If the gate is already closed when a
-buffered batch starts fan-out, the owner fails its record acknowledgements and the source retries
+buffered batch starts fan-out, the owner fails its record acknowledgements and the ingestor retries
 after the schedule changes. It cannot wait for the gate while holding that buffered batch: the
 swap's drain counts the batch, so such a wait would prevent the swap from finishing. In particular,
 an attached sibling on the old destination cannot acknowledge a batch while another attached
@@ -1237,10 +1237,10 @@ owner is unreachable.
 
 A routed batch that carries record acknowledgements and finds no attached consumer of its relay on
 the receiving node fails those acknowledgements. Its admission stands, so the transport does not
-send it again, but the owner receives a failed record acknowledgement and fails its source attempt.
-The source then redelivers the record along the owner's current routes. The receiver never reports
+send it again, but the owner receives a failed record acknowledgement and fails its ingestor attempt.
+The ingestor then redelivers the record along the owner's current routes. The receiver never reports
 an attached record acknowledged when no attached consumer took the batch, so an attached record
-cannot be committed at its source without a consumer having completed it. A batch without record
+cannot be committed at its ingestor without a consumer having completed it. A batch without record
 acknowledgements, such as a detached send, completes at admission as before.
 
 ## Membership, Consensus, And Bulk Transfer
@@ -1605,7 +1605,7 @@ and the branch lifecycle that names the branches — only after it has written t
 own stable storage and synchronized it, never on receipt. A replica that already holds the announced
 revision, or a newer one, synchronizes and acknowledges what it holds again, so an acknowledgement
 lost in transit is replaced by the next announcement instead of stranding the owner. A node without
-stable storage acknowledges nothing. The owner of a WASM processor branch releases the source
+stable storage acknowledges nothing. The owner of a WASM processor branch releases the ingestor
 acknowledgements a guest checkpoint covers only once every replica the committed schedule assigns
 has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
 install stops those acknowledgements from being released rather than letting them through, and the
@@ -2176,7 +2176,7 @@ admitted in place, so these consumers remain available until the node's own grap
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested
-record acknowledgement resolve; this includes roots created for sources in `MODE NO ACK`. Ownership
+record acknowledgement resolve; this includes roots created for ingestors in `MODE NO ACK`. Ownership
 handoff does not complete until its replication acknowledgement and committed activation have been
 observed. These owners keep admitted work visible while the supporting interconnect consumers are
 still running.
@@ -2299,7 +2299,7 @@ contract.
 ## Ingestor Instance Observation And Intake Gates
 
 An ingestor describe request carries its exact `Unit`. The receiver resolves the current owner
-for that unit and reports only its source lifetime, readiness and transient state. The control
+for that unit and reports only its ingestor lifetime, readiness and transient state. The control
 plane composes the logical description from all scheduled unit owners.
 
 Entity-gate engagement and drain-status requests carry `EntityGateTargets`: complete logical

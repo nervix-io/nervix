@@ -234,7 +234,7 @@ archive; see [Restore Streams](#restore-streams).
   domain followed by a relay `Model` reference for relay fields; domain followed by a codec
   `Model` reference for the fields of its output schema; and domain followed by a
   `Resource` reference for completed resource versions. It MUST use the distinct wire-schema
-  targets when a form requires an exact format. An ingestor source-reference target MUST carry a
+  targets when a form requires an exact format. An ingestor-reference target MUST carry a
   domain and MUST match the selected connector and entity; the `HTTP ENDPOINT` and
   `WEBSOCKETS ENDPOINT` targets return endpoints of that `TYPE`, and the others return clients of
   the pair's connector. The ingestor codec target carries a

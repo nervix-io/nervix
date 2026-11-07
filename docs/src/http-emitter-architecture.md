@@ -328,15 +328,15 @@ and the expression snapshot; it never scales HTTP timeouts, backoff, or `Retry-A
 `FLUSH IMMEDIATE` uses the existing physical minimum batching window.
 
 `ATTACHED` keeps each unresolved record's upstream ACK lease until HTTP delivery or its message
-error policy resolves it. `DETACHED` acknowledges the source at relay fan-out, but still confirms
+error policy resolves it. `DETACHED` acknowledges the ingestor at relay fan-out, but still confirms
 HTTP responses, retries unresolved requests, applies backpressure, and routes terminal errors.
-Source recovery depends on that source's own acknowledged-delivery contract. A lost final response
+Ingestor recovery depends on that ingestor's own acknowledged-delivery contract. A lost final response
 may mean the endpoint already applied the request; retrying it can duplicate the external effect.
 Nervix supplies no idempotency key. The application can send a stable event identifier, as the
 `Idempotency-Key` invocation above does, and arrange endpoint-side deduplication. A generated
-value is stable during a *local* retry because preparation is retained; source replay after a
+value is stable during a *local* retry because preparation is retained; ingestor replay after a
 restart may evaluate it again. [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery)
-defines the wider source/emitter combinations.
+defines the wider ingestor/emitter combinations.
 
 ## Errors and inspection
 
@@ -399,7 +399,7 @@ The retained `INHERIT` still initializes the codec body. A transition to `WITHOU
 removes `INHERIT`, which one `ALTER` writes as `SET TO ... WITHOUT BODY, DROP INHERIT`: the
 candidate is validated once every operation has applied. For a destination that cannot drain, the supported operational path
 is `STOP;`, change the emitter while the domain is stopped, then `START;`, after deciding how the
-source will replay unresolved work.
+ingestor will replay unresolved work.
 
 An entity pause gates intake and drains already admitted requests under their original client,
 resource binding, destination, and prepared bytes. A failed drain leaves the mutation unapplied;
@@ -407,16 +407,16 @@ it does not move pending requests to a new endpoint. `DESCRIBE TRANSACTION` repo
 scope and actual engagement under [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md).
 When a destination cannot be repaired in place, an operator can stop the domain, alter the
 stopped emitter, and start the domain again. That path discards volatile prepared attempts and
-relies on the source's replay contract; it can repeat an effect the destination already applied.
+relies on the ingestor's replay contract; it can repeat an effect the destination already applied.
 The [Control Plane](./control-plane.md) chapter owns mutation and drain decisions.
 
 Graceful node shutdown stops intake, force-flushes buffered HTTP work, and waits for eligible
 requests only within the existing physical drain deadline. Expiry or forced ending cancels an
 in-flight attempt without marking it delivered. Prepared method, target, headers, body, retry
-position, and ACK state are volatile. An attached acknowledged source can redeliver after restart;
-an unacknowledged source cannot recover a record it has lost. The
+position, and ACK state are volatile. An attached acknowledged ingestor can redeliver after restart;
+an unacknowledged ingestor cannot recover a record it has lost. The
 [Shutdown And Recovery](./shutdown.md) chapter owns stop phases, the former-owner fence, and the
-source recovery boundary; this chapter adds no alternate shutdown protocol.
+ingestor recovery boundary; this chapter adds no alternate shutdown protocol.
 
 ## Qualification and practical limits
 
@@ -446,7 +446,7 @@ The receiver assertions require at most one request awaiting a final head for on
 two relays and two branches; a fixture regression distinguishes two concurrent clients. The
 response-body scenarios require the next record to proceed while a response body stalls or holds
 32 MiB, and cancellation scenarios check abandoned connections after timeout, stop, and forced
-drain. Shuttle checks cover cancelled attempts and unresolved membership. Attached-source scenarios
+drain. Shuttle checks cover cancelled attempts and unresolved membership. Attached-ingestor scenarios
 require Kafka offsets to remain uncommitted while a request is pending. The emitter publishes no
 per-emitter memory figure, so these checks establish no fixed per-emitter memory ceiling; retained
 encoded bodies are governed by node memory pressure.
