@@ -104,7 +104,10 @@ class CalibrationTests(unittest.TestCase):
                     self.assertIn(probe["stdout"], rendered)
                     self.assertIn(probe["stderr"], rendered)
                     if probe.get("timed_out"):
-                        self.assertLess(probe["returncode"], 0)
+                        # A child may finish between the wait deadline and the group kill. The
+                        # marker records the elapsed guard; its actual exit status stays intact.
+                        self.assertGreaterEqual(probe["wall_seconds"], probe["timeout_seconds"])
+                        self.assertIsInstance(probe["returncode"], int)
                         self.assertIn(f"| {name} | wall guard elapsed |", rendered)
                     else:
                         self.assertIn(f"| {name} | exit {probe['returncode']} |", rendered)

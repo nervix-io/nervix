@@ -118,6 +118,38 @@ fn collect_locality_affinity(
     }
 }
 
+/// Affinity to the corresponding upstream unit, never to its sibling partitions.
+fn partition_locality_affinity(
+    graph: &DiGraph<ActiveNode, EdgeKind>,
+    index: NodeIndex,
+    unit: Unit,
+    assigned: &HashMap<NodeUnitRef, ClusterNodeName>,
+    visited: &mut HashSet<NodeIndex>,
+    scores: &mut HashMap<ClusterNodeName, usize>,
+) {
+    if !visited.insert(index) {
+        return;
+    }
+    for edge in graph.edges_directed(index, Direction::Incoming) {
+        if !edge.weight().is_runtime_flow_edge() && *edge.weight() != EdgeKind::MaterializedState {
+            continue;
+        }
+        let source = graph
+            .node_weight(edge.source())
+            .verified("the source belongs to this unchanged graph");
+        if is_schedulable_model(source.config.as_ref()) {
+            if let Some(node) = assigned.get(&NodeUnitRef::new(source.node_ref(), unit)) {
+                let score = scores.entry(node.clone()).or_default();
+                *score = score
+                    .checked_add(1)
+                    .assured("affinity counts graph edges held in memory");
+            }
+        } else {
+            partition_locality_affinity(graph, edge.source(), unit, assigned, visited, scores);
+        }
+    }
+}
+
 struct AssignmentPlanner<'a> {
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
     cluster_nodes: &'a [ClusterNodeName],
@@ -327,6 +359,16 @@ fn placement_affinity_scores(
     pairs: &HashMap<PlacementPair, ResolvedPlacementPair>,
     assigned_by_key: &HashMap<NodeRef, Vec<ClusterNodeName>>,
 ) -> HashMap<ClusterNodeName, isize> {
+    placement_affinity_scores_with(subject, pairs, |other| {
+        assigned_by_key.get(other).and_then(|nodes| nodes.first())
+    })
+}
+
+fn placement_affinity_scores_with<'a>(
+    subject: &NodeRef,
+    pairs: &HashMap<PlacementPair, ResolvedPlacementPair>,
+    primary: impl Fn(&NodeRef) -> Option<&'a ClusterNodeName>,
+) -> HashMap<ClusterNodeName, isize> {
     let mut scores = HashMap::<ClusterNodeName, isize>::new();
     for (pair, resolved) in pairs {
         let other = if pair.left == *subject {
@@ -341,10 +383,7 @@ fn placement_affinity_scores(
             PlacementPolicy::SuggestSeparation => -1,
             PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => continue,
         };
-        let Some(nodes) = assigned_by_key.get(other) else {
-            continue;
-        };
-        let Some(primary) = nodes.first() else {
+        let Some(primary) = primary(other) else {
             continue;
         };
         *scores.entry(primary.clone()).or_insert(0) += adjustment;
@@ -492,6 +531,7 @@ impl ActiveGraph {
         let mut next_assignment = 0usize;
         let mut node_load = HashMap::<ClusterNodeName, usize>::new();
         let mut assigned_by_key = HashMap::<NodeRef, Vec<ClusterNodeName>>::new();
+        let mut assigned_by_unit = HashMap::<NodeUnitRef, ClusterNodeName>::new();
         let mut group_assignments = HashMap::<usize, Vec<ClusterNodeName>>::new();
         let mut depth_cache = HashMap::<NodeIndex, usize>::new();
         let mut nodes = self
@@ -580,14 +620,42 @@ impl ActiveGraph {
                         #[cfg(not(feature = "testing"))]
                         planner.for_group(&members, &indices)
                     } else if units.len() > 1 {
+                        let (unit_affinity, placement_order) =
+                            if matches!(unit.kind(), nervix_models::UnitKind::Partition(_)) {
+                                let mut affinity = HashMap::new();
+                                partition_locality_affinity(
+                                    &self.graph,
+                                    index,
+                                    unit,
+                                    &assigned_by_unit,
+                                    &mut HashSet::new(),
+                                    &mut affinity,
+                                );
+                                let order = placement_affinity_scores_with(
+                                    &key,
+                                    &placement.pairs,
+                                    |other| {
+                                        assigned_by_unit
+                                            .get(&NodeUnitRef::new(other.clone(), unit))
+                                            .or_else(|| {
+                                                assigned_by_key
+                                                    .get(other)
+                                                    .and_then(|nodes| nodes.first())
+                                            })
+                                    },
+                                );
+                                (affinity, order)
+                            } else {
+                                (HashMap::new(), HashMap::new())
+                            };
                         #[cfg(feature = "testing")]
                         if let Some(random) = &random_assignment_planner {
                             random.unit_assignment(&key, position)
                         } else {
-                            planner.ranked_assignment(&HashMap::new(), &HashMap::new())
+                            planner.ranked_assignment(&unit_affinity, &placement_order)
                         }
                         #[cfg(not(feature = "testing"))]
-                        planner.ranked_assignment(&HashMap::new(), &HashMap::new())
+                        planner.ranked_assignment(&unit_affinity, &placement_order)
                     } else {
                         #[cfg(feature = "testing")]
                         if let Some(random) = &random_assignment_planner {
@@ -618,6 +686,16 @@ impl ActiveGraph {
                 &mut node_load,
                 &mut assigned_by_key,
             );
+            for (unit, assignment) in &scheduled_node.units {
+                if matches!(unit.kind(), nervix_models::UnitKind::Partition(_))
+                    && let Some(primary) = assignment.execution_node()
+                {
+                    assigned_by_unit.insert(
+                        NodeUnitRef::new(scheduled_node.identity(), *unit),
+                        primary.clone(),
+                    );
+                }
+            }
             scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
         }
         let placement_groups = unit_groups
@@ -893,6 +971,62 @@ mod tests {
             .into_iter()
             .map(|name| ClusterNodeName::parse(name).expect("valid name"))
             .collect()
+    }
+
+    #[test]
+    fn processor_partition_locality_prefers_each_upstream_primary_including_materialized_inputs() {
+        use meticulous::ResultExt as _;
+
+        let path = temp_db_path();
+        let registry = Registry::open(&path).assured("the test database is writable");
+        let domain = DomainName::parse("default").assured("the fixture name is valid");
+        let mut models = partitioned_relay_models("events", 4, true);
+        models.push(crate::registry::test_fixtures::relay_branched_by(
+            "outputs",
+            "event_schema",
+            "by_tenant",
+        ));
+        let Model::Junction(mut junction) =
+            crate::registry::test_fixtures::junction("route", &["events"], "outputs")
+        else {
+            unreachable!("the junction fixture constructs a junction");
+        };
+        junction.branched_by = nervix_models::BranchSelection::branched_by(
+            "by_tenant"
+                .try_into()
+                .assured("the fixture branch name is valid"),
+        );
+        junction
+            .materialized_state
+            .push(nervix_models::MaterializedStateDependency {
+                relay: "events"
+                    .try_into()
+                    .assured("the fixture relay name is valid"),
+                policy: nervix_models::MaterializedStatePolicy::RequiredWait,
+            });
+        models.push(Model::Junction(junction));
+        registry
+            .apply_batch(&domain, models)
+            .assured("the graph uses one exact schema and named branch");
+        let graph = registry
+            .active_graph(&domain)
+            .assured("the batch installed the graph");
+        let schedule =
+            graph.schedule_for_domain(&domain, &three_nodes(), 1, PlacementPolicy::Neutral);
+        let upstream = scheduled_node(&schedule, ModelKind::Relay, "events");
+        let processor = scheduled_node(&schedule, ModelKind::Junction, "route");
+        assert_eq!(processor.units.len(), 4);
+        for (unit, assignment) in &processor.units {
+            assert_eq!(
+                assignment.execution_node(),
+                upstream.units[unit].execution_node(),
+                "partition {unit:?} follows its primary"
+            );
+            assert_eq!(assignment.replica_nodes().len(), 1);
+        }
+        drop(graph);
+        drop(registry);
+        std::fs::remove_dir_all(path).assured("the test database is closed");
     }
 
     #[test]

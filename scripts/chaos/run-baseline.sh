@@ -54,6 +54,7 @@ Options:
                          ${fault}). backup-fault requires one of owner-crash, leader-crash,
                          owner-partition or rolling-restart, and restore-fault one of
                          leader-crash, leader-partition, owner-crash or reclamation-owner-crash.
+  --state-partitions N   Stateful fixture branch partitions: 1 or 4 (default: 1).
   --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
                          burst-loss, rate-limit, combined (default: ${degradation_profile}).
   --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
@@ -108,6 +109,8 @@ partition_option_set=false
 isolation_seconds=45
 isolation_option_set=false
 fault=none
+stateful_partitions=1
+stateful_partitions_set=false
 fault_option_set=false
 degradation_profile=all
 degradation_option_set=false
@@ -252,6 +255,12 @@ while [[ "$#" -gt 0 ]]; do
             [[ "$#" -ge 2 ]] || setup_error '--fault requires a value'
             fault="$2"
             fault_option_set=true
+            shift 2
+            ;;
+        --state-partitions)
+            [[ "$#" -ge 2 ]] || setup_error '--state-partitions requires a count'
+            stateful_partitions="$2"
+            stateful_partitions_set=true
             shift 2
             ;;
         --profile | --load-interval-ms | --baseline-seconds | --degrade-seconds | --drain-seconds | --max-backlog | --min-throughput-pct)
@@ -418,6 +427,13 @@ if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
 fi
 
 recovery_scenario=false
+if [[ "${stateful_partitions_set}" == true && "${scenario}" != stateful ]]; then
+    setup_error '--state-partitions applies only to stateful'
+fi
+case "${stateful_partitions}" in
+    1 | 4) ;;
+    *) setup_error '--state-partitions must be 1 or 4' ;;
+esac
 case "${scenario}" in
     stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) recovery_scenario=true ;;
 esac
@@ -2392,6 +2408,9 @@ fi
 domain_cli_command "${plexus_fixture}" \
     >"${artifact_dir}/public/configure-plexus.txt" 2>&1
 if [[ "${scenario}" == stateful ]]; then
+    domain_cli_command "CREATE BRANCH chaos_state_branch SCHEMA chaos_branch_key TTL 5m PARTITIONS ${stateful_partitions} MAX INSTANCES 16 EVICT LRU;" \
+        >"${artifact_dir}/public/configure-stateful-branch.txt" 2>&1
+    update_manifest '.fixtures.stateful_partitions = $count' --argjson count "${stateful_partitions}"
     domain_cli_command "$(<"${script_dir}/fixtures/stateful.plexus")" \
         >"${artifact_dir}/public/configure-stateful-plexus.txt" 2>&1
 fi

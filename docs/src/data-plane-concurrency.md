@@ -920,6 +920,37 @@ against the publish that reads its report.
 
 ### Branch processor state
 
+A partitioned processor has one supervisor and branch registry per `NodeUnitRef`. Its retained
+template names that exact unit for state, quiesce accounting and ownership freezes. Domain routing
+publishes plans under those same unit identities, while prepared engine artifacts are shared by
+the logical node. A unit move replaces only that unit's task and placement handles.
+
+Relay consumer registration publishes common consumers and fixed audiences together. A processor
+unit registers only with its input partition's audience; an emitter reading every partition keeps
+one common bounded queue. A publication counts and delivers from one snapshot containing the common
+consumers and that audience's dedicated consumers, each once, in registration order. Delivery never
+broadcasts to sibling processor units for them to filter. Audience registration and selected-unit
+drain observation use a retained registry; services hold their audience handles and delivery never
+locks that registry. Remote
+routes combine common and scoped readers per destination, preserving one encoded body and one
+delivery to each selected destination. Replacing consumer routes retires only changed units' channels.
+
+Attached delivery fixes its registration and ACK snapshot before waiting for queue capacity.
+Detached publication begins after attached admission completes and snapshots the registrations
+present at that point, so a detached consumer joining during attached backpressure receives the
+batch. Its observation count and actual publication keep separate reads of the registrations,
+preserving a consumer joining between them as well. The Shuttle check of the production owner races
+registration with that wait for whole relays, partition audiences and common consumers.
+
+Partition dispatch gates, drain observations and branch freezes select the same unit. A partition's
+transit counter also advances its relay's aggregate admission sequence, so whole-domain drains keep
+their observation ordering. Per-unit drains count dedicated audience queues; a common consumer's
+queue belongs to that consumer's lifecycle. Cancelling a publication before delivery returns every
+reservation acquired before its wait and wakes publishers that can use the returned capacity.
+A common consumer's queue survives a sibling unit's handoff. The preceding owner keeps its transit
+admission until its batches reach each local queue or complete remote runtime admission; the next
+owner's deliveries append to those same retained queues, preserving order for each concrete key.
+
 Each concrete branch has one dispatch lane and one mutable processor runtime. The lane admits one
 batch for that branch and queues later batches, which preserves processor order. Different branches
 have different runtimes and execute independently. Expiry and eviction first detach a branch from
@@ -1790,7 +1821,7 @@ win the attempt's existing admission fence before the runtime can admit it. A ca
 admission returns the admitted outcome.
 
 Relay fan-out itself uses one bounded queue per consumer. Publishers share no fan-out lock;
-capacity and receiver counts are atomic, and a publisher registers for notification only when a
+capacity is atomic and consumer registration is published as one immutable snapshot. A publisher registers for notification only when a
 consumer queue is full. A waiting publisher raises a waiting count before it reads a consumer's
 admission count, and a consumer lowers its admission count before it reads the waiting count. Both
 reach the admission count by read-modify-write, so either the publisher reads the room the consumer
@@ -1800,7 +1831,7 @@ does not stop the others, and changing capacity does not discard batches already
 A publication counts the consumers it delivers to from the same snapshot of the registered
 consumers that it delivers through. A consumer that registers meanwhile receives later publications
 only, so the acknowledgement shares a publication reserves for its attached consumers always match
-its deliveries, and a routed delivery, which holds no dispatch permit, cannot resolve a share it
+its deliveries, and a routed delivery cannot resolve a share it
 never reserved.
 
 ## Failed Authentication Pacing
@@ -3360,6 +3391,7 @@ against reports and announcements.
 | `runtime.relay-dispatch-gate.drain-wakeup` | The last dispatch to leave a closed gate wakes the fence waiting for it: either the fence's read of the count sees the dispatch gone, or the dispatch's leaving acquires that read and observes the gate closed | `loom_the_last_dispatch_to_leave_a_closed_gate_wakes_its_fence` (`src/runtime/relay_channel_loom_models.rs`); fails when `let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);` weakened to `let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::Acquire);` |
 | `runtime.relay-dispatch-gate.reopen-publication` | A dispatch that finds the gate reopened observes what the protected mutation changed while it was closed: reopening releases and the dispatch's read of the flag acquires | `loom_a_dispatch_that_finds_the_gate_reopened_observes_the_protected_change` (`src/runtime/relay_channel_loom_models.rs`); fails when `.store(!state.engagements.is_empty(), Ordering::Release);` weakened to `.store(!state.engagements.is_empty(), Ordering::Relaxed);` |
 | `runtime.relay-fanout.admission-wakeup` | A consumer that frees room a waiting publisher needs either admits it or wakes it: the publisher raises the waiting count before it reads the admission count, the consumer lowers the admission count before it reads the waiting count, and both reach the admission count by read-modify-write, so one observes the other | `loom_a_consumer_freeing_room_admits_or_wakes_the_publisher_waiting_for_it` (`src/runtime/relay_channel_loom_models.rs`); fails when `let admitted = self.admitted.fetch_add(0, Ordering::AcqRel);` weakened to `let admitted = self.admitted.load(Ordering::Acquire);` |
+| `runtime.relay-fanout.audience-ending` | A receiver published while its audience's parent ends is observed by that ending or observes the ending itself. Registration, resize and ending meet through read-modify-writes of the capacity word. The relaxed publication witness is read before joining the registering thread; ArcSwap and queue internals are opaque | `loom_an_audience_registering_as_its_parent_ends_is_seen_or_observes_the_ending` (`src/runtime/relay_channel_loom_models.rs`); fails when the registration becomes an acquire load, or the resize or ending becomes a release store |
 | `runtime.state-assignment.admission-fence` | An operation admitted under a runtime-state binding that a rebind supersedes either observes the new binding and is refused, or finishes before the rebind returns with everything it did visible to the rebinding side: the operation counts itself in before it reads the binding, the rebind publishes the binding before it reads the count, both reach the count by read-modify-write, and finishing releases what the read acquires | `loom_an_operation_admitted_under_a_superseded_binding_never_outlives_its_rebind` (`src/runtime/state_store_loom_models.rs`); fails when `while admitted.fetch_add(0, Ordering::AcqRel) != 0 {` weakened to `while admitted.load(Ordering::Acquire) != 0 {` or `.fetch_sub(1, Ordering::Release)` weakened to `.fetch_sub(1, Ordering::Relaxed)` |
 | `runtime.client-ingestor.admission-fence` | A client batch whose admission races a quiesce is either counted by the drain that follows the quiesce or refused before anything is dispatched under it: the admission tracks its root by read-modify-write before it reads the quiesce publication, the quiesce publishes before the drain reads the root counts, and the drain reads each count by read-modify-write, so one side observes the other | `loom_a_client_batch_racing_a_quiesce_is_counted_by_its_drain_or_refused` (`src/runtime/client_ingestor_loom_models.rs`); fails when `self.outstanding.fetch_add(0, Ordering::AcqRel)` weakened to `self.outstanding.load(Ordering::Acquire)` or `self.ownership_handoff_outstanding.fetch_add(0, Ordering::AcqRel)` weakened to `self.ownership_handoff_outstanding.load(Ordering::Acquire)` |
 | `runtime.local-drain.moving-batch` | A batch a node publishes into a relay while a drain observes the domain is never missing from the observation: the relay admits the batch before the node lets it go, the observation reads every relay's admission sequence before and after the node's count, and acquiring the node's release makes the admission visible to the closing read | `loom_a_batch_published_while_a_drain_observes_is_never_missing_from_it` (`src/runtime/local_drain_loom_models.rs`); fails when `self.admitted.load(Ordering::Acquire)` weakened to `self.admitted.load(Ordering::Relaxed)` |

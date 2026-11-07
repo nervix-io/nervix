@@ -73,7 +73,12 @@ publishes to the ingestor `NERVIX_PROBE_INGESTOR` names, consumes the emitter
 `A <runtime> client round-trips an operation, typed rows, an error and a closure` runs each runtime
 against a one- and a three-node cluster. The harness waits for every node to agree on the leader,
 chooses another node when one exists, and logs the leader and the probe's starting node. The
-one-node example is a direct-connection control.
+one-node example is a direct-connection control. Every runtime repeats the typed-row scenario with
+an unpartitioned branch and with four partitions: the existing `acme` and `beta` keys select
+partitions three and one. Both declarations use the same complete report
+oracle, so partition ownership changes neither the public branch identity nor any typed value.
+The report compares row lines independently of their order across concrete branches while keeping
+the operation, schema and closure lines ordered.
 
 The independent Go, Node.js and Bun probes first create an otherwise unused schema, a leader-only
 command whose completion they require before the common read operation. In a three-node example,

@@ -280,7 +280,10 @@ pub(super) async fn run_processor_node_runtime(
     let ownership_freeze = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "this task binds its exact ownership freeze publication before entering its recurring loop",
-        OwnershipHandoffFreezeWatch::new(&runtime_handle, ownership_entity.clone())
+        OwnershipHandoffFreezeWatch::for_unit(
+            &runtime_handle,
+            DomainNodeUnitRef::new(ownership_entity.clone(), template.owner.unit),
+        )
     );
     runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
     let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
@@ -293,8 +296,7 @@ pub(super) async fn run_processor_node_runtime(
     let quiesce_counters = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "task startup installs and retains the exact node quiesce counters before processing input",
-        runtime_handle
-            .node_quiesce_counters(&domain, NodeRef::new(template.owner.node.kind, &processor))
+        runtime_handle.unit_quiesce_counters(&domain, template.owner.clone())
     );
     let interaction_inputs = inputs
         .into_iter()
@@ -1109,6 +1111,7 @@ impl ProcessorWasmStateResetContext<'_> {
                 runtime.commit_wasm_state_reset_checkpoint(
                     domain,
                     &processor,
+                    template.owner.unit,
                     branch.key.clone(),
                     initial_state.clone(),
                 )
@@ -1370,10 +1373,7 @@ impl PreparedProcessorBranch {
                     routing
                         .load()
                         .processor_plans
-                        .get(&NodeRef::new(
-                            template.owner.node.kind,
-                            &template.owner.node.identifier,
-                        ))
+                        .get(&template.owner)
                         .map(|plan| plan.template.clone())
                 })
         } else {

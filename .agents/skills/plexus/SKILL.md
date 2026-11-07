@@ -519,6 +519,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
   separation policy exists. Lower `RANK` values are stronger, unranked rules are the weakest rule
   tier, and equal-rank different-policy claims conflict.
+- For partitioned processors and generators, read [Processors → Partitioned processing](../../../docs/src/processors.md#partitioned-processing)
+  and [Placement Policies](../../../docs/src/placement.md). Verify the owner and replicas of every
+  unit with `SHOW CLUSTER STATUS` or the node's `DESCRIBE`; size branch retention and buffering for
+  all declared partitions. The chapters own locality, materialized reads and whole-node relocation.
 - Treat every relay unit as scheduled work with one owner. A direct branch's `PARTITIONS n`
   gives its relay one unit per partition. `CAPACITY` bounds each unit's owner buffer, while each
   producer node and remote consumer node contributes one fixed in-flight dispatch slot. Materialized
@@ -529,8 +533,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Treat `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors as cluster-wide
   listeners and exclude them from placement members. Every other ingestor, a `WEBSOCKETS CONNECTION`
   included, keeps its existing live unit assignments across ordinary schedule recomputation.
-  Instance-capable sources can have several independent owners. Current `RELOCATE` refuses a
-  member with several execution units; automatic drain and failover preserve unit identity.
+  Instance-capable ingestors can have several independent owners. Read the Placement Policies
+  relocation section before moving a node with several units; automatic drain and failover preserve
+  unit identity.
 - Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
   chosen work onto a named cluster node. The selection is a kind-qualified list or a
   `FROM ... TO ...` corridor, hard colocation groups always move whole, and the whole unit moves in

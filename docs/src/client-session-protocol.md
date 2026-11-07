@@ -216,6 +216,12 @@ extreme values, nested lists, and every refusal of a domain clock attachment, to
 `just test-client-wire` checks that the checked-in bytes are exactly what the encoder writes, and
 `just update-client-wire-corpus` regenerates them for review.
 
+A WASM description's typed `wasm_state` contains its shared resource binding and a `units`
+collection. Each unit carries its identity, guest generations, reset readiness, recovery attempts
+and checkpoint observations. Checkpoint and recovery detail each retain a whole-processor limit
+of 128 entries; every unit reports complete counts and omitted totals. Text and JSON descriptions
+render those same facts.
+
 The registered client representation properties also compare complete generated current values
 through the production codecs. Separate targets verify malformed bytes under fixed limits; Arrow
 properties compare selected logical values and validity with decoded Row cells, using float bits

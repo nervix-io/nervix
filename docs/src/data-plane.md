@@ -75,6 +75,12 @@ become unbranched. Relays and branch-preserving processors use that exact named 
 entries remain scoped to one concrete branch; batches for those branches share the declared
 relay's owner buffer, or the buffer of the owner of their partition.
 
+A branched processor or generator has one supervisor per partition index, placed independently.
+Each supervisor owns its branch registry, buffers, state and lifecycle metrics; prepared programs
+remain shared by the logical node. A processor receives only its input partition, while common
+consumers retain one queue across partitions. Materialized dependency reads resolve the requested
+key's unit owner, and generators enumerate only their own unit's materialized rows.
+
 Structured Model expressions are compiled into typed VM programs. The leader validates them when a
 statement is applied, so invalid scopes, construction, types, nullability, sensitivity, or branch
 relationships fail at command time. Runtime nodes never reparse stored Plexus. A program executes

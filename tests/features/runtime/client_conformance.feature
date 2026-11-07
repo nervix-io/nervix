@@ -14,7 +14,9 @@ Feature: Cross-language client conformance
   JavaScript safe-integer boundary, an absent and a present-zero optional value, strings with
   multi-byte characters and an embedded NUL, bytes that are not UTF-8, empty strings and bytes,
   float sign and subnormal bits, the extreme DATETIME nanoseconds, a redacted sensitive field and
-  two interleaved concrete branches. Strings and bytes are reported as hex, floats as their bits.
+  two interleaved concrete branches, on both an unpartitioned relay and distinct units of a relay
+  with four partitions.
+  Strings and bytes are reported as hex, floats as their bits.
 
   Scenario Outline: A <runtime> client round-trips an operation, typed rows, an error and a closure
     Given a <cluster_size> node nervix cluster is started
@@ -66,7 +68,7 @@ Feature: Cross-language client conformance
         TO SCHEMA typed_row
         ENCODE at AS RFC3339, raw AS BASE64;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m <partition_clause>;
       CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant;
       CREATE VHOST edge conformance-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT typed_ingress ON edge PATH '/typed';
@@ -147,57 +149,75 @@ Feature: Cross-language client conformance
       """
 
     Examples: the C ABI in process
-      | runtime          | cluster_size |
-      | c-abi-in-process | 1            |
-      | c-abi-in-process | 3            |
+      | runtime          | cluster_size | partition_clause |
+      | c-abi-in-process | 1            |                  |
+      | c-abi-in-process | 3            |                  |
+      | c-abi-in-process | 1            | PARTITIONS 4     |
+      | c-abi-in-process | 3            | PARTITIONS 4     |
 
     @client_conformance_toolchain @client_probe_c
     Examples: C over the shared Rust binding
-      | runtime | cluster_size |
-      | c       | 1            |
-      | c       | 3            |
+      | runtime | cluster_size | partition_clause |
+      | c       | 1            |                  |
+      | c       | 3            |                  |
+      | c       | 1            | PARTITIONS 4     |
+      | c       | 3            | PARTITIONS 4     |
 
     @client_conformance_toolchain @client_probe_cpp
     Examples: C++ over the shared Rust binding
-      | runtime | cluster_size |
-      | c++     | 1            |
-      | c++     | 3            |
+      | runtime | cluster_size | partition_clause |
+      | c++     | 1            |                  |
+      | c++     | 3            |                  |
+      | c++     | 1            | PARTITIONS 4     |
+      | c++     | 3            | PARTITIONS 4     |
 
     @client_conformance_toolchain @client_probe_python
     Examples: CPython over the Python package
-      | runtime | cluster_size |
-      | python  | 1            |
-      | python  | 3            |
+      | runtime | cluster_size | partition_clause |
+      | python  | 1            |                  |
+      | python  | 3            |                  |
+      | python  | 1            | PARTITIONS 4     |
+      | python  | 3            | PARTITIONS 4     |
 
     @client_conformance_toolchain @client_probe_java
     Examples: Java 21 over the JNI library
-      | runtime | cluster_size |
-      | java    | 1            |
-      | java    | 3            |
+      | runtime | cluster_size | partition_clause |
+      | java    | 1            |                  |
+      | java    | 3            |                  |
+      | java    | 1            | PARTITIONS 4     |
+      | java    | 3            | PARTITIONS 4     |
 
     @client_conformance_toolchain @client_probe_ruby
     Examples: Ruby over the shared Rust binding
-      | runtime | cluster_size |
-      | ruby    | 1            |
-      | ruby    | 3            |
+      | runtime | cluster_size | partition_clause |
+      | ruby    | 1            |                  |
+      | ruby    | 3            |                  |
+      | ruby    | 1            | PARTITIONS 4     |
+      | ruby    | 3            | PARTITIONS 4     |
 
     @client_conformance_toolchain @client_probe_go
     Examples: an independent Go client over native gRPC
-      | runtime | cluster_size |
-      | go      | 1            |
-      | go      | 3            |
+      | runtime | cluster_size | partition_clause |
+      | go      | 1            |                  |
+      | go      | 3            |                  |
+      | go      | 1            | PARTITIONS 4     |
+      | go      | 3            | PARTITIONS 4     |
 
     @client_conformance_toolchain @client_probe_node
     Examples: an independent TypeScript client on Node.js over the binary WebSocket
-      | runtime | cluster_size |
-      | node    | 1            |
-      | node    | 3            |
+      | runtime | cluster_size | partition_clause |
+      | node    | 1            |                  |
+      | node    | 3            |                  |
+      | node    | 1            | PARTITIONS 4     |
+      | node    | 3            | PARTITIONS 4     |
 
     @client_conformance_toolchain @client_probe_bun
     Examples: the same TypeScript client on Bun
-      | runtime | cluster_size |
-      | bun     | 1            |
-      | bun     | 3            |
+      | runtime | cluster_size | partition_clause |
+      | bun     | 1            |                  |
+      | bun     | 3            |                  |
+      | bun     | 1            | PARTITIONS 4     |
+      | bun     | 3            | PARTITIONS 4     |
 
   Scenario Outline: A <runtime> C binding connects through two failed HTTPS endpoints and a live seed, and distinguishes session-local repeats from durable recovery
     Given client grpc transport is configured with mode "https"

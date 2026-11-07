@@ -930,12 +930,26 @@ pub(super) fn push_remote_runtime_consumer(
     relay: &RelayName,
     mode: AckMode,
 ) {
+    push_remote_scoped_runtime_consumer(consumers, node_id, relay, mode, None);
+}
+
+fn push_remote_scoped_runtime_consumer(
+    consumers: &mut Vec<RemoteRuntimeConsumer>,
+    node_id: &ClusterNodeName,
+    relay: &RelayName,
+    mode: AckMode,
+    unit: Option<Unit>,
+) {
     if let Some(existing) = consumers
         .iter_mut()
         .find(|consumer| consumer.node_id == node_id.clone() && consumer.relay == *relay)
     {
+        let selected = match unit {
+            Some(unit) => existing.unit_modes.entry(unit).or_insert(mode),
+            None => existing.mode.get_or_insert(mode),
+        };
         if mode == AckMode::Attached {
-            existing.mode = AckMode::Attached;
+            *selected = AckMode::Attached;
         }
         return;
     }
@@ -943,7 +957,11 @@ pub(super) fn push_remote_runtime_consumer(
     consumers.push(RemoteRuntimeConsumer {
         node_id: node_id.clone(),
         relay: relay.clone(),
-        mode,
+        mode: unit.is_none().then_some(mode),
+        unit_modes: match unit {
+            Some(unit) => BTreeMap::from([(unit, mode)]),
+            None => BTreeMap::new(),
+        },
     });
 }
 
@@ -1023,9 +1041,10 @@ impl Runtime {
     pub(in crate::runtime) async fn inject_remote_stream_boundary_message(
         &self,
         services: &RelayBoundaryServices,
+        unit: Unit,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        services.inject_remote_message(batch).await
+        services.inject_remote_message(unit, batch).await
     }
 
     pub(crate) async fn handle_remote_stream(
@@ -1326,7 +1345,7 @@ impl Runtime {
                 )
                 .await
             } else {
-                self.inject_remote_stream_boundary_message(&services, &batch)
+                self.inject_remote_stream_boundary_message(&services, remote.unit, &batch)
                     .await
             };
             if dispatch.is_ok() {
@@ -1660,8 +1679,7 @@ impl Runtime {
         local_node_id: &ClusterNodeName,
     ) -> HashMap<RelayName, Vec<RemoteRuntimeConsumer>> {
         let mut consumers = HashMap::<RelayName, Vec<RemoteRuntimeConsumer>>::new();
-        // A node that owns any unit of a relay fans that unit's batches out to every remote
-        // consumer of the relay, because a consumer reads every partition.
+        // Common consumers read every unit; a partitioned processor reads its matching unit.
         let owned_relays = revision
             .nodes
             .values()
@@ -1676,19 +1694,22 @@ impl Runtime {
             else {
                 continue;
             };
-            let Some(target_node) = node.execution_node() else {
-                continue;
-            };
-            for relay in &spec.spec.input_relays {
-                if !owned_relays.contains(relay) || node.executes_on(local_node_id) {
+            for unit in node.units.keys().copied() {
+                let Some(target_node) = node.unit_execution_node(unit) else {
                     continue;
+                };
+                for relay in &spec.spec.input_relays {
+                    if !owned_relays.contains(relay) || target_node == local_node_id {
+                        continue;
+                    }
+                    push_remote_scoped_runtime_consumer(
+                        consumers.entry(relay.clone()).or_default(),
+                        target_node,
+                        relay,
+                        spec.spec.mode,
+                        (unit != Unit::SINGLE).then_some(unit),
+                    );
                 }
-                push_remote_runtime_consumer(
-                    consumers.entry(relay.clone()).or_default(),
-                    target_node,
-                    relay,
-                    spec.spec.mode,
-                );
             }
         }
         for emitter in revision.emitters.emitters() {
@@ -1860,7 +1881,7 @@ mod tests {
             .assured("the remote reingestor reads the relay this node owns");
         assert_eq!(consumers.len(), 1);
         assert_eq!(consumers[0].node_id, executor);
-        assert_eq!(consumers[0].mode, AckMode::Detached);
+        assert_eq!(consumers[0].mode, Some(AckMode::Detached));
         assert!(!owned.contains_key(&named::<RelayName>("outgoing")));
 
         let executing = Runtime::remote_runtime_consumers_for_revision(&revision, &executor);

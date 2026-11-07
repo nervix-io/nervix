@@ -20,7 +20,7 @@ use nervix_models::{
     ResourceReplicaKey, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
     ResourceUploadState, ResourceVersion, RestoreStateAuthority, ScheduledNode, SchemaFingerprint,
     Timestamp, WasmSavedStateRejection, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome,
-    WasmStateResetReason, WasmStateResetScope,
+    WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
 };
 
 use crate::Arbitrary;
@@ -28,7 +28,7 @@ use crate::Arbitrary;
 /// How many entries a generated collection of stored records holds at most.
 const RECORDS: usize = 3;
 
-/// The most partitions the branch of a generated scheduled relay declares. A schedule holds one
+/// The most partitions the branch of a generated scheduled node declares. A schedule holds one
 /// unit per partition, so a small bound keeps a generated schedule small while still covering a
 /// single partition and several.
 const SCHEDULED_PARTITIONS: u16 = 4;
@@ -432,7 +432,12 @@ impl Arbitrary<'_> {
                     node.begin_wasm_state_reset(request, scope, reason);
                 }
                 3 => {
-                    let Some(reset) = node.wasm_state_reset() else {
+                    let Some(reset) = node
+                        .units
+                        .values()
+                        .filter_map(|unit| unit.wasm_state_reset.as_ref())
+                        .find(|reset| reset.phase() == WasmStateResetPhase::Publishing)
+                    else {
                         continue;
                     };
                     let request = reset.request().clone();
@@ -447,7 +452,12 @@ impl Arbitrary<'_> {
     /// an outcome when the admission recorded or resumed one.
     fn attempt_wasm_state_recovery(&mut self, node: &mut ScheduledNode) {
         let scope = self.reset_scope();
-        let Some(generations) = node.wasm_state_generations() else {
+        let branch = match &scope {
+            WasmStateResetScope::Branch(branch) => Some(branch),
+            WasmStateResetScope::Unbranched => None,
+            WasmStateResetScope::AllBranches => return,
+        };
+        let Some(generations) = node.wasm_state_generations_of_branch(branch) else {
             return;
         };
         let generation = generations.of_reset_scope(&scope);

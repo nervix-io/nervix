@@ -71,7 +71,8 @@ fn forced_routing_fence_ends_changed_channels_until_publication(#[case] move_own
     let consumers = vec![RemoteRuntimeConsumer {
         node_id: named("node-3"),
         relay: named("events"),
-        mode: AckMode::Attached,
+        mode: Some(AckMode::Attached),
+        unit_modes: BTreeMap::new(),
     }];
     let services = RelayBoundaryServices::new(
         RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
@@ -125,7 +126,8 @@ async fn runtime_report_chain_detached_relay_delivery_log() {
         vec![RemoteRuntimeConsumer {
             node_id: named("node-2"),
             relay: named("orders"),
-            mode: AckMode::Detached,
+            mode: Some(AckMode::Detached),
+            unit_modes: BTreeMap::new(),
         }],
         Some(dispatcher),
         RelayBranchPresences::single(Arc::new(BranchPresence::new())),
@@ -157,6 +159,7 @@ async fn relay_task_stops_classify_join_failures_by_task_kind() {
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
     let state = RelayStateTask {
         shutdown: state_shutdown,
+        unit: Unit::SINGLE,
         task: nervix_primitives::task::spawn(async { panic!("state task fixture failed") }),
     };
     let state_error = state
@@ -195,6 +198,7 @@ async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
     let state = RelayStateTask {
         shutdown: state_shutdown,
+        unit: Unit::SINGLE,
         task: nervix_primitives::task::spawn(std::future::pending()),
     };
     let state_error = state
@@ -405,6 +409,84 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
 
     assert_eq!(status.buffered_relay_batches, 1);
     assert!(!status.is_drained());
+}
+
+#[nervix_primitives::test]
+async fn partition_drains_count_their_own_transit_and_queues_while_the_domain_keeps_the_aggregate()
+{
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("orders");
+    let partitioning =
+        RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16)));
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(2usize)),
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::fresh(partitioning),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    runtime.inner.relay_boundary_fanouts.insert(
+        DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
+        services.fanout.clone(),
+    );
+    let first = Unit::partition(0);
+    let second = Unit::partition(1);
+    let (mut receiver, _buffer) =
+        services.activate_owner_buffer(second, relay_metrics(&runtime, &domain, &relay));
+    let status = |unit| {
+        runtime.entity_drain_status(
+            &domain,
+            std::slice::from_ref(&relay),
+            &nervix_models::EntityGateTargets::Units(vec![NodeUnitRef::new(
+                NodeRef::new(ModelKind::Relay, &relay),
+                unit,
+            )]),
+            EntityGatePurpose::OwnershipHandoff,
+        )
+    };
+    services
+        .enqueue_owner_batch(&quiesce_test_batch(), second)
+        .await
+        .assured("the owner buffer admits one batch");
+    assert!(status(first).is_drained());
+    assert_eq!(status(second).buffered_relay_batches, 1);
+    assert_eq!(services.fanout.outstanding_work_len(), 1);
+    assert!(matches!(receiver.try_recv(), RelayTryRecv::Batch(_)));
+    let completion = services.begin_owner_batch_completion(second);
+    assert_eq!(
+        status(second).buffered_relay_batches,
+        1,
+        "dequeue never hides a batch still being handed on"
+    );
+    drop(completion);
+    assert!(status(second).is_drained());
+    assert_eq!(services.fanout.outstanding_work_len(), 0);
+
+    let _common = services.add_local_runtime_consumer(AckMode::Detached);
+    let mut scoped = services.add_local_unit_runtime_consumer(AckMode::Detached, second);
+    services
+        .dispatch_local_runtime_consumers(
+            RuntimeConsumerDispatch::Owner,
+            second,
+            &quiesce_test_batch(),
+        )
+        .await
+        .assured("the second partition reaches its own and common consumers");
+    assert!(status(first).is_drained());
+    assert_eq!(status(second).buffered_relay_batches, 1);
+    assert!(matches!(scoped.try_recv(), RelayTryRecv::Batch(_)));
+    assert!(
+        status(second).is_drained(),
+        "a common consumer keeps its own lifecycle"
+    );
+    assert_eq!(
+        services.fanout.outstanding_work_len(),
+        1,
+        "the whole-domain drain still sees the common consumer's batch"
+    );
 }
 
 #[test]
@@ -1623,7 +1705,7 @@ async fn a_routed_attached_batch_fails_its_acknowledgement_without_an_attached_c
     let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks);
 
     services
-        .inject_remote_message(&batch)
+        .inject_remote_message(Unit::SINGLE, &batch)
         .await
         .expect_err("no attached consumer of the relay runs on this node");
 
@@ -1644,7 +1726,7 @@ async fn a_routed_attached_batch_completes_when_its_attached_consumer_does() {
     let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks.clone());
 
     services
-        .inject_remote_message(&batch)
+        .inject_remote_message(Unit::SINGLE, &batch)
         .await
         .expect("the attached consumer on this node takes the routed batch");
     acks.ack_success();
@@ -1676,9 +1758,76 @@ async fn a_routed_detached_batch_needs_no_attached_consumer() {
     let services = test_relay_boundary_services();
 
     services
-        .inject_remote_message(&quiesce_test_batch())
+        .inject_remote_message(Unit::SINGLE, &quiesce_test_batch())
         .await
         .expect("a detached routed batch carries no acknowledgement to complete");
+}
+
+#[rstest::rstest]
+#[case::whole(RelayPartitioning::Whole, false)]
+#[case::partition(
+    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    false
+)]
+#[case::partition_common(
+    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    true
+)]
+#[nervix_primitives::test]
+async fn a_detached_consumer_joining_during_attached_backpressure_receives_the_batch(
+    #[case] partitioning: RelayPartitioning,
+    #[case] common: bool,
+) {
+    let fanout = match partitioning {
+        RelayPartitioning::Whole => RelayBoundaryFanout::direct_with_capacity(nonzero!(1usize)),
+        RelayPartitioning::Partitioned(_) => {
+            RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize))
+        }
+    };
+    let services = RelayBoundaryServices::new(
+        fanout,
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::fresh(partitioning),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    let key = string_branch_key("tenant", "acme");
+    let unit = partitioning
+        .unit_of(&key)
+        .expect("the key names a relay unit");
+    let batch = RelayRecordBatch::single(
+        test_schema(&[("value", ParseAsType::I64)]),
+        key,
+        test_runtime_row([("value".into(), RuntimeValue::I64(1))]),
+        AckSet::empty(),
+    )
+    .expect("the fixture batch preserves its concrete branch");
+    let mut attached = services.add_local_unit_runtime_consumer(AckMode::Attached, unit);
+    services
+        .dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, unit, &batch)
+        .await
+        .expect("the first batch fills the attached queue");
+    let pending =
+        services.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, unit, &batch);
+    tokio::pin!(pending);
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    let mut detached = if common {
+        services.add_local_runtime_consumer(AckMode::Detached)
+    } else {
+        services.add_local_unit_runtime_consumer(AckMode::Detached, unit)
+    };
+    assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+    pending
+        .await
+        .expect("the attached queue returned its capacity");
+    assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+    assert!(
+        matches!(detached.try_recv(), RelayTryRecv::Batch(_)),
+        "detached publication begins after attached admission completes"
+    );
+    assert!(matches!(detached.try_recv(), RelayTryRecv::Empty));
 }
 
 #[nervix_primitives::test]
@@ -2601,7 +2750,8 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
     let consumers = ["one", "two", "three"].map(|relay| RemoteRuntimeConsumer {
         node_id: ClusterNodeName::parse(&format!("node-{relay}")).expect("valid name"),
         relay: named::<RelayName>(relay),
-        mode: AckMode::Attached,
+        mode: Some(AckMode::Attached),
+        unit_modes: BTreeMap::new(),
     });
     let payloads = consumers
         .iter()

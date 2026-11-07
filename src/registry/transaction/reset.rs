@@ -87,7 +87,11 @@ impl Registry {
                 },
             ));
         };
-        if node.execution_node().is_none() || node.wasm_state_generations().is_none() {
+        if node
+            .units
+            .values()
+            .any(|unit| unit.execution_node().is_none() || unit.wasm_state_generations.is_none())
+        {
             return Err(Report::new(
                 TransactionPlanningError::ResetProcessorNotRunning {
                     domain: domain.clone(),
@@ -109,10 +113,13 @@ impl Registry {
             })
         })?;
         let scope = selection.scope();
-        if let Some(current) = node.wasm_state_reset()
-            && current.phase() == WasmStateResetPhase::Publishing
-            && (current.request() != request || current.scope() != &scope)
-        {
+        let selected_units = node.units_for_wasm_state_scope(&scope);
+        if node.units.values().any(|unit| {
+            unit.wasm_state_reset.as_ref().is_some_and(|current| {
+                current.phase() == WasmStateResetPhase::Publishing
+                    && (current.request() != request || current.scope() != &scope)
+            })
+        }) {
             return Err(Report::new(TransactionPlanningError::ResetInProgress {
                 processor: reset.processor.clone(),
             }));
@@ -171,9 +178,13 @@ impl Registry {
             nervix_models::WasmStateResetReason::Transaction,
         ) {
             node.complete_wasm_state_reset(request);
-        } else if node
-            .wasm_state_reset()
-            .is_none_or(|current| current.request() != request || current.scope() != &scope)
+        } else if selected_units.is_empty()
+            || selected_units.iter().any(|unit| {
+                node.units[unit]
+                    .wasm_state_reset
+                    .as_ref()
+                    .is_none_or(|current| current.request() != request || current.scope() != &scope)
+            })
         {
             return Err(Report::new(
                 TransactionPlanningError::ResetProcessorNotRunning {
