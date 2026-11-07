@@ -325,7 +325,10 @@ impl SessionServiceImpl {
         }
         let scope = Self::resolve_wasm_state_recovery_scope(processor, target)?;
         let generations = node
-            .wasm_state_generations()
+            .wasm_state_generations_of_branch(match &scope {
+                WasmStateResetScope::Branch(branch) => Some(branch),
+                _ => None,
+            })
             .ok_or_else(|| Report::new(unavailable()))?;
         let generation = match &scope {
             WasmStateResetScope::Unbranched => generations.of_branch(None),

@@ -291,6 +291,10 @@ An instance placement identity carries an unsigned 64-bit index in the `Placemen
 partition indices remain unsigned 32-bit values. Client encoders and decoders preserve the full
 instance index when reporting transaction impact and execution placement.
 
+Structured WASM inspection carries a `units` collection. Clients preserve each unit identity and
+its own generation, reset, recovery and checkpoint details; a processor's partitions can have
+different generations. Checkpoint and recovery detail limits apply to the complete response.
+
 Treat client CONFIG validation refusals as ordinary failed commands under the rules below.
 Show their client/key diagnostic without retrying invalid input automatically. A refused queued
 statement leaves its transaction usable. `SHOW CREATE CLIENT` and structured-choice previews mask

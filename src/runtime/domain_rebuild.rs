@@ -448,6 +448,7 @@ impl Runtime {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
+                    unit_runtime_consumer_counts: BTreeMap::new(),
                     branch_presences,
                     remote_runtime_consumers: Vec::new(),
                 },
@@ -468,7 +469,7 @@ impl Runtime {
             }
         }
 
-        let mut placement_tasks = HashMap::<NodeRef, PlacementTasks>::new();
+        let mut placement_tasks = HashMap::<NodeUnitRef, PlacementTasks>::new();
         let mut materialized_states = HashMap::new();
         for node in revision.nodes.values() {
             nervix_primitives::task::consume_budget().await;
@@ -497,7 +498,14 @@ impl Runtime {
                 }
             }
             let placement = self
-                .build_scheduled_node_placement(domain, &shutdown_tx, node, local_node_id, state)
+                .build_scheduled_node_placement(
+                    domain,
+                    &shutdown_tx,
+                    node,
+                    local_node_id,
+                    state,
+                    None,
+                )
                 .change_context_lazy(build)?;
             for (unit, state) in placement.materialized_states {
                 materialized_states.insert(
@@ -506,7 +514,12 @@ impl Runtime {
                 );
             }
             if !placement.tasks.is_empty() {
-                placement_tasks.insert(node.identity(), placement.tasks);
+                placement_tasks.extend(
+                    placement
+                        .tasks
+                        .into_iter()
+                        .map(|(unit, tasks)| (NodeUnitRef::new(node.identity(), unit), tasks)),
+                );
             }
         }
 
@@ -541,7 +554,8 @@ impl Runtime {
                             partitioning: relay.branch_presences.partitioning(),
                             state,
                             retention: planned.retention,
-                            receiver: relay.runtime_consumer_fan_in_for_mode(AckMode::Detached),
+                            receiver: relay
+                                .runtime_consumer_fan_in_for_unit(AckMode::Detached, unit),
                         });
                     }
                 }
@@ -629,25 +643,25 @@ impl Runtime {
             )) else {
                 continue;
             };
-            let executes_locally = node.executes_on(local_node_id);
-            let mut inputs = Vec::new();
-            for input_relay in &node_spec.spec.input_relays {
-                let Some(relay) = relay_builders.get_mut(input_relay) else {
-                    return Err(Report::new(ExecutionBuildError::MissingInputRelay {
-                        node: NodeRef::new(node_spec.spec.kind, node_spec.spec.processor.clone()),
-                        relay: input_relay.clone(),
-                    })
-                    .change_context(build()));
-                };
-                if executes_locally {
+            for unit in node.units_executing_on(local_node_id) {
+                let mut inputs = Vec::new();
+                for input_relay in &node_spec.spec.input_relays {
+                    let Some(relay) = relay_builders.get_mut(input_relay) else {
+                        return Err(Report::new(ExecutionBuildError::MissingInputRelay {
+                            node: NodeRef::new(
+                                node_spec.spec.kind,
+                                node_spec.spec.processor.clone(),
+                            ),
+                            relay: input_relay.clone(),
+                        })
+                        .change_context(build()));
+                    };
                     inputs.push((
                         input_relay.clone(),
-                        relay.runtime_consumer_fan_in_for_mode(node_spec.spec.mode),
+                        relay.runtime_consumer_fan_in_for_unit(node_spec.spec.mode, unit),
                     ));
                 }
-            }
-            if executes_locally {
-                processor_input_specs.push((node_spec.clone(), inputs));
+                processor_input_specs.push((NodeUnitRef::new(node.identity.clone(), unit), inputs));
             }
         }
 
@@ -680,15 +694,18 @@ impl Runtime {
             .map(|(identifier, relay)| {
                 (
                     identifier,
-                    Arc::new(RelayBoundaryServices::new(
-                        relay.fanout,
-                        relay.attached_runtime_consumer_count,
-                        relay.detached_runtime_consumer_count,
-                        relay.remote_runtime_consumers,
-                        remote_dispatcher.clone(),
-                        relay.branch_presences,
-                        self.domain_ack_root_tracker(domain),
-                    )),
+                    Arc::new(
+                        RelayBoundaryServices::new(
+                            relay.fanout,
+                            relay.attached_runtime_consumer_count,
+                            relay.detached_runtime_consumer_count,
+                            relay.remote_runtime_consumers,
+                            remote_dispatcher.clone(),
+                            relay.branch_presences,
+                            self.domain_ack_root_tracker(domain),
+                        )
+                        .with_unit_runtime_consumer_counts(relay.unit_runtime_consumer_counts),
+                    ),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -725,22 +742,21 @@ impl Runtime {
         }
 
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
-        let local_processor_specs = processor_input_specs
-            .iter()
-            .map(|(spec, _)| spec.clone())
-            .collect::<Vec<_>>();
         let previous_processor_plans = HashMap::default();
         let processor_plans = bind_published_processor_plans(
-            &local_processor_specs,
+            &all_branched_specs.processors,
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
+                local_node_id: Some(local_node_id),
                 relay_schemas: &relay_schemas,
                 relay_services: &relay_services,
                 relay_branchings: &relay_branchings,
                 materialized_stream_specs: &materialized_stream_specs,
                 lookups: &lookup_runtimes,
                 udfs: Some(&udf_executor),
+                nodes: &revision.nodes,
+                unit: None,
                 previous: &previous_processor_plans,
             },
         )
@@ -761,11 +777,7 @@ impl Runtime {
             .change_context_lazy(build)?,
         );
 
-        for (node_spec, inputs) in processor_input_specs {
-            let entity = NodeRef {
-                kind: node_spec.spec.kind,
-                identifier: node_spec.spec.processor.clone(),
-            };
+        for (entity, inputs) in processor_input_specs {
             let template = processor_plans
                 .get(&entity)
                 .verified("the published plan binder returns every local processor")
@@ -794,17 +806,37 @@ impl Runtime {
         };
 
         for generator in resource_plans.generators.values() {
-            if !generator.assignment.executes_on(Some(local_node_id)) {
+            let mut units = generator
+                .assignment
+                .units_executing_on(Some(local_node_id))
+                .peekable();
+            let Some(first) = units.peek().copied() else {
                 continue;
-            }
-            let spec = GeneratorTaskSpec::bind(domain, generator, &relay_services, &udf_executor)
-                .change_context_lazy(build)?;
-            let entity = NodeRef::new(ModelKind::Generator, &generator.name);
-            generator_tasks.insert(
-                entity,
-                self.spawn_generator_task(domain, &shutdown_tx, spec)
+            };
+            let mut prepared = Some(
+                GeneratorTaskSpec::bind(domain, generator, first, &relay_services, &udf_executor)
                     .change_context_lazy(build)?,
             );
+            while let Some(unit) = units.next() {
+                let mut spec = if units.peek().is_some() {
+                    prepared
+                        .as_ref()
+                        .verified("the prepared programs are moved only into the final unit")
+                        .clone()
+                } else {
+                    prepared
+                        .take()
+                        .verified("the final unit consumes the prepared programs once")
+                };
+                spec.unit = unit;
+                let entity =
+                    NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &generator.name), unit);
+                generator_tasks.insert(
+                    entity,
+                    self.spawn_generator_task(domain, &shutdown_tx, spec)
+                        .change_context_lazy(build)?,
+                );
+            }
         }
 
         let mut relay_state_tasks = BTreeMap::new();
@@ -965,6 +997,7 @@ impl Runtime {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
+                    unit_runtime_consumer_counts: BTreeMap::new(),
                     branch_presences: RelayBranchPresences::fresh(partitioning),
                     remote_runtime_consumers: Vec::new(),
                 },

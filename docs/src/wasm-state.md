@@ -238,6 +238,11 @@ default generation for every branch and a generation of its own for each concret
 separately since the default last advanced. A new generation number is always the successor of the
 highest one the processor has handed out, so a branch's generation only moves forward.
 
+Each execution unit retains its own generations, reset and recovery attempts when it is
+rescheduled. A changed module binding starts new lifetimes in every retained unit and clears the
+attempts spent on its preceding lifetimes. A newly declared unit starts with its own initial
+generations; it never borrows another partition's state.
+
 | Event | Generation effect |
 | --- | --- |
 | The processor is created | Every branch starts in generation 1 |
@@ -734,6 +739,13 @@ Duplicates](./wasm-processor-guests.md#recovery-replay-and-duplicates) and [ACK 
 Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery).
 
 ## Observability
+
+The typed inspection contains the shared resource binding and a `units` collection. Each entry
+names its execution unit and that unit's default generation, latest reset, readiness, recovery
+attempts and checkpoint facts. Text renders partition entries under `state partition: <index>`;
+JSON carries the same unit identities. Generation filtering uses the checkpoint's own unit.
+The 128-entry checkpoint and recovery detail budgets each cover the whole processor, with counts
+and omitted totals retained for every unit.
 
 | Signal | What it shows |
 | --- | --- |

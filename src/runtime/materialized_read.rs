@@ -32,8 +32,8 @@ use super::{
 #[path = "materialized_read_reuse_tests.rs"]
 mod reuse_tests;
 
-/// One generator task's admitted remote source views, one for each unit of its source relay that a
-/// remote node owns. Each unit's selected owner must confirm the full sealed identity on every
+/// One generator task's admitted remote view of its source unit. The unit's selected owner must
+/// confirm the full sealed identity on every
 /// read; a view is neither installed state nor recovery authority.
 #[derive(Default)]
 pub(super) struct MaterializedGenerationReadCache {
@@ -55,8 +55,6 @@ pub(super) enum MaterializedGenerationRead {
         snapshot: Arc<RestoredMaterializedSnapshot>,
         next: usize,
     },
-    /// The reads of every unit of a partitioned relay, yielded one unit after another.
-    Units(VecDeque<MaterializedGenerationRead>),
 }
 
 impl From<Vec<MaterializedGenerationRecord>> for MaterializedGenerationRead {
@@ -79,14 +77,6 @@ impl Iterator for MaterializedGenerationRead {
                     row: record.row.clone(),
                 })
             }
-            // Bounded by the relay's partition count: each exhausted unit read is dropped once.
-            Self::Units(reads) => loop {
-                let current = reads.front_mut()?;
-                if let Some(record) = current.next() {
-                    return Some(record);
-                }
-                reads.pop_front();
-            },
         }
     }
 }
@@ -722,6 +712,12 @@ impl Runtime {
             }
             MaterializedLookupKeyMode::Root => None,
         };
+        let Ok(unit) = routing
+            .relay_partitioning(relay)
+            .unit_of(&placement_branch_key)
+        else {
+            return Ok(None);
+        };
         // The schedule can publish a materialized relay's destination before that destination
         // activates its prepared state. The ownership gate already fences records headed to the
         // relay across that interval; dependency reads observe the same fence so a REQUIRED WAIT
@@ -729,16 +725,10 @@ impl Runtime {
         if routing
             .relay_services
             .get(relay)
-            .is_some_and(|services| services.dispatch_is_fenced())
+            .is_some_and(|services| services.dispatch_is_fenced(unit))
         {
             return Ok(None);
         }
-        let Ok(unit) = routing
-            .relay_partitioning(relay)
-            .unit_of(&placement_branch_key)
-        else {
-            return Ok(None);
-        };
         let owner = routing.materialized_stream_owner_of(relay, unit);
         if let Some(owner) = owner
             && !self.is_local_node(&owner)
@@ -841,38 +831,9 @@ impl Runtime {
         Ok(reports)
     }
 
-    /// Every materialized record one relay holds, taken from the node that owns each of its units.
-    ///
-    /// Records keep their columns and their typed concrete branch identity: nothing is turned into
-    /// named scalar fields on the way, and nothing is rebuilt into a row on arrival.
-    pub(in crate::runtime) async fn materialized_records_from_owner(
-        &self,
-        routing: &mut DomainRoutingCache,
-        cache: &mut MaterializedGenerationReadCache,
-        domain: &DomainName,
-        relay: &RelayName,
-    ) -> error_stack::Result<MaterializedGenerationRead, MaterializedReadError> {
-        let routing = routing.load().clone();
-        let units = routing.relay_partitioning(relay).units();
-        cache.remote.retain(|unit, _| units.contains(unit));
-        let mut reads = VecDeque::with_capacity(units.len());
-        for unit in units {
-            let read = self
-                .materialized_unit_records_from_owner(&routing, cache, domain, relay, unit)
-                .await?;
-            reads.push_back(read);
-        }
-        if reads.len() == 1 {
-            let read = reads
-                .pop_front()
-                .verified("the length check above found exactly one unit read");
-            return Ok(read);
-        }
-        Ok(MaterializedGenerationRead::Units(reads))
-    }
-
     /// Every materialized record one unit of a relay holds, taken from the node that owns it.
-    async fn materialized_unit_records_from_owner(
+    /// Columns and typed branch identities stay intact through local and remote reads.
+    pub(in crate::runtime) async fn materialized_unit_records_from_owner(
         &self,
         routing: &DomainRoutingSnapshot,
         cache: &mut MaterializedGenerationReadCache,

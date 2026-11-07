@@ -26,7 +26,8 @@ impl Runtime {
         &self,
         domain: &DomainName,
         revision: &ExecutionRevision,
-    ) -> error_stack::Result<HashMap<NodeRef, StdArc<PublishedProcessorPlan>>, RuntimeError> {
+    ) -> error_stack::Result<HashMap<NodeUnitRef, StdArc<PublishedProcessorPlan>>, RuntimeError>
+    {
         let dispatcher = self.inner.remote_dispatcher.load_full();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let specs = revision
@@ -56,12 +57,15 @@ impl Runtime {
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
+                local_node_id,
                 relay_schemas: &routing.relay_schemas,
                 relay_services: &routing.relay_services,
                 relay_branchings: &routing.relay_branchings,
                 materialized_stream_specs: &routing.materialized_stream_specs,
                 lookups: &routing.lookups,
                 udfs: Some(&routing.udfs),
+                nodes: &revision.nodes,
+                unit: None,
                 previous: &routing.processor_plans,
             },
         )
@@ -73,8 +77,12 @@ impl Runtime {
     pub(in crate::runtime) async fn bind_installed_processor_plan(
         &self,
         domain: &DomainName,
-        spec: &BranchedProcessorNodeSpec,
+        spec: &Arc<BranchedProcessorNodeSpec>,
+        revision: &ExecutionRevision,
+        unit: Unit,
     ) -> error_stack::Result<StdArc<PublishedProcessorPlan>, RuntimeError> {
+        let dispatcher = self.inner.remote_dispatcher.load_full();
+        let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let build = || RuntimeError::build_domain_execution(domain);
         let routing = {
             let Some(execution) = self.inner.executions.get(domain) else {
@@ -90,12 +98,15 @@ impl Runtime {
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
+                local_node_id,
                 relay_schemas: &routing.relay_schemas,
                 relay_services: &routing.relay_services,
                 relay_branchings: &routing.relay_branchings,
                 materialized_stream_specs: &routing.materialized_stream_specs,
                 lookups: &routing.lookups,
                 udfs: Some(&routing.udfs),
+                nodes: &revision.nodes,
+                unit: Some(unit),
                 previous: &routing.processor_plans,
             },
         )
@@ -103,7 +114,8 @@ impl Runtime {
         .change_context(ExecutionBuildError::BindProcessorPlans)
         .change_context_lazy(build)?;
         let identity = NodeRef::new(spec.spec.kind, spec.spec.processor.clone());
-        let Some(plan) = plans.remove(&identity) else {
+        let owner = NodeUnitRef::new(identity.clone(), unit);
+        let Some(plan) = plans.remove(&owner) else {
             return Err(
                 Report::new(ExecutionBuildError::UnboundProcessorPlan { node: identity })
                     .change_context(build()),

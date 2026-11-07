@@ -17,12 +17,41 @@
 )]
 
 use meticulous::ResultExt as _;
-use nervix_model_harness::shuttle::check_random_and_pct;
+use nervix_model_harness::shuttle::{check_dfs, check_random_and_pct};
 use nervix_primitives::sync::Arc;
 
 use super::{
     LocalDomainDrainStatus, NodeQuiesceWorkGuard, OneRelayAndNode, OutputBufferQuiesceGauge, domain,
 };
+
+#[test]
+fn shuttle_a_partition_admission_remains_visible_to_the_whole_domain_drain() {
+    check_dfs(
+        || {
+            shuttle::future::block_on(async {
+                let sources = Arc::new(OneRelayAndNode::new());
+                let partition = Arc::new(super::super::RelayTransit::within(
+                    sources.fanout.transit.clone(),
+                ));
+                let mut output = OutputBufferQuiesceGauge::new(sources.counters.clone());
+                output.add_batch();
+                let publishing = nervix_primitives::task::spawn(async move {
+                    super::super::RelayOwnerAdmission::new(partition).accept();
+                    output.remove_batches(1);
+                });
+                let status = LocalDomainDrainStatus::observe(domain("default"), &*sources);
+                publishing
+                    .await
+                    .assured("the publisher moves one batch from output to its partition");
+                assert!(
+                    status.holds_admitted_work(),
+                    "the aggregate admission sequence must see a batch entering any partition"
+                );
+            });
+        },
+        Some(128),
+    );
+}
 
 /// A node publishes a batch from its output buffer into a relay while a drain observes the domain.
 /// The relay counts the batch before the node lets it go, which a drain that reads relays before

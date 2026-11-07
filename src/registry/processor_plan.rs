@@ -22,8 +22,9 @@ use nervix_models::{
     InferencerTensorMapping, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
     ProcessorOutputs as ModelProcessorOutputs, RelayName, ResolvedBranching, ResourceName,
-    ScheduledNodes, SchemaFingerprint, WasmStateGenerations, WindowBound,
+    ScheduledNodes, SchemaFingerprint, WindowBound,
 };
+use nervix_primitives::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BranchedProcessorNodeSpec {
@@ -31,7 +32,6 @@ pub(crate) struct BranchedProcessorNodeSpec {
     pub(crate) branch: Option<BranchName>,
     pub(crate) branch_ttl: Option<String>,
     pub(crate) branch_max_instances: Option<NonZeroU64>,
-    pub(crate) wasm_state_reset: Option<nervix_models::WasmStateReset>,
     pub(crate) binding: ProcessorPlanBinding,
 }
 
@@ -41,7 +41,6 @@ pub(crate) struct BranchedProcessorNodeSpec {
 pub(crate) struct ProcessorPlanBinding {
     schema_fingerprint: Option<SchemaFingerprint>,
     resolved_branching: Option<ResolvedBranching>,
-    wasm_state_generations: Option<WasmStateGenerations>,
 }
 
 impl BranchedProcessorNodeSpec {
@@ -56,7 +55,7 @@ impl BranchedProcessorNodeSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BranchedNodeSpecs {
-    pub(crate) processors: Vec<BranchedProcessorNodeSpec>,
+    pub(crate) processors: Vec<Arc<BranchedProcessorNodeSpec>>,
 }
 
 impl BranchedNodeSpecs {
@@ -64,7 +63,7 @@ impl BranchedNodeSpecs {
         &self,
         kind: ModelKind,
         identifier: &ModelName,
-    ) -> Option<&BranchedProcessorNodeSpec> {
+    ) -> Option<&Arc<BranchedProcessorNodeSpec>> {
         self.processors
             .iter()
             .find(|node| node.spec.kind == kind && &node.spec.processor == identifier)
@@ -354,7 +353,6 @@ fn processor_node_spec(
         branch: policy.branch,
         branch_ttl: policy.ttl,
         branch_max_instances: policy.max_instances,
-        wasm_state_reset: None,
         binding: ProcessorPlanBinding::default(),
     }
 }
@@ -369,20 +367,13 @@ pub(crate) struct PlannedModel {
 pub(crate) fn branched_node_specs_from_scheduled_nodes(
     nodes: &ScheduledNodes,
 ) -> BranchedNodeSpecs {
-    let resets = nodes
-        .values()
-        .filter_map(|node| {
-            node.wasm_state_reset()
-                .cloned()
-                .map(|reset| (node.identifier.clone(), reset))
-        })
-        .collect::<HashMap<_, _>>();
     let mut specs = branched_node_specs_from_models(nodes.values().map(|node| PlannedModel {
         kind: node.kind(),
         identifier: node.identifier.clone(),
         model: (*node.config).clone(),
     }));
     for processor in &mut specs.processors {
+        let processor = Arc::make_mut(processor);
         let identity = NodeRef::new(processor.spec.kind, processor.spec.processor.clone());
         let scheduled = nodes.get(&identity).verified(
             "the processor specification came from this same validated scheduled-node map",
@@ -390,9 +381,7 @@ pub(crate) fn branched_node_specs_from_scheduled_nodes(
         processor.binding = ProcessorPlanBinding {
             schema_fingerprint: Some(scheduled.schema_fingerprint),
             resolved_branching: scheduled.resolved_branching.clone(),
-            wasm_state_generations: scheduled.wasm_state_generations().cloned(),
         };
-        processor.wasm_state_reset = resets.get(&processor.spec.processor).cloned();
     }
     specs
 }
@@ -607,7 +596,9 @@ pub(crate) fn branched_node_specs_from_models(
 
     processors.sort_by(|left, right| left.spec.processor.cmp(&right.spec.processor));
 
-    BranchedNodeSpecs { processors }
+    BranchedNodeSpecs {
+        processors: processors.into_iter().map(Arc::new).collect(),
+    }
 }
 
 #[cfg(test)]
@@ -752,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn wasm_guest_state_generation_changes_the_prepared_revision() {
+    fn unit_generations_leave_the_processor_program_definition_unchanged() {
         let nodes = crate::registry::test_fixtures::unplaced_schedule(vec![
             crate::registry::test_fixtures::wasm_processor("filter", "incoming", "outgoing"),
         ]);
@@ -772,10 +763,6 @@ mod tests {
             .processor(ModelKind::WasmProcessor, &named("filter"))
             .assured("the changed WASM processor has a plan");
 
-        assert_ne!(
-            current.binding.wasm_state_generations,
-            changed.binding.wasm_state_generations
-        );
-        assert!(!changed.reuses_prepared_revision(Some(current)));
+        assert!(changed.reuses_prepared_revision(Some(current)));
     }
 }

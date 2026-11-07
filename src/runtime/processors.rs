@@ -1,3 +1,10 @@
+//! Prepared processor programs and concrete branch execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Shared compiled processor artifacts and the state of one concrete processor branch.
+//! - **Depends on.** Typed processor plans, execution units, Arrow and the execution engines.
+//! - **Must not know.** Semantic Models, Plexus parsing or control-plane placement decisions.
+
 use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
 
 use ahash::HashMap;
@@ -67,8 +74,50 @@ impl ProcessorPlanRevision {
 /// One fully bound node plan published as part of a complete domain routing revision.
 #[derive(Debug, Clone)]
 pub(super) struct PublishedProcessorPlan {
-    pub(super) source: BranchedProcessorNodeSpec,
+    pub(super) source: Arc<BranchedProcessorNodeSpec>,
+    pub(super) unit_revision: ProcessorUnitRevision,
     pub(super) template: StdArc<BranchInstanceTemplate>,
+}
+
+/// The state lifetime of one unit, independent of the programs its logical node shares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ProcessorUnitRevision {
+    Stateless,
+    Wasm {
+        generations: nervix_models::WasmStateGenerations,
+        reset: Option<nervix_models::WasmStateReset>,
+    },
+}
+
+impl ProcessorUnitRevision {
+    pub(super) fn of(
+        node: &crate::registry::ExecutionNode,
+        unit: nervix_models::Unit,
+    ) -> error_stack::Result<Self, super::planning::PlanningError> {
+        let owner = NodeUnitRef::new(node.identity(), unit);
+        let scheduled = node.units.get(&unit).ok_or_else(|| {
+            Report::new(super::planning::PlanningError::MissingProcessorUnit {
+                owner: owner.clone(),
+            })
+        })?;
+        if node.kind() != ModelKind::WasmProcessor {
+            return Ok(Self::Stateless);
+        }
+        let generations = scheduled.wasm_state_generations.clone().ok_or_else(|| {
+            Report::new(super::planning::PlanningError::MissingWasmUnitGenerations { owner })
+        })?;
+        Ok(Self::Wasm {
+            generations,
+            reset: scheduled.wasm_state_reset.clone(),
+        })
+    }
+
+    pub(super) fn reset(&self) -> Option<&nervix_models::WasmStateReset> {
+        match self {
+            Self::Stateless => None,
+            Self::Wasm { reset, .. } => reset.as_ref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +259,7 @@ pub(super) struct RelayProcessorOutputTemplate {
 
 #[derive(Debug)]
 pub(super) struct RelayProcessorNode {
+    pub(super) unit: nervix_models::Unit,
     pub(super) kind: ModelKind,
     pub(super) processor: ModelName,
     pub(super) input_relays: Vec<RelayName>,

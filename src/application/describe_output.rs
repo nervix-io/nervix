@@ -33,7 +33,7 @@ use nervix_models::{
     NodeUnitRef, PlacementName, PlacementPolicy, ProcessorInputs, ProcessorOutputs, RelayName,
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
     ResourceUsage, ResourceVersionEntries, ScheduledNode, Unit, WasmStateInspection,
-    expression_to_plexus,
+    WasmUnitStateInspection, expression_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -1140,13 +1140,20 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
         "replicated state: true".to_string(),
     ]);
     lines.extend(format_processor_output_lines(&processor.output_routes));
-    lines.extend(format_wasm_state_reset_lines(inspection));
-    lines.extend(format_wasm_state_recovery_lines(inspection));
-    lines.extend(format_wasm_checkpoint_lines(inspection));
+    if let Some(inspection) = inspection {
+        for unit in &inspection.units {
+            if let nervix_models::UnitKind::Partition(partition) = unit.unit.kind() {
+                lines.push(format!("state partition: {partition}"));
+            }
+            lines.extend(format_wasm_state_reset_lines(Some(unit)));
+            lines.extend(format_wasm_state_recovery_lines(Some(unit)));
+            lines.extend(format_wasm_checkpoint_lines(Some(unit)));
+        }
+    }
     lines.join("\n")
 }
 
-fn format_wasm_state_reset_lines(inspection: Option<&WasmStateInspection>) -> Vec<String> {
+fn format_wasm_state_reset_lines(inspection: Option<&WasmUnitStateInspection>) -> Vec<String> {
     let Some(inspection) = inspection else {
         return Vec::new();
     };
@@ -1179,7 +1186,7 @@ fn format_wasm_state_reset_lines(inspection: Option<&WasmStateInspection>) -> Ve
 /// its attempt without producing a usable lifetime are the three states an operator acts on, so all
 /// three are reported. The branch is named by the scope alone, because a branch key may carry
 /// payload values.
-fn format_wasm_state_recovery_lines(inspection: Option<&WasmStateInspection>) -> Vec<String> {
+fn format_wasm_state_recovery_lines(inspection: Option<&WasmUnitStateInspection>) -> Vec<String> {
     let Some(inspection) = inspection else {
         return Vec::new();
     };
@@ -1200,7 +1207,7 @@ fn format_wasm_state_recovery_lines(inspection: Option<&WasmStateInspection>) ->
     lines
 }
 
-fn format_wasm_checkpoint_lines(inspection: Option<&WasmStateInspection>) -> Vec<String> {
+fn format_wasm_checkpoint_lines(inspection: Option<&WasmUnitStateInspection>) -> Vec<String> {
     let Some(inspection) = inspection else {
         return Vec::new();
     };

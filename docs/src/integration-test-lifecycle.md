@@ -36,6 +36,16 @@ node's files, observes the initially loaded leaf on a fresh connection before re
 replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
 name, and the console recorder checks an opened WSS connection to the advertised leader.
 
+## Focused Application Progress Qualification
+
+`just test-progress-qualification --concurrency 2 --retry 0` runs the application-progress,
+interconnect-health and domain-clock-attachment features through the ordinary in-process harness.
+It prepares the console assets, WASM guests and ONNX runtime those nodes load, while retaining
+the scenarios' public commands, fault controls, startup budgets, deadlines and parallel execution.
+This focused check covers incarnation-bound progress, completion through a push or query and
+clock delivery after attachment changes; the complete ordinary and mode suites remain separate
+qualification evidence.
+
 ## Focused Native Command Recovery
 
 `just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
@@ -1817,6 +1827,13 @@ The harness keeps these boundaries explicit.
   shared pause registry retains these controls through request cancellation; scenario cleanup
   releases and clears them even after an assertion fails. The original health-only scenario keeps
   its nine-second sequential probe and remains an independent check.
+
+  The [Progress 04 qualification](https://app.clickup.com/t/86bcy647h) compared twelve batches per
+  condition and revision on the same host on 7 November 2026, at concurrency two. Request reports
+  reduced median completion from 459 to 297 milliseconds with revision queries available, and
+  from 4,458 to 795 milliseconds with their replies held; both sampled tail latencies improved.
+  These measurements preserve the prepared client, statement sequence and fault conditions.
+  The nine- and twenty-second bounds continue to allow parallel control-queue and runtime load.
 
   The large-resource control probe connects a named production client to the restarted node once
   it has started, then waits until that node's
