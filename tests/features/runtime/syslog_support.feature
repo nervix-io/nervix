@@ -662,7 +662,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
@@ -718,7 +718,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
@@ -771,7 +771,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
@@ -836,7 +836,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
@@ -904,7 +904,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1

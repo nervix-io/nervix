@@ -167,11 +167,11 @@ The generated [SYSLOG client reference](connector-capabilities.md#syslog-client)
 keys from the client declaration.
 
 The client alone cannot know its side, so the statement that binds it checks the keys that side
-reads: `CREATE SYSLOG LISTENER INGESTOR` and `ALTER SYSLOG LISTENER INGESTOR ... SET FROM` for a
-listener, `CREATE SYSLOG COLLECTOR EMITTER` and `ALTER SYSLOG COLLECTOR EMITTER ... SET CLIENT` for a
-collector, and the transaction that replaces a client its entities reference with `DROP CLIENT` and
-`CREATE SYSLOG CLIENT`. A key only the other side reads refuses the statement, naming the key and
-the side that reads it.
+reads: `CREATE SYSLOG LISTENER INGESTOR` and `ALTER SYSLOG LISTENER INGESTOR ... SET FROM` or
+`SET CLIENT` for a listener, `CREATE SYSLOG COLLECTOR EMITTER` and
+`ALTER SYSLOG COLLECTOR EMITTER ... SET CLIENT` for a collector, and the transaction that replaces a
+client its entities reference with `DROP CLIENT` and `CREATE SYSLOG CLIENT`. A key only the other
+side reads refuses the statement, naming the key and the side that reads it.
 
 TLS file paths use normal client resource mounts. For example:
 

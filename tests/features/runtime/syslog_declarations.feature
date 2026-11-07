@@ -11,7 +11,7 @@ Feature: Syslog listener and collector declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (host STRING, message STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (host string, message string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_main CONFIG {
         'protocol' = 'tcp', 'addr' = '127.0.0.1:5514', 'timeout_ms' = '1000'
@@ -41,7 +41,7 @@ Feature: Syslog listener and collector declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (host STRING, message STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (host string, message string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_main CONFIG {
         'protocol' = 'tcp', 'addr' = '127.0.0.1:5514', <setting>
@@ -72,7 +72,7 @@ Feature: Syslog listener and collector declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (host STRING, message STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (host string, message string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SYSLOG CLIENT listening CONFIG {
         'protocol' = 'tcp', 'addr' = '127.0.0.1:5514', 'max_message_size' = '512'
@@ -107,6 +107,14 @@ Feature: Syslog listener and collector declarations
       """
       SYSLOG LISTENER ingestor 'intake' in domain '{{domain}}' cannot use client 'collecting': client config key 'timeout_ms' is read only by emitters
       """
+    When these Plexus commands fail
+      """
+      ALTER SYSLOG LISTENER INGESTOR intake SET CLIENT collecting;
+      """
+    Then the last command error contains
+      """
+      SYSLOG LISTENER ingestor 'intake' in domain '{{domain}}' cannot use client 'collecting': client config key 'timeout_ms' is read only by emitters
+      """
     When these Plexus commands are executed on the leader node
       """
       ALTER SYSLOG COLLECTOR EMITTER publishing SET CLIENT collecting;
@@ -116,6 +124,15 @@ Feature: Syslog listener and collector declarations
     Then the last command output contains
       """
       FROM listening MODE NO ACK ON QUIESCE SUSPEND
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER SYSLOG LISTENER INGESTOR intake SET CLIENT shared;
+      SHOW CREATE INGESTOR intake;
+      """
+    Then the last command output contains
+      """
+      FROM shared MODE NO ACK ON QUIESCE SUSPEND
       """
     When these Plexus commands are executed on the leader node
       """
@@ -150,7 +167,7 @@ Feature: Syslog listener and collector declarations
       """
       CREATE SCHEMA event (host STRING, message STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (host string, message string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SYSLOG CLIENT trusting MOUNT syslog_tls VERSION 1 CONFIG {
         'protocol' = 'tls', 'addr' = '127.0.0.1:6514',
@@ -199,7 +216,7 @@ Feature: Syslog listener and collector declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (host STRING, message STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (host string, message string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_main CONFIG { <config> };
       """
