@@ -664,6 +664,11 @@ expired reference cannot settle an earlier complete upload whose outcome was los
 `OutcomeUnknown`; keep its original reference and restore the same archive for recovery. See
 [Restoring](client-library.md#restoring) for the native-client contract.
 
+In the [web console](client-tools-web-console.md#backup-and-restore), an unrecorded request failure
+on a later attempt also leaves an earlier possibly admitted restore unknown. Keep the same
+statement, archive and execution reference to recover its recorded outcome. A recovered failure
+or a restore step report remains definitive and preserves the steps already applied.
+
 ### Restoring From The Command Line
 
 `nervix-cli restore` runs one restore and exits:
