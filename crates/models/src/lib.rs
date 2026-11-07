@@ -398,5 +398,6 @@ pub use wasm_state_generation::{
 pub use wasm_state_inspection::{
     WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
     WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
+    WasmUnitStateInspection,
 };
 pub use window_model_digest::WindowModelDigest;

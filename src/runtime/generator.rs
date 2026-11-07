@@ -55,8 +55,10 @@ pub(crate) enum GeneratorError {
     OutputRow,
 }
 
+#[derive(Clone)]
 pub(super) struct GeneratorTaskSpec {
     pub(super) name: GeneratorName,
+    pub(super) unit: Unit,
     pub(super) each: nervix_models::DomainClockPeriod,
     pub(super) source_relay: RelayName,
     pub(super) source_branching: ResolvedBranching,
@@ -65,7 +67,11 @@ pub(super) struct GeneratorTaskSpec {
 }
 
 impl GeneratorTaskSpec {
-    pub(super) fn new(plan: &GeneratorExecutionPlan, routes: Vec<GeneratorTaskRouteSpec>) -> Self {
+    pub(super) fn new(
+        plan: &GeneratorExecutionPlan,
+        unit: Unit,
+        routes: Vec<GeneratorTaskRouteSpec>,
+    ) -> Self {
         let source_relay = plan.source_relay.clone();
         let source_schema = &plan.source_schema;
         let source_branching = plan.source_branching.clone();
@@ -79,6 +85,7 @@ impl GeneratorTaskSpec {
         );
         Self {
             name: plan.name.clone(),
+            unit,
             each: plan.each,
             source_relay,
             source_branching,
@@ -90,6 +97,7 @@ impl GeneratorTaskSpec {
     pub(super) fn bind(
         domain: &DomainName,
         plan: &GeneratorExecutionPlan,
+        unit: Unit,
         services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
         udfs: &UdfExecutor,
     ) -> error_stack::Result<Self, GeneratorError> {
@@ -126,10 +134,11 @@ impl GeneratorTaskSpec {
             .change_context_lazy(start)?;
             routes.push(GeneratorTaskRouteSpec::new(route, program, output_services));
         }
-        Ok(Self::new(plan, routes))
+        Ok(Self::new(plan, unit, routes))
     }
 }
 
+#[derive(Clone)]
 pub(super) struct GeneratorContextProjection {
     pub(super) source_namespace: String,
     pub(super) schema: StdArc<arrow_schema::Schema>,
@@ -217,6 +226,7 @@ impl GeneratorContextProjection {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct GeneratorTaskRouteSpec {
     pub(super) relay: RelayName,
     pub(super) flush_policy: FlushPolicy,
@@ -259,6 +269,16 @@ pub(super) struct GeneratorRouteInputProjection {
     pub(super) uninitialized: VmUninitializedInput,
 }
 
+impl Clone for GeneratorRouteInputProjection {
+    fn clone(&self) -> Self {
+        Self {
+            uninitialized: VmUninitializedInput {
+                fields: self.uninitialized.fields.clone(),
+            },
+        }
+    }
+}
+
 impl GeneratorRouteInputProjection {
     pub(super) fn new(schema: &arrow_schema::Schema) -> Self {
         Self {
@@ -296,6 +316,46 @@ impl GeneratorRouteInputProjection {
             None,
         )
         .change_context(GeneratorError::ProjectRouteInput)
+    }
+}
+
+/// The fixed source fences this generator unit follows. A unit handoff closes only its partition;
+/// model changes retain the whole-relay fence.
+struct GeneratorSourceGates {
+    whole: Arc<RelayDispatchGate>,
+    unit: Option<Arc<RelayDispatchGate>>,
+}
+
+impl GeneratorSourceGates {
+    fn is_closed(&self) -> bool {
+        self.whole.is_closed() || self.unit.as_ref().is_some_and(|gate| gate.is_closed())
+    }
+
+    async fn wait_open(&self) {
+        let Some(unit) = &self.unit else {
+            return self.whole.wait_open().await;
+        };
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            self.whole.wait_open().await;
+            unit.wait_open().await;
+            if !self.is_closed() {
+                return;
+            }
+        }
+    }
+
+    async fn wait_closed(&self) {
+        let unit = async {
+            match &self.unit {
+                Some(unit) => unit.wait_closed().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        nervix_primitives::select! {
+            _ = self.whole.wait_closed() => {},
+            _ = unit => {},
+        }
     }
 }
 
@@ -504,6 +564,7 @@ impl Runtime {
     ) -> error_stack::Result<JoinHandle<()>, GeneratorError> {
         let GeneratorTaskSpec {
             name,
+            unit,
             each,
             source_relay,
             source_branching,
@@ -549,15 +610,20 @@ impl Runtime {
                 ModelKind::Relay,
                 source_relay.clone(),
             ))
-            .map(|fanout| fanout.dispatch_gate());
+            .map(|fanout| GeneratorSourceGates {
+                whole: fanout.dispatch_gate(),
+                unit: fanout.unit_dispatch_gate(unit),
+            });
         let Some(source_gate) = source_gate else {
             let error = Report::new(GeneratorError::MissingSourceGate {
                 relay: source_relay.clone(),
             });
             return Err(error.change_context(start()));
         };
-        let quiesce_counters =
-            self.node_quiesce_counters(domain, NodeRef::new(ModelKind::Generator, &name));
+        let quiesce_counters = self.unit_quiesce_counters(
+            domain,
+            NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &name), unit),
+        );
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut domain_status_rx = self.inner.domain_status_changed.subscribe();
         let mut local_intake_rx = self.inner.local_intake.subscribe();
@@ -694,11 +760,12 @@ impl Runtime {
 
                     let mut state_load_failed = false;
                     let mut state = match runtime
-                        .materialized_records_from_owner(
-                            &mut routing,
+                        .materialized_unit_records_from_owner(
+                            routing.load(),
                             &mut source_generation,
                             &task_domain,
                             &source_relay,
+                            unit,
                         )
                         .await
                     {
@@ -1387,6 +1454,7 @@ mod tests {
         let (shutdown_tx, _shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let source_schema = test_schema(&[("value", ParseAsType::String)]);
         let spec = || GeneratorTaskSpec {
+            unit: Unit::SINGLE,
             name: named("synth_notifications"),
             each: "1s".parse().assured("one second is a valid cadence"),
             source_relay: named("notifications"),

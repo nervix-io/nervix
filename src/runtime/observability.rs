@@ -332,10 +332,47 @@ impl Runtime {
                 "failed to refresh branch-aggregated metrics before describe"
             );
         }
-        let mut lines = self
-            .inner
-            .metrics
-            .describe_global_target(domain, kind, identifier.clone());
+        let local_units = match self.inner.executions.get(domain) {
+            Some(execution) => match kind.to_ascii_lowercase().parse::<ModelKind>() {
+                Ok(model_kind) => match execution
+                    .revision
+                    .nodes
+                    .get(&NodeRef::new(model_kind, identifier.clone()))
+                {
+                    Some(node)
+                        if node.units.keys().any(|unit| {
+                            matches!(unit.kind(), nervix_models::UnitKind::Partition(_))
+                        }) =>
+                    {
+                        let dispatcher = self.inner.remote_dispatcher.load_full();
+                        let local = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
+                        Some(
+                            node.units
+                                .keys()
+                                .copied()
+                                .filter(|unit| {
+                                    Self::scheduled_unit_executes_locally(node, *unit, local)
+                                })
+                                .collect::<BTreeSet<_>>(),
+                        )
+                    }
+                    _ => None,
+                },
+                Err(_) => None,
+            },
+            None => None,
+        };
+        let mut lines = match local_units {
+            Some(units) => {
+                self.inner
+                    .metrics
+                    .describe_global_units(domain, kind, &identifier, &units)
+            }
+            None => self
+                .inner
+                .metrics
+                .describe_global_target(domain, kind, identifier.clone()),
+        };
         if kind.eq_ignore_ascii_case(ModelKind::Emitter.as_str()) {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
             let mut destination = self.inner.metrics.describe_emitter_interactions(&key);
@@ -391,19 +428,27 @@ impl Runtime {
         let Some(scheduled) = execution.revision.nodes.get(&entity) else {
             return Vec::new();
         };
-        let Some(generations) = scheduled.wasm_state_generations() else {
-            return Vec::new();
-        };
+        let dispatcher = self.inner.remote_dispatcher.load_full();
+        let local = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let mut checkpoints = Vec::new();
         for state in self.inner.replicated_wasm_processor_states.iter() {
             let placement = &state.placement;
             if &placement.domain != domain
                 || placement.kind != ModelKind::WasmProcessor
                 || placement.identifier != processor
+                || (placement.unit != Unit::SINGLE
+                    && !Self::scheduled_unit_executes_locally(scheduled, placement.unit, local))
             {
                 continue;
             }
             let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
+            let Some(generations) = scheduled
+                .units
+                .get(&placement.unit)
+                .and_then(|unit| unit.wasm_state_generations.as_ref())
+            else {
+                continue;
+            };
             if generations.of_branch(branch.as_ref()) != state.generation() {
                 continue;
             }

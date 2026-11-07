@@ -519,9 +519,11 @@ impl ScheduledNode {
 
     /// The units a node configured by `config` is scheduled as under `branching`.
     fn units_for(config: &Model, branching: Option<&ResolvedBranching>) -> Vec<Unit> {
-        match (config, branching) {
-            (Model::Relay(_), Some(branching)) => branching.units(),
-            (Model::Ingestor(ingestor), _) => match ingestor.input.instances() {
+        if let Some(partitions) = Self::branch_partitions_for(config, branching) {
+            return partitions.units();
+        }
+        match config {
+            Model::Ingestor(ingestor) => match ingestor.input.instances() {
                 Some(crate::IngestorInstances::Count(count)) => (0..count.get())
                     .map(|index| {
                         Unit::try_instance(index)
@@ -531,6 +533,40 @@ impl ScheduledNode {
                 _ => vec![Unit::SINGLE],
             },
             _ => vec![Unit::SINGLE],
+        }
+    }
+
+    fn branch_partitions_for(
+        config: &Model,
+        branching: Option<&ResolvedBranching>,
+    ) -> Option<crate::BranchPartitions> {
+        match config {
+            Model::Relay(_)
+            | Model::Junction(_)
+            | Model::Deduplicator(_)
+            | Model::Reorderer(_)
+            | Model::WindowProcessor(_)
+            | Model::Correlator(_)
+            | Model::Inferencer(_)
+            | Model::WasmProcessor(_)
+            | Model::Generator(_) => branching.and_then(ResolvedBranching::partitions),
+            _ => None,
+        }
+    }
+
+    /// Whether the scheduled identities match the current declaration. Ingestor units also
+    /// depend on resolved construction references and are validated by their entrypoint plan.
+    pub fn units_match_declaration(&self) -> bool {
+        if matches!(self.config.as_ref(), Model::Ingestor(_)) {
+            return true;
+        }
+        match Self::branch_partitions_for(self.config.as_ref(), self.resolved_branching.as_ref()) {
+            Some(partitions) if partitions.is_partitioned() => {
+                self.units.len() == usize::from(partitions.count().get())
+                    && (0..u32::from(partitions.count().get()))
+                        .all(|index| self.units.contains_key(&Unit::partition(index)))
+            }
+            _ => self.units.len() == 1 && self.units.contains_key(&Unit::SINGLE),
         }
     }
 
@@ -679,6 +715,40 @@ impl ScheduledNode {
         self.sole_unit()?.wasm_state_recoveries.as_ref()
     }
 
+    /// The execution unit of a concrete branch, using the same fingerprint seed as data routing.
+    pub fn unit_of_branch(&self, branch: Option<&BranchKeyFingerprint>) -> Option<Unit> {
+        let unit = match self
+            .resolved_branching
+            .as_ref()
+            .and_then(|branching| branching.partitions())
+        {
+            Some(partitions) if partitions.is_partitioned() => {
+                partitions.unit_of(branch?.partition_seed())
+            }
+            _ => Unit::SINGLE,
+        };
+        self.units.contains_key(&unit).then_some(unit)
+    }
+
+    pub fn wasm_state_generations_of_branch(
+        &self,
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> Option<&WasmStateGenerations> {
+        self.units
+            .get(&self.unit_of_branch(branch)?)?
+            .wasm_state_generations
+            .as_ref()
+    }
+
+    /// The concrete units selected by one reset, in unit order.
+    pub fn units_for_wasm_state_scope(&self, scope: &WasmStateResetScope) -> Vec<Unit> {
+        self.units
+            .keys()
+            .copied()
+            .filter(|unit| scope.selects_unit(*unit, self.resolved_branching.as_ref()))
+            .collect()
+    }
+
     /// Decide what the refused `generation` of `scope` is entitled to, recording an admitted
     /// attempt so that a restart, a leader change, or another owner reads the same decision.
     ///
@@ -690,7 +760,16 @@ impl ScheduledNode {
         generation: WasmStateGeneration,
         rejection: WasmSavedStateRejection,
     ) -> Option<WasmStateRecoveryAdmission> {
-        let recoveries = self.sole_unit_mut()?.wasm_state_recoveries.as_mut()?;
+        let identity = match &scope {
+            WasmStateResetScope::Branch(branch) => self.unit_of_branch(Some(branch))?,
+            WasmStateResetScope::Unbranched => self.unit_of_branch(None)?,
+            WasmStateResetScope::AllBranches => return None,
+        };
+        let recoveries = self
+            .units
+            .get_mut(&identity)?
+            .wasm_state_recoveries
+            .as_mut()?;
         let request = scope.recovery_request(generation);
         Some(recoveries.admit(scope, generation, rejection, request))
     }
@@ -704,7 +783,11 @@ impl ScheduledNode {
         request: &CommandExecutionReference,
         outcome: WasmStateRecoveryOutcome,
     ) -> bool {
-        let Some(unit) = self.sole_unit_mut() else {
+        let units = self.units_for_wasm_state_scope(scope);
+        let [identity] = units.as_slice() else {
+            return false;
+        };
+        let Some(unit) = self.units.get_mut(identity) else {
             return false;
         };
         let Some(recoveries) = unit.wasm_state_recoveries.as_mut() else {
@@ -718,7 +801,8 @@ impl ScheduledNode {
     /// A generation belongs to the pinned module binding it was published for. When this entry
     /// binds a different resource version or file than `existing`, the lifetimes continue from
     /// `existing` and every branch then starts a new one, so no snapshot saved under the previous
-    /// binding can attach to this one.
+    /// binding can attach to this one. Every execution unit continues only the lifetimes of its
+    /// matching unit; a newly declared unit keeps its own initial lifetimes.
     pub fn continue_wasm_state_generations_of(&mut self, existing: &Self) {
         let (Some(processor), Some(existing_processor)) =
             (self.wasm_processor(), existing.wasm_processor())
@@ -728,46 +812,50 @@ impl ScheduledNode {
         let binding_changed = processor.resource != existing_processor.resource
             || processor.resource_version != existing_processor.resource_version
             || processor.file != existing_processor.file;
-        let existing_unit = existing.single_unit();
-        let Some(existing_generations) = existing_unit.wasm_state_generations.as_ref() else {
-            return;
-        };
-        let mut generations = existing_generations.clone();
-        if binding_changed {
-            generations.begin_every_branch();
+        for (identity, unit) in &mut self.units {
+            let Some(existing_unit) = existing.units.get(identity) else {
+                continue;
+            };
+            let Some(existing_generations) = existing_unit.wasm_state_generations.as_ref() else {
+                continue;
+            };
+            let mut generations = existing_generations.clone();
+            if binding_changed {
+                generations.begin_every_branch();
+            }
+            unit.wasm_state_generations = Some(generations);
+            unit.wasm_state_reset = if binding_changed {
+                None
+            } else {
+                existing_unit.wasm_state_reset.clone()
+            };
+            // A recovery attempt belongs to its unit's admitted lifetime. A changed binding
+            // restarts that lifetime, so its preceding attempts no longer name a refusal.
+            unit.wasm_state_recoveries = match binding_changed {
+                true => Some(WasmStateRecoveries::empty()),
+                false => existing_unit.wasm_state_recoveries.clone(),
+            };
         }
-        let unit = self.single_unit_mut();
-        unit.wasm_state_generations = Some(generations);
-        unit.wasm_state_reset = if binding_changed {
-            None
-        } else {
-            existing_unit.wasm_state_reset.clone()
-        };
-        // A recovery attempt is spent on the lifetime it was admitted for. A changed binding
-        // restarts every lifetime, so the attempts recorded against the previous ones no longer
-        // name anything this entry can refuse.
-        unit.wasm_state_recoveries = match binding_changed {
-            true => Some(WasmStateRecoveries::empty()),
-            false => existing_unit.wasm_state_recoveries.clone(),
-        };
     }
 
     /// Start a new guest-state lifetime for every branch of this WASM processor, including branches
     /// that exist only as persisted snapshots. Every other kind of node has no guest state, a relay
     /// scheduled as partitions included.
     pub fn begin_wasm_state_generation(&mut self) {
-        let Some(unit) = self.sole_unit_mut() else {
-            return;
-        };
-        if let Some(generations) = unit.wasm_state_generations.as_mut() {
-            generations.begin_every_branch();
+        for unit in self.units.values_mut() {
+            if let Some(generations) = unit.wasm_state_generations.as_mut() {
+                generations.begin_every_branch();
+            }
         }
     }
 
     /// Start a new guest-state lifetime for one concrete branch of this WASM processor, leaving every
     /// other branch in the lifetime it has.
     pub fn begin_wasm_branch_state_generation(&mut self, branch: BranchKeyFingerprint) {
-        let Some(unit) = self.sole_unit_mut() else {
+        let Some(identity) = self.unit_of_branch(Some(&branch)) else {
+            return;
+        };
+        let Some(unit) = self.units.get_mut(&identity) else {
             return;
         };
         if let Some(generations) = unit.wasm_state_generations.as_mut() {
@@ -786,37 +874,45 @@ impl ScheduledNode {
         scope: WasmStateResetScope,
         reason: WasmStateResetReason,
     ) -> bool {
-        let Some(unit) = self.sole_unit_mut() else {
-            return false;
-        };
-        let Some(generations) = unit.wasm_state_generations.as_mut() else {
-            return false;
-        };
-        if unit
-            .wasm_state_reset
-            .as_ref()
-            .is_some_and(|reset| reset.request() == &request && reset.scope() == &scope)
-        {
-            return false;
+        let selected = self.units_for_wasm_state_scope(&scope);
+        let mut began = false;
+        for identity in selected {
+            let unit = self
+                .units
+                .get_mut(&identity)
+                .verified("the selected unit belongs to this node");
+            let Some(generations) = unit.wasm_state_generations.as_mut() else {
+                continue;
+            };
+            if unit
+                .wasm_state_reset
+                .as_ref()
+                .is_some_and(|reset| reset.request() == &request && reset.scope() == &scope)
+            {
+                continue;
+            }
+            generations.begin_reset(&scope);
+            unit.wasm_state_reset =
+                Some(WasmStateReset::publishing(request.clone(), scope, reason));
+            began = true;
         }
-        generations.begin_reset(&scope);
-        unit.wasm_state_reset = Some(WasmStateReset::publishing(request, scope, reason));
-        true
+        began
     }
 
     /// Mark the initial checkpoint of this exact reset durable and ready for runtime admission.
     pub fn complete_wasm_state_reset(&mut self, request: &CommandExecutionReference) -> bool {
-        let Some(unit) = self.sole_unit_mut() else {
-            return false;
-        };
-        let Some(reset) = unit.wasm_state_reset.as_mut() else {
-            return false;
-        };
-        if reset.request() != request || reset.phase() == WasmStateResetPhase::Ready {
-            return false;
+        let mut completed = false;
+        for unit in self.units.values_mut() {
+            let Some(reset) = unit.wasm_state_reset.as_mut() else {
+                continue;
+            };
+            if reset.request() != request || reset.phase() == WasmStateResetPhase::Ready {
+                continue;
+            }
+            reset.mark_ready();
+            completed = true;
         }
-        reset.mark_ready();
-        true
+        completed
     }
 
     pub fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {

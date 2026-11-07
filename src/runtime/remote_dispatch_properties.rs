@@ -15,6 +15,8 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use std::collections::BTreeMap;
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_execution::{ChargedBytes, MemoryClass};
@@ -73,6 +75,7 @@ impl RoutedCase {
         let mode = arbitrary
             .entropy()
             .pick([AckMode::Attached, AckMode::Detached]);
+        let scoped = unit != Unit::SINGLE && arbitrary.entropy().flag();
         let registered_rows = arbitrary.entropy().byte();
         let schema = GeneratedDomain::Arrow.schema(arbitrary);
         let rows = GeneratedDomain::Arrow.batch(arbitrary, &schema);
@@ -116,7 +119,12 @@ impl RoutedCase {
             consumer: RemoteRuntimeConsumer {
                 node_id: arbitrary.rule_name::<ClusterNodeName>(),
                 relay: arbitrary.rule_name::<RelayName>(),
-                mode,
+                mode: (!scoped).then_some(mode),
+                unit_modes: if scoped {
+                    BTreeMap::from([(unit, mode)])
+                } else {
+                    BTreeMap::new()
+                },
             },
             domain: arbitrary.rule_name::<DomainName>(),
             partitioning,

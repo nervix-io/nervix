@@ -831,6 +831,13 @@ For fan-out, the source encodes an Arrow batch once and shares those immutable e
 destinations and transport retries. Delivery metadata, admission state, and attached record
 acknowledgements remain specific to each destination channel.
 
+A destination receives one consumer delivery for a relay batch even when it runs both consumers of
+that batch's partition and consumers shared by all partitions. Its local fan-out selects both from
+one registration snapshot, so attached acknowledgement shares match those deliveries. A processor
+unit receives only its partition's batches; a shared consumer retains one bounded queue across all
+partitions. A handoff fences the selected unit's delivery while sibling units keep their channels
+and consumers.
+
 A delivery proceeds as follows:
 
 1. A delivery that carries record acknowledgements first stores them on the sender, charged to its
@@ -1823,16 +1830,19 @@ executor, pool class and byte limit; semantic conversion callers use that same c
 recreating serialization or validation outside the engine. This introduces no separate codec,
 message shape or execution mode.
 
-Domain routing retains each materialized relay's installed-state publication from the shared
-state-replication routing owner. Branch reads and generator scans use that relay's immutable index,
+Domain routing retains each materialized relay unit's installed-state publication from the shared
+state-replication routing owner. A branch dependency resolves only its own partition's owner, and
+each generator unit enumerates only its source unit's rows. They use that unit's immutable index,
 while the selected route validates its retained assignment identity. Retirement ends the exact
 state intake before removing its member; an ending predecessor cannot withdraw its replacement.
 Materialized installation refuses a lower revision, fence or branch generation before changing
 live rows. Transport decoding and the snapshot container remain owned by their existing engines;
 this publication introduces no wire or stored-container variant.
 
-A materialized dependency reader may observe the committed destination just before that node
-activates its prepared state, or the previous destination just after it leaves the assignment. A
+A materialized dependency reader observes its selected unit's delivery fence before reading local
+state or requesting remote state; a sibling unit's fence leaves its read available. The reader may
+observe the committed destination just before that node activates its prepared state, or the
+previous destination just after it leaves the assignment. A
 rejected, absent, or not-ready snapshot description in this handoff window means the dependency has
 no available record for that read. The dependency policy then waits, skips, or supplies its declared
 default; `REQUIRED WAIT` retains the batch and retries after routing, state, or bounded poll progress.

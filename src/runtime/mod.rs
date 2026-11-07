@@ -579,12 +579,12 @@ use processors::{
     InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError,
     PlannedGeneralFailure, PlannedGeneralResult, PlannedMessageError, PlannedSidecar,
     ProcessorCompileError, ProcessorLiveStateError, ProcessorMaterializedError,
-    ProcessorPlanRevision, ProgramName, PublishedProcessorPlan, RelayProcessorNode,
-    RelayProcessorOperationNode, RelayProcessorOperationTemplate, RelayProcessorOutputNode,
-    RelayProcessorOutputTemplate, RelayProcessorOutputsNode, RelayProcessorOutputsTemplate,
-    RelayProcessorRelayTemplate, RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer,
-    ReordererRowOrder, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext,
-    WindowBounds, WindowFlushContext,
+    ProcessorPlanRevision, ProcessorUnitRevision, ProgramName, PublishedProcessorPlan,
+    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
+    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
+    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
+    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, WasmAckContext, WasmAckMap,
+    WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
 };
 pub(in crate::runtime) use reconnect_backoff::{AcknowledgementKeepalive, RuntimeReconnectBackoff};
 use record_metadata::RecordMetadataColumns;
