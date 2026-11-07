@@ -171,6 +171,7 @@ mod tests {
     use meticulous::ResultExt as _;
 
     use super::*;
+    use crate::cluster::{KEY_TERMINATING, subscription_interest_key};
 
     fn name(node: &str) -> ClusterNodeName {
         ClusterNodeName::parse(node).assured("the test node names are valid")
@@ -222,19 +223,17 @@ mod tests {
         let mut members = members_of("node-1", 7);
         members.observe(&live(&[("node-1", 7), ("node-2", 9)], &[]));
 
-        let relay_created = members.observe(&live(
+        let termination_announced = members.observe(&live(
             &[("node-1", 7), ("node-2", 9)],
-            &[("runtime_revision_ready", "12")],
+            &[(KEY_TERMINATING, "1")],
         ));
+        let interest_key = subscription_interest_key("tenant", "orders");
         let subscription_opened = members.observe(&live(
             &[("node-1", 7), ("node-2", 9)],
-            &[
-                ("runtime_revision_ready", "12"),
-                ("subscription_interest:tenant/orders", "1"),
-            ],
+            &[(KEY_TERMINATING, "1"), (&interest_key, "1")],
         ));
 
-        assert_eq!(relay_created, Vec::new());
+        assert_eq!(termination_announced, Vec::new());
         assert_eq!(subscription_opened, Vec::new());
     }
 

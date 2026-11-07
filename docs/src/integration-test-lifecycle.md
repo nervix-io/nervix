@@ -53,6 +53,15 @@ This focused check covers incarnation-bound progress, completion through a push 
 clock delivery after attachment changes; the complete ordinary and mode suites remain separate
 qualification evidence.
 
+The held-query case keeps the sampled revision replies outstanding while reports complete the
+command. The held-report-and-query case releases either path explicitly and measures completion
+from that release. Clock cases exercise receiver attachment ahead of graph readiness. These are
+separate witnesses for the [completion barrier](./command-completion.md#all-live-node-barriers)
+and [authority delivery](./domain-clock.md#tick-production-and-progress-delivery); membership gossip
+remains available for topology and subscription interest. The measured nine- and twenty-second
+control-probe budgets and their margins are recorded under
+[Product Deadlines And Harness Deadlines](#product-deadlines-and-harness-deadlines).
+
 ## Focused Native Command Recovery
 
 `just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
@@ -157,6 +166,11 @@ fixture cannot survive its node specification.
 A scenario can release the byte cadence once. That wakes every delayed chunk and leaves existing
 sockets, buffered bytes and the reserved listener intact; future connections also run without
 pacing. A release does not parse the stream, fabricate a product response or replace a connection.
+
+Both proxy sockets preserve the interconnect's `TCP_NODELAY` policy. The accepted socket and the
+connection to the private listener disable Nagle coalescing before forwarding, so small writes
+follow the fixture's explicit byte cadence and its release. Focused socket-owner tests check both
+options and preserve request and response bytes across the two distinct connection legs.
 
 The rate-limited case transfers leadership to node-2 while the stopped follower has only its
 initial log, making the new leader recover an unconfirmed previous-log boundary. The scenario
