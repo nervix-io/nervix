@@ -122,12 +122,9 @@ stateDiagram-v2
 ```
 
 The control plane owns command identity, durable effect progress, terminal outcomes, and recovery.
-The registry and scheduling decisions validate and produce authoritative state. Each node records
-the authoritative revision it applied and the runtime revisions it prepared and made ready in one
-record bound to its process incarnation, so a restarted process cannot inherit its predecessor's
-readiness. It reports that record to the leader over the interconnect, and a barrier queries a node
-whose report it lacks; gossip carries no progress. Sessions and clients route requests and wait;
-they do not decide completion.
+The registry and scheduling decisions validate and produce authoritative state. Each node publishes
+its [application progress](#application-progress) to the leader, and a barrier queries a node whose
+report it lacks. Sessions and clients route requests and wait; they do not decide completion.
 
 ```mermaid
 flowchart LR
@@ -193,6 +190,36 @@ The ordered transaction records the reset as an effect even though it changes no
 waits for the selected guest-state generation to be durable and its replacement execution usable.
 Retrying an admitted reference resumes or reads the original outcome; an expired reference cannot
 start another destructive reset. See [Coordinated Reset](./wasm-state.md#coordinated-reset).
+
+## Application progress
+
+Each node owns one record bound to its full process incarnation. Its four phases record the newest
+revision that incarnation reached, with absence until it reaches one:
+
+| Phase | Writer | What the phase establishes |
+| --- | --- | --- |
+| Authoritative | Consensus applied-state observer | The incarnation applied the authoritative revision |
+| Runtime prepared | Runtime applicator | The incarnation prepared the coherent execution revision |
+| Runtime ready | Runtime applicator | The incarnation activated that revision and made it usable |
+| Domain clocks installed | Domain clock installer | Every installed domain clock matches the committed runtime revision, including its authority fence |
+
+Each phase only advances. This is volatile readiness evidence: a new process starts with every
+phase absent, while the durable command identity, effect progress and outcome remain in the
+replicated execution ledger. A replacement incarnation must establish its own readiness.
+
+The local owner publishes advances through a watch. A node pushes its newest record to its
+observed leader, which retains reports by full incarnation and merges late reports monotonically.
+A barrier combines its own record, the reports its leader received and authenticated revision-query
+replies. Gossip contributes to discovering participants and their availability; it carries no
+application progress and cannot establish that a participant reached a revision. The
+[interconnect contract](./interconnect.md#application-progress) owns report admission, query
+fallback, request classes and deadlines.
+
+The installed-clock phase also lets a receiver open
+[delivery from its authority](./domain-clock.md#tick-production-and-progress-delivery) before graph readiness.
+It does not replace the prepared and ready barriers. A server notice is a separately delivered
+[display event](./client-session-protocol.md#what-a-session-is-told); the command's retained terminal
+outcome establishes completion.
 
 ## All-live-node barriers
 

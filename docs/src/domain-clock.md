@@ -231,6 +231,12 @@ addressed. It uses the installed-clock phase of the node's
 [application progress](./interconnect.md#application-progress). A newer installed revision replaces
 the attachment, and an authority reassignment causes a fresh attachment to the new authority.
 
+Node-to-node attachments establish delivery from an authority to a receiver's installed clock.
+[Session attachments](./client-session-protocol.md#domain-clock-attachment) expose that local clock
+to a client, with their own reply ordering and restoration contract. Graph completion consumes the
+receiver's [prepared and ready phases](./command-completion.md#all-live-node-barriers); clock
+delivery begins as soon as the clock installation allows it.
+
 Attachment follows clock installation, ahead of graph preparation and activation. A target whose
 graph installation waits on a departed node therefore still receives progress. A lifecycle change
 that only graph installation installs, such as a new generation of another domain, holds the
