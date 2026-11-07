@@ -43,6 +43,21 @@ It runs that production owner's declared exploration and its nondeterminism chec
 Shuttle build directory, retaining failing schedules. The canonical `just test-shuttle` inventory
 and package-wide discovery still qualify the full selection in CI.
 
+The same focused scenario runner selects the four console restore-history examples with
+`just test-client-recovery-witnesses console-restore-recovery 'A console restore whose (reply was lost after it applied|completed reply was lost)'`.
+The bounded browser fixture loses a real completed restore's reply. Its unreadable-file control
+then fails archive reads; its unrecorded-failure case keeps the file readable and replaces exactly
+one later reply with a matching `Failed/Executed` outcome without a restore report, encoded by the
+production Rust codec. The fixture retains one start frame and the lost reply, each bounded by
+the normal frame limit, and holds at most sixteen later messages. It leaves subsequent replies
+unchanged after substitution. In the unrecorded-failure case Rust verifies the original request
+and execution reference of each lost candidate. A valid `OutcomeUnknown` can advance to the next
+held reply, within the same capture and wait bounds; a real completed outcome and its restore
+report are still required before substituting the later failure. The UI must retain Unknown under the original reference and name
+the later cause; a separate public restore stream repeats the retained start's statement and exact
+archive and checks every field of the recovered original outcome. These are one- and three-node
+browser scenarios with no retry, exclusivity or modified product deadline.
+
 `just test-client-recovery-diagnostic <selection>` uses the canonical Deloxide runner for each of
 `deloxide`, `deloxide-order`, `deloxide-stress` and `deloxide-stress-restore`. It validates the full
 register first, then retains all registered workloads in the four feature files reached by the

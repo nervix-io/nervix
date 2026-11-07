@@ -707,14 +707,21 @@ that restore call and likewise reports **unknown** under the restore's original 
 cannot establish that the restore was refused or that nothing changed; a foreign outcome is never
 shown as this restore's result.
 
-The leader admits a restore as soon as it holds the whole archive, so once an attempt has sent the
+The leader may admit a restore once it holds the whole archive, so once an attempt has sent the
 whole archive without an answer the console can read, or the leader has answered that the outcome
 is not known yet, the restore may have run. If the restore then ends without its outcome, because
 the browser can no longer read the file, a reply cannot be read, the leader refuses a later
-stream, or the leader no longer holds the execution reference, the dialog reports the outcome as
+stream, the leader no longer holds the execution reference, or a later request fails without a
+recorded outcome or restore step report, the dialog reports the outcome as
 unknown under that reference, with what stopped it, and never as a refusal: a refusal of a later
 stream says nothing about the earlier one. A file the browser cannot read before any attempt has
 sent the whole archive changes nothing, and the dialog reports the restore as refused.
+
+A valid refusal on the first attempt remains definitive. A recovered failure, or a failure with
+the restore's step report, gives the restore's result; the dialog retains the steps already applied.
+An unrecorded failure of a later request cannot replace an earlier restore's unknown result, even
+when it names the same execution reference. Keep the original reference, statement and archive
+when recovering that result.
 
 The console never renders what an archive holds beyond the summary a backup reports and the report
 a restore returns.
