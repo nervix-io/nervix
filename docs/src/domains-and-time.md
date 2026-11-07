@@ -182,12 +182,17 @@ subquota. For each domain and each remote node that installed its clock, the aut
 replaceable pending report and permits one delivery attempt at a time. A newer frontier replaces an
 older pending frontier while connection capacity or a response is delayed. The interconnection
 bounds all in-flight progress requests independently of the stream and memory reservations for
-health, cancellation, admission, and terminal outcomes. A joining or reconnected node receives the
-newest retained frontier once it advertises that it installed the required domain clocks.
+health, cancellation, admission, and terminal outcomes. A receiver opens delivery with a
+`domain_clock_attach` management request once its clocks match the committed runtime revision,
+ahead of graph readiness. It names its incarnation, installed revision and addressed authority
+fence, and attaches again after a newer installation or authority reassignment. Accepted
+attachments intersected with effective availability select delivery targets, so a joining or
+reconnected node receives the newest retained frontier through its installed-clock attachment.
 
-Each progress attempt has a two-second physical deadline. A failed attempt retries the newest
-frontier after a 200-millisecond physical backoff, and authority shutdown cancels both the request
-and that backoff. The response only confirms that the authenticated receiver evaluated the report;
+Each attachment or progress attempt has a two-second physical deadline. A failed attempt retries
+the current attachment or newest frontier after a 200-millisecond physical backoff. Replacement
+and terminal shutdown cancel the request and that backoff. The progress response only confirms
+that the authenticated receiver evaluated the report;
 the committed generation and authority fence decide whether it is current. Progress never replaces
 the committed mapping or moves a node's logical clock. Its wire value contains typed logical and
 UTC timestamps and never contains a process-local monotonic instant.

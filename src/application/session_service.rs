@@ -182,6 +182,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// This incarnation's application progress and the reports it holds while it leads. Also held
     /// by the revision and report handlers, the reporter and the authoritative writer.
     pub(in crate::application) application_progress: ApplicationProgressState,
+    /// Receiver subscriptions to this node's installed clock authorities.
+    pub(in crate::application) domain_clock_attachments:
+        super::domain_clock::DomainClockAttachments,
     /// Attaches the producers of this node's sessions, locally or through the node that executes
     /// their ingestor.
     pub(in crate::application) client_producers: ClientProducerRouter,

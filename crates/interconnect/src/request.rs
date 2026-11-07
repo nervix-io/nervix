@@ -22,7 +22,10 @@ use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
-use nervix_models::{ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity};
+use nervix_models::{
+    ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity, DomainClockAuthorityRevision,
+    DomainName,
+};
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption},
     sync::{Arc, Notify, OwnedSemaphorePermit, Semaphore, StdArc},
@@ -50,7 +53,7 @@ use super::{
 use crate::{
     connection::{
         ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender,
-        EncodedMessage, FrameReader, OutboundByteStreamRequest, RawDuplexRequest,
+        EncodedMessage, FrameReader, OutboundByteStreamRequest, PeerProcessFence, RawDuplexRequest,
     },
     observation::{ConnectionDirection, RequestOutcome, TransportObservations},
 };
@@ -182,6 +185,11 @@ pub struct RequestContext {
 impl RequestContext {
     pub fn peer_node_id(&self) -> &ClusterNodeName {
         &self.peer_node_id
+    }
+
+    /// The process epoch the authenticated peer supplied in this connection's hello.
+    pub fn peer_process_epoch(&self) -> u64 {
+        self.peer_process_epoch
     }
 
     /// The certificate-validated host named by the peer's connection hello.
@@ -538,6 +546,43 @@ impl InterconnectRequest for HttpsListenerInstallationRequest {
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
+/// Opens progress delivery after this receiver installed the addressed clock authority.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DomainClockAttachRequest {
+    pub domain_id: DomainName,
+    pub target: ClusterNodeIdentity,
+    pub installed_revision: u64,
+    pub generation: u64,
+    pub authority_revision: DomainClockAuthorityRevision,
+    pub authority: ClusterNodeIdentity,
+}
+
+/// The addressed authority's evaluation of one receiver attachment.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DomainClockAttachReceipt {
+    Accepted,
+    ForeignTarget,
+    UnavailableTarget,
+    SupersededAuthority,
+    StaleRevision,
+}
+
+impl InterconnectRequest for DomainClockAttachRequest {
+    type Response = DomainClockAttachReceipt;
+
+    const NAME: &'static str = "domain_clock_attach";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "clock attachment and progress requests must share one attempt deadline"
+        )
+    )]
+    const TIMEOUT: Duration = DomainClockProgressRequest::TIMEOUT;
+}
+
 impl InterconnectRequest for DomainClockProgressRequest {
     type Response = ();
 
@@ -626,6 +671,16 @@ impl StreamingResponse {
 
 #[derive(Debug, Error)]
 pub enum RequestError {
+    #[error(
+        "request '{request}' to node '{node}' expected process {expected}, but the connection \
+         belongs to process {actual}"
+    )]
+    PeerProcessChanged {
+        node: ClusterNodeName,
+        request: &'static str,
+        expected: u64,
+        actual: u64,
+    },
     #[error("the {subquota:?} request subquota is full for '{request}'")]
     AdmissionFull {
         request: &'static str,
@@ -718,6 +773,7 @@ impl RequestError {
                 ..
             } => true,
             Self::Encode { .. }
+            | Self::PeerProcessChanged { .. }
             | Self::Decode { .. }
             | Self::ShuttingDown { .. }
             | Self::TargetLeft { .. }
@@ -1728,14 +1784,42 @@ impl Transport {
     }
 
     /// Send one typed request with a caller-owned end-to-end deadline.
-    pub async fn request_with_timeout<M>(
+    pub fn request_with_timeout<M>(
         &self,
         node: &ClusterNodeName,
         message: M,
         timeout_duration: Duration,
+    ) -> impl Future<Output = Result<M::Response, Report<RequestError>>>
+    where
+        M: InterconnectRequest,
+    {
+        self.request_with_fence(node, message, timeout_duration, ())
+    }
+
+    /// Send only through a connection to the named authenticated process. A replacement process
+    /// is refused before any request is sent, without adding metadata to the request payload.
+    pub fn request_to_process<M>(
+        &self,
+        node: &ClusterNodeName,
+        peer_process_epoch: u64,
+        message: M,
+    ) -> impl Future<Output = Result<M::Response, Report<RequestError>>>
+    where
+        M: InterconnectRequest,
+    {
+        self.request_with_fence(node, message, M::TIMEOUT, peer_process_epoch)
+    }
+
+    async fn request_with_fence<M, F>(
+        &self,
+        node: &ClusterNodeName,
+        message: M,
+        timeout_duration: Duration,
+        fence: F,
     ) -> Result<M::Response, Report<RequestError>>
     where
         M: InterconnectRequest,
+        F: PeerProcessFence,
     {
         if self.inner.is_shutting_down() {
             return Err(Report::new(RequestError::ShuttingDown {
@@ -1776,12 +1860,20 @@ impl Transport {
             let response = {
                 let mapping_input = self
                     .inner
-                    .round_trip_control(node, request, M::SUBQUOTA, timeout_duration)
+                    .round_trip_control(node, request, M::SUBQUOTA, timeout_duration, fence)
                     .await;
                 match mapping_input {
                     Ok(mapped_value) => Ok(mapped_value),
                     Err(error) => Err({
                         let request_error = match error.current_context() {
+                            super::TransportError::PeerProcessChanged {
+                                expected, actual, ..
+                            } => RequestError::PeerProcessChanged {
+                                node: node.clone(),
+                                request: M::NAME,
+                                expected: *expected,
+                                actual: *actual,
+                            },
                             super::TransportError::ShuttingDown => RequestError::ShuttingDown {
                                 node: node.clone(),
                                 request: M::NAME,
@@ -1964,6 +2056,8 @@ impl InterconnectRequest for ReconcileOwnershipHandoffPreparationsRequest {
     }
 }
 
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+mod clock_attachment_properties;
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
 mod progress_properties;
 #[cfg(all(test, feature = "shuttle"))]

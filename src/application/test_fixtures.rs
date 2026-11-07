@@ -308,6 +308,10 @@ fn test_session_service(
             client_producers,
             client_consumers,
             interconnect,
+            domain_clock_attachments: super::domain_clock::DomainClockAttachments::new(
+                application_progress.identity(),
+            )
+            .0,
             application_progress,
             service_tasks: super::service_tasks::ServiceTasks::default(),
             authentication_pacing: SessionServiceImpl::new_authentication_pacing(),

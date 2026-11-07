@@ -11,6 +11,17 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+`just test-domain-clock-delivery` runs the one- and three-node receiver attachment scenarios:
+clock installation while gossip exchanges are blocked, session tick delivery and receiver restart.
+It prepares the console assets, WASM guests and ONNX runtime required by the in-process nodes;
+these cases start no CLI, paced simulation or Python driver. Arguments pass to the ordinary
+scenario runner, whose startup, execution, parallelism and teardown budgets stay unchanged.
+
+After a peer stops, these scenarios observe its unavailability through the cluster-status
+warning from the same availability view the clock authority reads. The warning stays observable
+after discovery retires the peer's interconnect row. Observation keeps the existing status budget,
+and the surviving session must still receive increasing ticks within ten seconds.
+
 The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
 system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
 address explicitly and presents the node's fixture certificate. The redirect scenario launches a

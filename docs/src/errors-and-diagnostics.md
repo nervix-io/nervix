@@ -10,6 +10,12 @@ sequences and malformed generations. Both retain typed `error_stack::Report` con
 fingerprints have a value-free `Debug` implementation, and the engine never receives original
 key values. Host policy and public message-error mapping belong to the caller.
 
+A typed interconnect request bound to a peer process returns `RequestError::PeerProcessChanged`
+when its selected connection lease belongs to another authenticated process epoch. The node,
+request, expected epoch and observed epoch remain typed, with the original
+`TransportError::PeerProcessChanged` underneath. The refusal sends no request and does not claim
+a remote handler rejection; the owner follows a replacement attachment instead.
+
 Native session TLS provisioning fails before a node opens its stores or listeners. Missing
 certificate/key paths and TLS files supplied in HTTP mode are distinct application errors. File
 reads retain their `io::Error` beneath `TlsMaterialError::ReadFile`, including the certificate or
