@@ -60,6 +60,21 @@ pub fn copy(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn copy_tooling(source: &Path, destination: &Path) -> Result<()> {
+    for (relative, name) in [
+        ("driver", "nervix-lint-driver"),
+        ("driver", "nervix-lint-report"),
+        ("source", "nervix-ratchet"),
+    ] {
+        let relative = Path::new("typed-ratchet")
+            .join(relative)
+            .join("debug")
+            .join(name);
+        copy(&source.join(&relative), &destination.join(relative))?;
+    }
+    Ok(())
+}
+
 pub fn copy_current(root: &Path, destination: &Path) -> Result<()> {
     let changed = process::text(
         "git",

@@ -242,17 +242,7 @@ impl QualifyCache {
     ) -> Result<Qualification> {
         worktree::copy_current(&self.root, root)?;
         let target = directory.join("second-target");
-        for (relative, name) in [
-            ("driver", "nervix-lint-driver"),
-            ("driver", "nervix-lint-report"),
-            ("source", "nervix-ratchet"),
-        ] {
-            let relative = Path::new("typed-ratchet")
-                .join(relative)
-                .join("debug")
-                .join(name);
-            worktree::copy(&self.target_dir.join(&relative), &target.join(relative))?;
-        }
+        worktree::copy_tooling(&self.target_dir, &target)?;
         let second = qualify(root, &target)?;
         Problem::SharedWorktreeIdentity.require(first.identity != second.identity)?;
         worktree::reject_foreign_report(root, &target, &second.recovered, &first.identity)?;
