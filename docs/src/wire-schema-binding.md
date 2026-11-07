@@ -223,10 +223,14 @@ position; encoding builds the record value from the typed columns and writes it 
 **Batches and bounds.** A batching emitter's member value is exactly the payload the single-record
 path writes, and the three formats frame members in their own containers: a JSON array, a
 definite-length CBOR array, and one Avro array block of the record schema
-([Batch Containers](./schemas-and-codecs.md#batch-containers)). JSON and CBOR stream into a bounded
-writer that abandons the encoding at the first write past `MAX SIZE`; AVRO builds the datum and the
-bounded writer decides whether it fits. Either way an encoding that does not fit is the typed
-`Oversize` outcome naming the codec, its encoding and the limit, never a truncated payload.
+([Batch Containers](./schemas-and-codecs.md#batch-containers)). Each container's syntax comes from
+its format's maintained encoder, around members written exactly as their records encoded them and
+never parsed again: `serde_json`'s compact formatter writes the JSON array's brackets and commas,
+`ciborium-ll` the CBOR array head, and `apache-avro` the Avro block count and the zero count that
+ends the array. JSON and CBOR stream into a bounded writer that abandons the encoding at the first
+write past `MAX SIZE`; AVRO builds the datum and the bounded writer decides whether it fits. Either
+way an encoding that does not fit is the typed `Oversize` outcome naming the codec, its encoding and
+the limit, never a truncated payload.
 
 ## Value Fidelity
 

@@ -515,6 +515,13 @@ test-kinded-heads *args: build-codec-heads
         --input {{ quote(justfile_directory() / "tests/features/runtime/{kinded_endpoint_heads,kinded_codec_heads,acknowledgement_clause}.feature") }} \
         --concurrency 4 --retry 0 "$@"
 
+# Exercise CLI stream recovery and terminal endings without unrelated client probes.
+test-cli-streams *args: build-deps build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_session*.feature") }} --tags '@cli_stream_termination or @cli_stream_recovery' {{ quote(args) }}
+
 # Select codec round trips or browser cases with the same ordinary runner and prepared tools.
 test-codec-scenarios input *args: build-codec-heads
     #!/usr/bin/env bash
@@ -2575,8 +2582,8 @@ coverage-loom output filter="":
 coverage-bins output *args:
     cargo llvm-cov --bins --lcov --output-path {{ output }} {{ args }}
 
-# Exercise the CLI binary through the public transaction, clock, and REPL reconnect scenarios with
-# LLVM coverage.
+# Exercise the CLI binary through the public transaction, clock, subscription lifetime and REPL
+# reconnect scenarios with LLVM coverage.
 coverage-cli-process output="target/cli-process.lcov":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2593,7 +2600,7 @@ coverage-cli-process output="target/cli-process.lcov":
         just test-scenarios --input tests/features/tools/cli_session.feature --name clock
     LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
         NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
-        just test-scenarios --input tests/features/tools/cli_session.feature --name keeps.printing
+        just test-scenarios --input tests/features/tools/cli_session.feature --name 'keeps.printing|subscription'
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/{print $2}')/bin"
     "$llvm_bin/llvm-profdata" merge -sparse "$coverage_dir"/*.profraw -o "$coverage_dir/merged.profdata"
     "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
