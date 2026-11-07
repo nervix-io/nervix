@@ -125,6 +125,15 @@ impl WireValues<'_> {
                 ClientRequest::Subscribe(subscribe) => {
                     subscribe.domain = self.arbitrary.name();
                     subscribe.statement = self.arbitrary.string();
+                    // The samples hold a first subscribe and a restoration, so both shapes are
+                    // generated whatever the input.
+                    subscribe.expected_schema = match &subscribe.expected_schema {
+                        Some(_) => {
+                            let branched = self.arbitrary.entropy().flag();
+                            Some(self.row_schema(branched))
+                        }
+                        None => None,
+                    };
                 }
                 ClientRequest::Unsubscribe(unsubscribe) => {
                     unsubscribe.subscription = self.arbitrary.name()

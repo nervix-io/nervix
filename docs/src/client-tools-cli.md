@@ -280,22 +280,29 @@ what is waiting and the whole chain of why, and the client keeps trying:
 ```
 
 After a reconnect the CLI opens every subscription and attaches every clock again. When the new
-session refuses one, a notice line reports the server's message and when the next attempt follows:
+session refuses one for a reason a later attempt can overcome, a notice line reports why, the
+server's message and when the next attempt follows:
 
 ```text
-[events] subscription [watch] notice: opening the subscription again failed: stream 'orders' does not exist in domain 'quickstart'; the next attempt follows in 2s
-[events] domain clock [simulation] notice: attaching the clock again failed: session-scoped and client-local statements cannot be queued in a transaction; the next attempt follows in 2s
+[events] subscription [watch] notice: opening the subscription again failed because the serving node could not open it now: failed to subscribe to relay 'orders': it was redefined while the subscription was being created; subscribe again; the next attempt follows in 2s
+[events] domain clock [simulation] notice: attaching the clock again failed because the session holds a transaction: session-scoped and client-local statements cannot be queued in a transaction; the next attempt follows in 2s
 ```
+
+A subscription whose relay was removed or redefined while the CLI had no session ends instead of
+being tried again, with the same last line as when the server ends it, and a followed clock whose
+domain no longer exists ends with its own end line.
 
 `DELETE SUBSCRIPTION` of a subscription no open session holds, because its session ended or the new
 session refused to open it again, completes at once and frees the name.
 
 When the server ends a subscription because its relay was redefined or removed, the subscription's
-last line reads:
+last line says why:
 
 ```text
-[events] subscription [watch] notice: the subscription ended: session subscription 'watch' ended because relay 'orders' in domain 'quickstart' no longer exists
+[events] subscription [watch] notice: the subscription ended because its relay no longer exists: session subscription 'watch' ended because relay 'orders' in domain 'quickstart' no longer exists
 ```
+
+A redefined relay reads `because its relay was redefined` instead.
 
 The CLI never opens an ended subscription again, including after a reconnect. `CREATE SUBSCRIPTION`
 under the same name opens it again under the relay's current definition, and `DELETE SUBSCRIPTION`
@@ -550,7 +557,7 @@ observers can parse them. Every line has one of these forms:
 | `[events] domain clock [<domain>]: <clock>` | when the serving node installs another clock, and when a new session attaches the clock again |
 | `[events] domain clock [<domain>] tick: generation <n>, id <n>, boundary <time>, authority UTC <time>, node logical <time>` | when the serving node accepts a newer tick of a paced clock |
 | `[events] domain clock [<domain>] notice: the session was interrupted; the clock is attached again on the next session` | when the session holding the attachment ends |
-| `[events] domain clock [<domain>] notice: attaching the clock again failed: <message>; the next attempt follows in <wait>` | when a new session refuses to attach the clock again |
+| `[events] domain clock [<domain>] notice: attaching the clock again failed because <cause>: <message>; the next attempt follows in <wait>` | when a new session refuses to attach the clock again; `<cause>` is `the session holds a transaction`, `the session rejected the request` or `the client could not complete the attempt` |
 | `[events] domain clock [<domain>] notice: the attachment ended because <reason>` | when the server ends the attachment, as the last line |
 
 `<clock>` is `generation <n>, ` followed by `stopped`, `uninstalled`, `unpaced`, or

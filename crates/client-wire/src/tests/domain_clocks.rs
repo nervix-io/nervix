@@ -39,7 +39,9 @@ fn every_attach_disposition_round_trips_with_the_clock_in_every_state() {
     dispositions.push(DomainClockAttachDisposition::DomainNotFound(name(
         &"d".repeat(128),
     )));
-    dispositions.push(DomainClockAttachDisposition::Failed);
+    for &refusal in crate::domain_clock::ALL_DOMAIN_CLOCK_ATTACH_REFUSALS {
+        dispositions.push(DomainClockAttachDisposition::Refused(refusal));
+    }
     for disposition in dispositions {
         let original = reply(ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
             disposition,

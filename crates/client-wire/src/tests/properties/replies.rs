@@ -211,11 +211,13 @@ impl WireValues<'_> {
                 diagnostics: self.diagnostics(),
             }));
         }
-        bodies.push(ReplyBody::Subscribe(SubscribeOutcome {
-            disposition: SubscribeDisposition::Failed,
-            message: self.arbitrary.string(),
-            diagnostics: self.diagnostics(),
-        }));
+        for &refusal in crate::reply::ALL_SUBSCRIPTION_REFUSALS {
+            bodies.push(ReplyBody::Subscribe(SubscribeOutcome {
+                disposition: SubscribeDisposition::Refused(refusal),
+                message: self.arbitrary.string(),
+                diagnostics: self.diagnostics(),
+            }));
+        }
         for disposition in [
             UnsubscribeDisposition::Deleted(self.subscription()),
             UnsubscribeDisposition::Failed,
@@ -256,11 +258,14 @@ impl WireValues<'_> {
                 message: self.arbitrary.string(),
             }));
         }
-        for disposition in [
+        let mut refusals = vec![
             DomainClockAttachDisposition::AlreadyAttached(self.arbitrary.name()),
             DomainClockAttachDisposition::DomainNotFound(self.arbitrary.name()),
-            DomainClockAttachDisposition::Failed,
-        ] {
+        ];
+        for &refusal in crate::domain_clock::ALL_DOMAIN_CLOCK_ATTACH_REFUSALS {
+            refusals.push(DomainClockAttachDisposition::Refused(refusal));
+        }
+        for disposition in refusals {
             bodies.push(ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
                 disposition,
                 message: self.arbitrary.string(),

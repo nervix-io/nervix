@@ -50,9 +50,10 @@ use nervix_client_wire::{
     OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection,
     RowSchema, ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
     SessionLimits, SourceSpan, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
-    SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
-    SubscriptionType, UnknownOutcomeCause, UnsubscribeDisposition, UnsubscribeOutcome,
-    UploadDisposition, UploadFailure, UploadReply, VerifiedFrame, WireDecodeError,
+    SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRefusal,
+    SubscriptionRowsEncoder, SubscriptionType, UnknownOutcomeCause, UnsubscribeDisposition,
+    UnsubscribeOutcome, UploadDisposition, UploadFailure, UploadReply, VerifiedFrame,
+    WireDecodeError,
 };
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainName, DomainPace, DomainStatus, FieldName,
@@ -2011,7 +2012,7 @@ async fn subscription_diagnostics_address_the_query_the_caller_passed() {
         .answer(
             request.request_id,
             ReplyBody::Subscribe(SubscribeOutcome {
-                disposition: SubscribeDisposition::Failed,
+                disposition: SubscribeDisposition::Refused(SubscriptionRefusal::RelayNotFound),
                 message: "relay 'order' does not exist".to_string(),
                 diagnostics: vec![
                     Diagnostic {
@@ -2195,7 +2196,7 @@ async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exc
         .answer(
             first_restore.request_id,
             ReplyBody::Subscribe(SubscribeOutcome {
-                disposition: SubscribeDisposition::Failed,
+                disposition: SubscribeDisposition::Refused(SubscriptionRefusal::Unavailable),
                 message: "relay is starting".to_string(),
                 diagnostics: Vec::new(),
             }),
