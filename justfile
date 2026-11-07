@@ -435,12 +435,16 @@ test-client-restore-reply: build-web-console download-onnxruntime build-test-cli
 build-codec-parser-heads:
     cargo test --package nervix-plexus --test kinded_codec_heads --no-run
 
+# Collect the complete codec-head parser and canonical-renderer assertions as ordinary coverage.
+coverage-codec-heads output="target/codec-heads.lcov":
+    cargo llvm-cov --package nervix-plexus --test kinded_codec_heads --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
 # Unify the native tool graph so each shared vocabulary dependency is prepared once.
 build-codec-tools:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo build --package nervix-plexus-format --bin nervix-plexus-format --package nervix-cli --bin nervix-cli --package nervix-deadlock --features nervix-deadlock/report-tool --bin nervix-deadlock-report
 
-# Real development assets keep focused API checks independent of release optimization.
-build-codec-heads: generate-test-onnx download-onnxruntime build-web-console-dev wasm-processor-guests build-codec-tools
+# Prepare the ordinary assets and tools the codec public scenarios execute.
+build-codec-heads: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests build-codec-tools
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -4039,13 +4043,6 @@ client *args: build-deps
 
 build-web-console:
     python3 -m scripts.build_web_console
-
-# Real, current console assets for focused local functional checks.
-build-web-console-dev:
-    python3 -m scripts.build_web_console --dev
-
-test-web-console-assets:
-    python3 -m unittest scripts.tests.test_bolero.ConsoleAssetTests
 
 # Keep the console build's wasm-bindgen CLI selection, installation and verification counters
 # beside the other tooling reports.

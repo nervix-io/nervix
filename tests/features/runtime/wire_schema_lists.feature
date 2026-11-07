@@ -30,7 +30,7 @@ Feature: Wire schema list fields
         matrix <matrix_wire>,
         stamps <stamps_wire>
       );
-      CREATE CODEC measurement_codec FROM WIRE AVRO SCHEMA measurement_wire TO SCHEMA measurement
+      CREATE WIRE AVRO CODEC measurement_codec FROM WIRE SCHEMA measurement_wire TO SCHEMA measurement
         ENCODE stamps AS RFC3339;
       CREATE RELAY measurements SCHEMA measurement UNBRANCHED;
       CREATE VHOST edge avro-lists-{{test_id}}.example.com;
@@ -100,7 +100,7 @@ Feature: Wire schema list fields
       """
       CREATE SCHEMA capture (chunks <chunks>, id STRING, stamps <stamps>);
       CREATE WIRE JSON SCHEMA capture_wire MODE STRICT (chunks array, id string, stamps array);
-      CREATE CODEC capture_codec FROM WIRE JSON SCHEMA capture_wire TO SCHEMA capture
+      CREATE WIRE JSON CODEC capture_codec FROM WIRE SCHEMA capture_wire TO SCHEMA capture
         ENCODE chunks AS BASE64, stamps AS RFC3339;
       CREATE RELAY captures SCHEMA capture UNBRANCHED;
       CREATE VHOST edge json-lists-{{test_id}}.example.com;
@@ -156,7 +156,7 @@ Feature: Wire schema list fields
       """
       CREATE SCHEMA capture (chunks <chunks>, id STRING, stamps <stamps>);
       CREATE WIRE CBOR SCHEMA capture_wire MODE STRICT (chunks array, id text, stamps array);
-      CREATE CODEC capture_codec FROM WIRE CBOR SCHEMA capture_wire TO SCHEMA capture
+      CREATE WIRE CBOR CODEC capture_codec FROM WIRE SCHEMA capture_wire TO SCHEMA capture
         ENCODE stamps AS RFC3339;
       CREATE RELAY captures SCHEMA capture UNBRANCHED;
       CREATE VHOST edge cbor-lists-{{test_id}}.example.com;
@@ -209,7 +209,7 @@ Feature: Wire schema list fields
       """
     When these Plexus commands fail with "<reason>"
       """
-      CREATE CODEC sample_codec FROM WIRE <format> SCHEMA sample_wire TO SCHEMA sample
+      CREATE WIRE <format> CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample
         <rules>;
       """
 

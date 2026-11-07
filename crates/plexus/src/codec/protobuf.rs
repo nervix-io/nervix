@@ -1,32 +1,34 @@
-//! Codec grammar in the language layer.
+//! Protobuf codec declaration grammar in the language layer.
 //!
-//! - **Owns.** Protobuf resource, message and transformation codec bodies.
+//! - **Owns.** The Protobuf codec head, resource binding, messages and transformations.
 //! - **Depends on.** Shared Plexus grammar primitives and codec vocabulary.
-//! - **Must not know.** Registry validation, codec execution or transport state.
+//! - **Must not know.** Resource installation, Protobuf compilation or transport state.
 
 #![cfg_attr(
     nervix_lint,
-    nervix::layer(language, reason = "owns codec declaration grammar")
+    nervix::layer(language, reason = "owns protobuf codec declaration grammar")
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{CodecProtobufConfig, CodecWireFormat};
+use nervix_models::{CodecProtobufConfig, CodecWireFormat, CreateCodec, RequestedResourceVersion};
 
-use super::{CodecBody, encoding_rules, jaq::transformations};
+use super::{encoding_rules, jaq::transformations, target_schema};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, config_entries_block, kw, kw_phrase2, resource_ref, resource_version_clause,
-        schema_ref, string_lit,
+        ParseError, codec_name, config_entries_block, kw, kw_phrase2, resource_ref,
+        resource_version_clause, string_lit,
     },
 };
 
-pub(super) fn body<'src>()
--> impl Parser<'src, &'src [Token], CodecBody, extra::Err<ParseError<'src>>> + Clone {
-    let protobuf_codec = kw(Identifier::Protobuf)
-        .ignore_then(kw(Identifier::Using))
-        .ignore_then(kw(Identifier::Resource))
-        .ignore_then(resource_ref())
+pub(super) fn create<'src>()
+-> impl Parser<'src, &'src [Token], CreateCodec<RequestedResourceVersion>, extra::Err<ParseError<'src>>>
++ Clone {
+    kw_phrase2(Identifier::Protobuf, Identifier::Codec)
+        .ignore_then(codec_name())
+        .then_ignore(kw(Identifier::Using))
+        .then_ignore(kw(Identifier::Resource))
+        .then(resource_ref())
         .then(resource_version_clause())
         .then(config_entries_block())
         .boxed()
@@ -37,34 +39,33 @@ pub(super) fn body<'src>()
                 .ignore_then(string_lit())
                 .or_not(),
         )
-        .then_ignore(kw(Identifier::To))
-        .then_ignore(kw(Identifier::Schema))
-        .then(schema_ref())
+        .then(target_schema())
         .boxed()
         .then(transformations())
         .then(encoding_rules())
         .map(
             |(
                 (
-                    (((((resource, resource_version), config), message), batch_message), schema),
+                    (
+                        (((((name, resource), resource_version), config), message), batch_message),
+                        schema,
+                    ),
                     transformations,
                 ),
                 encoding_rules,
-            )| {
-                CodecBody {
-                    wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
-                        resource,
-                        resource_version,
-                        config,
-                        message,
-                        batch_message,
-                        transformations,
-                    }),
-                    schema,
-                    encoding_rules,
-                }
+            )| CreateCodec {
+                name,
+                wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
+                    resource,
+                    resource_version,
+                    config,
+                    message,
+                    batch_message,
+                    transformations,
+                }),
+                schema,
+                encoding_rules,
             },
         )
-        .boxed();
-    protobuf_codec
+        .boxed()
 }

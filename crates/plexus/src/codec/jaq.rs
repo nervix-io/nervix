@@ -1,6 +1,6 @@
 //! Codec grammar in the language layer.
 //!
-//! - **Owns.** Directed JAQ transformations and native-format codec bodies.
+//! - **Owns.** JAQ format heads, their codec bodies and directed transformations.
 //! - **Depends on.** Shared Plexus grammar primitives and codec vocabulary.
 //! - **Must not know.** Registry validation, codec execution or transport state.
 
@@ -10,12 +10,14 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{CodecJaqFormat, CodecJaqTransformations, CodecWireFormat};
+use nervix_models::{
+    CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, RequestedResourceVersion,
+};
 
-use super::{CodecBody, encoding_rules};
+use super::{encoding_rules, target_schema};
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, kw, schema_ref, string_lit},
+    parser_support::{ParseError, codec_name, kw, kw_phrase3, string_lit},
 };
 
 /// `ON EMITTING` together with the `ON EMITTING BATCH` program that may follow it.
@@ -73,34 +75,32 @@ pub(super) fn transformations<'src>()
         .map(|emitting| EmittingTransformations::into_transformations(None, Some(emitting)));
     let directed_jaq_transformations =
         choice((ingestion_transformations, emitting_only_transformations)).boxed();
-    let jaq_transformations = kw(Identifier::With)
+    kw(Identifier::With)
         .ignore_then(kw(Identifier::Jaq))
         .ignore_then(kw(Identifier::Transformations))
         .ignore_then(directed_jaq_transformations)
-        .boxed();
-
-    jaq_transformations
+        .boxed()
 }
 
-pub(super) fn body<'src>()
--> impl Parser<'src, &'src [Token], CodecBody, extra::Err<ParseError<'src>>> + Clone {
-    let jaq_format = choice((
-        kw(Identifier::Json).to(CodecJaqFormat::Json),
-        kw(Identifier::Yaml).to(CodecJaqFormat::Yaml),
-        kw(Identifier::Toml).to(CodecJaqFormat::Toml),
-        kw(Identifier::Xml).to(CodecJaqFormat::Xml),
-        kw(Identifier::Cbor).to(CodecJaqFormat::Cbor),
+pub(super) fn create<'src>()
+-> impl Parser<'src, &'src [Token], CreateCodec<RequestedResourceVersion>, extra::Err<ParseError<'src>>>
++ Clone {
+    let head = choice((
+        kw_phrase3(Identifier::Jaq, Identifier::Json, Identifier::Codec).to(CodecJaqFormat::Json),
+        kw_phrase3(Identifier::Jaq, Identifier::Yaml, Identifier::Codec).to(CodecJaqFormat::Yaml),
+        kw_phrase3(Identifier::Jaq, Identifier::Toml, Identifier::Codec).to(CodecJaqFormat::Toml),
+        kw_phrase3(Identifier::Jaq, Identifier::Xml, Identifier::Codec).to(CodecJaqFormat::Xml),
+        kw_phrase3(Identifier::Jaq, Identifier::Cbor, Identifier::Codec).to(CodecJaqFormat::Cbor),
     ))
     .boxed();
-    let jaq_native_codec = jaq_format
-        .then_ignore(kw(Identifier::To))
-        .then_ignore(kw(Identifier::Schema))
-        .then(schema_ref())
+    head.then(codec_name())
+        .then(target_schema())
         .then(transformations())
         .boxed()
         .then(encoding_rules())
         .map(
-            |(((format, schema), transformations), encoding_rules)| CodecBody {
+            |((((format, name), schema), transformations), encoding_rules)| CreateCodec {
+                name,
                 wire_format: CodecWireFormat::JaqNative {
                     format,
                     transformations,
@@ -109,6 +109,5 @@ pub(super) fn body<'src>()
                 encoding_rules,
             },
         )
-        .boxed();
-    jaq_native_codec
+        .boxed()
 }

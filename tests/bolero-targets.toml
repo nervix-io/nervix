@@ -373,7 +373,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 52
+domain_version = 53
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -388,7 +388,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 54
+domain_version = 55
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -628,7 +628,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 52
+domain_version = 53
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -658,7 +658,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 51
+domain_version = 52
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -673,7 +673,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 51
+domain_version = 52
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -688,7 +688,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 50
+domain_version = 51
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -1063,7 +1063,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 51
+domain_version = 52
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1467,7 +1467,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
-domain_version = 46
+domain_version = 47
 features = []
 id = "registry-archived-models"
 invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
@@ -4284,3 +4284,18 @@ random_iterations = 256
 source = "crates/connectors/nats/src/client/authentication/tests.rs"
 test = "client::authentication::tests::bolero_malformed_authentication_keeps_typed_value_free_refusals"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__codec_draft__tests__bolero_codec_drafts_preserve_complete_models_and_family_heads/corpus"
+domain_version = 1
+features = []
+id = "console-codec-drafts"
+invariant = "Every codec family's browser draft renders its composed head and reparses to the complete Model, preserving conditional creation, exact wire-schema kind, resource version, ordered encoding rules and all directed transformation text."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-web-console"
+random_iterations = 128
+source = "crates/web-console/src/create_dialog/codec_draft.rs"
+test = "create_dialog::codec_draft::tests::bolero_codec_drafts_preserve_complete_models_and_family_heads"
+test_target = "bin:nervix-web-console"

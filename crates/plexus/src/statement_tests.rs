@@ -1760,8 +1760,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::codec_with_multiline_jaq_program(
         r#"
-            CREATE CODEC binance_ws_event_codec
-                FROM JSON
+            CREATE JAQ JSON CODEC binance_ws_event_codec
                 TO SCHEMA binance_ws_event
                 WITH JAQ TRANSFORMATIONS ON INGESTION $jaq${
                     event_type: .e,

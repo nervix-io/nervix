@@ -123,15 +123,15 @@ fn main() -> ExitCode {
     println!("  CREATE SCHEMA <name> (<field defs>) [;]");
     println!("  CREATE WIRE JSON|CBOR|AVRO SCHEMA <name> MODE STRICT|LOOSE (<field defs>) [;]");
     println!(
-        "  CREATE CODEC <name> FROM WIRE JSON|CBOR|AVRO SCHEMA <wire_schema> TO SCHEMA <schema> \
-         [;]"
+        "  CREATE WIRE JSON|CBOR|AVRO CODEC <name> FROM WIRE SCHEMA <wire_schema> TO SCHEMA \
+         <schema> [;]"
     );
     println!(
-        "  CREATE CODEC <name> FROM JSON|YAML|TOML|XML|CBOR TO SCHEMA <schema> WITH JAQ \
+        "  CREATE JAQ JSON|YAML|TOML|XML|CBOR CODEC <name> TO SCHEMA <schema> WITH JAQ \
          TRANSFORMATIONS ON INGESTION|EMITTING '...' [;]"
     );
     println!(
-        "  CREATE CODEC <name> FROM PROTOBUF USING RESOURCE <resource> [VERSION <n>] CONFIG \
+        "  CREATE PROTOBUF CODEC <name> USING RESOURCE <resource> VERSION <n>|LATEST CONFIG \
          {{'file' = '<path.proto>', 'include' = '.'}} MESSAGE '<package.Message>' TO SCHEMA \
          <schema> WITH JAQ TRANSFORMATIONS ON INGESTION|EMITTING '...' [;]"
     );

@@ -260,7 +260,7 @@ async fn process_command_preserves_detached_deduplicator_and_emitter_modes() {
     let commands = [
         "CREATE SCHEMA notification ( user_id I64 );",
         "CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );",
-        "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
+        "CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
          notification;",
         "CREATE RELAY notifications SCHEMA notification UNBRANCHED;",
         "CREATE RELAY forwarded_notifications SCHEMA notification UNBRANCHED;",
@@ -324,7 +324,7 @@ async fn process_command_creates_junction_model() {
     for command in [
         "CREATE SCHEMA notification ( user_id I64 );",
         "CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );",
-        "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
+        "CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
          notification;",
         "CREATE RELAY notifications_a SCHEMA notification UNBRANCHED;",
         "CREATE RELAY notifications_b SCHEMA notification UNBRANCHED;",
@@ -386,7 +386,7 @@ async fn process_command_creates_deduplicator_model() {
         "CREATE SCHEMA transaction ( transaction_id STRING, amount I64 );",
         "CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT ( transaction_id string, amount \
          integer );",
-        "CREATE CODEC transaction_codec FROM WIRE JSON SCHEMA transaction_wire TO SCHEMA \
+        "CREATE WIRE JSON CODEC transaction_codec FROM WIRE SCHEMA transaction_wire TO SCHEMA \
          transaction;",
         "CREATE RELAY inbound SCHEMA transaction UNBRANCHED;",
         "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",

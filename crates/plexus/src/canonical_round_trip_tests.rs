@@ -313,6 +313,47 @@ fn assert_presentation_rows(presentation: &nervix_models::EntityPresentation, re
 }
 
 #[test]
+fn codec_corpus_reaches_every_family_head() {
+    macro_rules! input {
+        ($file:literal) => {
+            include_bytes!(concat!(
+                "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/\
+                 corpus/",
+                $file
+            ))
+            .as_slice()
+        };
+    }
+    for (bytes, head) in [
+        (input!("codec-wire-json"), "WIRE JSON"),
+        (input!("codec-wire-cbor"), "WIRE CBOR"),
+        (input!("codec-wire-avro"), "WIRE AVRO"),
+        (input!("codec-jaq-json"), "JAQ JSON"),
+        (input!("codec-jaq-yaml"), "JAQ YAML"),
+        (input!("codec-jaq-toml"), "JAQ TOML"),
+        (input!("codec-jaq-xml"), "JAQ XML"),
+        (input!("codec-jaq-cbor"), "JAQ CBOR"),
+        (input!("codec-protobuf"), "PROTOBUF"),
+        (input!("codec-syslog"), "SYSLOG"),
+    ] {
+        let model = Arbitrary::new(bytes, Domain::Plexus).model();
+        assert!(matches!(&model, Model::Codec(_)), "{head}: {model:?}");
+        let statement = ClientStatement::Server(Statement::Create(CreateStatement::new(
+            Box::new(model),
+            false,
+        )));
+        let canonical = statement
+            .to_canonical_plexus()
+            .unwrap_or_else(|error| panic!("{head} must render: {error:?}"));
+        assert!(
+            canonical.starts_with(&format!("CREATE {head} CODEC ")),
+            "{head}: {canonical}"
+        );
+        assert_statement_round_trips(&statement);
+    }
+}
+
+#[test]
 fn bolero_model_roundtrip_canonical_plexus() {
     bolero::check!()
         .with_iterations(256)

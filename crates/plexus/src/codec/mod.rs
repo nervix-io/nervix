@@ -17,25 +17,23 @@ mod wire;
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    CodecEncoding, CodecEncodingRule, CodecWireFormat, CreateCodec, CreateStatement,
-    RequestedResourceVersion, SchemaName,
+    CodecEncoding, CodecEncodingRule, CreateCodec, CreateStatement, RequestedResourceVersion,
+    SchemaName,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, codec_name, field_ref, if_not_exists_clause,
-        into_parse_error, kw, lex_input, suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, field_ref, if_not_exists_clause,
+        into_parse_error, kw, lex_input, schema_ref, suggest_from, tok,
     },
 };
 
-/// The part of `CREATE CODEC` that follows `FROM`: the wire format the codec reads together with
-/// the wire schema that format needs, the Nervix schema it decodes into, and the per-field
-/// encoding rules.
-struct CodecBody {
-    wire_format: CodecWireFormat<RequestedResourceVersion>,
-    schema: SchemaName,
-    encoding_rules: Vec<CodecEncodingRule>,
+fn target_schema<'src>()
+-> impl Parser<'src, &'src [Token], SchemaName, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(kw(Identifier::Schema))
+        .ignore_then(schema_ref())
 }
 
 fn encoding_rules<'src>()
@@ -48,7 +46,7 @@ fn encoding_rules<'src>()
         )))
         .map(|(field, encoding)| CodecEncodingRule { field, encoding })
         .boxed();
-    let encoding_rules = kw(Identifier::Encode)
+    kw(Identifier::Encode)
         .ignore_then(
             encoding_rule
                 .separated_by(tok(Token::Comma))
@@ -58,9 +56,7 @@ fn encoding_rules<'src>()
         )
         .or_not()
         .map(Option::unwrap_or_default)
-        .boxed();
-
-    encoding_rules
+        .boxed()
 }
 
 pub fn create_codec_parser<'src>() -> impl Parser<
@@ -71,23 +67,17 @@ pub fn create_codec_parser<'src>() -> impl Parser<
 > + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Codec))
-        .then(codec_name())
-        .then_ignore(kw(Identifier::From))
-        .boxed()
-        .then(choice((wire::body(), protobuf::body(), jaq::body(), syslog::body())).boxed())
+        .then(
+            choice((
+                wire::create(),
+                protobuf::create(),
+                jaq::create(),
+                syslog::create(),
+            ))
+            .boxed(),
+        )
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|((if_not_exists, name), body)| {
-            CreateStatement::new(
-                CreateCodec {
-                    name,
-                    wire_format: body.wire_format,
-                    schema: body.schema,
-                    encoding_rules: body.encoding_rules,
-                },
-                if_not_exists,
-            )
-        })
+        .map(|(if_not_exists, codec)| CreateStatement::new(codec, if_not_exists))
         .boxed()
 }
 

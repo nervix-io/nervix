@@ -345,7 +345,7 @@ CREATE PROTOBUF CODEC <name>
 `BATCH MESSAGE` names a message in the same compiled descriptors. Without a batch transformation
 the batch message must declare exactly one field and that field must be `repeated <message>`;
 Nervix fills it with the members in packing order. With a batch transformation, the batch message
-may have any shape the transformation's single output is a valid instance of. `CREATE CODEC` fails
+may have any shape the transformation's single output is a valid instance of. `CREATE PROTOBUF CODEC` fails
 when the named message does not exist, and a batching emitter fails validation when the batch
 message has no single repeated field and the codec declares no batch transformation.
 

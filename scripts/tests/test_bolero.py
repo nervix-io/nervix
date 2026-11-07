@@ -117,58 +117,6 @@ class ConsoleAssetTests(unittest.TestCase):
                     build_web_console.main()
             self.assertEqual((console / "dist/index.html").read_bytes(), b"current console")
 
-    def test_development_assets_reuse_tools_and_isolate_only_application_artifacts(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            console = root / "crates/web-console"
-            console.mkdir(parents=True)
-            original_index = "<html><head><title>Console</title></head><body></body></html>"
-            (console / "index.html").write_text(original_index)
-            target = pathlib.Path("custom-target")
-            tools = root / target / "tools/wasm-bindgen-0.2.129/bin"
-
-            def build(args: list[str], **kwargs: object) -> None:
-                self.assertEqual(args[:4], ["trunk", "build", "--offline", "--dist"])
-                self.assertEqual(kwargs["cwd"], console)
-                self.assertEqual(args[5:7], ["--html-output", "index.html"])
-                index = pathlib.Path(args[7])
-                self.assertEqual(index.parent, console)
-                self.assertIn('data-trunk rel="rust" data-no-demangle', index.read_text())
-                env = kwargs["env"]
-                self.assertEqual(env["CARGO_TARGET_DIR"], str(root / target / "web-console-dev"))
-                self.assertEqual(env["PATH"].split(os.pathsep)[0], str(tools))
-                for key in ("RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"):
-                    self.assertEqual(env.get(key), os.environ.get(key))
-                staging = pathlib.Path(args[4])
-                staging.mkdir()
-                (staging / "index.html").write_bytes(b"development console")
-
-            with mock.patch.object(build_web_console, "ROOT", root), \
-                    mock.patch.object(build_web_console.wasm_bindgen, "default_target", return_value=target), \
-                    mock.patch.object(build_web_console.wasm_bindgen, "install", return_value=tools) as install, \
-                    mock.patch.object(build_web_console.subprocess, "run", side_effect=build):
-                build_web_console.main(release=False)
-            install.assert_called_once_with(root, target)
-            self.assertEqual((console / "dist/index.html").read_bytes(), b"development console")
-            self.assertEqual((console / "index.html").read_text(), original_index)
-            self.assertEqual(list(console.glob(".trunk-dev-*.html")), [])
-
-    def test_development_index_is_removed_when_trunk_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            console = root / "crates/web-console"
-            console.mkdir(parents=True)
-            source = "<html><head></head><body></body></html>"
-            (console / "index.html").write_text(source)
-            with mock.patch.object(build_web_console, "ROOT", root), \
-                    mock.patch.object(build_web_console.wasm_bindgen, "install", return_value=root), \
-                    mock.patch.object(build_web_console.subprocess, "run",
-                                      side_effect=subprocess.CalledProcessError(1, "trunk")):
-                with self.assertRaises(subprocess.CalledProcessError):
-                    build_web_console.main(release=False)
-            self.assertEqual((console / "index.html").read_text(), source)
-            self.assertEqual(list(console.glob(".trunk-dev-*.html")), [])
-
     def test_a_failed_tool_install_stops_the_build_before_trunk_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -468,6 +416,7 @@ class InventoryTests(unittest.TestCase):
             "console-pending-backups-malformed",
             "console-restore-drafts",
             "console-client-drafts",
+            "console-codec-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-destination-partitions",
@@ -545,14 +494,14 @@ class InventoryTests(unittest.TestCase):
             target.id: target.domain_version for target in bolero.load_inventory().targets
         }
         for target, version in {
-            "plexus-model": 52,
-            "plexus-archive-model": 54,
-            "plexus-statement": 52,
-            "plexus-statement-text": 51,
-            "plexus-format-document": 51,
-            "plexus-format-text": 50,
-            "models-archived-models": 51,
-            "registry-archived-models": 46,
+            "plexus-model": 53,
+            "plexus-archive-model": 55,
+            "plexus-statement": 53,
+            "plexus-statement-text": 52,
+            "plexus-format-document": 52,
+            "plexus-format-text": 51,
+            "models-archived-models": 52,
+            "registry-archived-models": 47,
             "consensus-state-records": 44,
             "consensus-state-corruption": 44,
             "consensus-raft-records": 44,

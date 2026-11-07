@@ -15,7 +15,7 @@ Feature: Explicit emitter record keys and destination partitions
       """
       CREATE SCHEMA event ( tenant STRING, value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_fields ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -84,8 +84,8 @@ Feature: Explicit emitter record keys and destination partitions
       """
       CREATE SCHEMA event ( tenant STRING, value I64, wire_key STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, wire_key string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_fields ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
@@ -136,8 +136,8 @@ Feature: Explicit emitter record keys and destination partitions
       """
       CREATE SCHEMA event ( tenant STRING, value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_fields ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
@@ -194,8 +194,8 @@ Feature: Explicit emitter record keys and destination partitions
       """
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge key-routing-{{test_id}}.example.com;
@@ -242,7 +242,7 @@ Feature: Explicit emitter record keys and destination partitions
       """
       CREATE SCHEMA event ( tenant STRING, value I64, zone I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, zone integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_fields ( tenant STRING );
       CREATE SCHEMA location_fields ( zone I64, tenant STRING );
       CREATE BRANCH tenant_source SCHEMA tenant_fields TTL 5m PARTITIONS 4;
@@ -300,7 +300,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE SCHEMA incoming ( tenant STRING SENSITIVE, value I64, label STRING OPTIONAL );
       CREATE SCHEMA public_event ( value I64 );
       CREATE WIRE JSON SCHEMA public_wire MODE STRICT ( value integer );
-      CREATE CODEC public_codec FROM WIRE JSON SCHEMA public_wire TO SCHEMA public_event;
+      CREATE WIRE JSON CODEC public_codec FROM WIRE SCHEMA public_wire TO SCHEMA public_event;
       CREATE SCHEMA tenant_fields ( tenant STRING SENSITIVE );
       CREATE BRANCH by_tenant SCHEMA tenant_fields TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA incoming BRANCHED BY by_tenant;
@@ -396,7 +396,7 @@ Feature: Explicit emitter record keys and destination partitions
       """
       CREATE SCHEMA event ( tenant STRING, value I64, zone I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, zone integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_fields ( tenant STRING );
       CREATE SCHEMA location_fields ( zone I64, tenant STRING );
       CREATE BRANCH tenant_source SCHEMA tenant_fields TTL 5m PARTITIONS 4;

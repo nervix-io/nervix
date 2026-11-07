@@ -2,8 +2,8 @@
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    ClientConfigEntry, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, FieldName,
-    WireSchemaName,
+    ClientConfigEntry, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+    CodecWireFormat, FieldName, WireSchemaName,
 };
 use rstest::rstest;
 
@@ -20,28 +20,28 @@ fn to_tokens(input: &str) -> Vec<Token> {
 
 #[rstest]
 #[case::xml_with_both_transformations(
-    "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ XML CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON INGESTION \".payload\" ON EMITTING \"{payload: {user_id}}\";",
     CodecJaqFormat::Xml,
     Some(".payload"),
     Some("{payload: {user_id}}")
 )]
 #[case::yaml_with_ingestion_transformation(
-    "CREATE CODEC notification_codec FROM YAML TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ YAML CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON INGESTION \".payload\";",
     CodecJaqFormat::Yaml,
     Some(".payload"),
     None
 )]
 #[case::json_with_emitting_transformation(
-    "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON EMITTING \"{payload: .}\";",
     CodecJaqFormat::Json,
     None,
     Some("{payload: .}")
 )]
 #[case::cbor_with_ingestion_transformation(
-    "CREATE CODEC notification_codec FROM CBOR TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ CBOR CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON INGESTION \".payload\";",
     CodecJaqFormat::Cbor,
     Some(".payload"),
@@ -71,8 +71,8 @@ fn parses_jaq_native_codec_transformations(
 #[test]
 fn parses_create_protobuf_codec_with_resource_config_and_message() {
     let tokens = to_tokens(
-        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 2 \
-         CONFIG {\"file\" = \"notification.proto\", \"include\" = \".\"} MESSAGE \
+        "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION 2 CONFIG \
+         {\"file\" = \"notification.proto\", \"include\" = \".\"} MESSAGE \
          \"nervix.test.Notification\" TO SCHEMA notification_schema WITH JAQ TRANSFORMATIONS ON \
          INGESTION \".\" ON EMITTING \".\";",
     );
@@ -108,7 +108,7 @@ fn parses_create_protobuf_codec_with_resource_config_and_message() {
 #[test]
 fn parses_create_protobuf_codec_bound_to_the_latest_resource_version() {
     let parsed = parse_create_codec(
-        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION LATEST \
+        "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION LATEST \
          CONFIG {'file' = 'notification.proto'} MESSAGE 'nervix.test.Notification' TO SCHEMA \
          notification_schema WITH JAQ TRANSFORMATIONS ON INGESTION '.';",
     )
@@ -126,28 +126,28 @@ fn wire_schema_name(name: &str) -> WireSchemaName {
 
 #[rstest]
 #[case::json(
-    "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
+    "CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
      notification_schema;",
     CodecWireFormat::Json { wire_schema: wire_schema_name("notification_wire") },
     "notification_codec",
     "notification_schema"
 )]
 #[case::avro(
-    "CREATE CODEC notification_codec FROM WIRE AVRO SCHEMA notification_wire TO SCHEMA \
+    "CREATE WIRE AVRO CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
      notification_schema;",
     CodecWireFormat::Avro { wire_schema: wire_schema_name("notification_wire") },
     "notification_codec",
     "notification_schema"
 )]
 #[case::cbor(
-    "CREATE CODEC notification_codec FROM WIRE CBOR SCHEMA notification_wire TO SCHEMA \
+    "CREATE WIRE CBOR CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
      notification_schema;",
     CodecWireFormat::Cbor { wire_schema: wire_schema_name("notification_wire") },
     "notification_codec",
     "notification_schema"
 )]
 #[case::syslog(
-    "CREATE CODEC events FROM SYSLOG TO SCHEMA syslog_event;",
+    "CREATE SYSLOG CODEC events TO SCHEMA syslog_event;",
     CodecWireFormat::Syslog,
     "events",
     "syslog_event"
@@ -168,75 +168,70 @@ fn parses_schemaful_codec_formats(
 
 #[rstest]
 #[case::implicit_jaq_transformation(
-    "CREATE CODEC notification_codec FROM YAML TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ YAML CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATION \".payload\";"
 )]
 #[case::syslog_jaq_transformation(
-    "CREATE CODEC events FROM SYSLOG TO SCHEMA syslog_event WITH JAQ TRANSFORMATIONS ON INGESTION \
-     '.';"
+    "CREATE SYSLOG CODEC events TO SCHEMA syslog_event WITH JAQ TRANSFORMATIONS ON INGESTION '.';"
 )]
 #[case::syslog_encoding_rule(
-    "CREATE CODEC events FROM SYSLOG TO SCHEMA syslog_event ENCODE timestamp AS RFC3339;"
+    "CREATE SYSLOG CODEC events TO SCHEMA syslog_event ENCODE timestamp AS RFC3339;"
 )]
 #[case::incomplete_encoding_rule(
-    "CREATE CODEC orders_codec FROM WIRE JSON SCHEMA orders_wire TO SCHEMA orders ENCODE \
+    "CREATE WIRE JSON CODEC orders_codec FROM WIRE SCHEMA orders_wire TO SCHEMA orders ENCODE \
      created_at RFC3339;"
 )]
 #[case::jaq_native_without_transformation(
-    "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema;"
+    "CREATE JAQ XML CODEC notification_codec TO SCHEMA notification_schema;"
 )]
 #[case::protobuf_without_jaq_transformation(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 CONFIG \
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION 1 CONFIG \
      {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" TO SCHEMA \
      notification_schema;"
 )]
 #[case::protobuf_without_config_clause(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 MESSAGE \
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION 1 MESSAGE \
      \"nervix.test.Notification\" TO SCHEMA notification_schema WITH JAQ TRANSFORMATIONS ON \
      INGESTION \".\";"
 )]
 #[case::protobuf_without_resource_version(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle CONFIG {\"file\" = \
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle CONFIG {\"file\" = \
      \"notification.proto\"} MESSAGE \"nervix.test.Notification\" TO SCHEMA notification_schema \
      WITH JAQ TRANSFORMATIONS ON INGESTION \".\";"
 )]
 #[case::protobuf_with_a_named_version(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION newest \
-     CONFIG {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" TO SCHEMA \
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION newest CONFIG \
+     {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" TO SCHEMA \
      notification_schema WITH JAQ TRANSFORMATIONS ON INGESTION \".\";"
 )]
-#[case::without_explicit_wire_format(
-    "CREATE CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
-     notification_schema;"
-)]
 #[case::jaq_transformations_without_direction(
-    "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ XML CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS \".payload\";"
 )]
 #[case::schemaful_with_jaq_transformation(
-    "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
+    "CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
      notification_schema WITH JAQ TRANSFORMATIONS ON INGESTION \".payload\";"
 )]
 #[case::batch_transformation_without_emitting(
-    "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON EMITTING BATCH \".\";"
 )]
 #[case::batch_transformation_after_ingestion_only(
-    "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON INGESTION \".\" ON EMITTING BATCH \".\";"
 )]
 #[case::batch_transformation_before_emitting(
-    "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON EMITTING BATCH \".\" ON EMITTING \".\";"
 )]
 #[case::batch_message_before_message(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 CONFIG \
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION 1 CONFIG \
      {\"file\" = \"notification.proto\"} BATCH MESSAGE \"nervix.test.Batch\" MESSAGE \
      \"nervix.test.Notification\" TO SCHEMA notification_schema WITH JAQ TRANSFORMATIONS ON \
      EMITTING \".\";"
 )]
 #[case::batch_message_on_a_jaq_native_codec(
-    "CREATE CODEC notification_codec FROM JSON BATCH MESSAGE \"nervix.test.Batch\" TO SCHEMA \
+    "CREATE JAQ JSON CODEC notification_codec BATCH MESSAGE \"nervix.test.Batch\" TO SCHEMA \
      notification_schema WITH JAQ TRANSFORMATIONS ON EMITTING \".\";"
 )]
 fn rejects_invalid_codec_forms(#[case] input: &str) {
@@ -248,7 +243,7 @@ fn parses_base64_field_encoding() {
     for format in ["JSON", "AVRO"] {
         for spelling in ["BASE64", "base64", "BaSe64"] {
             let input = format!(
-                "CREATE CODEC binary_codec FROM WIRE {format} SCHEMA binary_wire TO SCHEMA \
+                "CREATE WIRE {format} CODEC binary_codec FROM WIRE SCHEMA binary_wire TO SCHEMA \
                  binary_schema ENCODE payload AS {spelling};"
             );
             let parsed = parse_create_codec(&input).assured("BASE64 is a field encoding");
@@ -261,7 +256,7 @@ fn parses_base64_field_encoding() {
             );
         }
     }
-    let prefix = "CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA \
+    let prefix = "CREATE WIRE JSON CODEC binary_codec FROM WIRE SCHEMA binary_wire TO SCHEMA \
                   binary_schema ENCODE payload AS ";
     let suggestions = suggest_create_codec(prefix, prefix.len());
     assert!(suggestions.contains(&"BASE64".to_string()));
@@ -271,7 +266,7 @@ fn parses_base64_field_encoding() {
 #[test]
 fn parses_create_codec_with_rfc3339_datetime_encoding() {
     let tokens = to_tokens(
-        "CREATE CODEC orders_codec FROM WIRE JSON SCHEMA orders_wire TO SCHEMA orders ENCODE \
+        "CREATE WIRE JSON CODEC orders_codec FROM WIRE SCHEMA orders_wire TO SCHEMA orders ENCODE \
          created_at AS RFC3339;",
     );
     let parsed = parse_create_codec_tokens(&tokens).expect("parse should succeed");
@@ -287,93 +282,83 @@ fn parses_create_codec_with_rfc3339_datetime_encoding() {
 
 #[rstest]
 #[case::encode_after_target_schema(
-    "CREATE CODEC orders_codec FROM WIRE JSON SCHEMA orders_wire TO SCHEMA orders EN",
+    "CREATE WIRE JSON CODEC orders_codec FROM WIRE SCHEMA orders_wire TO SCHEMA orders EN",
     &["ENCODE"],
     &[]
 )]
 #[case::from_after_codec_name(
-    "CREATE CODEC notification_codec ",
+    "CREATE WIRE JSON CODEC notification_codec ",
     &["FROM"],
     &[]
 )]
-#[case::schemaful_formats_after_from_wire(
-    "CREATE CODEC notification_codec FROM WIRE ",
-    &["JSON", "AVRO", "CBOR"],
-    &[]
-)]
-#[case::wire_and_jaq_native_formats_after_from(
-    "CREATE CODEC notification_codec FROM ",
-    &["WIRE", "JSON", "YAML", "TOML", "XML", "CBOR", "PROTOBUF", "SYSLOG"],
-    &[]
-)]
 #[case::syslog_stays_on_its_codec_branch(
-    "CREATE CODEC events FROM SYSLOG ",
+    "CREATE SYSLOG CODEC events ",
     &["TO"],
     &["USING", "WITH", "ENCODE"]
 )]
-#[case::using_after_from_protobuf(
-    "CREATE CODEC notification_codec FROM PROTOBUF ",
+#[case::using_after_protobuf_head(
+    "CREATE PROTOBUF CODEC notification_codec ",
     &["USING"],
     &["WIRE"]
 )]
 #[case::only_version_after_protobuf_resource(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle ",
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle ",
     &["VERSION"],
     &["CONFIG", "MESSAGE"]
 )]
 #[case::latest_and_completed_version_after_protobuf_version(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION ",
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION ",
     &["LATEST", "completed_resource_version"],
     &["CONFIG", "integer_literal"]
 )]
 #[case::config_after_protobuf_latest_resource_version(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION LATEST ",
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION LATEST ",
     &["CONFIG"],
     &["MESSAGE", "LATEST"]
 )]
 #[case::config_after_protobuf_resource_version(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 ",
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION 1 ",
     &["CONFIG"],
     &["MESSAGE"]
 )]
 #[case::on_after_with_jaq_transformations(
-    "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ XML CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ",
     &["ON"],
     &["TO"]
 )]
 #[case::both_directions_after_with_jaq_transformations_on(
-    "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ XML CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON ",
     &["INGESTION", "EMITTING"],
     &["TRANSFORMATIONS"]
 )]
 #[case::only_emitting_as_second_jaq_transformation_direction(
-    "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ XML CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON INGESTION \".\" ON ",
     &["EMITTING"],
     &["INGESTION"]
 )]
 #[case::emitting_batch_after_emitting_transformation(
-    "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON EMITTING \".\" ON EMITTING ",
     &["BATCH"],
     &["INGESTION"]
 )]
 #[case::emitting_after_ingestion_and_emitting_transformations(
-    "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+    "CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
      TRANSFORMATIONS ON INGESTION \".\" ON EMITTING \".\" ON ",
     &["EMITTING"],
     &["INGESTION"]
 )]
 #[case::batch_message_after_protobuf_message(
-    "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 \
+    "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION 1 \
      CONFIG {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" ",
     &["BATCH MESSAGE", "TO"],
     &["BATCH", "WITH"]
 )]
 #[case::only_explicit_transformations_after_with_jaq(
-    "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH JAQ ",
+    "CREATE JAQ XML CODEC notification_codec TO SCHEMA notification_schema WITH JAQ ",
     &["TRANSFORMATIONS"],
     &["TRANSFORMATION"]
 )]
@@ -396,12 +381,12 @@ fn completes_codec_context_without_branch_leakage(
 fn parses_an_emitting_batch_transformation_after_the_emitting_transformation() {
     for (input, on_ingestion) in [
         (
-            "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+            "CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
              TRANSFORMATIONS ON EMITTING \"{id: .user_id}\" ON EMITTING BATCH \"{records: .}\";",
             None,
         ),
         (
-            "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+            "CREATE JAQ JSON CODEC notification_codec TO SCHEMA notification_schema WITH JAQ \
              TRANSFORMATIONS ON INGESTION \".\" ON EMITTING \"{id: .user_id}\" ON EMITTING BATCH \
              \"{records: .}\";",
             Some(".".to_string()),
@@ -426,10 +411,10 @@ fn parses_an_emitting_batch_transformation_after_the_emitting_transformation() {
 #[test]
 fn parses_a_protobuf_batch_message_after_the_message() {
     let parsed = parse_create_codec(
-        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 \
-         CONFIG {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" BATCH \
-         MESSAGE \"nervix.test.NotificationBatch\" TO SCHEMA notification_schema WITH JAQ \
-         TRANSFORMATIONS ON EMITTING \".\";",
+        "CREATE PROTOBUF CODEC notification_codec USING RESOURCE proto_bundle VERSION 1 CONFIG \
+         {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" BATCH MESSAGE \
+         \"nervix.test.NotificationBatch\" TO SCHEMA notification_schema WITH JAQ TRANSFORMATIONS \
+         ON EMITTING \".\";",
     )
     .expect("the protobuf codec parses");
 

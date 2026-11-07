@@ -1693,7 +1693,7 @@ mod tests {
         for input in [
             "DESCRIBE RESOURCE proto VERSION ",
             "CREATE VHOST edge api.example.com WITH TLS proto VERSION ",
-            "CREATE CODEC c FROM PROTOBUF USING RESOURCE proto VERSION 1",
+            "CREATE PROTOBUF CODEC c USING RESOURCE proto VERSION 1",
             "CREATE INFERENCER i FROM features USING RESOURCE proto VERSION ",
             "REBIND RESOURCE proto TO VERSION ",
             "REBIND\nRESOURCE\tproto\nTO\tVERSION ",

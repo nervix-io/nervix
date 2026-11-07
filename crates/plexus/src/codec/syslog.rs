@@ -1,35 +1,34 @@
-//! Codec grammar in the language layer.
+//! Syslog codec declaration grammar in the language layer.
 //!
-//! - **Owns.** The predefined Syslog codec body.
+//! - **Owns.** The Syslog codec head and its predefined field contract's target schema.
 //! - **Depends on.** Shared Plexus grammar primitives and codec vocabulary.
 //! - **Must not know.** Registry validation, codec execution or transport state.
 
 #![cfg_attr(
     nervix_lint,
-    nervix::layer(language, reason = "owns codec declaration grammar")
+    nervix::layer(language, reason = "owns syslog codec declaration grammar")
 )]
 
 use chumsky::prelude::*;
-use nervix_models::CodecWireFormat;
+use nervix_models::{CodecWireFormat, CreateCodec, RequestedResourceVersion};
 
-use super::CodecBody;
+use super::target_schema;
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, kw, schema_ref},
+    parser_support::{ParseError, codec_name, kw_phrase2},
 };
 
-pub(super) fn body<'src>()
--> impl Parser<'src, &'src [Token], CodecBody, extra::Err<ParseError<'src>>> + Clone {
-    let syslog_codec = kw(Identifier::Syslog)
-        .ignore_then(kw(Identifier::To))
-        .ignore_then(kw(Identifier::Schema))
-        .ignore_then(schema_ref())
-        .map(|schema| CodecBody {
+pub(super) fn create<'src>()
+-> impl Parser<'src, &'src [Token], CreateCodec<RequestedResourceVersion>, extra::Err<ParseError<'src>>>
++ Clone {
+    kw_phrase2(Identifier::Syslog, Identifier::Codec)
+        .ignore_then(codec_name())
+        .then(target_schema())
+        .map(|(name, schema)| CreateCodec {
+            name,
             wire_format: CodecWireFormat::Syslog,
             schema,
             encoding_rules: Vec::new(),
         })
-        .boxed();
-
-    syslog_codec
+        .boxed()
 }

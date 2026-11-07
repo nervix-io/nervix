@@ -11,11 +11,27 @@
 )]
 
 use meticulous::ResultExt as _;
-use nervix_models::{CodecWireFormat, ModelKind, SemanticReference};
+use nervix_models::{
+    CodecWireFormat, CreateCodec, CreateStatement, Model, ModelKind, RequestedResourceVersion,
+    SemanticReference, Statement,
+};
 use rstest::rstest;
 
 use super::parse_create_codec;
 use crate::client_statement::{CompletionExpectation, suggest_client_expectations};
+
+fn assert_canonical_round_trip(codec: &CreateStatement<CreateCodec<RequestedResourceVersion>>) {
+    let statement = Statement::Create(codec.clone().map_body(Model::Codec).map_body(Box::new));
+    let canonical = statement
+        .to_canonical_plexus()
+        .assured("every current codec head has a canonical spelling");
+    let parsed = crate::client_statement::parse_client_statement(&canonical)
+        .assured("the composed client grammar reads canonical codec declarations");
+    assert_eq!(
+        parsed,
+        crate::client_statement::ClientStatement::Server(statement)
+    );
+}
 
 #[rstest]
 #[case::wire_json("WIRE JSON", "FROM WIRE SCHEMA source_wire")]
@@ -36,6 +52,7 @@ fn every_family_head_preserves_its_name_and_schema(#[case] head: &str, #[case] b
         };
         let parsed =
             parse_create_codec(&source).assured("the current codec family has its own head");
+        assert_canonical_round_trip(&parsed);
         assert_eq!(parsed.name.as_str(), "payload_codec");
         assert_eq!(parsed.schema.as_str(), "payload");
         assert_eq!(parsed.if_not_exists, prefix == "CREATE IF NOT EXISTS");
@@ -78,6 +95,7 @@ fn protobuf_head_preserves_resource_binding_and_both_emitting_programs() {
          ON EMITTING BATCH '{records: .}';",
     )
     .assured("a protobuf codec keeps its complete resource and transformation body");
+    assert_canonical_round_trip(&parsed);
     let CodecWireFormat::Protobuf(config) = &parsed.wire_format else {
         panic!("the PROTOBUF head must select a protobuf codec");
     };

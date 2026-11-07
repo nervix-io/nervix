@@ -139,14 +139,14 @@ field governs its innermost scalar elements, at any nesting depth, and only thos
 ```plexus
 CREATE SCHEMA capture (stamps VEC<DATETIME>, chunks VEC<BYTES>, matrix ARRAY<F64, 2, 3>);
 CREATE WIRE JSON SCHEMA capture_json MODE STRICT (stamps array, chunks array, matrix array);
-CREATE CODEC capture_json_codec FROM WIRE JSON SCHEMA capture_json TO SCHEMA capture
+CREATE WIRE JSON CODEC capture_json_codec FROM WIRE SCHEMA capture_json TO SCHEMA capture
   ENCODE stamps AS RFC3339, chunks AS BASE64;
 CREATE WIRE AVRO SCHEMA capture_avro MODE STRICT (
   stamps array<string>,
   chunks array<bytes>,
   matrix array<array<double>>
 );
-CREATE CODEC capture_avro_codec FROM WIRE AVRO SCHEMA capture_avro TO SCHEMA capture
+CREATE WIRE AVRO CODEC capture_avro_codec FROM WIRE SCHEMA capture_avro TO SCHEMA capture
   ENCODE stamps AS RFC3339;
 ```
 

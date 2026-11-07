@@ -1278,7 +1278,8 @@ fn codec_and_signaling_forms_render_every_current_editor_family() {
         });
         let wire = render();
         assert!(wire.contains("Create codec"));
-        assert!(wire.contains("FROM WIRE JSON SCHEMA payload_wire"));
+        assert!(wire.contains("CREATE WIRE JSON CODEC wire_codec"));
+        assert!(wire.contains("FROM WIRE SCHEMA payload_wire"));
         assert!(wire.contains("create-codec-wire-schema"));
 
         signals.codec.update(|draft| {
