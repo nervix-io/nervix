@@ -362,7 +362,7 @@ impl From<BranchInstanceSnapshotEntry<Option<BranchKey>>> for BackupBranchLifecy
     }
 }
 
-/// One Kafka source partition's next offset in a captured checkpoint.
+/// One Kafka ingestor partition's next offset in a captured checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackupKafkaPartitionOffset {
     pub(crate) topic: String,

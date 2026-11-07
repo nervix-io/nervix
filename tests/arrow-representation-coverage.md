@@ -99,9 +99,11 @@ branch fingerprint.
 
 ## Codec Domains
 
-JSON fields use five representation types, CBOR fields six, and AVRO fields eight. Generated JSON
-`string` byte fields declare `BASE64`; generated CBOR `bytes` fields hold native byte strings;
-generated AVRO byte fields use either `bytes` directly or `string` with `BASE64`. The row,
+JSON fields use five representation types, CBOR fields six, and AVRO fields seven scalar types and
+`array<item>` of any of them, arrays included. Generated JSON `string` byte fields and JSON lists of
+bytes declare `BASE64`; generated CBOR `bytes` fields and CBOR lists of bytes hold native byte
+strings; generated AVRO byte fields and innermost byte items use either `bytes` directly or `string`
+with `BASE64`. A generated list of datetimes declares `RFC3339` in every format. The row,
 payload-group and bounded-encoding properties preserve the bytes through these representations.
 
 - `WIRE JSON` preserves every finite value. JSON has no number for a non-finite float, so the JSON
@@ -118,17 +120,17 @@ payload-group and bounded-encoding properties preserve the bytes through these r
   retain that case. CBOR narrows its binary float directly to the internal width.
 - CBOR binds `integer`, `float`, `boolean`, `text`, `bytes` and `array` to the corresponding
   internal types. `DATETIME` binds `text` with `ENCODE ... AS RFC3339`. JSON uses `integer`,
-  `number`, `string`, `boolean` and `array`; AVRO keeps its own scalar and collection types. The
-  generator draws them, and `generated_schemaful_codecs_are_accepted` holds every generated codec
-  to the registry's own validation.
+  `number`, `string`, `boolean` and `array`; AVRO keeps its own scalar types and declares the item
+  type of every array level. The generator draws them, and `generated_schemaful_codecs_are_accepted`
+  holds every generated codec to the registry's own validation.
 - A payload refused while a nested list value is being appended closes that list value inside the
   abandoned row, so its elements never become the first elements of the next row's list. The
   payload-group property and the scenario outline **Kafka NO ACK keeps the nested lists of a
   collected ingest group exact when a `<wire_format>` message is refused inside one** retain that
   case.
-- `WIRE AVRO` preserves every float bit pattern. A top-level field holds a type an Avro wire type
-  binds, and an unsigned element of a list is written as an Avro `long`, so the generated domain
-  holds unsigned values up to `i64::MAX`; a larger one is refused when it is encoded.
+- `WIRE AVRO` preserves every float bit pattern. A field and every list element hold a type an
+  Avro type binds exactly, and each element travels as the item type the wire schema declares for
+  its depth.
 - Every format writes a datetime as RFC 3339 text in UTC, which reads back to the same nanosecond
   from 1677 through 2262, and bytes as padded base64 text in JSON and native octets in CBOR and Avro.
 - A wire schema lists its fields in any order. Avro writes them in that order, and every format

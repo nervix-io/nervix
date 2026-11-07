@@ -4,7 +4,7 @@
 //! Layer: test harness.
 //! - **Owns.** The invariants the members of a batch payload are held to while the emitter's answers,
 //!   a retry, a cancelled attempt, terminal shutdown, a sibling emitter and a drain race one
-//!   another: every member resolves once, no source acknowledgement completes before every
+//!   another: every member resolves once, no ingestor acknowledgement completes before every
 //!   attached emitter confirmed it, a retry writes a retained payload with exactly the bytes and
 //!   the envelope it was first written with, and a drain never reads the emitter empty while one of
 //!   its members is unresolved.
@@ -90,7 +90,7 @@ fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
         occurred_at: Timestamp::from_unix_nanos(1),
         content: EncodedPayload {
             envelope: BatchEnvelope {
-                key: None,
+                destination: None,
                 headers: EmitterHeaders::Text(Vec::new()),
                 message_group: None,
                 clauses: Some(Arc::new(modeled_envelope())),
@@ -132,7 +132,7 @@ enum SiblingEnd {
 
 /// Two source messages fan out to a batching emitter and a sibling emitter. The batching emitter
 /// writes one payload of both, learns nothing, and writes it again, while the sibling resolves its
-/// own shares. Each source acknowledgement completes once: successfully only after both emitters
+/// own shares. Each ingestor acknowledgement completes once: successfully only after both emitters
 /// confirmed it, and the retry writes exactly the bytes and the envelope of the first attempt.
 fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
     shuttle::future::block_on(async move {

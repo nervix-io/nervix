@@ -208,7 +208,8 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
         received_at: 981_173_111_802,
     };
     let message = BrokerMessage::from_bytes(b"\xff", headers())
-        .with_key(Some("key".to_string()))
+        .with_key(Some(b"key".to_vec()))
+        .with_partition(Some(2))
         .with_group(Some("group".to_string()))
         .with_time(Some(created))
         .with_typed_headers(typed_headers.clone())
@@ -234,7 +235,8 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
     assert_eq!(first.bytes, b"\xff");
     assert_eq!(first.payload, "\u{fffd}");
     assert_eq!(first.headers, headers());
-    assert_eq!(first.key.as_deref(), Some("key"));
+    assert_eq!(first.key.as_deref(), Some(b"key".as_slice()));
+    assert_eq!(first.partition, Some(2));
     assert_eq!(first.group.as_deref(), Some("group"));
     assert_eq!(first.time, Some(created));
     assert_eq!(first.typed_headers, typed_headers);

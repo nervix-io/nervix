@@ -6,7 +6,7 @@
 //!   queued, their fair admission into the ingestor's one acknowledgement window, the ACK root of
 //!   every admitted batch and its terminal outcome, the admission state producers are told, the
 //!   end of their attachments, and the node's byte budget for producer payloads.
-//! - **Depends on.** Typed client source plans, the ingestor's bound routes and quiesce control,
+//! - **Depends on.** Typed client ingestor plans, the ingestor's bound routes and quiesce control,
 //!   the ingest group executor, ACK roots, and Arrow body decoding.
 //! - **Must not know.** Sessions, the session or interconnect wire, Plexus, or how a producer
 //!   reached this node.
@@ -1950,7 +1950,7 @@ impl IngestorQuiesceControl {
         Ok((root, completion))
     }
 
-    /// Whether a client source admits a batch under the current publication. An ownership
+    /// Whether a client ingestor admits a batch under the current publication. An ownership
     /// handoff or a shutdown stops intake for good on this execution; every other hold is a
     /// suspension that the release ends.
     pub(in crate::runtime) fn client_intake_state(&self) -> ClientIntakeState {

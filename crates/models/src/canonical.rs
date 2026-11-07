@@ -3049,7 +3049,7 @@ pub fn ingest_quiesce_to_plexus(quiesce: &crate::IngestQuiesceMode) -> String {
 }
 
 impl ClientIngestMode {
-    /// The mode clause of a client source, after its `MODE` keyword.
+    /// The mode clause of a client ingestor, after its `MODE` keyword.
     pub fn to_canonical_plexus(&self) -> String {
         let Self {
             window,
@@ -3183,13 +3183,15 @@ fn envelope_clause_to_plexus(
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     let keywords = clause.kind().keywords();
     let text = match clause {
-        EnvelopeClause::Persistent | EnvelopeClause::Mandatory | EnvelopeClause::Retain => {
-            keywords.to_string()
-        }
+        EnvelopeClause::PartitionFromBranch
+        | EnvelopeClause::Persistent
+        | EnvelopeClause::Mandatory
+        | EnvelopeClause::Retain => keywords.to_string(),
         EnvelopeClause::DeliverAfter(duration) | EnvelopeClause::Delay(duration) => {
             format!("{keywords} {duration}")
         }
-        EnvelopeClause::Timestamp(expression)
+        EnvelopeClause::Key(expression)
+        | EnvelopeClause::Timestamp(expression)
         | EnvelopeClause::ReplyTo(expression)
         | EnvelopeClause::MessageId(expression)
         | EnvelopeClause::DeduplicationId(expression) => {
@@ -3455,16 +3457,28 @@ pub fn string_literal(value: &str) -> String {
     }
 }
 
+/// A wire schema field type as canonical Plexus writes it: its keywords in uppercase.
 trait NativeTypeToPlexus {
     fn to_plexus_keyword(&self) -> String;
 }
 
-impl<T> NativeTypeToPlexus for T
-where
-    T: AsRef<str>,
-{
+impl NativeTypeToPlexus for JsonType {
     fn to_plexus_keyword(&self) -> String {
         self.as_ref().to_ascii_uppercase()
+    }
+}
+
+impl NativeTypeToPlexus for CborType {
+    fn to_plexus_keyword(&self) -> String {
+        self.as_ref().to_ascii_uppercase()
+    }
+}
+
+/// An AVRO type's keywords are the names of its Avro schema, so an array writes its item type at
+/// every depth, `ARRAY<ARRAY<DOUBLE>>`.
+impl NativeTypeToPlexus for AvroType {
+    fn to_plexus_keyword(&self) -> String {
+        self.to_string().to_ascii_uppercase()
     }
 }
 
@@ -3636,6 +3650,43 @@ mod tests {
         assert_eq!(
             plexus,
             "CREATE WIRE AVRO SCHEMA latency MODE STRICT (\n  p99 DOUBLE,\n  created_at STRING\n);"
+        );
+    }
+
+    #[test]
+    fn renders_avro_array_items_at_every_depth() {
+        let schema: Model = Model::WireAvroSchema(CreateWireSchema {
+            name: named("lists"),
+            strictness: Default::default(),
+            fields: vec![
+                WireSchemaField {
+                    name: named("totals"),
+                    ty: AvroType::array_of(AvroType::Long),
+                    optional: true,
+                },
+                WireSchemaField {
+                    name: named("matrix"),
+                    ty: AvroType::array_of(AvroType::array_of(AvroType::Double)),
+                    optional: false,
+                },
+            ],
+        });
+        assert_eq!(
+            schema.to_canonical_plexus().expect("must render"),
+            "CREATE WIRE AVRO SCHEMA lists MODE STRICT (\n  totals ARRAY<LONG> OPTIONAL,\n  \
+             matrix ARRAY<ARRAY<DOUBLE>>\n);"
+        );
+
+        let alter = crate::AlterWireSchema {
+            schema: named("lists"),
+            operations: vec![crate::AlterWireSchemaOperation::SetFieldType {
+                field: named("totals"),
+                ty: AvroType::array_of(AvroType::Int),
+            }],
+        };
+        assert_eq!(
+            super::alter_avro_wire_schema_to_canonical_plexus(&alter).expect("must render"),
+            "ALTER WIRE AVRO SCHEMA lists ALTER FIELD totals SET TYPE ARRAY<INT>;"
         );
     }
 
@@ -4682,20 +4733,10 @@ mod tests {
             }))
         };
         assert_eq!(
-            sqs(Some(crate::SqsFifoGroup::FromBranch))
+            sqs(Some(scoped_field(FieldScope::Input, "tenant")))
                 .entity_presentation()
-                .assured("the branch group has no fallible expression")
+                .assured("the scoped field has a canonical representation")
                 .reference_to_plexus(),
-            "sqs_main QUEUE 'orders_queue' FIFO GROUP FROM BRANCH SEND BATCH"
-        );
-        assert_eq!(
-            sqs(Some(crate::SqsFifoGroup::Expression(scoped_field(
-                FieldScope::Input,
-                "tenant"
-            ))))
-            .entity_presentation()
-            .assured("the scoped field has a canonical representation")
-            .reference_to_plexus(),
             "sqs_main QUEUE 'orders_queue' FIFO GROUP input.tenant SEND BATCH"
         );
 

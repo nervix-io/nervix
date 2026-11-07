@@ -319,6 +319,9 @@ mod remote_ack_watch_charge;
 mod remote_dispatch;
 mod reorderer;
 mod resources;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod revision_index_inspection;
 mod stateful_inferencer;
 pub(crate) use resources::RuntimeResourceError;
 mod runtime_lifecycle;

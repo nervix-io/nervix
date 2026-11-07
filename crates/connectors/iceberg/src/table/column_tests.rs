@@ -1,5 +1,5 @@
 //! Which table column an Iceberg commit writes each mapped column into, and which tables the mapped
-//! columns are refused for, driven through the sink against Iceberg's in-memory catalog.
+//! columns are refused for, driven through the emitter against Iceberg's in-memory catalog.
 
 use ::iceberg::{
     NamespaceIdent, TableCreation, TableIdent,
@@ -57,7 +57,7 @@ async fn create_table(catalog: &dyn Catalog, fields: Vec<NestedField>) -> Table 
         .assured("the in-memory catalog creates the table")
 }
 
-/// A sink that stages the columns `mapped` and appends them to `table`, as an emitter whose
+/// An emitter that stages the columns `mapped` and appends them to `table`, as an emitter whose
 /// `VALUES` maps those columns, in that order, opens one.
 fn fixture_emitter(
     catalog: StdArc<dyn Catalog>,
@@ -91,7 +91,7 @@ fn fixture_emitter(
 }
 
 /// Stages every row of `batch` as one carrier.
-async fn stage(sink: &mut IcebergTableEmitter, batch: &RecordBatch) {
+async fn stage(emitter: &mut IcebergTableEmitter, batch: &RecordBatch) {
     let selected_rows = (0..batch.num_rows()).collect::<Vec<_>>();
     let target_columns = batch
         .schema()
@@ -99,7 +99,7 @@ async fn stage(sink: &mut IcebergTableEmitter, batch: &RecordBatch) {
         .iter()
         .map(|field| field.name().clone())
         .collect::<Vec<_>>();
-    let outcome = sink
+    let outcome = emitter
         .publish(MappedEmitterRows {
             target_columns: &target_columns,
             carriers: vec![MappedEmitterCarrier {
@@ -113,7 +113,7 @@ async fn stage(sink: &mut IcebergTableEmitter, batch: &RecordBatch) {
         .await;
     assert!(
         !outcome.has_infrastructure_error(),
-        "the sink stages every row it is handed"
+        "the emitter stages every row it is handed"
     );
 }
 
@@ -197,7 +197,7 @@ async fn a_commit_writes_each_mapped_column_into_the_table_column_of_its_name() 
         Field::new("b", DataType::Utf8, true),
         Field::new("a", DataType::Utf8, true),
     ]);
-    let mut sink = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
+    let mut emitter = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
     let batch = RecordBatch::try_new(
         StdArc::new(mapped),
         vec![
@@ -206,9 +206,10 @@ async fn a_commit_writes_each_mapped_column_into_the_table_column_of_its_name() 
         ],
     )
     .assured("the columns match the mapped schema");
-    stage(&mut sink, &batch).await;
+    stage(&mut emitter, &batch).await;
 
-    sink.commit()
+    emitter
+        .commit()
         .await
         .assured("columns of one type in another order commit")
         .assured("the commit publishes the staged row");
@@ -234,7 +235,7 @@ async fn columns_of_different_types_mapped_out_of_the_table_order_commit_by_name
         Field::new("action", DataType::Utf8, true),
         Field::new("user_id", DataType::Int64, true),
     ]);
-    let mut sink = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
+    let mut emitter = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
     let batch = RecordBatch::try_new(
         StdArc::new(mapped),
         vec![
@@ -243,9 +244,10 @@ async fn columns_of_different_types_mapped_out_of_the_table_order_commit_by_name
         ],
     )
     .assured("the columns match the mapped schema");
-    stage(&mut sink, &batch).await;
+    stage(&mut emitter, &batch).await;
 
-    sink.commit()
+    emitter
+        .commit()
         .await
         .assured("columns of different types in another order commit")
         .assured("the commit publishes the staged rows");
@@ -271,15 +273,16 @@ async fn an_optional_table_column_values_leaves_unmapped_is_written_as_null() {
     )
     .await;
     let mapped = arrow_schema::Schema::new(vec![Field::new("action", DataType::Utf8, true)]);
-    let mut sink = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
+    let mut emitter = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
     let batch = RecordBatch::try_new(
         StdArc::new(mapped),
         vec![StdArc::new(StringArray::from(vec!["open"]))],
     )
     .assured("the column matches the mapped schema");
-    stage(&mut sink, &batch).await;
+    stage(&mut emitter, &batch).await;
 
-    sink.commit()
+    emitter
+        .commit()
         .await
         .assured("a table column VALUES leaves out does not fail the commit")
         .assured("the commit publishes the staged row");
@@ -305,7 +308,7 @@ async fn a_nullable_mapping_into_a_required_column_fails_the_commit_instead_of_w
         Field::new("user_id", DataType::Int64, true),
         Field::new("action", DataType::Utf8, true),
     ]);
-    let mut sink = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
+    let mut emitter = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
     let batch = RecordBatch::try_new(
         StdArc::new(mapped),
         vec![
@@ -314,9 +317,9 @@ async fn a_nullable_mapping_into_a_required_column_fails_the_commit_instead_of_w
         ],
     )
     .assured("the columns match the mapped schema");
-    stage(&mut sink, &batch).await;
+    stage(&mut emitter, &batch).await;
 
-    let refused = sink
+    let refused = emitter
         .commit()
         .await
         .err()
@@ -338,7 +341,10 @@ async fn a_nullable_mapping_into_a_required_column_fails_the_commit_instead_of_w
         table_rows(catalog.as_ref()).await,
         Vec::<serde_json::Value>::new()
     );
-    assert_eq!(sink.staged_rows, 1, "a refused commit keeps its staged row");
+    assert_eq!(
+        emitter.staged_rows, 1,
+        "a refused commit keeps its staged row"
+    );
 }
 
 #[nervix_primitives::test]
@@ -356,7 +362,7 @@ async fn a_commit_writes_null_into_an_optional_column_added_after_open() {
         Field::new("user_id", DataType::Int64, true),
         Field::new("action", DataType::Utf8, true),
     ]);
-    let mut sink = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
+    let mut emitter = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
     evolve_table(catalog.as_ref(), |transaction| {
         let added = transaction.update_schema().add_column(AddColumn::optional(
             "note",
@@ -373,9 +379,10 @@ async fn a_commit_writes_null_into_an_optional_column_added_after_open() {
         ],
     )
     .assured("the columns match the mapped schema");
-    stage(&mut sink, &batch).await;
+    stage(&mut emitter, &batch).await;
 
-    sink.commit()
+    emitter
+        .commit()
         .await
         .assured("a column added after open does not fail the commit")
         .assured("the commit publishes the staged row");
@@ -401,7 +408,7 @@ async fn a_mapped_column_deleted_after_open_fails_the_commit_naming_it() {
         Field::new("user_id", DataType::Int64, true),
         Field::new("action", DataType::Utf8, true),
     ]);
-    let mut sink = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
+    let mut emitter = fixture_emitter(StdArc::clone(&catalog), table, &mapped);
     evolve_table(catalog.as_ref(), |transaction| {
         let deleted = transaction.update_schema().delete_column("action");
         deleted.apply(transaction)
@@ -415,9 +422,9 @@ async fn a_mapped_column_deleted_after_open_fails_the_commit_naming_it() {
         ],
     )
     .assured("the columns match the mapped schema");
-    stage(&mut sink, &batch).await;
+    stage(&mut emitter, &batch).await;
 
-    let refused = sink
+    let refused = emitter
         .commit()
         .await
         .err()
@@ -435,7 +442,10 @@ async fn a_mapped_column_deleted_after_open_fails_the_commit_naming_it() {
         table_rows(catalog.as_ref()).await,
         Vec::<serde_json::Value>::new()
     );
-    assert_eq!(sink.staged_rows, 1, "a refused commit keeps its staged row");
+    assert_eq!(
+        emitter.staged_rows, 1,
+        "a refused commit keeps its staged row"
+    );
 }
 
 #[test]

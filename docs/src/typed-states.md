@@ -133,13 +133,19 @@ Kafka's external unavailable encoding is resolved at this boundary. Missing bina
 empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
 from a present empty payload when both lend an empty slice to a codec.
 
+An emitter's external key is absent or a present byte sequence, including an empty sequence.
+The `KEY` expression must produce a non-null `STRING` or `BYTES`, with explicit leakage of any
+sensitive source, message or branch value. Its admitted type is resolved when the program binds;
+the external representation is the string's UTF-8 bytes or the binary bytes unchanged. Source
+branch identity and destination-partition selection remain separate from that external key.
+
 An MQTT publish keeps a property its publisher left unset distinct from one it set empty: an unset
 content type, response topic, correlation data or message expiry is absent and reads as a typed
 null, while an empty string, empty bytes or a zero expiry remain values. Absence comes from the
 packet, never from an encoding of the value.
 
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
-and scheduled poll instant in that variant, while sources with no integration fields carry the
+and scheduled poll instant in that variant, while ingestors with no integration fields carry the
 headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;
 neither a missing status nor a default timestamp can be mistaken for a valid HTTP response.
 
@@ -197,14 +203,14 @@ class is a compile-time error. [Node Settings](node-settings.md) owns their oper
 carriers, defaults, change procedures and source ratchet.
 
 Redis subscription plans carry a nonzero bounded message capacity and a validated idle deadline.
-The source's absent subscription means it needs a resume. An installed subscription owns its
+The ingestor's absent subscription means it needs a resume. An installed subscription owns its
 bounded receiver and exact reader task; close and suspend join that task before replacing it.
 Queued messages precede its terminal read failure. These handles, queued payloads and parsing
 state remain volatile and are never part of a persisted Model.
 
 Running MQTT acknowledgement state distinguishes automatic acknowledgement from manual
 acknowledgement with its bounded QoS 0 capacity. Each queued QoS 0 outcome owns its permit until
-the source takes it; acknowledged packets use their separate reserved capacity. Overflow is an
+the ingestor takes it; acknowledged packets use their separate reserved capacity. Overflow is an
 ordinary admission outcome that drops and counts one publish, rather than a read failure or a
 missing connection. The queue, permits and host-supplied counter handle remain volatile.
 
@@ -272,9 +278,9 @@ with reason-bearing `nervix::error_boundary(outcome, ...)` metadata. A contextua
 returns a report; a missing value does not silently turn one into a success. The resolved compiler
 gate and report-carrier obligations are described in [Errors And Diagnostics](errors-and-diagnostics.md).
 
-The outbound WebSocket source distinguishes a peer Close carrying its code and reason, a Close
+The outbound WebSocket ingestor distinguishes a peer Close carrying its code and reason, a Close
 without a status, an ended stream and a local close-handshake timeout as typed failure states.
-No fabricated close code stands for an absent status. The source removes the exact transport
+No fabricated close code stands for an absent status. The ingestor removes the exact transport
 before its bounded closing wait, so cancellation leaves it needing a new resume. The
 [connector contract](./connector-contract.md#ingestor-boundary) owns the retry and payload lifetime
 effects.
@@ -289,7 +295,7 @@ The validated WebSockets client configuration carries the handshake capacity as 
 message/frame limits as `NonZeroU32`. Decimal CONFIG values cross this boundary once; zero,
 overflow and an unschedulable ping-derived idle deadline are typed configuration refusals. The
 effective idle duration is already established before planning. A handshake attempt owns its
-bounded queue until signaling succeeds; only the completed queue moves into ordinary source
+bounded queue until signaling succeeds; only the completed queue moves into ordinary ingestor
 reads. Dropping or failing the negotiating future drops that exact queue, so its frames cannot
 become data for a replacement connection. After a completed queue drains, its absent channel is
 represented by `None`, and steady reads use only task-owned connection state.
@@ -325,8 +331,8 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX MODEL ITS` archive signature identifies the current Model layout, including
-the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec
+The registry's `NERVIX KEYARRAYS` archive signature identifies the current Model layout, including
+the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the required 16-bit branch partition count,
 typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
@@ -336,7 +342,7 @@ service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of s
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
 that header state, and inferencer state bindings with their initial expressions.
-Consensus's `raft_intake_inference_` keyspaces and current `ClusterState`
+Consensus's `raft_key_avro_` keyspaces and current `ClusterState`
 metadata encoding, 14, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
@@ -353,6 +359,9 @@ positions and an optional applied explicit-start generation. Pending canonical s
 subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 
+Emitter Models also carry explicit STRING/BYTES key expressions, source-partition routing and
+expression-only SQS FIFO groups in this current shape.
+
 ## Absence And Distinct States
 
 **Installed resource manifests.** The resource store returns an optional manifest: a filesystem
@@ -364,14 +373,14 @@ Recovery of an unpublished upload consumes the same absence outcome: without the
 node's installed copy, the admitted archive is unavailable. Its read failures retain their causes,
 while an executor refusal or cancellation leaves that upload applying for another reconciliation.
 
-**MQTT size admission.** A source packet is either an admitted publish with independently owned
+**MQTT size admission.** An ingestor packet is either an admitted publish with independently owned
 bytes or an oversized outcome with an optional prepared acknowledgement. Absence means that QoS
 requires none or the client acknowledges automatically. A discard is explicitly deferred for
 its ordinary prefix, unrequested with its deadline, or requested with its confirmation target.
 The following read starts its optional keep-alive deadline after the host acknowledges the
 ordinary prefix; that original deadline then survives cancellation. The connection retains at
 most one discard and clears it only when it returns the size outcome after confirmation. See
-[MQTT source connections](./connector-contract.md#mqtt-source-connections).
+[MQTT ingestor connections](./connector-contract.md#mqtt-ingestor-connections).
 
 **MQTT client configuration.** The vocabulary converts one rendered MQTT client configuration into
 typed values once, at `CREATE MQTT CLIENT` and again when a connection is built. Its transport is
@@ -425,7 +434,7 @@ once into a lossless `I64`. Failed conversion is a typed read failure, held sepa
 valid gathered prefix. The full broker position remains the settlement identity.
 
 **Pulsar input retirement.** The same optional replacement plan distinguishes dropping an input
-from replacing it. A changed owned source requires a comparison of resolved broker address,
+from replacing it. A changed owned ingestor requires a comparison of resolved broker address,
 qualified topic and subscription name; ownership and consumer policy are not subscription
 identity. A failed resolution or invalid service address leaves that comparison undecided, reports
 its typed failure and preserves the subscription. It never supplies a default identity or treats
@@ -550,8 +559,8 @@ owns its encoded bytes together with their independent reservation until the job
 the enclosing request ends. [Cluster Interconnect](./interconnect.md#traffic-and-resource-isolation)
 owns receive admission and its stream responses.
 
-**Client ingestors.** An ingestor's input is either a transport, which carries its source and the
-codec that decodes it, or a client source, which carries the schema its batches hold and its
+**Client ingestors.** An ingestor's input is either a transport, which carries its connector and the
+codec that decodes it, or a client ingestor, which carries the schema its batches hold and its
 producer policy. There is no optional codec beside an optional schema, so an ingestor cannot claim
 both or neither. A producer's admission is `Open` or `Suspended`; a batch's outcome is one of four
 variants, each carrying its own typed cause, so a completed batch has no cause and a refused one no
@@ -560,16 +569,16 @@ that opened it, and a forwarded producer's link key is never reused within its p
 has a reserved value meaning none. The client ingestor endpoint's published counts are genuine
 zero counts, never markers.
 
-**Sources and emitters.** A source or an emitter is addressed by the connector that serves it and the
+**Ingestors and emitters.** An ingestor or an emitter is addressed by the connector that serves it and the
 entity it consumes, and its Model states both in its shape: the union holds one variant per
 connector, that variant holds one variant per entity, and each entity has its own Model with only
-the fields its statement writes. A Kafka topic source therefore cannot hold a Pub/Sub channel, and
+the fields its statement writes. A Kafka topic ingestor therefore cannot hold a Pub/Sub channel, and
 an OpenTelemetry emitter is a logs, a traces or a metrics emitter, so only a metrics emitter carries a
 metric and no signal value sits beside mappings that might contradict it. The kind that names a
 pair is read from the Model and never stored beside it. An ingestor alteration is nested the same
-way: its head selects one connector and entity, and the operations of that entity set a source of
+way: its head selects one connector and entity, and the operations of that entity set the input with
 that entity's own Model, so `ALTER KAFKA TOPIC INGESTOR` cannot carry a Redis channel and no kind
-field sits beside the source it sets. Only a transport's operations include the codec that decodes
+field sits beside the input it sets. Only a transport's operations include the codec that decodes
 its payloads, so a client producer alteration cannot hold one. A targeted change, such as
 `SET TOPIC`, `SET MODE` or `DROP HEADERS`, is a value of the entity's own change enum, so a change
 can name only a part that entity's body writes, and an emitter's change is nested by connector and
@@ -578,14 +587,14 @@ then entity in the same way. A change to a construction where it stands is one s
 construction. A stored ingestor of another pair is refused by comparing the two kinds. The names an external system owns, such as a Kafka topic or a NATS subject, are distinct
 types from Nervix names: each is checked against its entity's own rule once, when it is parsed or
 decoded, and keeps its text exactly as written, case included, so a connector sends what the
-statement says. What every source or emitter of a pair
+statement says. What every ingestor or emitter of a pair
 declares, whatever its statement says, is declared once on that entity's Model in the vocabulary:
 whether its messages carry headers, the typed `metadata` namespace they expose, whether it runs on
 every node, what its body references, and for an emitter whether it writes headers, needs a codec,
 requires batching and which publishing modes it accepts. A client Model names the connector it
-configures as a typed kind, so a source or an emitter is matched with its client by comparing kinds
-rather than labels. A session producer's source is no transport, so the transport union holds no
-Model of it; the kind union still names it, because capability decisions ask about every source.
+configures as a typed kind, so an ingestor or an emitter is matched with its client by comparing kinds
+rather than labels. A session producer's ingestor is no transport, so the transport union holds no
+Model of it; the kind union still names it, because capability decisions ask about every ingestor.
 
 Direct-value entities declare their mapped field types in the same vocabulary. Codec and native
 bodies have no direct-mapping contract; column mappings and named protocol fields have distinct
@@ -650,7 +659,7 @@ policy; it stores no second mode. Plexus parses a complete `SET TO` body using i
 and ALTER carries that declared kind. The vocabulary checks the stored kind and every replacement
 before atomically publishing an alteration, including manually constructed Models. Typed failures
 name both entities. External locators preserve case in entity-specific validated types, including
-one SQS queue-name type shared by sources and destinations. An Iceberg storage-client reference
+one SQS queue-name type shared by ingestors and emitters. An Iceberg storage-client reference
 retains absence of a resolved backend until the decision layer resolves the actual configured
 client; no default backend fills that boundary.
 
@@ -660,6 +669,19 @@ requires that validated interconnect endpoint; an incomplete publication cannot 
 reachable member through an empty address. Other service advertisements, including the console,
 may be absent independently. Absence says the service is unavailable; it does not invent a reason.
 Peer selection and transport handling follow the [interconnect contract](./interconnect.md).
+
+**Voting configuration.** A membership planning snapshot retains OpenRaft's effective and
+committed membership publications, with every constituent voter set. It derives the voter union
+only for identity and admission checks; the union cannot stand in for the joint configuration's
+quorum state or its last target set. Completing a joint transition is a distinct planned mutation.
+The completion boundary checks that state and proposes any continuation in one OpenRaft Core
+turn. Its typed outcome distinguishes unchanged effective and committed records, an applied
+continuation carrying its returned voter set, and the original membership write error. A prior joint
+observation cannot force a uniform Core to append a duplicate entry. Only the continuation proposes
+a membership entry, using the Core's current joint target. The expected
+uniform target is complete only when its effective membership entry is committed.
+These are observation and planning values, not a second persisted membership encoding. See
+[Consensus Storage And Replication](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion).
 
 **Startup voter evidence.** The reconciliation task owns a process-local set of typed node names
 actually observed live, including observations made while following. An absent voter in that set
@@ -782,9 +804,9 @@ are described in [Data-Plane Concurrency](./data-plane-concurrency.md) and
 backend supplies the atomic; selecting a modeled atomic does not validate the owner's encoding or
 prove its transitions without the corresponding production-owner check.
 
-A source instance owns starting, ready and retired states in a private atomic byte. Its handle alone
+An ingestor instance owns starting, ready and retired states in a private atomic byte. Its handle alone
 interprets starting=0, ready=1 and retired=2. Compare-and-swap permits readiness changes only before
-retirement; a retired source cannot become ready or change a replacement instance. This relaxed
+retirement; a retired ingestor cannot become ready or change a replacement instance. This relaxed
 scalar publishes no payload or other location. Buffered message-error workers separately own
 `Prepared`, `Running` and `Ended` lifecycle states; a fallible binding prepares the bounded queue,
 and successful running publication starts its worker once. An ended worker is never restarted.
@@ -862,7 +884,7 @@ a nearby instant: a program or `TIMESTAMP AT` that reads the field refuses the m
 `validation` message error naming the field, and a field nothing reads costs nothing. The retained
 copy a quiesce buffer replays keeps the unrepresentable state with its description.
 
-The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
+The MongoDB emitter also distinguishes each failed write's document answers: delivered, rejected with
 the server's definitive refusal code, or unresolved. An insert's implicit applied-document account
 and a verbose bulk write's explicit applied indexes are separate request variants. The unsatisfied
 write concern remains an optional failure beside those answers; it never replaces the documents'
@@ -1089,13 +1111,13 @@ read or transition to local routing cannot obtain a cached remote success. An ad
 its immutable view and admission until it ends, independently of cache release. This read cache cannot
 install state or weaken the installation boundary's monotonic checks.
 
-Server endpoint configuration and source availability are distinct states. The immutable route
-table contains configured definitions; a bound source lifetime contains an optional prepared intake.
-Source ending publishes absence through that lifetime before removing its route binding. A retained
-request or WebSocket cannot interpret absence as a replacement source with the same node identity.
+Server endpoint configuration and ingestor availability are distinct states. The immutable route
+table contains configured definitions; a bound ingestor lifetime contains an optional prepared intake.
+Ingestor ending publishes absence through that lifetime before removing its route binding. A retained
+request or WebSocket cannot interpret absence as a replacement ingestor with the same node identity.
 A lease loaded before ending may complete; later admission sees absence. Domain replacement and
 teardown end the domain's lifetimes and replace all of its route definitions together, preserving
-other domains. Unbind names the exact binding allocation so a preceding source's close cannot end
+other domains. Unbind names the exact binding allocation so a preceding ingestor's close cannot end
 its replacement.
 
 Endpoint request policy is either unacknowledged or a typed acknowledged plan carrying positive
@@ -1107,20 +1129,20 @@ interrupted lifetime. Only the public response boundary projects those states on
 client outcome vocabulary. Exact lifetime ending is a cancellation event distinct from absent
 intake; held replies observe the event while later requests observe absence.
 
-A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's source,
+A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's connector,
 client, codec and routes and every reingestor's inputs, node filter and routes. It records how a
 route's records get their branch key as one of three states: unbranched, keeping the incoming key,
 or constructing a new key with a lowered program. The two branched states carry the branch and the
 retention of the relay the route writes, so the branch a route declares and the branch its
 entrypoint retains are one value, and a route whose declaration disagrees with its relay fails
-planning. An ingestor's transport class is read from the one source it declares rather than stored
+planning. An ingestor's transport class is read from the one entity it declares rather than stored
 beside it. A Kafka ingestor's offsets are either a consumer group or domain offsets together with
 their placement. The planner lowers every filter, route and branch construction before a node binds
 them, so a bound route always carries its compiled program and a running task has no
 missing-program or undeclared-branch state to check.
 
-The Kafka source's assignment knowledge distinguishes unknown, cleared and installed partitions.
-Moving an assignment operation into an admitted job leaves its source's knowledge unknown until
+The Kafka ingestor's assignment knowledge distinguishes unknown, cleared and installed partitions.
+Moving an assignment operation into an admitted job leaves the ingestor's knowledge unknown until
 the job returns the confirmed state. Cancellation or failure cannot leave a cached assignment
 claiming that a native operation the caller did not observe completed successfully. The next
 operation therefore reinstalls or clears it rather than trusting an unconfirmed cache.
@@ -1266,9 +1288,9 @@ first, an active connector retry next, and a task error without a retry after th
 retry remains visible to drains. Operator inspection reads both owners' errors and the selected
 retry from one immutable publication. Retained observations are immutable.
 
-A Syslog stream source separately represents its listener's existence and the listening socket's
+A Syslog stream ingestor separately represents its listener's existence and the listening socket's
 presence. An absent socket after accept failure requires rebind, while the same listener still
-owns established connection tasks and queued frames; source close ends that retained state.
+owns established connection tasks and queued frames; ingestor close ends that retained state.
 The testing capability shares one named listener-fault request between the connector and host:
 the selected bound address and its acknowledgement belong to that same armed request.
 
@@ -1334,15 +1356,15 @@ read-only buffers retain the native allocation through their root rather than a 
 An instancing declaration is `Count(NonZeroU64)` or `PerPartition`; entity capabilities admit the
 forms before placement. Its native and archived representations occupy eight bytes. The archive
 encodes `PerPartition` as zero and each positive count as its exact unsigned 64-bit value; semantic
-JSON retains the tagged forms. A resolved source unit uses the shared `NodeUnitRef` and
+JSON retains the tagged forms. A resolved ingestor unit uses the shared `NodeUnitRef` and
 `DomainNodeUnitRef` identities throughout plans, runtime registrations and durable state placement.
-There is no node-local index conversion. A source's readiness is one scalar whose retirement ends
+There is no node-local index conversion. An ingestor's readiness is one scalar whose retirement ends
 that exact lifetime.
 The shared `Unit` identity occupies eight bytes with four-byte archive alignment. Its private rank
 orders `Single`, all 32-bit partitions, and then instance indices. `UnitKind` is its semantic view;
 JSON uses that tagged view and validates an instance index through `Unit::try_instance`.
 Every rank is valid. The maximum instance index is `u64::MAX - (2^32 + 1)`, above every vector
-position on supported targets; this representation therefore admits every materializable source
+position on supported targets; this representation therefore admits every materializable ingestor
 unit while preserving the full-width count declaration. Archive and transport records retain the
 same footprint for single, partition and instance units. Stored tagged key segments and the client
 placement union validate their 64-bit instance value before constructing the identity.
@@ -1354,4 +1376,4 @@ Singleton placement inspection selects by cardinality: one `Instance(0)` has one
 Normalization sorts and deduplicates within the selected form. Persisted transaction gate plans,
 interconnect requests and runtime holds retain that choice. A held lease must contain the exact
 unit and its exact freeze before it authorizes a handoff checkpoint. Placement groups also carry
-exact unit members, allowing a source instance and a relay partition in the same component.
+exact unit members, allowing an ingestor instance and a relay partition in the same component.

@@ -20,7 +20,7 @@ Feature: Pulsar receipt bounds and finishing accepted records
       CREATE RELAY delivery_events SCHEMA delivery_event UNBRANCHED;
       CREATE VHOST edge pulsar-{{test_id}}.example.com;
       CREATE ENDPOINT delivery_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR delivery_source
+      CREATE HTTP ENDPOINT INGESTOR delivery_ingestor
         FROM delivery_ingress MODE ACK MAX 100 ACK TIMEOUT 60s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING delivery_codec
         TIMESTAMP NOW
@@ -85,7 +85,7 @@ Feature: Pulsar receipt bounds and finishing accepted records
       CREATE RELAY delivery_events SCHEMA delivery_event UNBRANCHED;
       CREATE VHOST edge pulsar-{{test_id}}.example.com;
       CREATE ENDPOINT delivery_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR delivery_source
+      CREATE HTTP ENDPOINT INGESTOR delivery_ingestor
         FROM delivery_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING delivery_codec
         TIMESTAMP NOW

@@ -109,7 +109,7 @@ If you work from a repository clone, `just deps` starts a complete local depende
 
 Provision external entities before starting a graph. This tutorial creates its Kafka topic
 explicitly before ingesting from it: Nervix's consumers disable topic auto-creation and report a
-missing topic as a transient source failure. Kafka emitters keep librdkafka's producer default, so a
+missing topic as a transient ingestor failure. Kafka emitters keep librdkafka's producer default, so a
 broker that allows auto-creation can create a missing output topic on the first publish. Do not
 rely on that broker behavior to provision topics with the intended partitions and settings.
 

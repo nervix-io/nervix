@@ -128,6 +128,8 @@ checks = [
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
+  "application::completion::progress::shuttle_tests::shuttle_a_barrier_that_observes_before_it_reads_sees_every_racing_report_and_advance",
+  "application::completion::progress::shuttle_tests::shuttle_racing_reports_of_one_incarnation_keep_its_newest_progress",
   "application::restore::shuttle_tests::shuttle_a_resumed_restore_never_repeats_a_recorded_effect",
   "application::restore::shuttle_tests::shuttle_an_abandoned_restore_upload_releases_its_quota_exactly_once",
   "application::restore::shuttle_tests::shuttle_concurrent_restore_retries_join_one_execution",

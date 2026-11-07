@@ -68,7 +68,7 @@ impl ConfiguredFaultInjection {
         false
     }
 
-    pub(in crate::runtime) fn source_confirmation_delay(
+    pub(in crate::runtime) fn ingestor_confirmation_delay(
         &self,
         _ingestor: &DomainNodeRef,
     ) -> Option<Duration> {

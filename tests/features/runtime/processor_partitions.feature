@@ -413,11 +413,11 @@ Feature: Partitioned processors and generators
       CREATE VHOST edge correlation-{{test_id}}.example.com;
       CREATE ENDPOINT left_ingress ON edge PATH '/left' TYPE HTTP;
       CREATE ENDPOINT right_ingress ON edge PATH '/right' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR left_source FROM left_ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR left_ingestor FROM left_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO left_events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR right_source FROM right_ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR right_ingestor FROM right_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO right_events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

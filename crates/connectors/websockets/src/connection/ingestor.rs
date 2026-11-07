@@ -319,7 +319,7 @@ impl WebsocketsConnectionIngestor {
         &mut self,
     ) -> error_stack::Result<(), WebsocketsConnectionIngestorFailure> {
         // Detach before the first await: cancelling the handshake drops this exact socket and
-        // leaves the source needing a resume, without attaching to another transport.
+        // leaves the ingestor needing a resume, without attaching to another transport.
         let Some(mut connection) = self.connection.take() else {
             return Ok(());
         };
@@ -640,7 +640,7 @@ mod tests {
         let address = listener.local_addr().assured("the listener is bound");
         // Accepts the connection and never answers the upgrade request.
         let silent = nervix_primitives::task::spawn(async move {
-            let (held, _) = listener.accept().await.assured("the source connects");
+            let (held, _) = listener.accept().await.assured("the ingestor connects");
             std::future::pending::<()>().await;
             drop(held);
         });
@@ -656,10 +656,10 @@ mod tests {
             fixture.resolver,
         )
         .assured("the endpoint and deadline are valid");
-        let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+        let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
             .await
-            .assured("the source opens");
-        let failure = timeout(Duration::from_secs(10), source.resume())
+            .assured("the ingestor opens");
+        let failure = timeout(Duration::from_secs(10), ingestor.resume())
             .await
             .assured("connect_timeout_ms bounds the resume")
             .err()
@@ -745,7 +745,7 @@ mod tests {
         let failure = WebsocketsConnectionIngestor::open(&plan, 0)
             .await
             .err()
-            .assured("the source cannot add a section it cannot parse to its roots");
+            .assured("the ingestor cannot add a section it cannot parse to its roots");
         assert!(matches!(
             failure.current_context(),
             IngestorError::Open { .. }
@@ -776,11 +776,11 @@ mod tests {
             .collect();
         let plan = WebsocketsConnectionIngestorPlan::new(config, headers, None, fixture.resolver)
             .assured("the endpoint is valid");
-        let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+        let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
             .await
-            .assured("the source opens");
+            .assured("the ingestor opens");
         let server = async {
-            let (stream, _) = listener.accept().await.assured("the source connects");
+            let (stream, _) = listener.accept().await.assured("the ingestor connects");
             #[expect(clippy::result_large_err, reason = "tungstenite requires an unboxed HTTP rejection response in its handshake callback")]
             let verify_upgrade = |request: &tokio_tungstenite::tungstenite::handshake::server::Request, mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
                 for (name, value) in &expected {
@@ -793,9 +793,12 @@ mod tests {
                 .await
                 .assured("the upgrade succeeds")
         };
-        let (resumed, peer) = tokio::join!(source.resume(), server);
-        assert_eq!(resumed.assured("the source resumes"), IngestorResume::Ready);
-        (source, peer)
+        let (resumed, peer) = tokio::join!(ingestor.resume(), server);
+        assert_eq!(
+            resumed.assured("the ingestor resumes"),
+            IngestorResume::Ready
+        );
+        (ingestor, peer)
     }
 
     #[nervix_primitives::test]
@@ -803,14 +806,14 @@ mod tests {
         use futures_util::{SinkExt as _, StreamExt as _};
 
         for suspend in [true, false] {
-            let (mut source, mut peer) = connected_pair().await;
-            let headers = source
+            let (mut ingestor, mut peer) = connected_pair().await;
+            let headers = ingestor
                 .connection
                 .as_ref()
                 .assured("the pair is connected")
                 .headers
                 .clone();
-            source
+            ingestor
                 .pending
                 .push_back(WebsocketsConnectionIngestorMessage::new(
                     WebsocketDataFrame::Binary(b"retained".to_vec()),
@@ -818,9 +821,9 @@ mod tests {
                 ));
             let ending = async {
                 if suspend {
-                    source.suspend().await
+                    ingestor.suspend().await
                 } else {
-                    source.close().await
+                    ingestor.close().await
                 }
             };
             let observe = async {
@@ -840,9 +843,9 @@ mod tests {
             };
             let (closed, ()) = tokio::join!(ending, observe);
             closed.assured("the close handshake succeeds");
-            assert_eq!(source.pending.len(), usize::from(suspend));
+            assert_eq!(ingestor.pending.len(), usize::from(suspend));
             if suspend {
-                let batch = source
+                let batch = ingestor
                     .next_batch(
                         IngestorBatchRequest {
                             max_messages: std::num::NonZeroUsize::MIN,
@@ -851,13 +854,13 @@ mod tests {
                         &IngestorReadCancellation::new(),
                     )
                     .await
-                    .assured("the suspended source retains its accepted frame");
+                    .assured("the suspended ingestor retains its accepted frame");
                 let IngestorBatch::Messages(messages) = batch else {
                     panic!("the retained frame is ready before another connection");
                 };
                 assert_eq!(messages[0].payload(), b"retained");
             }
-            assert!(source.needs_resume());
+            assert!(ingestor.needs_resume());
         }
     }
 
@@ -865,14 +868,14 @@ mod tests {
     async fn a_cancelled_read_takes_no_frame_and_leaves_the_next_one_to_the_next_read() {
         use futures_util::SinkExt as _;
 
-        let (mut source, mut peer) = connected_pair().await;
+        let (mut ingestor, mut peer) = connected_pair().await;
         let request = IngestorBatchRequest {
             max_messages: std::num::NonZeroUsize::MIN,
             batch_timeout: None,
         };
         let cancellation = IngestorReadCancellation::new();
         cancellation.cancel();
-        let interrupted = source
+        let interrupted = ingestor
             .next_batch(request, &cancellation)
             .await
             .assured("a cancelled read is not a failure");
@@ -884,12 +887,12 @@ mod tests {
         peer.send(Message::Text("sent after the cancelled read".into()))
             .await
             .assured("the peer sends a frame");
-        let batch = source
+        let batch = ingestor
             .next_batch(request, &IngestorReadCancellation::new())
             .await
             .assured("the frame is read");
         let IngestorBatch::Messages(messages) = batch else {
-            panic!("the source reads the frame as a batch");
+            panic!("the ingestor reads the frame as a batch");
         };
         let message = messages.first().assured("the read returned the frame");
         assert_eq!(message.payload(), b"sent after the cancelled read");
@@ -901,14 +904,14 @@ mod tests {
         use futures_util::StreamExt as _;
         use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
-        let (mut source, mut peer) = connected_pair().await;
+        let (mut ingestor, mut peer) = connected_pair().await;
         peer.close(Some(CloseFrame {
             code: CloseCode::Again,
             reason: "fixture restart".into(),
         }))
         .await
         .assured("the peer sends its close");
-        let error = source
+        let error = ingestor
             .next_batch(
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
@@ -925,7 +928,7 @@ mod tests {
         ));
         assert!(format!("{error:#}").contains("1013"));
         assert!(format!("{error:#}").contains("fixture restart"));
-        assert!(source.needs_resume());
+        assert!(ingestor.needs_resume());
         let answer = peer
             .next()
             .await
@@ -940,11 +943,11 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_close_without_a_status_is_a_transient_read_failure() {
-        let (mut source, mut peer) = connected_pair().await;
+        let (mut ingestor, mut peer) = connected_pair().await;
         peer.close(None)
             .await
             .assured("the peer sends an empty Close");
-        let error = source
+        let error = ingestor
             .next_batch(
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
@@ -956,38 +959,38 @@ mod tests {
             .err()
             .assured("an empty Close still requires a paced reconnect");
         assert!(format!("{error:#}").contains("without a status"));
-        assert!(source.needs_resume());
+        assert!(ingestor.needs_resume());
     }
 
     #[nervix_primitives::test]
     async fn a_peer_that_never_answers_close_releases_the_transport_with_a_timeout() {
         for suspend in [true, false] {
-            let (mut source, _peer) = connected_pair().await;
-            let headers = source
+            let (mut ingestor, _peer) = connected_pair().await;
+            let headers = ingestor
                 .connection
                 .as_ref()
                 .assured("the pair is connected")
                 .headers
                 .clone();
-            source
+            ingestor
                 .pending
                 .push_back(WebsocketsConnectionIngestorMessage::new(
                     WebsocketDataFrame::Binary(b"retained".to_vec()),
                     headers,
                 ));
             let result = if suspend {
-                timeout(Duration::from_secs(60), source.suspend()).await
+                timeout(Duration::from_secs(60), ingestor.suspend()).await
             } else {
-                timeout(Duration::from_secs(60), source.close()).await
+                timeout(Duration::from_secs(60), ingestor.close()).await
             };
             let error = result
-                .assured("source teardown has its own bounded close wait")
+                .assured("ingestor teardown has its own bounded close wait")
                 .err()
                 .assured("a peer that never reads cannot answer the Close");
             assert!(format!("{error:#}").contains("close handshake"));
-            assert_eq!(source.pending.len(), usize::from(suspend));
+            assert_eq!(ingestor.pending.len(), usize::from(suspend));
             if suspend {
-                let batch = source
+                let batch = ingestor
                     .next_batch(
                         IngestorBatchRequest {
                             max_messages: std::num::NonZeroUsize::MIN,
@@ -996,45 +999,45 @@ mod tests {
                         &IngestorReadCancellation::new(),
                     )
                     .await
-                    .assured("a failed closing wait keeps the suspended source's accepted frame");
+                    .assured("a failed closing wait keeps the suspended ingestor's accepted frame");
                 let IngestorBatch::Messages(messages) = batch else {
                     panic!("the retained frame is ready before another connection");
                 };
                 assert_eq!(messages[0].payload(), b"retained");
             }
-            assert!(source.needs_resume());
+            assert!(ingestor.needs_resume());
         }
     }
 
     #[nervix_primitives::test]
     async fn a_cancelled_close_releases_the_transport_and_clears_pending_payloads() {
-        let (mut source, _peer) = connected_pair().await;
-        let headers = source
+        let (mut ingestor, _peer) = connected_pair().await;
+        let headers = ingestor
             .connection
             .as_ref()
             .assured("the pair is connected")
             .headers
             .clone();
-        source
+        ingestor
             .pending
             .push_back(WebsocketsConnectionIngestorMessage::new(
                 WebsocketDataFrame::Binary(b"retained".to_vec()),
                 headers,
             ));
         assert!(
-            timeout(Duration::from_millis(1), source.close())
+            timeout(Duration::from_millis(1), ingestor.close())
                 .await
                 .is_err()
         );
-        assert!(source.needs_resume());
-        assert!(source.pending.is_empty());
+        assert!(ingestor.needs_resume());
+        assert!(ingestor.pending.is_empty());
     }
 
     #[nervix_primitives::test]
     async fn a_failed_read_preserves_its_typed_transport_cause() {
-        let (mut source, peer) = connected_pair().await;
+        let (mut ingestor, peer) = connected_pair().await;
         drop(peer);
-        let error = source
+        let error = ingestor
             .next_batch(
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
@@ -1050,7 +1053,7 @@ mod tests {
                 .downcast_ref::<tokio_tungstenite::tungstenite::Error>()
                 .is_some()
         );
-        assert!(source.needs_resume());
+        assert!(ingestor.needs_resume());
     }
 
     struct DnsFixture {
@@ -1175,11 +1178,11 @@ mod tests {
                 .assured("the upgrade response is sent");
             (authority, path)
         });
-        let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+        let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
             .await
-            .assured("the source can open");
+            .assured("the ingestor can open");
         assert_eq!(
-            source
+            ingestor
                 .resume()
                 .await
                 .assured("the second address is reachable"),
@@ -1200,7 +1203,7 @@ mod tests {
         Option<String>,
         Result<WebSocketStream<TcpStream>, tokio_tungstenite::tungstenite::Error>,
     ) {
-        let (stream, _) = listener.accept().await.assured("the source connects");
+        let (stream, _) = listener.accept().await.assured("the ingestor connects");
         let mut offer = None;
         #[expect(
             clippy::result_large_err,
@@ -1249,11 +1252,11 @@ mod tests {
             fixture.resolver,
         )
         .assured("the endpoint is valid");
-        let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+        let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
             .await
-            .assured("the source opens");
+            .assured("the ingestor opens");
         let (resumed, (offer, upgraded)) = tokio::join!(
-            source.resume(),
+            ingestor.resume(),
             answer_subprotocol(&listener, Some("v1.events"))
         );
         assert_eq!(
@@ -1266,7 +1269,7 @@ mod tests {
         peer.send(Message::Text("payload".to_string()))
             .await
             .assured("the peer sends a data frame");
-        let batch = source
+        let batch = ingestor
             .next_batch(
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
@@ -1329,11 +1332,13 @@ mod tests {
                 fixture.resolver,
             )
             .assured("the endpoint is valid");
-            let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+            let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
                 .await
-                .assured("the source opens");
-            let (resumed, _) =
-                tokio::join!(source.resume(), answer_subprotocol(&listener, case.answer));
+                .assured("the ingestor opens");
+            let (resumed, _) = tokio::join!(
+                ingestor.resume(),
+                answer_subprotocol(&listener, case.answer)
+            );
             let failure = resumed
                 .err()
                 .assured("an answer that contradicts the request fails the connection");
@@ -1360,7 +1365,7 @@ mod tests {
             // An offer can carry a credential, so the refusal never prints it.
             assert!(!format!("{failure:#}").contains("events"));
             assert!(
-                source.needs_resume(),
+                ingestor.needs_resume(),
                 "a refused upgrade installs no connection"
             );
         }
@@ -1391,11 +1396,11 @@ mod tests {
             fixture.resolver.clone(),
         )
         .assured("the WebSocket endpoint is valid");
-        let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+        let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
             .await
-            .assured("the source opens");
+            .assured("the ingestor opens");
         let (resumed, _) = tokio::join!(
-            source.resume(),
+            ingestor.resume(),
             answer_subprotocol(&refusing, Some("v2.events"))
         );
         let failure = resumed.err().assured("the first address refused the offer");
@@ -1436,11 +1441,11 @@ mod tests {
                 .assured("the WebSocket upgrade succeeds");
             drop(socket);
         });
-        let mut source = WebsocketsConnectionIngestor::open(&plan, 0)
+        let mut ingestor = WebsocketsConnectionIngestor::open(&plan, 0)
             .await
-            .assured("the source can open");
+            .assured("the ingestor can open");
         assert_eq!(
-            source
+            ingestor
                 .resume()
                 .await
                 .assured("the IPv6 endpoint is reachable"),
@@ -1451,7 +1456,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn source_plan_uses_url_default_ports_and_rejects_other_schemes() {
+    async fn ingestor_plan_uses_url_default_ports_and_rejects_other_schemes() {
         let fixture = DnsFixture::start().await;
         for (url, port, requires_tls) in [
             ("ws://websocket.nervix.test/path", 80, false),

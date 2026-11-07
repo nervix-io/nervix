@@ -54,7 +54,10 @@ async fn opening_consumes_only_the_selected_instance() {
 fn record() -> EmitterRecord {
     EmitterRecord::new(
         EmitterRecordId::new(7),
-        Some("key".to_string()),
+        Some(Arc::new(RecordDestination {
+            key: Some(RecordKey::String("key".to_string())),
+            source_partition: Some(2),
+        })),
         vec![0, 255, 1],
         vec![
             ("same".to_string(), "first".to_string()),
@@ -85,7 +88,8 @@ async fn record_observations_keep_the_complete_envelope_on_every_attempt() {
             panic!("each attempt carries one record");
         };
         assert_eq!(record.id, EmitterRecordId::new(7));
-        assert_eq!(record.key.as_deref(), Some("key"));
+        assert_eq!(record.key(), Some(&RecordKey::String("key".to_owned())));
+        assert_eq!(record.source_partition(), Some(2));
         assert_eq!(record.payload, [0, 255, 1]);
         assert_eq!(
             record.headers,

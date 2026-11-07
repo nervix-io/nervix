@@ -655,7 +655,7 @@ impl EmitterConnectorState {
             published?;
         }
         // Every buffered row is resolved now, and the rows the emitter delivered are sent, however
-        // many attempts delivered them. A emitter that stages what it accepts has not published those
+        // many attempts delivered them. An emitter that stages what it accepts has not published those
         // rows yet, so its commit counts them as sent and this write counts none.
         let report = buffer.delivered_report();
         buffer.clear();

@@ -60,7 +60,7 @@ An emitter's sent metrics count the records its destination delivered, each once
 attempts it took: a flush that completes after retries counts its delivered records once, and a
 record the destination refused follows `ON MESSAGE ERROR` and is not sent. When a flush fails for
 good, the records its emitter delivered before the failure are counted as its other records are routed
-to their error policy. A emitter that publishes on its own commit, such as Iceberg, counts what each
+to their error policy. An emitter that publishes on its own commit, such as Iceberg, counts what each
 commit publishes. Sent bytes measure a delivered record's payload as the emitter's buffer measures
 it; an HTTP request's method, target and headers are not payload, and a request without a body
 carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-and-metrics).
@@ -121,17 +121,17 @@ Nervix records these raw metric families:
   overflow, memory-pressure zero-capacity behavior, or an interrupting termination
 - `nervix_ingestor_quiesce_rejected_total`: endpoint requests or connections refused while an
   ingestor cannot accept them
-- `nervix_ingestor_unfolding_refused_total`: payloads a source handed over without an
+- `nervix_ingestor_unfolding_refused_total`: payloads an ingestor handed over without an
   acknowledgement that an ingestor did not deliver because the node's extension workers had no room
-  to unfold them, for a source whose transport would not survive a held loop; see
+  to unfold them, for an ingestor whose transport would not survive a held loop; see
   [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full)
 - `nervix_ingestor_transport_redeliveries_total`: pending acknowledgements and rejections an
-  ingestor discarded after its RabbitMQ, SQS or MQTT source reconnected. The broker redelivers what
+  ingestor discarded after its RabbitMQ, SQS or MQTT ingestor reconnected. The broker redelivers what
   the lost connection did not acknowledge, so each counted position is ingested again
 - `nervix_ingestor_decode_rejections_total`: payloads an ingestor consumed because its codec
   refused them, each reported as a decode rejection under its `ON GENERAL ERROR` policy; see
   [When The Codec Refuses A Payload](./ingestors.md#when-the-codec-refuses-a-payload)
-- `nervix_ingestor_oversized_payloads_total`: payloads an ingestor's source dropped because they
+- `nervix_ingestor_oversized_payloads_total`: payloads an ingestor dropped because they
   exceed their client's message size bound, such as a Syslog UDP datagram larger than
   `max_message_size`; see [Oversized payloads](./connector-contract.md#oversized-payloads)
 - `nervix_ingestor_header_values_dropped_total`: invalid UTF-8 transport header values an
@@ -143,7 +143,7 @@ Nervix records these raw metric families:
 - `nervix_ingestor_read_ahead_dropped_payloads_total`: QoS 0 publishes an ACK-mode MQTT ingestor
   dropped because its separate 64-outcome read-ahead quota was full. The driver counts each drop
   immediately, including during a downstream acknowledgement wait; see
-  [MQTT source connections](./connector-contract.md#mqtt-source-connections)
+  [MQTT ingestor connections](./connector-contract.md#mqtt-ingestor-connections)
 - `nervix_session_subscriptions`: open session subscriptions the node delivers from a relay. The
   node advertises interest in the relay to the cluster exactly while this is above zero, and the
   series stays at `0` once the relay's last subscription on the node closes
@@ -392,7 +392,7 @@ Relay admission:
   `direction="outbound"` the refusals this node received for its own deliveries. The capacity
   reasons, `memory`, `queue_item`, `terminal_outcome` and `channel_busy`, hold the delivery back,
   and its sender asks again; a count of them that keeps rising on a sender means its deliveries are
-  waiting for the receiver's room, and its sources are held with them. Every other reason fails the
+  waiting for the receiver's room, and its ingestors are held with them. Every other reason fails the
   delivery at once. See [Held Deliveries](./interconnect.md#held-deliveries)
 - `nervix_interconnect_relay_admissions_total` and
   `nervix_interconnect_relay_admission_wait_seconds_total`: attempts resolved, by `outcome`
@@ -411,7 +411,7 @@ Relay admission:
 Execution admission:
 
 Worker series include the `connector_storage` class. Its running and pending jobs show Kafka
-source control calls, consumer-group commits and the destruction of retired consumers and producers
+ingestor control calls, consumer-group commits and the destruction of retired consumers and producers
 waiting on their broker, independently of `filesystem_storage` and `consensus_storage`. A commit may
 keep its worker after its caller's thirty-second deadline; the next commit from that instance waits
 for the same job. A retired consumer whose group coordinator does not answer keeps its worker for up
@@ -666,9 +666,9 @@ planned handoff or failover.
 ## Ingestor Unit Metrics And Recovery
 
 `DESCRIBE INGESTOR` queries each unit's current owner and reports its global index, owner, running
-state and readiness. Its edge metric lines render `instance=<i>`. Source-specific quiesce,
+state and readiness. Its edge metric lines render `instance=<i>`. Ingestor-specific quiesce,
 redelivery, decode-rejection, oversize, header-drop, read-ahead-drop and unfolding-refusal metrics
-use `domain`, `ingestor`, `physical_node_id` and `instance`; a `Single` source uses `instance="-"`.
+use `domain`, `ingestor`, `physical_node_id` and `instance`; a `Single` ingestor uses `instance="-"`.
 
 A `BranchAggregated` checkpoint belongs to an exact execution unit. Capture includes that unit's
 series with each series' physical-node attribution intact. Installation replaces only that unit's
@@ -678,4 +678,4 @@ before a departing owner withdraws the unit's live series. Raw Prometheus record
 their local assignment lifetime and are not restored from checkpoints; durable summarized
 metrics use the checkpoint store.
 Inspection discovers the current units through a key-only checkpoint listing, including before a
-stopped source is restarted, and never substitutes one sibling's measurements for another's.
+stopped ingestor is restarted, and never substitutes one sibling's measurements for another's.

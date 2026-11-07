@@ -333,12 +333,92 @@ impl InterconnectRequest for ApplicationHealthProbe {
 }
 
 /// The application progress one process incarnation has reached for control-plane completion.
+///
+/// Each phase holds the newest revision the incarnation reached in it, and is absent until the
+/// incarnation reaches one. A phase only advances, and a new incarnation starts with every phase
+/// absent, so no incarnation reports progress its predecessor made.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ApplicationRevisionResponse {
+pub struct ApplicationProgress {
     pub identity: ClusterNodeIdentity,
-    pub authoritative: u64,
-    pub runtime_prepared: u64,
-    pub runtime_ready: u64,
+    /// The authoritative revision the incarnation applied.
+    pub authoritative: Option<u64>,
+    /// The runtime revision the incarnation prepared.
+    pub runtime_prepared: Option<u64>,
+    /// The runtime revision the incarnation made ready.
+    pub runtime_ready: Option<u64>,
+    /// The runtime revision every domain clock of the incarnation matches.
+    pub domain_clock_installed: Option<u64>,
+}
+
+/// One phase of [`ApplicationProgress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationProgressPhase {
+    Authoritative,
+    RuntimePrepared,
+    RuntimeReady,
+    DomainClockInstalled,
+}
+
+impl ApplicationProgress {
+    /// The progress of an incarnation that has reached no phase.
+    pub const fn new(identity: ClusterNodeIdentity) -> Self {
+        Self {
+            identity,
+            authoritative: None,
+            runtime_prepared: None,
+            runtime_ready: None,
+            domain_clock_installed: None,
+        }
+    }
+
+    /// The newest revision the incarnation reached in `phase`, absent until it reached one.
+    pub const fn reached(&self, phase: ApplicationProgressPhase) -> Option<u64> {
+        match phase {
+            ApplicationProgressPhase::Authoritative => self.authoritative,
+            ApplicationProgressPhase::RuntimePrepared => self.runtime_prepared,
+            ApplicationProgressPhase::RuntimeReady => self.runtime_ready,
+            ApplicationProgressPhase::DomainClockInstalled => self.domain_clock_installed,
+        }
+    }
+
+    /// Records that the incarnation reached `revision` in `phase`, and answers whether that
+    /// advanced the phase. A revision at or before the one already reached changes nothing.
+    pub fn advance(&mut self, phase: ApplicationProgressPhase, revision: u64) -> bool {
+        let reached = match phase {
+            ApplicationProgressPhase::Authoritative => &mut self.authoritative,
+            ApplicationProgressPhase::RuntimePrepared => &mut self.runtime_prepared,
+            ApplicationProgressPhase::RuntimeReady => &mut self.runtime_ready,
+            ApplicationProgressPhase::DomainClockInstalled => &mut self.domain_clock_installed,
+        };
+        if let Some(current) = *reached
+            && current >= revision
+        {
+            return false;
+        }
+        *reached = Some(revision);
+        true
+    }
+
+    /// Takes every phase `report`, a later report of the same incarnation, reached beyond this
+    /// progress, and answers whether any phase advanced. A report that arrives late moves no
+    /// phase back.
+    pub fn absorb(&mut self, report: &Self) -> bool {
+        let mut advanced = false;
+        for phase in [
+            ApplicationProgressPhase::Authoritative,
+            ApplicationProgressPhase::RuntimePrepared,
+            ApplicationProgressPhase::RuntimeReady,
+            ApplicationProgressPhase::DomainClockInstalled,
+        ] {
+            let Some(revision) = report.reached(phase) else {
+                continue;
+            };
+            if self.advance(phase, revision) {
+                advanced = true;
+            }
+        }
+        advanced
+    }
 }
 
 /// Requests the current application progress from one authenticated node.
@@ -346,7 +426,7 @@ pub struct ApplicationRevisionResponse {
 pub struct ApplicationRevisionRequest;
 
 impl InterconnectRequest for ApplicationRevisionRequest {
-    type Response = ApplicationRevisionResponse;
+    type Response = ApplicationProgress;
 
     const NAME: &'static str = "application_revision";
     const CLASS: PoolClass = PoolClass::Management;
@@ -354,12 +434,48 @@ impl InterconnectRequest for ApplicationRevisionRequest {
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
-/// The live process incarnations a leader currently requires for command completion.
+/// One process incarnation's application progress, reported to the Raft leader it observes.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplicationProgressReport {
+    pub progress: ApplicationProgress,
+    /// The leader the reporting incarnation addressed.
+    pub leader: ClusterNodeName,
+    /// The Raft term in which the reporting incarnation observed that leader.
+    pub term: u64,
+}
+
+/// What a node did with an application progress report.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ApplicationProgressReceipt {
+    /// The node leads the addressed term and holds the report.
+    Accepted,
+    /// The node does not lead the addressed term, so it holds nothing.
+    NotLeader,
+    /// The report names another node than the one that sent it, so the node holds nothing.
+    ForeignReporter,
+}
+
+impl InterconnectRequest for ApplicationProgressReport {
+    type Response = ApplicationProgressReceipt;
+
+    const NAME: &'static str = "application_progress";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+    /// A report carries the record a revision query answers, over the same progress subquota, so it
+    /// has the query's deadline.
+    const TIMEOUT: Duration = ApplicationRevisionRequest::TIMEOUT;
+}
+
+/// The live process incarnations a leader currently requires for command completion, and the
+/// application progress it holds for them.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApplicationCompletionPeersResponse {
     pub leader: ClusterNodeIdentity,
     pub term: u64,
     pub peers: Vec<ClusterNodeIdentity>,
+    /// The leader's own progress and the latest progress each other peer reported to it. A peer
+    /// that has reported nothing to this leader has no entry.
+    pub progress: Vec<ApplicationProgress>,
 }
 
 /// Requests the current leader's effective application-health view. A follower must fence the
@@ -1848,6 +1964,8 @@ impl InterconnectRequest for ReconcileOwnershipHandoffPreparationsRequest {
     }
 }
 
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+mod progress_properties;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_checks;
 
@@ -1964,6 +2082,100 @@ mod tests {
         assert_eq!(
             HttpsListenerInstallationRequest::TIMEOUT,
             Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn application_progress_requests_use_reserved_management_progress_capacity() {
+        fn assert_progress_response<M>()
+        where
+            M: InterconnectRequest<Response = ApplicationProgress>,
+        {
+        }
+        fn assert_receipt_response<M>()
+        where
+            M: InterconnectRequest<Response = ApplicationProgressReceipt>,
+        {
+        }
+
+        assert_progress_response::<ApplicationRevisionRequest>();
+        assert_eq!(ApplicationRevisionRequest::NAME, "application_revision");
+        assert_eq!(ApplicationRevisionRequest::CLASS, PoolClass::Management);
+        assert_eq!(
+            ApplicationRevisionRequest::SUBQUOTA,
+            RequestSubquota::Progress
+        );
+        assert_eq!(ApplicationRevisionRequest::TIMEOUT, Duration::from_secs(2));
+
+        assert_receipt_response::<ApplicationProgressReport>();
+        assert_eq!(ApplicationProgressReport::NAME, "application_progress");
+        assert_eq!(ApplicationProgressReport::CLASS, PoolClass::Management);
+        assert_eq!(
+            ApplicationProgressReport::SUBQUOTA,
+            RequestSubquota::Progress
+        );
+        assert_eq!(ApplicationProgressReport::TIMEOUT, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn application_progress_phases_only_advance() {
+        let identity = ClusterNodeIdentity::new(
+            ClusterNodeName::parse("node-a")
+                .assured("the test node name follows the public node-name grammar"),
+            nervix_models::ClusterNodeIncarnation::new(7),
+        );
+        let mut progress = ApplicationProgress::new(identity.clone());
+        assert_eq!(
+            progress.reached(ApplicationProgressPhase::RuntimePrepared),
+            None
+        );
+        assert!(progress.advance(ApplicationProgressPhase::RuntimePrepared, 0));
+        assert_eq!(
+            progress.reached(ApplicationProgressPhase::RuntimePrepared),
+            Some(0),
+            "runtime revision 0 is a revision the incarnation reached, not an absent phase"
+        );
+        assert!(progress.advance(ApplicationProgressPhase::RuntimePrepared, 5));
+        assert!(
+            !progress.advance(ApplicationProgressPhase::RuntimePrepared, 5),
+            "reaching the same revision again advances nothing"
+        );
+        assert!(
+            !progress.advance(ApplicationProgressPhase::RuntimePrepared, 3),
+            "an earlier revision moves no phase back"
+        );
+        assert_eq!(
+            progress.reached(ApplicationProgressPhase::RuntimePrepared),
+            Some(5)
+        );
+        assert_eq!(
+            progress.reached(ApplicationProgressPhase::RuntimeReady),
+            None,
+            "advancing one phase reaches no other"
+        );
+
+        let late = ApplicationProgress {
+            identity: identity.clone(),
+            authoritative: Some(9),
+            runtime_prepared: Some(4),
+            runtime_ready: None,
+            domain_clock_installed: Some(2),
+        };
+        assert!(progress.absorb(&late));
+        assert_eq!(
+            progress,
+            ApplicationProgress {
+                identity,
+                authoritative: Some(9),
+                runtime_prepared: Some(5),
+                runtime_ready: None,
+                domain_clock_installed: Some(2),
+            },
+            "a report takes every phase it reached further and keeps every phase it reached less"
+        );
+        assert!(
+            !progress.absorb(&late),
+            "absorbing the same report again advances nothing"
         );
     }
 

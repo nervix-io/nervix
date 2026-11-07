@@ -754,6 +754,9 @@ tower-service = "0.3"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 any_spawner = "0.3.0"
 nkeys = "0.4.5"
+# Maintained NKey format APIs without a signing or random backend; nkeys remains the independent
+# test-only SDK. Production signing stays with Nervix's cryptography owner.
+nkeys-codec = { package = "nkeys", git = "https://github.com/nervix-io/nkeys.git", rev = "248dc49a1a8d4ebc47504358cc011f5c26583dfe", default-features = false }
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
@@ -785,12 +788,13 @@ zeromq = "0.4"
 [patch.crates-io]
 # The alpha.33 heartbeat worker stopped waiting after one heartbeat interval, discarding follower
 # answers that still arrived inside the leader lease. Keep its response wait aligned with that lease.
-openraft = { git = "https://github.com/glebpom/openraft.git", rev = "f54a099019f2d5090393209942e88eb0701b05f9" }
+openraft = { git = "https://github.com/nervix-io/openraft.git", rev = "1fa0ac5345475d6f00d219ad55bea39b7f40a87d" }
 # A flush must drain async-nats' queued bytes before flushing the transport. The connection
 # generation lets a Core NATS write reject a replacement connection's flush after buffer loss.
 # Header pairs retain their wire order, including interleaved names; JetStream metadata can be
 # parsed from an acknowledgement subject without constructing another client context.
-async-nats = { git = "https://github.com/glebpom/nats.rs.git", rev = "649282d58fb5248ea24e620385c5dabf1bdaa813" }
+# The same maintained driver also exposes borrowed credentials for external nonce signers.
+async-nats = { git = "https://github.com/nervix-io/nats.rs.git", rev = "572ef042d3afaeb2eff67896843599cd7ee5c6f7" }
 # rkyv 0.8.18 leaks partial allocations when semantic deserialization refuses
 # an element. Pin its 0.8.18 ownership fix until https://github.com/rkyv/rkyv/pull/710 ships.
 rkyv = { git = "https://github.com/glebpom/rkyv.git", rev = "868fa9c3c268560ad3459ddb95e271c7167bc097" }
