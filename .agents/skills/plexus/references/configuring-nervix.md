@@ -440,7 +440,8 @@ current connection, retry and deadline limits.
   its batch is read again, so downstream output can repeat.
 - Every ingestor head names its connector and entity, such as `CREATE KAFKA TOPIC INGESTOR`, and
   its body after `FROM` names no connector. Its client belongs to the head's connector, and an
-  `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT` reads an endpoint of `TYPE HTTP` or `TYPE WEBSOCKETS`.
+  `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT` reads an endpoint declared with its matching kinded
+  head. Read `Ingestors` → `HTTP ENDPOINT And WEBSOCKETS ENDPOINT` for endpoint declarations.
   Every ingestor body declares `MODE`, with `MODE NO ACK` where nothing waits on an acknowledgement,
   and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.

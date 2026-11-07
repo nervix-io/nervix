@@ -22,7 +22,7 @@ Feature: Practical string search and normalization
       CREATE RELAY searched_texts SCHEMA searched_text UNBRANCHED;
       CREATE RELAY search_errors SCHEMA search_error UNBRANCHED;
       CREATE VHOST edge text-search-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/text' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/text';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec

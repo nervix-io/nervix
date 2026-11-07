@@ -244,6 +244,12 @@ caller; the recipe does not expand their contents as shell code. The reuse recip
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
 
+`just test-endpoint-heads` selects `kinded_endpoint_heads.feature` for its in-process endpoint
+inspection and reference-kind refusal cases. It prepares the console, ONNX and guest assets,
+Plexus formatter, CLI and diagnostic report tool those cases use. The paced-driver steps own their
+Rust driver and Python package prerequisites in the full `tests-deps` path. Arguments after the
+focused recipe, including a quoted scenario name, reach the same scenario runner intact.
+
 `just test-restore-codec-replies` prepares the server assets, CLI and diagnostic reporter and runs
 only the restore reply rejection feature with the ordinary scenario runner. It forwards caller
 arguments by the same quoting rule. The bounded peer forwards the original upload to a real node,

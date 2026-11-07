@@ -18,6 +18,13 @@ private-key role; malformed PEM and key mismatch retain the material owner's typ
 contents. The [Client Session Protocol](client-session-protocol.md#native-grpc) owns the TLS
 listener's startup and rotation contract.
 
+Interconnect TLS construction retains `nervix-crypto`'s `InterconnectAlgorithmError`, including the
+exact cipher suite or key exchange group, beneath `TlsConfigError::AlgorithmPolicy`. This checks
+the fixed algorithm set without claiming FIPS module validation. Handshake refusals remain typed
+rustls failures. Ed25519 key preparation and signing retain AWS-LC's typed cause beneath the
+cryptography context; the NATS owner adds its configuration context or hands the complete report
+to the driver's authentication callback error, without rendering credentials.
+
 Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
 client/domain context. The server's changed-model binding validation runs connector-owned offline
 checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed
@@ -1543,9 +1550,9 @@ references. A branch mismatch in an error route, for example, identifies the sou
 relay, and both branch declarations. A flush-based route without `FLUSH EACH` or `FLUSH IMMEDIATE`
 fails validation; the registry does not supply a cadence. The current registry reports this as an
 invalid-model failure naming the node and output in its diagnostic. An ingestor whose body names a
-client of another connector, or an endpoint of another `TYPE`, than its head's entity reads is
+client of another connector, or an endpoint of another kind, than its head's entity reads is
 refused with a typed failure naming the domain, the ingestor, its connector and entity, the client
-or endpoint, and both connectors or both endpoint types, such as `KAFKA TOPIC ingestor 'orders_in'
+or endpoint, and both connectors or both endpoint kind phrases, such as `KAFKA TOPIC ingestor 'orders_in'
 in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `PROMETHEUS CLIENT`'s `CONFIG` is held to the keys the vocabulary declares for it when the client
 is created. The refusal names the connector, the client and the domain, with the vocabulary's
 `PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address

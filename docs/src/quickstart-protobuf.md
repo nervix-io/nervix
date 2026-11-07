@@ -62,7 +62,7 @@ CREATE CODEC order_protobuf_codec
 
 CREATE RELAY proto_orders SCHEMA order_record UNBRANCHED;
 
-CREATE ENDPOINT proto_ingress ON edge PATH '/proto-orders' TYPE HTTP;
+CREATE HTTP ENDPOINT proto_ingress ON edge PATH '/proto-orders';
 
 CREATE HTTP ENDPOINT INGESTOR proto_order_source
   FROM proto_ingress MODE NO ACK

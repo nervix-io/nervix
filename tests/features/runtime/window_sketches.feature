@@ -25,7 +25,7 @@ Feature: Bounded window sketches
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketches-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/sketches' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/sketches';
       CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
@@ -95,7 +95,7 @@ Feature: Bounded window sketches
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketches-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/sketches' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/sketches';
       CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
@@ -172,7 +172,7 @@ Feature: Bounded window sketches
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketch-failover-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/sketches' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/sketches';
       CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec

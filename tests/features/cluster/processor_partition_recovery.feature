@@ -22,7 +22,7 @@ Feature: Partitioned processor recovery and handoff
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge partition-recovery-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant

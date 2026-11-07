@@ -278,6 +278,11 @@ WASM ownership preparation follows the installed revision's execution mode. A pa
 retains and transfers the validated checkpoint inventory without instantiating guests or reading
 its stopped clock. Guest restoration is deferred until `START` installs a running revision.
 
+Endpoint activation preserves `EndpointKind`: HTTP has no signaling data, while WebSockets carries
+its optional signaling reference. Installation resolves only that variant's reference into its
+compiled protocol. Published routes retain that same kind and prepared protocol; the endpoint-type
+projection used by request dispatch and ingestor capabilities derives from the kind.
+
 Server endpoint installation replaces that domain's complete set of host-and-path definitions in
 the node's immutable intake table. Ingestor starts bind prepared intake lifetimes to the same table;
 ingestor ending and domain teardown end those lifetimes before withdrawing them. Other domains'

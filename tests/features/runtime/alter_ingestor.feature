@@ -16,8 +16,8 @@ Feature: Altering ingestors
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY audit SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-roundtrip.example.com;
-      CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
+      CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -79,8 +79,8 @@ Feature: Altering ingestors
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-swap.example.com;
-      CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
+      CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -142,7 +142,7 @@ Feature: Altering ingestors
         FROM WIRE JSON SCHEMA buffered_event_wire TO SCHEMA buffered_event;
       CREATE RELAY buffered_events SCHEMA buffered_event UNBRANCHED CAPACITY 2;
       CREATE VHOST buffered_edge http-{{test_id}}-buffered-alter.example.com;
-      CREATE ENDPOINT buffered_ingress ON buffered_edge PATH '/buffered-alter' TYPE HTTP;
+      CREATE HTTP ENDPOINT buffered_ingress ON buffered_edge PATH '/buffered-alter';
       CREATE ZEROMQ CLIENT buffered_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
@@ -208,7 +208,7 @@ Feature: Altering ingestors
         FROM WIRE JSON SCHEMA quiesce_event_wire TO SCHEMA quiesce_event;
       CREATE RELAY quiesce_events SCHEMA quiesce_event UNBRANCHED;
       CREATE VHOST quiesce_edge http-{{test_id}}-set-quiesce.example.com;
-      CREATE ENDPOINT quiesce_ingress ON quiesce_edge PATH '/set-quiesce' TYPE HTTP;
+      CREATE HTTP ENDPOINT quiesce_ingress ON quiesce_edge PATH '/set-quiesce';
       CREATE HTTP ENDPOINT INGESTOR quiesce_ingestor
         FROM quiesce_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING quiesce_event_codec
@@ -286,7 +286,7 @@ Feature: Altering ingestors
         };
 
       CREATE VHOST paced_edge http-{{test_id}}-paced-alter.example.com;
-      CREATE ENDPOINT paced_ingress ON paced_edge PATH '/paced-alter' TYPE HTTP;
+      CREATE HTTP ENDPOINT paced_ingress ON paced_edge PATH '/paced-alter';
 
       CREATE HTTP ENDPOINT INGESTOR paced_ingestor
         FROM paced_ingress MODE NO ACK

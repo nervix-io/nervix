@@ -1397,6 +1397,7 @@ async fn slow_management_work_cannot_consume_cancellation_streams() {
 mod duplex;
 
 mod progress;
+mod tls_policy;
 
 #[nervix_primitives::test]
 async fn discovery_subquota_cannot_crowd_out_management_requests() {

@@ -26,9 +26,7 @@ use std::num::NonZeroUsize;
 use ahash::HashSet;
 use error_stack::Report;
 use meticulous::OptionExt as _;
-use nervix_connector::{
-    RustlsClientConfigProvider, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
-};
+use nervix_connector::{RustlsClientConfigProvider, client_tls_paths, read_tls_file};
 use nervix_models::{ClientConfigKey, CreateClientSyslog, DeadlineKey};
 use nervix_primitives::sync::StdArc;
 use nonzero_ext::nonzero;
@@ -415,7 +413,7 @@ impl SyslogClientConfig {
     pub fn tls_server_config(
         &self,
     ) -> error_stack::Result<StdArc<ServerConfig>, SyslogConfigError> {
-        install_rustls_crypto_provider();
+        nervix_crypto::tls::install_default_provider();
         let tls = client_tls_paths(&self.entries);
         let cert_file = tls.cert_file.as_ref().ok_or_else(|| {
             Report::new(SyslogConfigError::MissingTlsKey {

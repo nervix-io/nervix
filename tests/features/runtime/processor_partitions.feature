@@ -23,7 +23,7 @@ Feature: Partitioned processors and generators
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge partition-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
@@ -152,7 +152,7 @@ Feature: Partitioned processors and generators
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge partition-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TIMESTAMP NOW
         TO events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
@@ -245,7 +245,7 @@ Feature: Partitioned processors and generators
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -411,8 +411,8 @@ Feature: Partitioned processors and generators
       CREATE RELAY right_events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY joined_events SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge correlation-{{test_id}}.example.com;
-      CREATE ENDPOINT left_ingress ON edge PATH '/left' TYPE HTTP;
-      CREATE ENDPOINT right_ingress ON edge PATH '/right' TYPE HTTP;
+      CREATE HTTP ENDPOINT left_ingress ON edge PATH '/left';
+      CREATE HTTP ENDPOINT right_ingress ON edge PATH '/right';
       CREATE HTTP ENDPOINT INGESTOR left_ingestor FROM left_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO left_events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
@@ -483,8 +483,8 @@ Feature: Partitioned processors and generators
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY enriched SCHEMA event BRANCHED BY tenants;
       CREATE VHOST edge partition-read-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT state_ingress ON edge PATH '/preferences' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT state_ingress ON edge PATH '/preferences';
       CREATE HTTP ENDPOINT INGESTOR state_ingestor FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TIMESTAMP NOW
         TO preferences INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant

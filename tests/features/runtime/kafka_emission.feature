@@ -19,7 +19,7 @@ Feature: Kafka emission
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY queue_events SCHEMA queue_event UNBRANCHED;
       CREATE VHOST edge small-queue-{{test_id}}.example.com;
-      CREATE ENDPOINT queue_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT queue_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR queue_ingestor
         FROM queue_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING queue_ingest_codec
@@ -107,7 +107,7 @@ Feature: Kafka emission
         ENCODE occurred_at AS RFC3339, blob AS BASE64;
       CREATE RELAY events SCHEMA incoming_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_codec
@@ -562,7 +562,7 @@ Feature: Kafka emission
       CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-stop-{{test_id}}.example.com;
-      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
@@ -648,7 +648,7 @@ Feature: Kafka emission
       CREATE CODEC unsent_event_codec FROM WIRE JSON SCHEMA unsent_event_wire TO SCHEMA unsent_event;
       CREATE RELAY unsent_events SCHEMA unsent_event UNBRANCHED;
       CREATE VHOST edge unsent-stop-{{test_id}}.example.com;
-      CREATE ENDPOINT unsent_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT unsent_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR unsent_ingestor
         FROM unsent_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING unsent_event_codec
@@ -730,7 +730,7 @@ Feature: Kafka emission
       CREATE CODEC swap_codec FROM WIRE JSON SCHEMA swap_wire TO SCHEMA swap_event;
       CREATE RELAY swap_events SCHEMA swap_event UNBRANCHED;
       CREATE VHOST edge swap-{{test_id}}.example.com;
-      CREATE ENDPOINT swap_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT swap_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR swap_ingestor
         FROM swap_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING swap_codec
@@ -812,7 +812,7 @@ Feature: Kafka emission
         FROM WIRE JSON SCHEMA retired_event_wire TO SCHEMA retired_event;
       CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
       CREATE VHOST edge retire-out-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
         FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
         TO retired_events INHERIT ALL UNBRANCHED
@@ -911,7 +911,7 @@ Feature: Kafka emission
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge timestamped-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -1009,7 +1009,7 @@ Feature: Kafka emission
         ENCODE event_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge timestamp-retry-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -1071,7 +1071,7 @@ Feature: Kafka emission
         ENCODE event_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge timestamp-altered-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
