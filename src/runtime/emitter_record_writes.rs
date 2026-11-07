@@ -176,6 +176,14 @@ pub(super) trait PreparedContent {
     type Written;
 
     /// Content bytes retained for another write, before driver framing or compression.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "payload ownership transitions read the retained content length without \
+                      allocation or synchronization"
+        )
+    )]
     fn prepared_bytes(&self) -> usize;
 
     /// The value the write hands the emitter for this payload under `record`. The emitter takes its own

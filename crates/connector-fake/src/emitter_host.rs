@@ -40,6 +40,14 @@ impl FakeEmitterHost {
         EmitterHost::new(self.clone())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "test assertions snapshot the numeric preparation log outside emitter \
+                      execution"
+        )
+    )]
     pub fn observations(&self) -> EmitterHostObservations {
         self.observations.lock().clone()
     }

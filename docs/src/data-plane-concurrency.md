@@ -1910,6 +1910,11 @@ driver or callback boundary; it does not exempt compiler-visible local callback 
 Emitter branch retirement carries this contract for its synchronous sent-count observer. The buffer
 reports only rows already delivered, and the compiler still analyzes the task's local observer body.
 
+The prepared-content length trait declares recurring execution: payload ownership transitions read
+the retained encoding's length without allocating or acquiring synchronization. The recording test
+host's snapshot method is an observer used by assertions outside emitter execution; its append and
+subdivision callbacks retain their bounded recurring contracts.
+
 The NATS stream metadata visitor carries this contract on its field helper: a synchronous callback
 projects the borrowed delivery metadata into the requested scalar sink. Its per-visit `OnceCell`
 is stack-local, and the compiler continues to analyze each local projection body.
