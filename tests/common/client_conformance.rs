@@ -243,7 +243,9 @@ pub(crate) enum ProbeExercise {
     /// Connects through a live seed after an unavailable initial address, then checks that
     /// session-local execution is a new request rather than durable outcome recovery.
     Connection,
-    /// Reads a refused restoration after the scenario ends the session and removes the relay.
+    /// Reports how a restored session answers the reopening of a subscription after the scenario
+    /// ends its session: a refusal for now with its cause, message and wait, or the end of the
+    /// subscription with its reason.
     Restoration { relay: String, subscription: String },
 }
 

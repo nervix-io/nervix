@@ -295,7 +295,7 @@ Feature: Cross-language client conformance
       | c++     | 1            |
       | c++     | 3            |
 
-  Scenario Outline: A <runtime> C binding exposes a refused subscription restoration's message and retry wait
+  Scenario Outline: A <runtime> client reads the cause, message and retry wait of a restoration refused for now
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -315,7 +315,7 @@ Feature: Cross-language client conformance
       """
       SUBSCRIBED
       INTERRUPTED
-      RESTORATION message=the serving node could not open the subscription now wait=positive
+      RESTORATION cause=unavailable message=the serving node could not open the subscription now wait=positive
       CHECKS ok
       PASS
       """
@@ -336,6 +336,63 @@ Feature: Cross-language client conformance
       | runtime | cluster_size |
       | c++     | 1            |
       | c++     | 3            |
+
+    @client_conformance_toolchain @client_probe_java
+    Examples: Java 21 over the JNI library
+      | runtime | cluster_size |
+      | java    | 1            |
+      | java    | 3            |
+
+  Scenario Outline: A <runtime> client reads why a subscription whose relay was dropped while it was disconnected ended
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA watched_row (value STRING);
+      CREATE RELAY watched SCHEMA watched_row UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    When the "<runtime>" client probe subscribes for restoration through the forwarded gRPC endpoint of node "{{leader}}"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" the client probe prints "INTERRUPTED"
+    When these Plexus commands are executed on the leader node
+      """
+      DROP RELAY watched;
+      """
+    And the TCP forwarder at "127.0.0.1" restarts
+    Then within "120s" the client probe reports
+      """
+      SUBSCRIBED
+      INTERRUPTED
+      ENDED reason=relay_removed
+      CHECKS ok
+      PASS
+      """
+
+    Examples: the C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C over the shared Rust binding
+      | runtime | cluster_size |
+      | c       | 1            |
+      | c       | 3            |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++ over the shared Rust binding
+      | runtime | cluster_size |
+      | c++     | 1            |
+      | c++     | 3            |
+
+    @client_conformance_toolchain @client_probe_java
+    Examples: Java 21 over the JNI library
+      | runtime | cluster_size |
+      | java    | 1            |
+      | java    | 3            |
 
   Scenario Outline: A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart
     # Holding the clock authority's first progress proves which node owns it, and that every live

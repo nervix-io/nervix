@@ -109,6 +109,10 @@ codes!(event_kind(host::EventKind) {
 codes!(clock_kind(host::ClockEventKind) {State=1,Tick=2,Ended=3,Interrupted=4,RestorationFailed=5});
 codes!(clock_state(host::ClockState) {Stopped=1,Uninstalled=2,Unpaced=3,Paced=4});
 codes!(clock_end(host::ClockEndReason) {DomainRemoved=1});
+codes!(end_reason(host::EndReason) {RelayRemoved=1,RelayChanged=2});
+codes!(restoration_cause(host::RestorationCause) {
+    InTransaction=1,InvalidStatement=2,NameInUse=3,InvalidFilter=4,Unavailable=5,Rejected=6,Failed=7,
+});
 codes!(endpoint_state(host::EndpointState) {Active=1,Interrupted=2,Restoring=3,ReopenRequired=4,Closed=5});
 codes!(admission(host::Admission) {Open=1,Suspended=2});
 codes!(window(host::WindowKind) {Sequential=1,Parallel=2});

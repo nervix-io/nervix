@@ -37,14 +37,16 @@ pub(crate) fn subscription<'local>(
 
 pub(crate) fn restoration<'local>(
     env: &mut Env<'local>,
+    cause: host::RestorationCause,
     message: &str,
     retry_after: std::time::Duration,
 ) -> Result<JObject<'local>, Error> {
     let message = env.new_string(message)?;
     Ok(env.new_object(
         jni_str!("io/nervix/client/Nervix$RestorationFailure"),
-        jni_sig!("(Ljava/lang/String;J)V"),
+        jni_sig!("(ILjava/lang/String;J)V"),
         &[
+            JValue::Int(marshal::restoration_cause(cause)),
             JValue::Object(message.as_ref()),
             JValue::Long(host::nanos(retry_after).cast_signed()),
         ],
@@ -106,12 +108,25 @@ fn event_restoration<'local>(
     _class: jni::objects::JClass<'local>,
     handle: jlong,
 ) -> Result<jni::objects::JObject<'local>, crate::error::Error> {
-    match value!(handle).event()?.subscription_event() {
-        SubscriptionEvent::RestorationFailed(failure) => {
-            restoration(env, &failure.message, failure.retry_after)
-        }
+    let event = value!(handle).event()?;
+    match event.subscription_event() {
+        SubscriptionEvent::RestorationFailed(failure) => restoration(
+            env,
+            event.restoration_cause()?,
+            &failure.message,
+            failure.retry_after,
+        ),
         _ => Ok(JObject::null()),
     }
+}
+native!(event_end(handle: long) -> int);
+
+fn event_end<'local>(
+    _env: &mut jni::Env<'local>,
+    _class: jni::objects::JClass<'local>,
+    handle: jlong,
+) -> Result<jint, crate::error::Error> {
+    Ok(marshal::end_reason(value!(handle).event()?.end_reason()?))
 }
 
 native!(buffer(handle: long) -> JObject);
@@ -239,6 +254,7 @@ pub(crate) const METHODS: &[jni::NativeMethod] = &[
     event_schema::METHOD,
     event_batch::METHOD,
     event_restoration::METHOD,
+    event_end::METHOD,
     buffer::METHOD,
     event_states::METHOD,
     event_fixed::METHOD,

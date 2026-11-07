@@ -96,6 +96,20 @@ public final class Nervix {
         public int code() { return code; }
         static ClockState of(int code) { return decode(values(), code); }
     }
+    public enum EndReason implements Coded {
+        RELAY_REMOVED(1), RELAY_CHANGED(2);
+        private final int code;
+        EndReason(int code) { this.code = code; }
+        public int code() { return code; }
+        static EndReason of(int code) { return decode(values(), code); }
+    }
+    public enum RestorationCause implements Coded {
+        IN_TRANSACTION(1), INVALID_STATEMENT(2), NAME_IN_USE(3), INVALID_FILTER(4), UNAVAILABLE(5), REJECTED(6), FAILED(7);
+        private final int code;
+        RestorationCause(int code) { this.code = code; }
+        public int code() { return code; }
+        static RestorationCause of(int code) { return decode(values(), code); }
+    }
     public enum ClockEndReason implements Coded {
         DOMAIN_REMOVED(1);
         private final int code;
@@ -396,7 +410,9 @@ public final class Nervix {
 
     public record Varlen(long[] offsets, byte[] data) {}
     public record Subscription(String name, long generation) {}
-    public record RestorationFailure(String message, long waitNanos) {}
+    public record RestorationFailure(RestorationCause cause, String message, long waitNanos) {
+        RestorationFailure(int cause, String message, long waitNanos) { this(RestorationCause.of(cause), message, waitNanos); }
+    }
     public record Diagnostic(String message, long[] span) {}
     public record Backup(long bytes, byte[] digest) {}
     public record Restore(boolean dryRun, long domains, long resourceVersions, long models, boolean failed) {}
@@ -612,6 +628,7 @@ public final class Nervix {
         public Schema schema() { return read(p -> new Schema(Native.eventSchema(p))); }
         public Batch batch() { return read(p -> new Batch(Native.eventBatch(p))); }
         public ByteBuffer frame() { return directBuffer(); }
+        public EndReason endReason() { return read(p -> EndReason.of(Native.eventEnd(p))); }
         public RestorationFailure restorationFailure() { return read(p -> (RestorationFailure) Native.eventRestoration(p)); }
         public byte[] states(Part part, int column) { return read(p -> Native.eventStates(p, part.code(), column)); }
         public byte[] fixed(Part part, int column) { return read(p -> Native.eventFixed(p, part.code(), column)); }

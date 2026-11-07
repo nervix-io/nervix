@@ -124,10 +124,14 @@ fn clock_event_restoration<'local>(
     _class: jni::objects::JClass<'local>,
     handle: jlong,
 ) -> Result<jni::objects::JObject<'local>, crate::error::Error> {
-    match value!(handle).clock_event()?.domain_clock_event() {
-        DomainClockEvent::RestorationFailed(failure) => {
-            crate::events::restoration(env, &failure.message, failure.retry_after)
-        }
+    let event = value!(handle).clock_event()?;
+    match event.domain_clock_event() {
+        DomainClockEvent::RestorationFailed(failure) => crate::events::restoration(
+            env,
+            event.restoration_cause()?,
+            &failure.message,
+            failure.retry_after,
+        ),
         _ => Ok(JObject::null()),
     }
 }

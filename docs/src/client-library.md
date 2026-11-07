@@ -493,7 +493,9 @@ whether the session follows the clock.
 
 Java 21 and later use `io.nervix.client.Nervix` from `crates/client-jvm`. Its `Session`, prepared
 `Execution`, `Outcome`, `ClockEvent` and immutable `DomainClock` expose the shared Rust client's
-state and projection arithmetic. `RestorationFailure` carries the message and physical wait.
+state and projection arithmetic. `Event.endReason()` reads why an ended subscription ended,
+`RELAY_REMOVED` or `RELAY_CHANGED`, and a subscription's or clock's `RestorationFailure` carries
+its typed `RestorationCause`, the message and the physical wait.
 `Cancel` supports deadlines and cancellation from another Java thread while a native call waits.
 Close handles with try-with-resources; Cleaner supplies fallback cleanup. Build the jar and its
 native library with `just build-client-jvm`. The [implementation manual](./client-implementation-manual.md#using-the-jvm-library)
