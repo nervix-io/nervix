@@ -256,6 +256,11 @@ proposes, `cluster parameters` when it installs a committed parameter revision, 
 runtime failure of any node and `control plane` for a control-plane failure of the connected node.
 The level is `INFO`, `WARN` or `ERROR`.
 
+The carried kind selects this label; the message is display text. A configuration mutation or a
+subscription-interest update alone produces no membership line. Command completion is reported
+through that command's outcome, independently of the notice stream; see
+[What A Session Is Told](./client-session-protocol.md#what-a-session-is-told).
+
 A domain clock line follows each newer state or accepted tick after the attach reply. A state or
 tick that changes again before it is delivered or read is replaced by the newest one, so a slow
 client can skip states and tick ids. The REPL queues at most 128 event lines, each
