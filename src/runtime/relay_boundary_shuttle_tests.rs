@@ -1,7 +1,7 @@
 //! Model checks for relay-owner fan-out while a consumer schedule changes.
 //!
 //! Layer: test harness.
-//! - **Owns.** The owner-side ACK and consumer-delivery invariant across a relay dispatch fence.
+//! - **Owns.** Owner-side ACK and delivery across registration, backpressure, and dispatch fences.
 //! - **Depends on.** The production relay boundary, dispatch gate, ACK tree, and Shuttle runner.
 //! - **Must not know.** Plexus, placement policy, or connector internals.
 
@@ -18,6 +18,91 @@ use nonzero_ext::nonzero;
 
 use super::*;
 use crate::runtime_ack::AckOutcome;
+
+#[test]
+fn shuttle_a_detached_consumer_joins_during_attached_backpressure() {
+    check_dfs(
+        || {
+            shuttle::future::block_on(async {
+                let partitioned = RelayPartitioning::of_partitions(
+                    nervix_models::BranchPartitions::Direct(nonzero!(2u16)),
+                );
+                for partitioning in [RelayPartitioning::Whole, partitioned] {
+                    nervix_primitives::task::consume_budget().await;
+                    for common in [false, true] {
+                        nervix_primitives::task::consume_budget().await;
+                        let fanout = match partitioning {
+                            RelayPartitioning::Whole => {
+                                RelayBoundaryFanout::direct_with_capacity(nonzero!(1usize))
+                            }
+                            RelayPartitioning::Partitioned(_) => {
+                                RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize))
+                            }
+                        };
+                        let services = Arc::new(RelayBoundaryServices::new(
+                            fanout,
+                            0,
+                            0,
+                            Vec::new(),
+                            None,
+                            RelayBranchPresences::fresh(partitioning),
+                            Arc::new(crate::runtime_ack::AckRootTracker::default()),
+                        ));
+                        let mut batch = quiesce_test_batch();
+                        batch.key = string_branch_key("tenant", "acme");
+                        let unit = partitioning
+                            .unit_of(&batch.key)
+                            .assured("the concrete key names its relay unit");
+                        let mut attached =
+                            services.add_local_unit_runtime_consumer(AckMode::Attached, unit);
+                        services
+                            .dispatch_local_runtime_consumers(
+                                RuntimeConsumerDispatch::Owner,
+                                unit,
+                                &batch,
+                            )
+                            .await
+                            .assured("the initial delivery fills the attached queue");
+                        let publishing = services.clone();
+                        let owner = nervix_primitives::task::spawn(async move {
+                            publishing
+                                .dispatch_local_runtime_consumers(
+                                    RuntimeConsumerDispatch::Owner,
+                                    unit,
+                                    &batch,
+                                )
+                                .await
+                        });
+                        let registering = services.clone();
+                        let joining = nervix_primitives::task::spawn(async move {
+                            if common {
+                                registering.add_local_runtime_consumer(AckMode::Detached)
+                            } else {
+                                registering.add_local_unit_runtime_consumer(AckMode::Detached, unit)
+                            }
+                        });
+                        // Registration finishes before the attached queue is freed. The owner may
+                        // have started its attached publication before or after that registration.
+                        let mut detached = joining.await.assured("the detached consumer registers");
+                        assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+                        owner
+                            .await
+                            .assured("the publishing task finishes")
+                            .assured("the attached queue returned its admission");
+                        assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+                        assert!(
+                            matches!(detached.try_recv(), RelayTryRecv::Batch(_)),
+                            "a detached consumer registered before attached admission completes \
+                             receives that publication exactly once"
+                        );
+                        assert!(matches!(detached.try_recv(), RelayTryRecv::Empty));
+                    }
+                }
+            });
+        },
+        Some(128),
+    );
+}
 
 #[test]
 fn shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_its_sibling_flows()

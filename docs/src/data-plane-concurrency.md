@@ -919,6 +919,13 @@ locks that registry. Remote
 routes combine common and scoped readers per destination, preserving one encoded body and one
 delivery to each selected destination. Replacing consumer routes retires only changed units' channels.
 
+Attached delivery fixes its registration and ACK snapshot before waiting for queue capacity.
+Detached publication begins after attached admission completes and snapshots the registrations
+present at that point, so a detached consumer joining during attached backpressure receives the
+batch. Its observation count and actual publication keep separate reads of the registrations,
+preserving a consumer joining between them as well. The Shuttle check of the production owner races
+registration with that wait for whole relays, partition audiences and common consumers.
+
 Partition dispatch gates, drain observations and branch freezes select the same unit. A partition's
 transit counter also advances its relay's aggregate admission sequence, so whole-domain drains keep
 their observation ordering. Per-unit drains count dedicated audience queues; a common consumer's

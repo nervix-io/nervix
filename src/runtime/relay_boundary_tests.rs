@@ -1763,6 +1763,73 @@ async fn a_routed_detached_batch_needs_no_attached_consumer() {
         .expect("a detached routed batch carries no acknowledgement to complete");
 }
 
+#[rstest::rstest]
+#[case::whole(RelayPartitioning::Whole, false)]
+#[case::partition(
+    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    false
+)]
+#[case::partition_common(
+    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    true
+)]
+#[nervix_primitives::test]
+async fn a_detached_consumer_joining_during_attached_backpressure_receives_the_batch(
+    #[case] partitioning: RelayPartitioning,
+    #[case] common: bool,
+) {
+    let fanout = match partitioning {
+        RelayPartitioning::Whole => RelayBoundaryFanout::direct_with_capacity(nonzero!(1usize)),
+        RelayPartitioning::Partitioned(_) => {
+            RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize))
+        }
+    };
+    let services = RelayBoundaryServices::new(
+        fanout,
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::fresh(partitioning),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    let key = string_branch_key("tenant", "acme");
+    let unit = partitioning
+        .unit_of(&key)
+        .expect("the key names a relay unit");
+    let batch = RelayRecordBatch::single(
+        test_schema(&[("value", ParseAsType::I64)]),
+        key,
+        test_runtime_row([("value".into(), RuntimeValue::I64(1))]),
+        AckSet::empty(),
+    )
+    .expect("the fixture batch preserves its concrete branch");
+    let mut attached = services.add_local_unit_runtime_consumer(AckMode::Attached, unit);
+    services
+        .dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, unit, &batch)
+        .await
+        .expect("the first batch fills the attached queue");
+    let pending =
+        services.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, unit, &batch);
+    tokio::pin!(pending);
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    let mut detached = if common {
+        services.add_local_runtime_consumer(AckMode::Detached)
+    } else {
+        services.add_local_unit_runtime_consumer(AckMode::Detached, unit)
+    };
+    assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+    pending
+        .await
+        .expect("the attached queue returned its capacity");
+    assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+    assert!(
+        matches!(detached.try_recv(), RelayTryRecv::Batch(_)),
+        "detached publication begins after attached admission completes"
+    );
+    assert!(matches!(detached.try_recv(), RelayTryRecv::Empty));
+}
+
 #[nervix_primitives::test]
 async fn relay_owner_enforces_branch_capacity_across_batches() {
     let runtime = Runtime::default();

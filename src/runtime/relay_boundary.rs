@@ -982,19 +982,25 @@ impl RelayConsumerFanout {
             attached_runtime_consumer_count,
             detached_runtime_consumer_count,
             self.attached_runtime_consumers.publication(),
-            self.detached_runtime_consumers.publication(),
+            || self.detached_runtime_consumers.publication(),
             batch,
         )
         .await
     }
 
-    async fn dispatch_publications<Selection: RelayConsumerSelection<RelayRecordBatch>>(
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the two local publication callbacks borrow their retained \
+                                   common or unit fan-out and only read its immutable \
+                                   registration snapshot")
+    )]
+    async fn dispatch_publications<'a, Selection: RelayConsumerSelection<RelayRecordBatch>>(
         &self,
         dispatch: RuntimeConsumerDispatch,
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         attached: RelayPublication<'_, RelayRecordBatch, Selection>,
-        detached: RelayPublication<'_, RelayRecordBatch, Selection>,
+        detached_publication: impl Fn() -> RelayPublication<'a, RelayRecordBatch, Selection>,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         // The shares reserved for the attached consumers and the deliveries to them come from the
@@ -1033,14 +1039,16 @@ impl RelayConsumerFanout {
             }
         }
 
-        let detached_receiver_count = detached.receivers();
+        // Detached observation and publication both start after attached admission. Keep their
+        // separate reads so a consumer joining between the count and broadcast receives the batch.
+        let detached_receiver_count = detached_publication().receivers();
         if detached_runtime_consumer_count > 0
             && detached_receiver_count < detached_runtime_consumer_count
         {
             warn!("detached runtime consumer receiver is unavailable");
         }
         if detached_receiver_count > 0
-            && let Err(error) = detached.broadcast(batch.detached()).await
+            && let Err(error) = detached_publication().broadcast(batch.detached()).await
         {
             warn!(
                 error = %error,
@@ -1914,7 +1922,7 @@ impl RelayBoundaryServices {
                     attached,
                     detached,
                     consumers.audiences.attached.publication(),
-                    consumers.audiences.detached.publication(),
+                    || consumers.audiences.detached.publication(),
                     batch,
                 )
                 .await;
