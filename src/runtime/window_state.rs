@@ -1,10 +1,10 @@
 //! Published branch-local window state and its sealed snapshot codec.
 //!
 //! Layer: data plane.
-//! - **Owns.** Immutable window generations, bounded Arrow and typed snapshot sections, and
-//!   restoration against a concrete branch lifetime.
-//! - **Depends on.** Window accumulator plans, Arrow row views, the bulk executor, and runtime
-//!   state placement.
+//! - **Owns.** The immutable window snapshot codec, bounded Arrow and typed snapshot sections,
+//!   and restoration against a concrete branch lifetime.
+//! - **Depends on.** The shared replicated branch-state owner, window accumulator plans, Arrow
+//!   row views, and the bulk executor.
 //! - **Must not know.** Plexus text, connector protocols, control-plane transactions, or ACK state.
 
 #![cfg_attr(
@@ -19,21 +19,21 @@ use std::io::Write as _;
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::Timestamp;
-use nervix_primitives::sync::StdArc;
+use nervix_primitives::sync::{Arc, StdArc};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
-    WindowAccumulatorPlan, WindowProcessorError, WindowProcessorState,
-    branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateOperationError,
+    RuntimeStatePlacement, RuntimeStateResult, RuntimeStateStore, WindowAccumulatorPlan,
+    WindowProcessorError, WindowProcessorState,
     materialized_snapshot::{
         MaterializedGeneration, MaterializedGenerationRecord, RestoredMaterializedSnapshot,
         RestoredRows, SealedContainerPieces, SealedSource, decode_aligned_rkyv,
     },
     published_generation::{Generation, PublishedGenerations},
+    replicated_branch_state::{BranchSnapshotCodec, ReplicatedBranchState},
     snapshot_staging::{SnapshotStaging, StagedArtifact, StagedPieces},
 };
 
@@ -79,18 +79,11 @@ pub(super) struct WindowProcessorStateSnapshot {
 /// Everything outside the task reads the window it last published: the snapshot task persists it,
 /// replicas and ownership handoff receive it, and the next task for the same branch restores from
 /// it.
+pub(super) type ReplicatedWindowProcessorState = ReplicatedBranchState<WindowSnapshotCodec>;
+
+/// The window's published Arrow views or sealed bytes and bounded checkpoint encoding.
 #[derive(Debug)]
-pub(super) struct ReplicatedWindowProcessorState {
-    pub(super) placement: RuntimeStatePlacement,
-    /// Absent until the branch task first publishes, which restores as an empty window.
-    pub(super) generations: PublishedGenerations<Option<WindowPublishedSnapshot>>,
-    /// What each replica reported holding of the published window, and the offer of the newest
-    /// published window to the replicas that lack it.
-    replication: CheckpointReplication,
-    /// The entry of the entity's branch checkpoint catalog that every published window is recorded
-    /// in, absent for a state that only encodes or checks a checkpoint.
-    catalog: Option<CatalogRegistration>,
-}
+pub(super) struct WindowSnapshotCodec;
 
 #[derive(Debug, Clone)]
 pub(super) enum WindowPublishedSnapshot {
@@ -874,28 +867,7 @@ impl ReplicatedWindowProcessorState {
             ),
             None => PublishedGenerations::restored(0, None),
         };
-        Self {
-            placement,
-            generations,
-            replication: CheckpointReplication::new(),
-            catalog: None,
-        }
-    }
-
-    /// This state as the state of a branch this node owns, with every window it publishes recorded
-    /// in `catalog`, so the entity's replicas learn of it.
-    pub(super) fn cataloged(mut self, catalog: &BranchCheckpointCatalog) -> Self {
-        let revision = self.generations.load().revision;
-        self.catalog = Some(catalog.register(
-            self.placement.branch_key.clone(),
-            self.placement.state,
-            revision,
-        ));
-        self
-    }
-
-    pub(super) fn replication(&self) -> &CheckpointReplication {
-        &self.replication
+        Self::from_generations(placement, generations)
     }
 
     /// Build the live window a branch task owns from the window published last.
@@ -956,12 +928,7 @@ impl ReplicatedWindowProcessorState {
         let snapshot = state
             .to_snapshot()
             .change_context(RuntimePersistenceError::WindowSnapshot)?;
-        let revision = self
-            .generations
-            .publish(Some(WindowPublishedSnapshot::Live(snapshot)));
-        if let Some(catalog) = &self.catalog {
-            catalog.record(revision);
-        }
+        self.publish(Some(WindowPublishedSnapshot::Live(snapshot)));
         Ok(())
     }
 
@@ -1051,6 +1018,40 @@ impl ReplicatedWindowProcessorState {
     }
 }
 
+impl BranchSnapshotCodec for WindowSnapshotCodec {
+    type Published = Option<WindowPublishedSnapshot>;
+
+    async fn persist_after(
+        state: &ReplicatedWindowProcessorState,
+        after_lsm: u64,
+        store: &RuntimeStateStore,
+        executor: &Executor,
+        staging: &SnapshotStaging,
+    ) -> RuntimeStateResult<Option<u64>> {
+        let persistence = state
+            .persistence_after(after_lsm, executor, staging)
+            .await
+            .change_context(RuntimeStateOperationError::Persistence)?;
+        let revision = match persistence {
+            None => return Ok(None),
+            Some(WindowPersistence::Resident(snapshot)) => {
+                store
+                    .persist_latest_snapshot(&state.placement, snapshot.lsm, &snapshot.payload)
+                    .change_context(RuntimeStateOperationError::Persistence)?;
+                snapshot.lsm
+            }
+            Some(WindowPersistence::Sealed { revision, artifact }) => {
+                store
+                    .publish_checkpoint_artifact(&state.placement, revision, Arc::new(artifact))
+                    .await
+                    .change_context(RuntimeStateOperationError::Persistence)?;
+                revision
+            }
+        };
+        Ok(Some(revision))
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -1059,7 +1060,6 @@ impl ReplicatedWindowProcessorState {
 mod tests {
     use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
     use nervix_models::ParseAsType;
-    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::{
