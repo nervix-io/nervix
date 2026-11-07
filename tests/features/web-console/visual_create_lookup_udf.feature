@@ -17,7 +17,7 @@ Feature: Web console visual hash map and Roto UDF creation
       UPLOAD RESOURCE visual_lookup_bundle VERSION '{{visual_lookup}}';
       CREATE SCHEMA visual_lookup_entry (id STRING, value I64);
       CREATE WIRE JSON SCHEMA visual_lookup_wire MODE STRICT (id string, value integer);
-      CREATE CODEC visual_lookup_codec FROM WIRE JSON SCHEMA visual_lookup_wire TO SCHEMA visual_lookup_entry;
+      CREATE WIRE JSON CODEC visual_lookup_codec FROM WIRE SCHEMA visual_lookup_wire TO SCHEMA visual_lookup_entry;
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -73,7 +73,7 @@ Feature: Web console visual hash map and Roto UDF creation
       UPLOAD RESOURCE visual_lookup_bundle VERSION '{{visual_lookup_mixed}}';
       CREATE SCHEMA visual_lookup_entry (id STRING, value I64);
       CREATE WIRE JSON SCHEMA visual_lookup_wire MODE STRICT (id string, value integer);
-      CREATE CODEC visual_lookup_codec FROM WIRE JSON SCHEMA visual_lookup_wire TO SCHEMA visual_lookup_entry;
+      CREATE WIRE JSON CODEC visual_lookup_codec FROM WIRE SCHEMA visual_lookup_wire TO SCHEMA visual_lookup_entry;
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -112,7 +112,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE SCHEMA visual_udf_input (value I64);
       CREATE SCHEMA visual_udf_output (result I64);
       CREATE WIRE JSON SCHEMA visual_udf_wire MODE STRICT (value integer);
-      CREATE CODEC visual_udf_codec FROM WIRE JSON SCHEMA visual_udf_wire TO SCHEMA visual_udf_input;
+      CREATE WIRE JSON CODEC visual_udf_codec FROM WIRE SCHEMA visual_udf_wire TO SCHEMA visual_udf_input;
       CREATE RELAY visual_udf_inputs SCHEMA visual_udf_input UNBRANCHED;
       CREATE RELAY visual_udf_outputs SCHEMA visual_udf_output UNBRANCHED;
       CREATE VHOST visual_udf_edge udf-{{test_id}}.example.com;
@@ -278,7 +278,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE RESOURCE scoped_bundle;
       CREATE SCHEMA scoped_entry (id STRING);
       CREATE WIRE JSON SCHEMA scoped_wire MODE STRICT (id string);
-      CREATE CODEC scoped_codec FROM WIRE JSON SCHEMA scoped_wire TO SCHEMA scoped_entry;
+      CREATE WIRE JSON CODEC scoped_codec FROM WIRE SCHEMA scoped_wire TO SCHEMA scoped_entry;
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -332,7 +332,7 @@ Feature: Web console visual hash map and Roto UDF creation
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".prompt-row" contains "{{domain}} tx"
-    When selector ".prompt-row input" is filled with "CREATE CODEC tx_codec FROM WIRE JSON SCHEMA tx_wire TO SCHEMA tx_entry;"
+    When selector ".prompt-row input" is filled with "CREATE WIRE JSON CODEC tx_codec FROM WIRE SCHEMA tx_wire TO SCHEMA tx_entry;"
     And selector ".prompt-row input" is pressed with "Enter"
     And selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='hash-map']" is clicked

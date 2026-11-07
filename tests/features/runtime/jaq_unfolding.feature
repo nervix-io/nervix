@@ -13,8 +13,7 @@ Feature: JAQ codec unfolding
         sku STRING,
         quantity I64
       );
-      CREATE CODEC order_lines_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC order_lines_codec
         TO SCHEMA order_line
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
@@ -62,8 +61,7 @@ Feature: JAQ codec unfolding
         sku STRING,
         quantity I64
       );
-      CREATE CODEC order_line_stream_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC order_line_stream_codec
         TO SCHEMA order_line
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
@@ -111,8 +109,7 @@ Feature: JAQ codec unfolding
       CREATE SCHEMA event (
         user_id I64
       );
-      CREATE CODEC events_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC events_codec
         TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
@@ -173,8 +170,7 @@ Feature: JAQ codec unfolding
       CREATE SCHEMA event (
         user_id I64
       );
-      CREATE CODEC flood_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC flood_codec
         TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION 'if .flood then range(65537) | {user_id: .} else . end';
       CREATE RELAY events SCHEMA event UNBRANCHED;
@@ -229,8 +225,7 @@ Feature: JAQ codec unfolding
       CREATE SCHEMA event (
         user_id I64
       );
-      CREATE CODEC selected_events_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC selected_events_codec
         TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[] | select(.keep)';
       CREATE RELAY events SCHEMA event UNBRANCHED;
@@ -292,11 +287,10 @@ Feature: JAQ codec unfolding
         user_id integer,
         target string
       );
-      CREATE CODEC split_event_wire_codec
-        FROM WIRE JSON SCHEMA split_event_wire
+      CREATE WIRE JSON CODEC split_event_wire_codec
+        FROM WIRE SCHEMA split_event_wire
         TO SCHEMA split_event;
-      CREATE CODEC split_events_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC split_events_codec
         TO SCHEMA split_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY delivered_events SCHEMA split_event UNBRANCHED;
@@ -378,11 +372,10 @@ Feature: JAQ codec unfolding
         user_id integer,
         target string
       );
-      CREATE CODEC split_event_wire_codec
-        FROM WIRE JSON SCHEMA split_event_wire
+      CREATE WIRE JSON CODEC split_event_wire_codec
+        FROM WIRE SCHEMA split_event_wire
         TO SCHEMA split_event;
-      CREATE CODEC split_events_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC split_events_codec
         TO SCHEMA split_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY delivered_events SCHEMA split_event UNBRANCHED;
@@ -460,8 +453,7 @@ Feature: JAQ codec unfolding
         source_offset I64 OPTIONAL,
         route STRING
       );
-      CREATE CODEC tenant_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC tenant_batch_codec
         TO SCHEMA tenant_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.events[]';
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -516,8 +508,7 @@ Feature: JAQ codec unfolding
         user_id I64,
         payload STRING
       );
-      CREATE CODEC notification_codec
-        FROM <format>
+      CREATE JAQ <format> CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '<transformation>';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;

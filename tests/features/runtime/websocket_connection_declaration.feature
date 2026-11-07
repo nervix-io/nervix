@@ -8,7 +8,7 @@ Feature: WebSockets connection declarations
       CREATE SCHEMA event ( user_id I64 );
       CREATE SCHEMA received_event ( user_id I64, frame_type STRING OPTIONAL, upgraded STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY received SCHEMA received_event UNBRANCHED;
       CREATE WEBSOCKETS CLIENT socket CONFIG { 'endpoint' = '{{websocket_peer}}' };
       CREATE WEBSOCKETS CONNECTION INGESTOR socket_events
@@ -48,8 +48,8 @@ Feature: WebSockets connection declarations
       CREATE SCHEMA event ( user_id I64 );
       CREATE SCHEMA received_event ( user_id I64, frame_type STRING OPTIONAL, upgraded STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC next_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC next_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY received SCHEMA received_event UNBRANCHED;
       CREATE WEBSOCKETS CLIENT socket CONFIG { 'endpoint' = '{{websocket_peer}}' };
       CREATE WEBSOCKETS CONNECTION INGESTOR socket_events
@@ -101,7 +101,7 @@ Feature: WebSockets connection declarations
       CREATE SCHEMA event ( user_id I64 );
       CREATE SCHEMA received_event ( user_id I64, subprotocol STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY received SCHEMA received_event UNBRANCHED;
       CREATE WEBSOCKETS CLIENT socket CONFIG { 'endpoint' = '{{websocket_peer}}' };
       CREATE WEBSOCKETS CONNECTION INGESTOR socket_events
@@ -132,7 +132,7 @@ Feature: WebSockets connection declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY received SCHEMA event UNBRANCHED;
       CREATE WEBSOCKETS CLIENT socket CONFIG { 'endpoint' = '{{websocket_peer}}' };
       CREATE WEBSOCKETS CONNECTION INGESTOR socket_events
@@ -242,7 +242,7 @@ Feature: WebSockets connection declarations
       """
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY received SCHEMA event UNBRANCHED;
       CREATE WEBSOCKETS CLIENT socket CONFIG { 'endpoint' = 'ws://websocket.nervix.test/events' };
       """

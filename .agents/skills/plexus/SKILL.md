@@ -459,7 +459,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Read `Schemas And Codecs` → `Wire Schemas` for each format's vocabulary and exact
-  binding matrix. Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
+  binding matrix, and `Codecs` for the family and format heads. Select the complete head before
+  writing the body; a WIRE codec and a JAQ codec of the same format have different contracts.
+  Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
   datetime in a JSON or AVRO `string` or a CBOR `text`, and `ENCODE <field> AS BASE64` for bytes
   in a JSON or AVRO `string`.
   An AVRO array names its item type (`array<long>`, `array<array<double>>`); a JSON or CBOR
@@ -804,7 +806,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Use only connector kinds listed in the current Ingestors and Emitters documentation. Treat
   connector syntax retained in older examples or configurations as invalid.
 - For syslog, read the dedicated `Common` → `Syslog` documentation entry. Reference the predefined
-  singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
+  singleton wire schema with a `SYSLOG CODEC` head, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` ingestor
   and `NO ACK` emitter forms.
 - For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and a positive

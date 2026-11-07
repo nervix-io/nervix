@@ -45,8 +45,8 @@ Feature: Positive count settings
       """
       CREATE SCHEMA notification ( tenant STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       """

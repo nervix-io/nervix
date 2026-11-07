@@ -11,7 +11,7 @@ Feature: Kafka topic declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:1' };
       """
@@ -70,7 +70,7 @@ Feature: Kafka topic declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:1' };
       """
@@ -106,7 +106,7 @@ Feature: Kafka topic declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:1' };
       """
@@ -135,7 +135,7 @@ Feature: Kafka topic declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:1' };
       """

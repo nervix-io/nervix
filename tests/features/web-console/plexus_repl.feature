@@ -816,7 +816,7 @@ Feature: Web console Plexus REPL
       CREATE RESOURCE lookup_bundle;
       CREATE SCHEMA lookup_entry (id STRING, value I64);
       CREATE WIRE JSON SCHEMA lookup_wire MODE STRICT (id string, value integer);
-      CREATE CODEC lookup_codec FROM WIRE JSON SCHEMA lookup_wire TO SCHEMA lookup_entry;
+      CREATE WIRE JSON CODEC lookup_codec FROM WIRE SCHEMA lookup_wire TO SCHEMA lookup_entry;
       """
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -931,7 +931,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
@@ -965,7 +965,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
@@ -984,7 +984,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
@@ -1066,8 +1066,8 @@ Feature: Web console Plexus REPL
         first_name string,
         surname string
       );
-      CREATE CODEC left_profile_codec FROM WIRE JSON SCHEMA left_profile_wire TO SCHEMA left_profile;
-      CREATE CODEC right_profile_codec FROM WIRE JSON SCHEMA right_profile_wire TO SCHEMA right_profile;
+      CREATE WIRE JSON CODEC left_profile_codec FROM WIRE SCHEMA left_profile_wire TO SCHEMA left_profile;
+      CREATE WIRE JSON CODEC right_profile_codec FROM WIRE SCHEMA right_profile_wire TO SCHEMA right_profile;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
       CREATE RELAY left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
@@ -1131,7 +1131,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
@@ -1170,7 +1170,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
@@ -1246,7 +1246,7 @@ Feature: Web console Plexus REPL
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string, user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -1312,7 +1312,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
@@ -1362,7 +1362,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
@@ -1403,7 +1403,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
@@ -1439,7 +1439,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
@@ -1499,7 +1499,7 @@ Feature: Web console Plexus REPL
       CREATE SCHEMA event ( id I64, secret STRING );
       CREATE SCHEMA secret_event ( id I64, secret STRING SENSITIVE );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer, secret string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ended-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
@@ -1557,7 +1557,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
@@ -1612,7 +1612,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
@@ -1652,7 +1652,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
@@ -1726,7 +1726,7 @@ Feature: Web console Plexus REPL
         rust_keep boolean,
         go_keep boolean
       );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1845,7 +1845,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
@@ -1878,7 +1878,7 @@ Feature: Web console Plexus REPL
       CREATE RESOURCE fraud_model;
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/ingest', 'timeout_ms' = 5000};
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
@@ -1910,7 +1910,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
@@ -1938,7 +1938,7 @@ Feature: Web console Plexus REPL
         event_type string,
         value string
       );
-      CREATE CODEC activity_codec FROM WIRE JSON SCHEMA activity_wire TO SCHEMA activity;
+      CREATE WIRE JSON CODEC activity_codec FROM WIRE SCHEMA activity_wire TO SCHEMA activity;
       CREATE IF NOT EXISTS SCHEMA device_branch ( tenant_id STRING, device_id STRING );
       CREATE IF NOT EXISTS BRANCH by_iot_device_activity SCHEMA device_branch TTL 30m;
       CREATE RELAY device_activity_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
@@ -2103,7 +2103,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA telemetry ( site STRING, value STRING );
       CREATE WIRE JSON SCHEMA telemetry_wire MODE STRICT ( site string, value string );
-      CREATE CODEC telemetry_codec FROM WIRE JSON SCHEMA telemetry_wire TO SCHEMA telemetry;
+      CREATE WIRE JSON CODEC telemetry_codec FROM WIRE SCHEMA telemetry_wire TO SCHEMA telemetry;
       CREATE IF NOT EXISTS SCHEMA site_branch ( site STRING );
       CREATE IF NOT EXISTS BRANCH by_primary_telemetry SCHEMA site_branch TTL 5m;
       CREATE RELAY telemetry_by_site SCHEMA telemetry BRANCHED BY by_primary_telemetry;
@@ -2145,7 +2145,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS BRANCH by_ingest_events SCHEMA value_branch TTL 5m;
@@ -2177,7 +2177,7 @@ Feature: Web console Plexus REPL
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       CREATE SCHEMA event ( value STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY raw_events SCHEMA event UNBRANCHED;
       CREATE RELAY filtered_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge api.example.com;
@@ -2211,7 +2211,7 @@ Feature: Web console Plexus REPL
         tenant string,
         user_id integer
       );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
@@ -2281,7 +2281,7 @@ Feature: Web console Plexus REPL
         value number,
         warn_high number
       );
-      CREATE CODEC telemetry_codec FROM WIRE JSON SCHEMA telemetry_wire TO SCHEMA telemetry;
+      CREATE WIRE JSON CODEC telemetry_codec FROM WIRE SCHEMA telemetry_wire TO SCHEMA telemetry;
       CREATE IF NOT EXISTS SCHEMA site_branch ( site STRING );
       CREATE IF NOT EXISTS SCHEMA device_branch ( device_id STRING );
       CREATE IF NOT EXISTS BRANCH by_http_telemetry SCHEMA site_branch TTL 5m;
@@ -2375,7 +2375,7 @@ Feature: Web console Plexus REPL
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS BRANCH by_relay_buffer_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_buffer_source CAPACITY 3;
@@ -2450,7 +2450,7 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA txn ( value STRING );
       CREATE WIRE JSON SCHEMA txn_wire MODE STRICT ( value string );
-      CREATE CODEC txn_codec FROM WIRE JSON SCHEMA txn_wire TO SCHEMA txn;
+      CREATE WIRE JSON CODEC txn_codec FROM WIRE SCHEMA txn_wire TO SCHEMA txn;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA value_branch TTL 5m;

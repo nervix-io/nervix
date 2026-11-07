@@ -17,8 +17,8 @@ Feature: Emitter batching configuration
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC sentry_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC sentry_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{message: "event", extra: {seq: .seq}}'
           ON EMITTING BATCH '{message: "batched events", extra: {records: .}}';
@@ -281,7 +281,7 @@ Feature: Emitter batching configuration
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
@@ -372,7 +372,7 @@ Feature: Emitter batching configuration
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = 'http://127.0.0.1:4317',
@@ -435,8 +435,8 @@ Feature: Emitter batching configuration
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC sentry_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC sentry_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '{message: "event"}';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
@@ -485,7 +485,7 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands fail with "expected string_literal, found BATCH"
       """
-      CREATE CODEC batch_only FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC batch_only TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING BATCH '{records: .}';
       """
 
@@ -510,7 +510,7 @@ Feature: Emitter batching configuration
         operation STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;

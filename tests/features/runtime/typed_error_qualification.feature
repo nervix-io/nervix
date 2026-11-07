@@ -243,8 +243,8 @@ Feature: Typed error qualification through public streams
         denominator integer,
         secret string
       );
-      CREATE CODEC calculation_codec
-        FROM WIRE JSON SCHEMA calculation_wire
+      CREATE WIRE JSON CODEC calculation_codec
+        FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;

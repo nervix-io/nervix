@@ -37,7 +37,7 @@ fn finding(kind: FindingKind, label: &str, path: &[&str]) -> Finding {
     Finding::new(
         kind,
         Some(label.to_string()),
-        "CREATE CODEC nx_codec VERSION".to_string(),
+        "CREATE PROTOBUF CODEC nx_codec USING RESOURCE nx_resource VERSION".to_string(),
         path.iter().map(|label| (*label).to_string()).collect(),
         Vec::new(),
         String::new(),
@@ -600,7 +600,7 @@ fn completion_never_goes_silent_on_a_reachable_branch() {
     // so it is asserted directly rather than left to the baseline.
     for seed in [
         "",
-        "CREATE CODEC nx_codec",
+        "CREATE WIRE JSON CODEC nx_codec",
         "CREATE SCHEMA nx_schema (",
         "CREATE MQTT TOPIC INGESTOR nx_ingestor FROM nx_client",
     ] {

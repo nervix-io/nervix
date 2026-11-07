@@ -1884,8 +1884,8 @@ Feature: Plexus transactions
       CREATE WIRE JSON SCHEMA transaction_event_wire MODE STRICT (
         value string
       );
-      CREATE CODEC transaction_event_codec
-        FROM WIRE JSON SCHEMA transaction_event_wire
+      CREATE WIRE JSON CODEC transaction_event_codec
+        FROM WIRE SCHEMA transaction_event_wire
         TO SCHEMA transaction_event;
       """
     When this Plexus command request is executed on the leader node
@@ -1896,8 +1896,8 @@ Feature: Plexus transactions
       ALTER SCHEMA transaction_event
         ALTER FIELD value SET TYPE F64;
       DROP CODEC transaction_event_codec;
-      CREATE CODEC transaction_event_codec
-        FROM WIRE JSON SCHEMA transaction_event_wire
+      CREATE WIRE JSON CODEC transaction_event_codec
+        FROM WIRE SCHEMA transaction_event_wire
         TO SCHEMA transaction_event;
       COMMIT
       """
@@ -1942,11 +1942,11 @@ Feature: Plexus transactions
       CREATE WIRE CBOR SCHEMA transaction_event_wire MODE STRICT (
         value text
       );
-      CREATE CODEC transaction_json_codec
-        FROM WIRE JSON SCHEMA transaction_event_wire
+      CREATE WIRE JSON CODEC transaction_json_codec
+        FROM WIRE SCHEMA transaction_event_wire
         TO SCHEMA transaction_event_wire;
-      CREATE CODEC transaction_cbor_codec
-        FROM WIRE CBOR SCHEMA transaction_event_wire
+      CREATE WIRE CBOR CODEC transaction_cbor_codec
+        FROM WIRE SCHEMA transaction_event_wire
         TO SCHEMA transaction_event_wire;
       """
     When these Plexus commands are executed on the leader node

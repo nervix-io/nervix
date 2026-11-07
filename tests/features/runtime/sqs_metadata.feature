@@ -15,7 +15,7 @@ Feature: SQS message metadata
         sent_time_present BOOL, first_receive_present BOOL, sender_present BOOL, group_absent BOOL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (marker string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1',
@@ -83,7 +83,7 @@ Feature: SQS message metadata
       CREATE SCHEMA summary (tenant STRING, samples I64, total I64, sent_at DATETIME OPTIONAL);
       CREATE SCHEMA tenant_key (tenant STRING);
       CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA timed_event BRANCHED BY tenants;
       CREATE RELAY summaries SCHEMA summary BRANCHED BY tenants;
@@ -139,7 +139,7 @@ Feature: SQS message metadata
         sequence_number STRING OPTIONAL, sender_id STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (marker string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY ordinary SCHEMA event UNBRANCHED;
       CREATE RELAY retries SCHEMA retried UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {

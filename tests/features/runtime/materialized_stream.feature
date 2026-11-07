@@ -17,8 +17,8 @@ Feature: Materialized relay state
         value string
       );
 
-      CREATE CODEC root_event_codec
-        FROM WIRE JSON SCHEMA root_event_wire
+      CREATE WIRE JSON CODEC root_event_codec
+        FROM WIRE SCHEMA root_event_wire
         TO SCHEMA root_event;
 
       CREATE RELAY root_state
@@ -71,7 +71,7 @@ Feature: Materialized relay state
       """
       CREATE SCHEMA reading ( tenant STRING, value F32 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, value number );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA reading_tenant ( tenant STRING );
       CREATE BRANCH by_reading_tenant SCHEMA reading_tenant TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant
@@ -137,8 +137,8 @@ Feature: Materialized relay state
         user_id integer,
         source string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_state_notifications SCHEMA tenant_branch TTL 5m;
@@ -260,8 +260,8 @@ Feature: Materialized relay state
         first_value string OPTIONAL,
         second_value string OPTIONAL
       );
-      CREATE CODEC dependency_event_codec
-        FROM WIRE JSON SCHEMA dependency_event_wire
+      CREATE WIRE JSON CODEC dependency_event_codec
+        FROM WIRE SCHEMA dependency_event_wire
         TO SCHEMA dependency_event;
       CREATE SCHEMA dependency_tenant ( tenant STRING );
       CREATE BRANCH by_dependency_tenant SCHEMA dependency_tenant TTL 5m;
@@ -414,8 +414,8 @@ Feature: Materialized relay state
         user_id integer,
         amount integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
@@ -490,8 +490,8 @@ Feature: Materialized relay state
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
@@ -558,8 +558,8 @@ Feature: Materialized relay state
         user_id integer,
         note string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 30s;
@@ -638,8 +638,8 @@ Feature: Materialized relay state
         source string,
         zblob string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_tenant_notifications SCHEMA tenant_branch TTL 5m;

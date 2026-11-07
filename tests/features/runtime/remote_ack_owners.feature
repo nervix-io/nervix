@@ -17,7 +17,7 @@ Feature: Attached record outcomes across independent branch deliveries
       CREATE WIRE JSON SCHEMA ack_owner_wire MODE STRICT (
         event_id string, branch_name string, sequence integer
       );
-      CREATE CODEC ack_owner_codec FROM WIRE JSON SCHEMA ack_owner_wire TO SCHEMA ack_owner_event;
+      CREATE WIRE JSON CODEC ack_owner_codec FROM WIRE SCHEMA ack_owner_wire TO SCHEMA ack_owner_event;
       CREATE SCHEMA ack_owner_key ( branch_name STRING );
       CREATE BRANCH ack_owner_branch SCHEMA ack_owner_key TTL 5m;
       CREATE RELAY ack_owner_records SCHEMA ack_owner_event BRANCHED BY ack_owner_branch;

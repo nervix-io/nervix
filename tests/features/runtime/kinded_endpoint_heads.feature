@@ -63,7 +63,7 @@ Feature: Endpoint kinds select their Plexus heads and bodies
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge kinded-{{test_id}}.example.com;
       CREATE <endpoint_kind> ENDPOINT intake ON edge PATH '/events';

@@ -129,7 +129,7 @@ Feature: Altering deduplicators and reorderers
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-dedup-dynamic.example.com;
@@ -192,7 +192,7 @@ Feature: Altering deduplicators and reorderers
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-dedup-key.example.com;
@@ -258,7 +258,7 @@ Feature: Altering deduplicators and reorderers
       """
       CREATE SCHEMA event ( primary_key I64, secondary_key I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( primary_key integer, secondary_key integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reorder-dynamic.example.com;
@@ -312,7 +312,7 @@ Feature: Altering deduplicators and reorderers
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( primary_key I64, secondary_key I64 );
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;

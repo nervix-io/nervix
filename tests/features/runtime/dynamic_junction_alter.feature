@@ -11,7 +11,7 @@ Feature: Dynamically applying junction ALTER operations
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-dynamic-filter.example.com;
@@ -74,7 +74,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE SCHEMA input_event ( seq I64 );
       CREATE SCHEMA output_event ( seq I64, label STRING );
       CREATE WIRE JSON SCHEMA input_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC input_event_codec FROM WIRE JSON SCHEMA input_event_wire TO SCHEMA input_event;
+      CREATE WIRE JSON CODEC input_event_codec FROM WIRE SCHEMA input_event_wire TO SCHEMA input_event;
       CREATE RELAY incoming SCHEMA input_event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA output_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-dynamic-construction.example.com;
@@ -134,7 +134,7 @@ Feature: Dynamically applying junction ALTER operations
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-dynamic-flush.example.com;
@@ -188,7 +188,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_event_source SCHEMA tenant_branch TTL 5m;
       CREATE WIRE JSON SCHEMA input_event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC input_event_codec FROM WIRE JSON SCHEMA input_event_wire TO SCHEMA input_event;
+      CREATE WIRE JSON CODEC input_event_codec FROM WIRE SCHEMA input_event_wire TO SCHEMA input_event;
       CREATE RELAY incoming SCHEMA input_event BRANCHED BY by_event_source;
       CREATE RELAY outgoing SCHEMA output_event BRANCHED BY by_event_source;
       CREATE VHOST edge http-{{test_id}}-dynamic-branch-revision.example.com;

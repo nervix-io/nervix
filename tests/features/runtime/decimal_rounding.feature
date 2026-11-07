@@ -22,8 +22,8 @@ Feature: Exact decimal rounding in Plexus
         narrow_matches BOOL,
         constant_matches BOOL
       );
-      CREATE CODEC rounding_codec
-        FROM JSON TO SCHEMA rounding_input
+      CREATE JAQ JSON CODEC rounding_codec
+        TO SCHEMA rounding_input
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY rounding_inputs SCHEMA rounding_input UNBRANCHED;
       CREATE RELAY rounding_results SCHEMA rounding_result UNBRANCHED;

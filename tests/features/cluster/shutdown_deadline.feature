@@ -31,8 +31,8 @@ Feature: Process shutdown deadline
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC held_event_codec
-        FROM WIRE JSON SCHEMA held_event_wire
+      CREATE WIRE JSON CODEC held_event_codec
+        FROM WIRE SCHEMA held_event_wire
         TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-{{test_id}}.example.com;

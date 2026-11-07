@@ -18,7 +18,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -80,7 +80,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -145,7 +145,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -211,7 +211,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -278,7 +278,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -339,7 +339,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -406,7 +406,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -473,7 +473,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -540,7 +540,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -631,7 +631,7 @@ Feature: Ingestor instances are independent placement units
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -661,7 +661,7 @@ Feature: Ingestor instances are independent placement units
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE BRANCH by_other SCHEMA tenant_key TTL 5m PARTITIONS 2;
@@ -692,7 +692,7 @@ Feature: Ingestor instances are independent placement units
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -727,7 +727,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -793,7 +793,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -860,7 +860,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -928,7 +928,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -990,7 +990,7 @@ Feature: Ingestor instances are independent placement units
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;

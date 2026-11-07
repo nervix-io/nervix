@@ -15,8 +15,8 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
       CREATE SCHEMA remote_hold_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA remote_hold_wire MODE STRICT ( event_id string );
-      CREATE CODEC remote_hold_codec
-        FROM WIRE JSON SCHEMA remote_hold_wire TO SCHEMA remote_hold_event;
+      CREATE WIRE JSON CODEC remote_hold_codec
+        FROM WIRE SCHEMA remote_hold_wire TO SCHEMA remote_hold_event;
       CREATE RELAY remote_hold_records SCHEMA remote_hold_event UNBRANCHED;
       CREATE KAFKA CLIENT remote_hold_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -108,8 +108,8 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
       CREATE SCHEMA full_hold_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA full_hold_wire MODE STRICT ( event_id string );
-      CREATE CODEC full_hold_codec
-        FROM WIRE JSON SCHEMA full_hold_wire TO SCHEMA full_hold_event;
+      CREATE WIRE JSON CODEC full_hold_codec
+        FROM WIRE SCHEMA full_hold_wire TO SCHEMA full_hold_event;
       CREATE RELAY full_hold_first SCHEMA full_hold_event UNBRANCHED;
       CREATE RELAY full_hold_second SCHEMA full_hold_event UNBRANCHED;
       CREATE KAFKA CLIENT full_hold_kafka CONFIG {

@@ -19,8 +19,8 @@ Feature: Domain-paced emitter cadence
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge emitter-cadence-{{test_id}}.example.com;
@@ -97,8 +97,8 @@ Feature: Domain-paced emitter cadence
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge emitter-hold-{{test_id}}.example.com;
@@ -165,8 +165,8 @@ Feature: Domain-paced emitter cadence
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge emitter-immediate-{{test_id}}.example.com;
@@ -232,8 +232,8 @@ Feature: Domain-paced emitter cadence
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-cadence-{{test_id}}.example.com;
@@ -308,8 +308,8 @@ Feature: Domain-paced emitter cadence
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main

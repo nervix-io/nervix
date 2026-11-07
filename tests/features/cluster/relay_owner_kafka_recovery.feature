@@ -15,8 +15,8 @@ Feature: Kafka acknowledgements across relay-owner recovery
       CREATE WIRE JSON SCHEMA relay_handoff_wire MODE STRICT (
         event_id string, branch_name string, sequence integer
       );
-      CREATE CODEC relay_handoff_codec
-        FROM WIRE JSON SCHEMA relay_handoff_wire TO SCHEMA relay_handoff_event;
+      CREATE WIRE JSON CODEC relay_handoff_codec
+        FROM WIRE SCHEMA relay_handoff_wire TO SCHEMA relay_handoff_event;
       CREATE SCHEMA relay_handoff_key ( branch_name STRING );
       CREATE BRANCH relay_handoff_branch SCHEMA relay_handoff_key TTL 5m;
       CREATE RELAY relay_handoff_records SCHEMA relay_handoff_event

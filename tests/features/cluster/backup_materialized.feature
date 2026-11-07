@@ -149,7 +149,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( tenant STRING, value I64, source STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, source string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY state SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -305,7 +305,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( tenant STRING, value I64, source STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, source string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY state SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -661,7 +661,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10s;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( sequence integer, occurred_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE occurred_at AS RFC3339;
       CREATE SCHEMA sequence_key ( sequence I64 );
       CREATE BRANCH by_sequence SCHEMA sequence_key TTL 30m;
@@ -733,7 +733,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I32 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY state SCHEMA event UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge backup-ipc-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/state';

@@ -40,8 +40,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
         catalogued BOOL,
         launch_day BOOL
       );
-      CREATE CODEC shipment_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC shipment_batch_codec
         TO SCHEMA shipment
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY shipments SCHEMA shipment UNBRANCHED;
@@ -124,8 +123,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
         carrier STRING OPTIONAL,
         preferred STRING OPTIONAL
       );
-      CREATE CODEC parcel_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC parcel_batch_codec
         TO SCHEMA parcel
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY parcels SCHEMA parcel UNBRANCHED;
@@ -220,8 +218,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC meter_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC meter_batch_codec
         TO SCHEMA meter
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY meters SCHEMA meter UNBRANCHED;
@@ -330,11 +327,10 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
         tier string,
         discount number
       );
-      CREATE CODEC tier_codec
-        FROM WIRE JSON SCHEMA tier_wire
+      CREATE WIRE JSON CODEC tier_codec
+        FROM WIRE SCHEMA tier_wire
         TO SCHEMA tier;
-      CREATE CODEC order_line_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC order_line_batch_codec
         TO SCHEMA order_line
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
@@ -414,8 +410,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE SCHEMA inference_result (
         result F32
       );
-      CREATE CODEC banded_value_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC banded_value_batch_codec
         TO SCHEMA banded_value
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY banded_values SCHEMA banded_value UNBRANCHED;

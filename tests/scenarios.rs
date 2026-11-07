@@ -7171,17 +7171,17 @@ fn build_ingestor_logic_commands(
         labels array
       );
 
-      CREATE CODEC logic_notification_ingest_codec
-        FROM WIRE JSON SCHEMA logic_notification_ingest_wire
+      CREATE WIRE JSON CODEC logic_notification_ingest_codec
+        FROM WIRE SCHEMA logic_notification_ingest_wire
         TO SCHEMA logic_notification_ingest;
 
-      CREATE CODEC logic_notification_internal_types_ingest_codec
-        FROM WIRE JSON SCHEMA logic_notification_internal_types_ingest_wire
+      CREATE WIRE JSON CODEC logic_notification_internal_types_ingest_codec
+        FROM WIRE SCHEMA logic_notification_internal_types_ingest_wire
         TO SCHEMA logic_notification_internal_types_ingest
         ENCODE occurred_at AS RFC3339;
 
-      CREATE CODEC logic_notification_list_operations_ingest_codec
-        FROM WIRE JSON SCHEMA logic_notification_list_operations_ingest_wire
+      CREATE WIRE JSON CODEC logic_notification_list_operations_ingest_codec
+        FROM WIRE SCHEMA logic_notification_list_operations_ingest_wire
         TO SCHEMA logic_notification_list_operations_ingest;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -9279,7 +9279,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         CREATE SCHEMA counted_input_event ( tenant STRING, sequence I32 );
         CREATE SCHEMA counted_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
         CREATE WIRE JSON SCHEMA counted_input_wire MODE STRICT ( tenant string, sequence integer );
-        CREATE CODEC counted_input_codec FROM WIRE JSON SCHEMA counted_input_wire TO SCHEMA counted_input_event;
+        CREATE WIRE JSON CODEC counted_input_codec FROM WIRE SCHEMA counted_input_wire TO SCHEMA counted_input_event;
         {branch_schema}
         CREATE RELAY counted_input_events SCHEMA counted_input_event{relay_branching};
         CREATE RELAY {output_relay} SCHEMA counted_output_event{relay_branching};
@@ -21456,7 +21456,7 @@ impl UnacknowledgedSourceFixture {
         format!(
             r#"
       CREATE SCHEMA unacknowledged_event ( user_id I64 );
-      CREATE CODEC unacknowledged_codec FROM JSON TO SCHEMA unacknowledged_event
+      CREATE JAQ JSON CODEC unacknowledged_codec TO SCHEMA unacknowledged_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY unacknowledged_events SCHEMA unacknowledged_event UNBRANCHED;{client}
       CREATE {head} INGESTOR {UNACKNOWLEDGED_SOURCE_INGESTOR}

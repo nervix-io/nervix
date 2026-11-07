@@ -34,8 +34,8 @@ Feature: Hash map metrics
         city string
       );
 
-      CREATE CODEC zip_code_entry_codec
-        FROM WIRE JSON SCHEMA zip_code_entry_wire
+      CREATE WIRE JSON CODEC zip_code_entry_codec
+        FROM WIRE SCHEMA zip_code_entry_wire
         TO SCHEMA zip_code_entry;
 
       CREATE HASH MAP zip_codes_by_zip

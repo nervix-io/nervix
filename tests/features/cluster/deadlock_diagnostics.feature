@@ -21,7 +21,7 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA event_error ( seq I64, operation STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY event_errors SCHEMA event_error UNBRANCHED;

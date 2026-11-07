@@ -34,8 +34,8 @@ CREATE WIRE JSON SCHEMA order_tiered_wire MODE STRICT (
   tier string
 );
 
-CREATE CODEC order_tiered_codec
-  FROM WIRE JSON SCHEMA order_tiered_wire
+CREATE WIRE JSON CODEC order_tiered_codec
+  FROM WIRE SCHEMA order_tiered_wire
   TO SCHEMA order_tiered;
 
 CREATE RELAY high_value_orders SCHEMA order_tiered UNBRANCHED;

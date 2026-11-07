@@ -363,7 +363,7 @@ Feature: Plexus file formatting
   Scenario: A Protobuf message name holding a closing brace keeps its value
     Given a Plexus file "pipeline.plexus" containing
       """
-      create codec notification_codec from protobuf using resource proto_bundle version 2
+      create PROTOBUF CODEC notification_codec using resource proto_bundle version 2
         config { 'file' = 'notification.proto' } message 'nervix.test.Notification}'
         to schema notification_schema with jaq transformations on ingestion '.';
       """

@@ -13,10 +13,10 @@ Feature: Delivery latency metrics
       CREATE SCHEMA reading ( tenant STRING, sequence I64, occurred_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
-      CREATE CODEC reading_batch_codec FROM JSON TO SCHEMA reading
+      CREATE JAQ JSON CODEC reading_batch_codec TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sequence integer, occurred_at string );
-      CREATE CODEC reading_wire_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading
+      CREATE WIRE JSON CODEC reading_wire_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY raw_readings SCHEMA reading BRANCHED BY tenants;
       CREATE RELAY admitted_readings SCHEMA reading BRANCHED BY tenants;

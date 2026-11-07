@@ -39,11 +39,11 @@ Feature: Relay correlation
         first_name string,
         surname string
       );
-        CREATE CODEC left_profile_codec
-        FROM WIRE JSON SCHEMA left_profile_wire
+        CREATE WIRE JSON CODEC left_profile_codec
+        FROM WIRE SCHEMA left_profile_wire
         TO SCHEMA left_profile;
-        CREATE CODEC right_profile_codec
-        FROM WIRE JSON SCHEMA right_profile_wire
+        CREATE WIRE JSON CODEC right_profile_codec
+        FROM WIRE SCHEMA right_profile_wire
         TO SCHEMA right_profile;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;

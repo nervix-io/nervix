@@ -16,9 +16,9 @@ Feature: Fixed-format emitter batch envelopes
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA error_event ( message STRING, environment STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA error_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA error_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC sentry_batch_codec FROM JSON TO SCHEMA error_event
+      CREATE JAQ JSON CODEC sentry_batch_codec TO SCHEMA error_event
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{message: .message, environment: .environment}'
           ON EMITTING BATCH '{message: "batched errors", environment: .[0].environment, extra: {records: .}}';
@@ -78,9 +78,9 @@ Feature: Fixed-format emitter batch envelopes
       """
       CREATE SCHEMA error_event ( message STRING );
       CREATE SCHEMA rejected_event ( error_message STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA error_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA error_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
-      CREATE CODEC sentry_batch_codec FROM JSON TO SCHEMA error_event
+      CREATE JAQ JSON CODEC sentry_batch_codec TO SCHEMA error_event
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{message: .message}'
           ON EMITTING BATCH '{message: "batched errors", extra: {records: .}}';
@@ -137,9 +137,9 @@ Feature: Fixed-format emitter batch envelopes
       CREATE SCHEMA syslog_event (
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA syslog_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
@@ -200,9 +200,9 @@ Feature: Fixed-format emitter batch envelopes
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
       );
       CREATE SCHEMA rejected_event ( error_message STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA syslog_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
@@ -255,9 +255,9 @@ Feature: Fixed-format emitter batch envelopes
       CREATE SCHEMA syslog_event (
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA syslog_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY received_events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
@@ -331,9 +331,9 @@ Feature: Fixed-format emitter batch envelopes
       CREATE SCHEMA syslog_event (
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA syslog_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY received_events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
@@ -404,7 +404,7 @@ Feature: Fixed-format emitter batch envelopes
       """
       CREATE SCHEMA event ( seq I64, body STRING );
       CREATE SCHEMA rejected_event ( seq I64, error_message STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;

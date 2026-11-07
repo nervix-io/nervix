@@ -9,7 +9,7 @@ Feature: NATS message metadata and publication envelopes
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_tls_scheme_addr}}' };
       CREATE NATS SUBJECT EMITTER events_out FROM events
@@ -44,7 +44,7 @@ Feature: NATS message metadata and publication envelopes
         stream STRING OPTIONAL, consumer STRING OPTIONAL, sequence U64 OPTIONAL,
         timestamp DATETIME OPTIONAL, delivered U64 OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA tagged UNBRANCHED;
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS STREAM INGESTOR stream_events
@@ -82,7 +82,7 @@ Feature: NATS message metadata and publication envelopes
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA tagged ( seq I64, subject STRING OPTIONAL, reply STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA tagged UNBRANCHED;
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR nats_events
@@ -132,7 +132,7 @@ Feature: NATS message metadata and publication envelopes
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY requests SCHEMA event UNBRANCHED;
       CREATE RELAY responses SCHEMA event UNBRANCHED;
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
@@ -200,7 +200,7 @@ Feature: NATS message metadata and publication envelopes
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR events_in

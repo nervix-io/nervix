@@ -459,6 +459,36 @@ test-client-restore-reply: build-web-console download-onnxruntime build-test-cli
         --input tests/features/runtime/client_restore_reply_validation.feature \
         --concurrency 2 --retry 0
 
+# Prepare codec checks separately so compilation has its own bounded phase.
+build-codec-parser-heads:
+    cargo test --package nervix-plexus --test kinded_codec_heads --no-run
+
+# Collect the complete codec-head parser and canonical-renderer assertions as ordinary coverage.
+coverage-codec-heads output="target/codec-heads.lcov":
+    cargo llvm-cov --package nervix-plexus --test kinded_codec_heads --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
+# Unify the native tool graph so each shared vocabulary dependency is prepared once.
+build-codec-tools:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo build --package nervix-plexus-format --bin nervix-plexus-format --package nervix-cli --bin nervix-cli --package nervix-deadlock --features nervix-deadlock/report-tool --bin nervix-deadlock-report
+
+# Prepare the ordinary assets and tools the codec public scenarios execute.
+build-codec-heads: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests build-codec-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
+# Public codec-head inspection and completion through the real native session and CLI.
+test-codec-heads: (test-codec-scenarios (justfile_directory() + "/tests/features/runtime/kinded_codec_heads.feature"))
+
+# Select codec round trips or browser cases with the same ordinary runner and prepared tools.
+test-codec-scenarios input *args: build-codec-heads
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(input) }} --concurrency 2 --retry 0 {{ quote(args) }}
+
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
 test-backup-cut-cleanup: build-deps build-test-cli
@@ -2724,6 +2754,23 @@ benchmark-nervix-image image benchmark_name="kafka-filter-map" *args:
     cargo build --release --package nervix-benchmark --bins
     "{{ cargo_target_dir }}/release/nervix-benchmark" run {{ quote(benchmark_name) }} \
         --implementation nervix --nervix-mode image --nervix-image {{ quote(image) }} {{ args }}
+
+# Exercise the six rewritten codec graphs through the real workload driver without timing claims.
+[positional-arguments]
+benchmark-codec-heads image artifacts=(cargo_target_dir + "/codec-benchmark-smoke") *workloads:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --package nervix-benchmark --bins
+    shift 2
+    if [[ "$#" == 0 ]]; then
+        set -- hot-path-ingest hot-path-processor hot-path-relay-fanout hot-path-remote-delivery kafka-dedup-window kafka-filter-map
+    fi
+    for workload in "$@"; do
+        "{{ cargo_target_dir }}/debug/nervix-benchmark" run "${workload}" \
+            --implementation nervix --nervix-mode image --nervix-image {{ quote(image) }} \
+            --duration-seconds 1 --warmup-seconds 1 --partitions 2 \
+            --artifacts-root {{ quote(artifacts) }}
+    done
 
 # Build once, then run every declared workload implementation sequentially with local Nervix.
 benchmark-all-local *args: build-web-console benchmark-flink-image

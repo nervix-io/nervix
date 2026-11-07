@@ -18,7 +18,7 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING, tags <tags_type>, raw STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge databases-{{test_id}}.example.com;
@@ -100,7 +100,7 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge database-sizes-{{test_id}}.example.com;
@@ -203,7 +203,7 @@ Feature: Database emitter batches
       CREATE SCHEMA rejected_event (
         seq I64, error_code STRING, error_operation STRING, error_message STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
@@ -277,7 +277,7 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge database-conflicts-{{test_id}}.example.com;
@@ -346,7 +346,7 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge database-retries-{{test_id}}.example.com;
@@ -414,7 +414,7 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION 'range(.count) | {seq: ., note: "n"}';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge mysql-placeholders-{{test_id}}.example.com;
@@ -468,7 +468,7 @@ Feature: Database emitter batches
       CREATE SCHEMA rejected_event (
         seq I64, error_code STRING, error_operation STRING, error_message STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;

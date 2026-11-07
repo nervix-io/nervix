@@ -18,8 +18,8 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA http2_clock_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC http2_clock_request_codec
-        FROM WIRE JSON SCHEMA http2_clock_request_wire
+      CREATE WIRE JSON CODEC http2_clock_request_codec
+        FROM WIRE SCHEMA http2_clock_request_wire
         TO SCHEMA http2_clock_request;
       CREATE RELAY http2_clock_observations
         SCHEMA http2_clock_observation UNBRANCHED;
@@ -112,8 +112,8 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA authority_clock_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC authority_clock_request_codec
-        FROM WIRE JSON SCHEMA authority_clock_request_wire
+      CREATE WIRE JSON CODEC authority_clock_request_codec
+        FROM WIRE SCHEMA authority_clock_request_wire
         TO SCHEMA authority_clock_request;
       CREATE RELAY authority_clock_observations
         SCHEMA authority_clock_observation UNBRANCHED;
@@ -361,8 +361,8 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA joined_clock_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC joined_clock_request_codec
-        FROM WIRE JSON SCHEMA joined_clock_request_wire
+      CREATE WIRE JSON CODEC joined_clock_request_codec
+        FROM WIRE SCHEMA joined_clock_request_wire
         TO SCHEMA joined_clock_request;
       CREATE RELAY joined_clock_observations
         SCHEMA joined_clock_observation UNBRANCHED;
@@ -411,8 +411,8 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA clock_source_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC clock_source_codec
-        FROM WIRE JSON SCHEMA clock_source_wire
+      CREATE WIRE JSON CODEC clock_source_codec
+        FROM WIRE SCHEMA clock_source_wire
         TO SCHEMA clock_source_record;
       CREATE RELAY clock_source_records SCHEMA clock_source_record UNBRANCHED;
       CREATE HTTP CLIENT clock_source
@@ -462,8 +462,8 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA cadence_source_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC cadence_source_codec
-        FROM WIRE JSON SCHEMA cadence_source_wire
+      CREATE WIRE JSON CODEC cadence_source_codec
+        FROM WIRE SCHEMA cadence_source_wire
         TO SCHEMA cadence_source_record;
       CREATE RELAY cadence_source_records SCHEMA cadence_source_record UNBRANCHED;
       CREATE HTTP CLIENT cadence_source
@@ -510,8 +510,7 @@ Feature: Domain clock contract regressions
         timestamp STRING,
         due STRING
       );
-      CREATE CODEC cadence_sample_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC cadence_sample_codec
         TO SCHEMA cadence_sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE SCHEMA cadence_observation (
@@ -563,8 +562,7 @@ Feature: Domain clock contract regressions
         timestamp STRING,
         due STRING
       );
-      CREATE CODEC rebound_sample_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC rebound_sample_codec
         TO SCHEMA rebound_sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE SCHEMA rebound_observation (
@@ -626,8 +624,8 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA clock_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC clock_request_codec
-        FROM WIRE JSON SCHEMA clock_request_wire
+      CREATE WIRE JSON CODEC clock_request_codec
+        FROM WIRE SCHEMA clock_request_wire
         TO SCHEMA clock_request;
       CREATE RELAY clock_observations SCHEMA clock_observation UNBRANCHED;
       CREATE VHOST edge clock-contract-{{test_id}}.example.com;
@@ -741,8 +739,8 @@ Feature: Domain clock contract regressions
         sequence integer,
         occurred_at string
       );
-      CREATE CODEC historical_event_codec
-        FROM WIRE JSON SCHEMA historical_event_wire
+      CREATE WIRE JSON CODEC historical_event_codec
+        FROM WIRE SCHEMA historical_event_wire
         TO SCHEMA historical_event
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY historical_events SCHEMA historical_event UNBRANCHED;
@@ -804,8 +802,8 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA stamp_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC stamp_request_codec
-        FROM WIRE JSON SCHEMA stamp_request_wire
+      CREATE WIRE JSON CODEC stamp_request_codec
+        FROM WIRE SCHEMA stamp_request_wire
         TO SCHEMA stamp_request;
       CREATE RELAY stamp_requests SCHEMA stamp_request UNBRANCHED;
       CREATE RELAY stamped_requests SCHEMA stamped_request UNBRANCHED;

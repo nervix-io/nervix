@@ -22,8 +22,8 @@ Feature: Window processor metrics
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_window_metrics_source SCHEMA tenant_branch TTL 5m;

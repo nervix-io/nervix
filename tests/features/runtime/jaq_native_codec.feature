@@ -12,8 +12,7 @@ Feature: JAQ native codec
         payload STRING
       );
 
-      CREATE CODEC notification_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATION '.';
       """
@@ -31,8 +30,7 @@ Feature: JAQ native codec
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM <format>
+        CREATE JAQ <format> CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '<transformation>';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -94,11 +92,10 @@ Feature: JAQ native codec
         user_id integer,
         payload string
       );
-        CREATE CODEC json_notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC json_notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
-        CREATE CODEC xml_notification_codec
-        FROM XML
+        CREATE JAQ XML CODEC xml_notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{t: "notification", c: [{t: "user_id", c: [(.user_id | tostring)]}, {t: "payload", c: [.payload]}]}';
@@ -166,8 +163,7 @@ Feature: JAQ native codec
         payload STRING
       );
 
-      CREATE CODEC xml_notification_codec
-        FROM XML
+      CREATE JAQ XML CODEC xml_notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{t: "notification", c: [{t: "user_id", c: [(.user_id | tostring)]}, {t: "payload", c: [.payload]}]}';
@@ -211,8 +207,7 @@ Feature: JAQ native codec
         payload STRING
       );
 
-      CREATE CODEC json_notification_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC json_notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
 
@@ -248,8 +243,8 @@ Feature: JAQ native codec
       """
       CREATE SCHEMA reading ( sensor I64, level F64, levels <levels_type> );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( sensor integer, level number, levels array );
-      CREATE CODEC exact_reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
-      CREATE CODEC transforming_reading_codec FROM <format> TO SCHEMA reading
+      CREATE WIRE JSON CODEC exact_reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
+      CREATE JAQ <format> CODEC transforming_reading_codec TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '.';
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE RELAY echoed_readings SCHEMA reading UNBRANCHED;
