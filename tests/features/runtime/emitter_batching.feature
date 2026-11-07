@@ -216,8 +216,9 @@ Feature: Emitter batching configuration
       """
     Then the last command output contains
       """
-      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_batched
+      CREATE KAFKA TOPIC EMITTER kafka_batched
         FROM outgoing
+        ATTACHED
         TO kafka_main TOPIC 'kafka_batched'
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
@@ -305,8 +306,9 @@ Feature: Emitter batching configuration
       """
     Then the last command output contains
       """
-      CREATE ATTACHED ZEROMQ PUSH EMITTER event_emitter
+      CREATE ZEROMQ PUSH EMITTER event_emitter
         FROM outgoing
+        ATTACHED
         TO emitter
           MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec

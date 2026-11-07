@@ -125,7 +125,8 @@ Feature: MQTT emission
         'addr' = '{{mqtt_stallable_addr}}',
         'client_id' = 'nervix-mqtt-boundary-{{test_id}}'
       };
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+        ATTACHED
         TO mqtt_sink TOPIC 'mqtt_boundary_out_{{test_id}}'
           <qos> MODE <mode>
           ENCODE USING notification_codec
@@ -209,7 +210,8 @@ Feature: MQTT emission
         'addr' = '{{mqtt_filtered_addr}}',
         'client_id' = 'nervix-pubcomp-{{test_id}}'
       };
-      CREATE ATTACHED MQTT TOPIC EMITTER pubcomp_out FROM notifications
+      CREATE MQTT TOPIC EMITTER pubcomp_out FROM notifications
+        ATTACHED
         TO mqtt_sink TOPIC 'pubcomp_out_{{test_id}}'
           QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 1s
             RETRY POLICY BACKOFF 100ms MAX 200ms

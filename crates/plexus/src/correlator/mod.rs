@@ -1,8 +1,20 @@
+//! Plexus correlator statements.
+//!
+//! Layer: language.
+//! - **Owns.** The correlator grammar, lowering into Models and grammar-derived completion.
+//! - **Depends on.** Shared parser clauses, tokens and the vocabulary.
+//! - **Must not know.** Registry validation, execution planning or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckMode, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    CreateCorrelator, CreateStatement, ProcessorInputs,
+    CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateCorrelator,
+    CreateStatement, ProcessorInputs,
 };
 
 use crate::{
@@ -81,11 +93,11 @@ pub fn create_correlator_parser<'src>()
 + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Identifier::Correlator))
         .then(correlator_name())
         .then(side_from_clauses(Identifier::Left))
         .then(side_from_clauses(Identifier::Right))
+        .then(ack_mode().or_not())
         .boxed()
         .then(correlate_where_clause())
         .then(match_policy())
@@ -109,7 +121,7 @@ pub fn create_correlator_parser<'src>()
                 ),
                 output_routes,
             ) = value;
-            let ((((if_not_exists, mode), name), left), right) = base;
+            let ((((if_not_exists, name), left), right), mode) = base;
             Ok(CreateStatement::new(
                 CreateCorrelator {
                     name,
@@ -121,7 +133,7 @@ pub fn create_correlator_parser<'src>()
                     match_policy,
                     max_time,
                     timeout_policy,
-                    mode: mode.unwrap_or(AckMode::Attached),
+                    mode: mode.unwrap_or_default(),
                     filter_where: None,
                     materialized_state,
                 },
@@ -162,10 +174,36 @@ pub fn suggest_create_correlator(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::FlushPolicy;
+    use nervix_models::{AckMode, FlushPolicy};
 
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn input_acknowledgement_clause_with_filtered_inputs() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE CORRELATOR tested LEFT FROM incoming WHERE left.value > 0 COLLECT FOR 5ms \
+             RIGHT FROM other WHERE right.value < 100",
+            "CORRELATE WHERE left.value = right.value MATCH EARLIEST MAX TIME 1m ON CORRELATION \
+             TIMEOUT DROP, DROP UNBRANCHED TO outgoing SET value = left.value FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG",
+        );
+    }
+
+    #[test]
+    fn input_acknowledgement_clause() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE CORRELATOR tested LEFT FROM incoming COLLECT FOR 5ms RIGHT FROM other",
+            "CORRELATE WHERE left.value = right.value MATCH EARLIEST MAX TIME 1m ON CORRELATION \
+             TIMEOUT DROP, DROP UNBRANCHED TO outgoing SET value = left.value FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG",
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE CORRELATOR tested LEFT FROM incoming COLLECT FOR 5ms RIGHT FROM other \
+             DETACHED ",
+            &["CORRELATE WHERE"],
+        );
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)
@@ -340,7 +378,7 @@ mod tests {
     #[test]
     fn parses_compound_predicate_and_latest_match() {
         let tokens = to_tokens(
-            "CREATE DETACHED CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \
+            "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 DETACHED CORRELATE \
              WHERE lower(left.name) = lower(right.first_name) AND left.tenant = right.tenant \
              MATCH LATEST MAX TIME 1s ON CORRELATION TIMEOUT DROP, DROP UNBRANCHED TO relay3 SET \
              name = lower(left.name), surname = upper(right.surname) FLUSH IMMEDIATE ON MESSAGE \

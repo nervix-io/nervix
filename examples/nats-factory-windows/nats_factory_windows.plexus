@@ -140,8 +140,9 @@ CREATE NATS SUBJECT INGESTOR nats_machine_signals
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR intake_quality_gate
+CREATE DEDUPLICATOR intake_quality_gate
   FROM signals_by_site
+  ATTACHED
   DEDUPLICATE ON input.site, input.line, input.asset_id, input.sensor, input.ts, input.seq
   MAX TIME 5m
   BRANCHED BY by_site
@@ -160,16 +161,18 @@ CREATE ATTACHED DEDUPLICATOR intake_quality_gate
     FLUSH EACH 250ms MAX BATCH SIZE 32kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED REINGESTOR asset_signal_repartition
+CREATE REINGESTOR asset_signal_repartition
   FROM clean_signals
+  ATTACHED
   TO signals_by_asset
     INHERIT ALL
     BRANCHED BY by_asset_signal SET site = message.site, line = message.line, asset_id = message.asset_id, sensor = message.sensor
     FLUSH EACH 250ms MAX BATCH SIZE 32kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED REORDERER asset_signal_reorderer
+CREATE REORDERER asset_signal_reorderer
   FROM signals_by_asset
+  ATTACHED
   BY input.ts, input.seq
   MAX TIME 5s
   BRANCHED BY by_asset_signal
@@ -178,8 +181,9 @@ CREATE ATTACHED REORDERER asset_signal_reorderer
     FLUSH EACH 500ms MAX BATCH SIZE 32kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR process_alert_splitter
+CREATE DEDUPLICATOR process_alert_splitter
   FROM signals_ordered
+  ATTACHED
   DEDUPLICATE ON input.site, input.line, input.asset_id, input.sensor, input.ts, input.seq
   MAX TIME 5m
   BRANCHED BY by_asset_signal
@@ -198,8 +202,9 @@ CREATE ATTACHED DEDUPLICATOR process_alert_splitter
     FLUSH EACH 250ms MAX BATCH SIZE 32kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED WINDOW PROCESSOR asset_signal_window
+CREATE WINDOW PROCESSOR asset_signal_window
   FROM signals_ordered
+  ATTACHED
   WIDTH 20 MESSAGES 30s DURATION
   STEP 10 MESSAGES 10s DURATION
   BRANCHED BY by_asset_signal
@@ -222,16 +227,18 @@ CREATE ATTACHED WINDOW PROCESSOR asset_signal_window
         value_percentiles = [percentile_linear_histogram(input.value, 50, 512, 0, 200, '2s'), percentile_linear_histogram(input.value, 90, 512, 0, 200, '2s'), percentile_linear_histogram(input.value, 99, 512, 0, 200, '2s')]
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED REINGESTOR site_critical_repartition
+CREATE REINGESTOR site_critical_repartition
   FROM critical_signals
+  ATTACHED
   TO site_critical_signals
     INHERIT ALL
     BRANCHED BY by_site_critical SET site = message.site
     FLUSH EACH 250ms MAX BATCH SIZE 32kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED NATS SUBJECT EMITTER nats_signal_windows
+CREATE NATS SUBJECT EMITTER nats_signal_windows
   FROM signal_windows
+  ATTACHED
   TO nats_edge SUBJECT 'factory_signal_windows'
     MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING signal_window_codec
@@ -240,8 +247,9 @@ CREATE ATTACHED NATS SUBJECT EMITTER nats_signal_windows
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED NATS SUBJECT EMITTER nats_site_critical_signals
+CREATE NATS SUBJECT EMITTER nats_site_critical_signals
   FROM site_critical_signals
+  ATTACHED
   TO nats_edge SUBJECT 'factory_site_critical_signals'
     MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING machine_signal_codec
@@ -250,8 +258,9 @@ CREATE ATTACHED NATS SUBJECT EMITTER nats_site_critical_signals
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED NATS SUBJECT EMITTER nats_battery_alerts
+CREATE NATS SUBJECT EMITTER nats_battery_alerts
   FROM battery_alerts
+  ATTACHED
   TO nats_edge SUBJECT 'factory_battery_alerts'
     MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING machine_signal_codec

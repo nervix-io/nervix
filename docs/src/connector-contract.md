@@ -990,6 +990,13 @@ that same head. Pool bounds, when declared, precede the optional resource mount.
 signaling precedes its mount. This syntax does not change which layer interprets configuration or
 how clients connect, pool or execute.
 
+Emitter heads name the connector and entity: `CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> EMITTER
+<name>`. The shared input grammar owns the optional `ATTACHED | DETACHED` body clause after the
+complete relay list and its optional `COLLECT FOR`, before materialized-state dependencies and
+`TO`. Its default is `AckMode::default()` (`ATTACHED`); canonical rendering writes it explicitly
+there. This input acknowledgement contract is separate from each entity's declared publishing
+`MODE`, and its Model field, plan interpretation and runtime completion point keep the same meaning.
+
 Client keys are lowercase and case-sensitive. The pure registry refuses unknown, repeated,
 missing-required or mistyped Nervix-owned keys, mutually exclusive keys and incomplete TLS
 identities before a candidate can become an active graph. It also refuses a key its driver reads as another name for a property

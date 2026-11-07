@@ -29,8 +29,9 @@ Feature: Fields named like keywords inside expressions
       """
     Then the last command output contains
       """
-      CREATE ATTACHED JUNCTION route_trips
+      CREATE JUNCTION route_trips
         FROM trips WHERE input.to > 0 AND input.end > input.on
+        ATTACHED
         UNBRANCHED
         TO routed
           SET id = input.id,
@@ -49,16 +50,18 @@ Feature: Fields named like keywords inside expressions
       """
     Then the last command output contains
       """
-      CREATE DETACHED JUNCTION route_trips
+      CREATE JUNCTION route_trips
         FROM trips WHERE input.to > 0 AND input.end > input.on
+        DETACHED
         FILTER WHERE input.by > input.on
         UNBRANCHED
       """
     When these Plexus commands are executed on the leader node
       """
       DROP JUNCTION route_trips;
-      CREATE DETACHED JUNCTION route_trips
+      CREATE JUNCTION route_trips
         FROM trips WHERE input.to > 0 AND input.end > input.on
+        DETACHED
         FILTER WHERE input.by > input.on
         UNBRANCHED
         TO routed
