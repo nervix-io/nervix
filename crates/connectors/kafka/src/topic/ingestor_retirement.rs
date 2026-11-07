@@ -2,7 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The consumer a ingestor or partition inspector shares with the driver jobs it admits,
+//! - **Owns.** The consumer an ingestor or partition inspector shares with the driver jobs it admits,
 //!   created once the charge of the job that will destroy it is taken.
 //! - **Depends on.** The crate's retirement of native clients, the bounded executor, `error-stack`
 //!   and librdkafka.

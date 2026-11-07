@@ -383,8 +383,8 @@ restart_one_node() {
             survivors_settled "${target}" "${round_dir}"
         local output_stopped
         output_stopped="$(topic_end_offset chaos_output)"
-        [[ "${output_stopped}" =~ ^[0-9]+$ ]] || rolling_fail 'sink offset unavailable during stop'
-        wait_for "sink traffic progressed while ${target} was stopped" 60 \
+        [[ "${output_stopped}" =~ ^[0-9]+$ ]] || rolling_fail 'emitter offset unavailable during stop'
+        wait_for "emitter traffic progressed while ${target} was stopped" 60 \
             topic_progressed chaos_output "${output_stopped}"
     fi
     local source_while_stopped output_while_stopped
@@ -461,7 +461,7 @@ run_rolling_restart() {
     compose up --detach --no-deps load observer
     wait_for 'independent load, observer and broker' 30 check_support_containers
     wait_for 'source traffic started' 30 topic_progressed chaos_input 0
-    wait_for 'sink traffic started' 60 topic_progressed chaos_output 0
+    wait_for 'emitter traffic started' 60 topic_progressed chaos_output 0
     wait_for 'initial cross-node traffic metrics' 60 initial_remote_path_ready
     mkdir -p "${artifact_dir}/restarts/initial"
     for host in "${node_hosts[@]}"; do

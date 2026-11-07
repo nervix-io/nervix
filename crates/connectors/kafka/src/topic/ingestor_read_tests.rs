@@ -20,7 +20,7 @@ use rdkafka::{
 
 use super::{
     KafkaGroupCommit, KafkaTopicIngestorError,
-    commit_tests::{READ_DEADLINE, cluster, publish, read_positions, subscribed_source},
+    commit_tests::{READ_DEADLINE, cluster, publish, read_positions, subscribed_ingestor},
 };
 
 /// How long a test lets the consumer fetch before it reads again.
@@ -46,7 +46,7 @@ async fn a_record_whose_timestamp_no_datetime_holds_is_read_between_its_neighbou
             .map_err(|(error, _)| error)
             .assured("the mock broker stores every current Kafka record");
     }
-    let mut source = subscribed_source(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    let mut ingestor = subscribed_ingestor(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
     let request = IngestorBatchRequest {
         max_messages: NonZeroUsize::new(8).assured("eight is a nonzero batch bound"),
         batch_timeout: Some(Duration::from_secs(1)),
@@ -56,7 +56,7 @@ async fn a_record_whose_timestamp_no_datetime_holds_is_read_between_its_neighbou
     while messages.len() < 3 {
         let batch = nervix_primitives::time::timeout(
             READ_DEADLINE,
-            source.next_batch(request, &cancellation),
+            ingestor.next_batch(request, &cancellation),
         )
         .await
         .assured("the group forms within the test observation deadline")
@@ -108,10 +108,10 @@ async fn a_record_whose_timestamp_no_datetime_holds_is_read_between_its_neighbou
 async fn a_failure_retained_after_a_gathered_prefix_is_reported_by_the_next_admitted_read() {
     let cluster = cluster();
     publish(&cluster).await;
-    let mut source = subscribed_source(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    let mut ingestor = subscribed_ingestor(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
     // What a collected read retains when a record after its gathered prefix has no position to
     // acknowledge, which only a record at the last offset Kafka's signed offsets reach has.
-    source.pending_read_error = Some(Report::new(KafkaTopicIngestorError::OffsetOverflow {
+    ingestor.pending_read_error = Some(Report::new(KafkaTopicIngestorError::OffsetOverflow {
         topic: "orders".to_string(),
         partition: 0,
     }));
@@ -123,17 +123,19 @@ async fn a_failure_retained_after_a_gathered_prefix_is_reported_by_the_next_admi
     let cancelled = IngestorReadCancellation::new();
     cancelled.cancel();
     let stopped =
-        nervix_primitives::time::timeout(READ_DEADLINE, source.next_batch(request, &cancelled))
+        nervix_primitives::time::timeout(READ_DEADLINE, ingestor.next_batch(request, &cancelled))
             .await
             .assured("a cancelled read ends within the test observation deadline")
             .assured("cancellation ends intake");
     assert!(matches!(stopped, IngestorBatch::Interrupted { gathered } if gathered.is_empty()));
 
     let cancellation = IngestorReadCancellation::new();
-    let next =
-        nervix_primitives::time::timeout(READ_DEADLINE, source.next_batch(request, &cancellation))
-            .await
-            .assured("the retained failure is reported within the test observation deadline");
+    let next = nervix_primitives::time::timeout(
+        READ_DEADLINE,
+        ingestor.next_batch(request, &cancellation),
+    )
+    .await
+    .assured("the retained failure is reported within the test observation deadline");
     let Err(error) = next else {
         panic!("the next admitted read reports the retained failure");
     };
@@ -141,7 +143,7 @@ async fn a_failure_retained_after_a_gathered_prefix_is_reported_by_the_next_admi
         error.downcast_ref::<KafkaTopicIngestorError>(),
         Some(KafkaTopicIngestorError::OffsetOverflow { partition: 0, .. })
     ));
-    let positions = read_positions(&mut source).await;
+    let positions = read_positions(&mut ingestor).await;
     assert_eq!(positions.len(), 1);
     assert_eq!(positions[0].offset, 1);
 }
@@ -152,10 +154,10 @@ async fn a_cancelled_parallel_read_returns_every_record_it_gathered() {
     for _record in 0..4 {
         publish(&cluster).await;
     }
-    let mut source = subscribed_source(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    let mut ingestor = subscribed_ingestor(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
     // The first read waits until the group has formed and the consumer has fetched. A position
     // names the next unread offset, so the records at offsets 0 to 3 have positions 1 to 4.
-    let first = read_positions(&mut source).await;
+    let first = read_positions(&mut ingestor).await;
     let mut next_offsets = Vec::new();
     for position in &first {
         next_offsets.push(position.offset);
@@ -171,10 +173,10 @@ async fn a_cancelled_parallel_read_returns_every_record_it_gathered() {
         .checked_add(READ_DEADLINE)
         .assured("a minute after now fits the monotonic clock");
     while next_offsets.len() < 4 {
-        let batch = source
+        let batch = ingestor
             .next_batch(request, &cancellation)
             .await
-            .assured("the source reads the records its broker serves");
+            .assured("the ingestor reads the records its broker serves");
         let IngestorBatch::Interrupted { gathered } = batch else {
             panic!("a read the host cancelled ends as interrupted");
         };

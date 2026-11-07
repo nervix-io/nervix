@@ -101,15 +101,21 @@ class ScenarioArgumentTests(unittest.TestCase):
         ))
 
     def test_restore_codec_recipe_executes_all_eight_cases_and_preserves_failures(self) -> None:
+        self.assert_restore_recipe("test-restore-codec-replies", "@client_restore_codec_rejection", 8)
+
+    def test_restore_history_recipe_executes_all_four_cases_and_preserves_failures(self) -> None:
+        self.assert_restore_recipe("test-restore-attempt-history", "@client_restore_uncertainty", 4)
+
+    def assert_restore_recipe(self, recipe_name: str, tag: str, count: int) -> None:
         dumped = subprocess.run(
             ["just", "--dump", "--dump-format", "json"],
             cwd=ROOT, capture_output=True, text=True, check=True, timeout=30,
         )
-        recipe = json.loads(dumped.stdout)["recipes"]["test-restore-codec-replies"]
+        recipe = json.loads(dumped.stdout)["recipes"][recipe_name]
         self.assertEqual([item["recipe"] for item in recipe["dependencies"]], [
             "build-deps", "build-test-cli", "build-deadlock-report",
         ])
-        with tempfile.TemporaryDirectory(prefix="restore codec arguments ") as directory:
+        with tempfile.TemporaryDirectory(prefix="restore arguments ") as directory:
             root = Path(directory)
             capture = root / "arguments.json"
             cargo = root / "cargo"
@@ -135,25 +141,25 @@ class ScenarioArgumentTests(unittest.TestCase):
             environment["SCENARIO_ARGUMENT_CAPTURE"] = str(capture)
             arguments = ("--concurrency", "2", "--retry", "0", "two words", "$PATH")
             for summary, cargo_exit, succeeds in (
-                ("8 scenarios (8 passed)", 0, True),
-                ("\x1b[32m8 scenarios (8 passed)\x1b[0m", 0, True),
+                (f"{count} scenarios ({count} passed)", 0, True),
+                (f"\x1b[32m{count} scenarios ({count} passed)\x1b[0m", 0, True),
                 ("0 scenarios", 0, False),
-                ("4 scenarios (4 passed)", 0, False),
-                ("8 scenarios (8 passed)\n4 scenarios (4 passed)", 0, False),
-                ("8 scenarios (8 failed)", 101, False),
+                (f"{count // 2} scenarios ({count // 2} passed)", 0, False),
+                (f"{count} scenarios ({count} passed)\n4 scenarios (4 passed)", 0, False),
+                (f"{count} scenarios ({count} failed)", 101, False),
             ):
                 with self.subTest(summary=summary, cargo_exit=cargo_exit):
                     environment["SCENARIO_SUMMARY"] = summary
                     environment["SCENARIO_EXIT"] = str(cargo_exit)
                     completed = subprocess.run(
                         ["just", "--no-deps", "--set", "cargo_target_dir", str(root / "target"),
-                         "test-restore-codec-replies", *arguments],
+                         recipe_name, *arguments],
                         cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
                     )
                     self.assertEqual(completed.returncode == 0, succeeds, completed.stderr)
                     self.assertEqual(json.loads(capture.read_text()), [
                         "test", "--package", "nervix-scenarios", "--test", "scenarios", "--",
-                        "--tags", "@client_restore_codec_rejection", *arguments,
+                        "--tags", tag, *arguments,
                     ])
 
     def test_coverage_arguments_remain_literal(self) -> None:

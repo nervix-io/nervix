@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The RabbitMQ client Model, the queue source and emitter Models and the exchange
+//! - **Owns.** The RabbitMQ client Model, the queue ingestor and emitter Models and the exchange
 //!   emitter Model with their delivery modes, the queue and exchange names with the rule AMQP holds
 //!   them to, the routing key an exchange emitter computes for every record, and what each entity
 //!   declares, the metadata a delivery exposes included.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The AMQP driver, or how a queue is consumed or a queue or an exchange is
 //!   published to.
 
@@ -374,11 +374,11 @@ impl crate::IngestorEntityChange for RabbitMqQueueIngestorChange {
 
 connector_ingestors! {
     connector RabbitMq = "RABBITMQ";
-    /// What a RabbitMQ source reads.
+    /// What a RabbitMQ ingestor reads.
     pub enum RabbitMqIngestor;
     /// The alterations of the ingestors that read a RabbitMQ entity.
     pub enum RabbitMqQueueIngestorAlteration;
-    /// The entities a RabbitMQ source reads.
+    /// The entities a RabbitMQ ingestor reads.
     pub enum RabbitMqIngestorEntity {
         Queue(RabbitMqQueueIngestor => RabbitMqQueueIngestorChange) = "QUEUE", "RabbitMQ";
     }

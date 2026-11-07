@@ -1,9 +1,9 @@
-//! Readiness publication for one exact source instance lifetime.
+//! Readiness publication for one exact ingestor instance lifetime.
 //!
 //! Layer: data plane.
-//! - **Owns.** Starting, ready and retired transitions visible to source readiness observers.
+//! - **Owns.** Starting, ready and retired transitions visible to ingestor readiness observers.
 //! - **Depends on.** Shared ownership and atomics from the primitive boundary.
-//! - **Must not know.** Runtime registries, polling, connectors or source names.
+//! - **Must not know.** Runtime registries, polling, connectors or ingestor names.
 
 #![cfg_attr(
     nervix_lint,
@@ -13,7 +13,7 @@
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "a source instance publishes only its own scalar readiness state"
+        reason = "an ingestor instance publishes only its own scalar readiness state"
     )
 )]
 

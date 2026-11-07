@@ -1,8 +1,9 @@
-//! Consensus stream controls and observations exposed to the fault harness.
+//! Consensus membership and stream controls exposed to the fault harness.
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** Follower answer delays, append controls and observations from consensus probes.
+//! - **Owns.** Membership interruption, follower answer delays, append controls and observations
+//!   from running nodes' consensus probes.
 //! - **Depends on.** The harness's shared probe registry and vocabulary node identities.
 //! - **Must not know.** Plexus, graph placement, runtime state or Raft retry policy.
 
@@ -14,6 +15,27 @@ use nervix_models::ClusterNodeName;
 use super::FaultInjection;
 
 impl FaultInjection {
+    /// Interrupt a promotion on whichever current node leads, after its joint entry applies.
+    pub async fn interrupt_voter_promotion(&self, joining: ClusterNodeName) {
+        for probe in self.consensus_test_probes() {
+            nervix_primitives::task::consume_budget().await;
+            probe.interrupt_voter_promotion(joining.clone()).await;
+        }
+    }
+
+    pub async fn interrupted_membership(
+        &self,
+        joining: &ClusterNodeName,
+    ) -> Option<nervix_consensus::InterruptedMembership> {
+        for probe in self.consensus_test_probes() {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(witness) = probe.interrupted_membership(joining).await {
+                return Some(witness);
+            }
+        }
+        None
+    }
+
     pub fn set_consensus_heartbeat_response_delay(&self, node: &ClusterNodeName, delay: Duration) {
         let state = self.inner.consensus_probes.entry(node.clone()).or_default();
         state.test_probe.set_heartbeat_response_delay(delay);

@@ -337,6 +337,13 @@ test-inferencer-state *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
 
+# Exercise NATS authentication through real brokers and one-/three-node public graphs.
+test-nats-authentication *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/nats_authentication.feature {{ quote(args) }}
+
 # Run the native-client and CLI foreign-reference witnesses with only the tools they start.
 test-client-foreign-execution: (test-client-recovery-witnesses "client-foreign-execution" "(A native command|The CLI) recovers its own execution after a foreign command reply")
 
@@ -381,6 +388,25 @@ test-restore-codec-replies *args: build-deps build-test-cli build-deadlock-repor
     counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
     if counts != ["8"]:
         raise SystemExit(f"restore reply witnesses must execute eight scenarios; reported counts: {counts}")
+    PY
+
+# Exercise later archive failures after a completed restore lost its answer, using only the
+# tools these native/CLI cases start and requiring all four topology/client examples.
+test-restore-attempt-history *args: build-deps build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    mkdir -p {{ quote(cargo_target_dir + "/restore-attempt-history") }}
+    restore_history_log="$(mktemp {{ quote(cargo_target_dir + "/restore-attempt-history/run.XXXXXX.log") }})"
+    cargo test --package nervix-scenarios --test scenarios -- --tags @client_restore_uncertainty {{ quote(args) }} 2>&1 | tee "$restore_history_log"
+    python3 - "$restore_history_log" <<'PY'
+    import re
+    import sys
+    from pathlib import Path
+    output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
+    counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
+    if counts != ["4"]:
+        raise SystemExit(f"restore attempt witnesses must execute four scenarios; reported counts: {counts}")
     PY
 
 # Exercise restore reply validation through the native client and CLI on one and three nodes.
@@ -641,6 +667,16 @@ test-command-recovery-scenarios: build-web-console wasm-processor-guests downloa
         --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
         --concurrency 1 --retry 0
 
+# Exercise list fields of every schemaful wire format through the in-process cluster: AVRO item
+# types, list-element ENCODE rules and the refusals of lists a wire type cannot carry.
+[positional-arguments]
+test-wire-schema-lists *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/wire_schema_lists.feature "$@"
+
 # Exercise explicit COMMIT outcome recovery and a recorded failed prefix through in-process nodes.
 test-explicit-commit-recovery: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
@@ -653,6 +689,13 @@ test-cluster-duration-scenarios: build-web-console wasm-processor-guests downloa
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/cluster/cluster_parameters.feature \
         --tags @multi_span_cluster_duration --concurrency 2 --retry 0
+
+# Exercise cluster parameter completion and the refusal of a repeated parameter through the
+# session protocol and the Rust client, with only the in-process server's prerequisites.
+test-cluster-parameter-completion-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/cluster/cluster_parameters.feature \
+        --tags @cluster_parameter_completion --concurrency 2 --retry 0
 
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
@@ -741,6 +784,18 @@ fmt-nats-driver checkout:
 # Qualify the pinned NATS driver's flush, ordered headers and borrowed delivery metadata parser.
 test-nats-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
+
+# Format the maintained NKey codec package in its checkout.
+fmt-nkeys-codec checkout:
+    cargo +nightly fmt --manifest-path {{ quote(checkout + "/Cargo.toml") }}
+
+# Qualify the maintained NKey format boundary without enabling its signing backend.
+test-nkeys-codec checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nkeys-codec") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --no-default-features --lib -- {{ args }}
+
+# Preserve the upstream NKey signing API alongside the independent format-only graph.
+test-nkeys-signing checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nkeys-codec") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --features xkeys --lib -- {{ args }}
 
 # Qualify the pinned Pulsar driver's metadata boundary with the product's enabled features.
 test-pulsar-driver checkout *args:
@@ -3704,12 +3759,12 @@ test-chaos-rate-probe:
 test-chaos-hold-quorum:
     exec bash scripts/chaos/tests/hold-quorum-self-test.sh
 
-# Judge a failover-length pause's sink progress and source consumer-group handoff from retained
+# Judge a failover-length pause's emitter progress and source consumer-group handoff from retained
 # pause timelines without a product image.
 test-chaos-pause-delivery:
     exec bash scripts/chaos/tests/pause-delivery-self-test.sh
 
-# Retain shell coverage of the failover-length pause's sink progress and consumer-group handoff controls.
+# Retain shell coverage of the failover-length pause's emitter progress and consumer-group handoff controls.
 coverage-chaos-pause-delivery:
     #!/usr/bin/env bash
     set -euo pipefail

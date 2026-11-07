@@ -961,6 +961,23 @@ behavior. That change also supplies its generated conformance and runtime scenar
 The declaration describes the product a user can execute; plans for additional connector clauses
 remain in their owning work records until that delivery.
 
+The declaration crosses each boundary once, without becoming runtime graph policy:
+
+| Reader | What it takes from the declaration |
+| --- | --- |
+| Plexus grammar and completion | The connector/entity head, locator and option forms, mode bodies, header and metadata names, and valid choices. |
+| Registry and planner | Reference kinds, exact value and option requirements, legal modes, envelopes and batching; validation produces a typed plan before execution. |
+| Connector host | The validated plan and declared metadata, bounds and waits; the host owns routing, retry, quiesce, flush and acknowledgements. |
+| Console and inspection | Entity choices, confidential client keys, effective defaults and the canonical or descriptive presentation. |
+| Manuals and checks | The generated capability matrix, conformance tests and scenario inventory described below. |
+
+Three evidence layers hold this boundary to its declaration. Generated Plexus conformance tests
+check parsing, completion and accepted or refused construction; the test-only fake connector checks
+host policy and value retention, including registered Shuttle interleavings; production-owner tests
+and public scenarios through the real transport establish each connector's delivery and declared
+runtime capabilities. The matrix and inventory checks catch a missing or stale documentation row
+or scenario registration, but neither substitutes for observing the transport.
+
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
@@ -1087,12 +1104,10 @@ statement that names a mode without the choices it requires is refused at `CREAT
 with the vocabulary's typed `UnmetDeliveryRequirement`, which names every required choice and what
 the statement writes for each. A publishing mode declares its choices the same way: an MQTT topic's
 `NO ACK` requires `QOS 0` and its `ACK` requires `QOS 1` or `QOS 2`, the destination answers which
-choice its statement made, and `UnmetPublishingRequirement` is the refusal. Whether a source can
-honor a quiesce mode, whether
-an emitter accepts a publishing mode, whether its body needs a codec, and the batching contract with its
-maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
-registry, the planner and the console keep their own copies of some of these facts until the work
-that owns those layers reads the declaration instead.
+choice its statement made, and `UnmetPublishingRequirement` is the refusal. Whether an ingestor can
+honor a quiesce mode, whether an emitter accepts a publishing mode, whether its body needs a codec,
+and the batching contract with its maximum and refusal are all read from the declaration. The
+registry, planner and console consume those facts without another allowed-value table.
 
 `REDIS PUBSUB` shares one channel-name rule between ingestion and emission: a nonempty literal
 of at most 1,024 UTF-8 bytes, passed through without normalization or wildcard interpretation.
@@ -1152,9 +1167,14 @@ authentication keys `token`, `credentials_file` and `nkey_seed`. Its schema decl
 three mutually exclusive and confidential, and identifies `credentials_file` as a mounted file.
 Both sides build authentication and TLS options through one connector-owned builder, then attach
 their own connection-loss notifications or reconnect policy. Token authentication uses the driver;
-nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The connector validates
-the fixed-size user seed's base32, user prefix and transcription checksum, and reads a mounted
-credentials file through the node's filesystem workers. Its immutable mounted length is charged to
+nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The maintained
+format-only [NKey fork](https://github.com/nervix-io/nkeys) validates the fixed-size user seed's
+canonical base32, exact user prefix and transcription checksum, and encodes its public key.
+The maintained [NATS driver fork](https://github.com/nervix-io/nats.rs) parses credentials into
+borrowed JWT and seed sections without enabling its signing backend. Parsing preserves LF/CRLF,
+trimmed lines, either section order, explanatory text and an end marker at EOF, without allocating
+or caching a regular expression. Public-key encoding allocates only its returned string.
+The connector reads a mounted credentials file through the node's filesystem workers. Its immutable mounted length is charged to
 credentials memory before allocation or reading, and that charge stays until the temporary bytes
 are cleared. Cancellation is checked before and after the bounded file read. Admission or execution
 refusal judges no credential and remains a retryable initialization failure, distinct from invalid
@@ -1464,7 +1484,7 @@ type of a typed model, or `headers: none`, and the per-entity tables of the
 
 ### Shared entity presentation
 
-The vocabulary's `EntityPresentation` projects each configured source or sink once from its
+The vocabulary's `EntityPresentation` projects each configured ingestor or emitter once from its
 current Model. Its declaration supplies the connector/entity phrase, locator keywords, option
 order and effective defaults. Canonical Plexus and `DESCRIBE` consume that projection; canonical
 text preserves omitted optional Model fields, while inspection includes their effective defaults.
@@ -2440,7 +2460,7 @@ librdkafka's flush without waiting and polls in between, so on a loaded node the
 that instant and the records linger past the deadline. The Kafka finish therefore waits inside
 librdkafka's flush itself, in steps of at most a second, while the producer's polling thread takes
 the delivery reports that end the flush. The flush holds a handle of its own, so a flush its finish's
-caller stopped waiting for keeps the producer until it returns, and then retires it if the sink is
+caller stopped waiting for keeps the producer until it returns, and then retires it if the emitter is
 gone, as [Kafka client retirement](#kafka-client-retirement) describes.
 
 The Kafka emitter counts the records its producer holds itself. librdkafka's out-queue length adds

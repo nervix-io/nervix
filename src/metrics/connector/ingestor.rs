@@ -1,7 +1,7 @@
-//! The source host's retained interaction counters.
+//! The ingestor host's retained interaction counters.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** One registration of the source host's existing counter children.
+//! - **Owns.** One registration of the ingestor host's existing counter children.
 //! - **Depends on.** Vocabulary identities and the node metric registry.
 //! - **Must not know.** Connector drivers, intake lifetimes, decoding policy or acknowledgements.
 
@@ -34,7 +34,7 @@ impl RuntimeMetrics {
         nervix_lint,
         nervix::context(
             lifecycle,
-            reason = "resolves the source host's children once at startup"
+            reason = "resolves the ingestor host's children once at startup"
         )
     )]
     pub(crate) fn register_ingestor_interactions(

@@ -246,7 +246,7 @@ run_degraded_links() {
     compose up --detach --no-deps load observer
     wait_for 'independent load, observer and broker' 30 check_support_containers
     wait_for 'source traffic started' 30 topic_progressed chaos_input 0
-    wait_for 'sink traffic started' 60 topic_progressed chaos_output 0
+    wait_for 'emitter traffic started' 60 topic_progressed chaos_output 0
     wait_for 'initial cross-node traffic metrics' 60 initial_remote_path_ready
     local remote_path_tmp
     remote_path_tmp="$(mktemp "${artifact_dir}/results/.remote-path.XXXXXX")"

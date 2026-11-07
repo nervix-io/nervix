@@ -53,7 +53,7 @@ pub(super) fn cluster() -> MockCluster<'static, DefaultProducerContext> {
     cluster
 }
 
-/// The plan of a ingestor in the test group declared `START AT EARLIEST`, whose offsets `commit`
+/// The plan of an ingestor in the test group declared `START AT EARLIEST`, whose offsets `commit`
 /// commits.
 pub(super) fn plan(
     cluster: &MockCluster<'static, DefaultProducerContext>,
@@ -95,37 +95,37 @@ pub(super) async fn publish(cluster: &MockCluster<'static, DefaultProducerContex
         .assured("the mock broker stores the test record");
 }
 
-/// A ingestor whose offsets `commit` commits, subscribed to the test topic in the test group.
-pub(super) async fn subscribed_source(
+/// An ingestor whose offsets `commit` commits, subscribed to the test topic in the test group.
+pub(super) async fn subscribed_ingestor(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     commit: KafkaGroupCommit,
 ) -> KafkaTopicIngestor {
-    let mut source = KafkaTopicIngestor::open(&plan(cluster, commit), 0)
+    let mut ingestor = KafkaTopicIngestor::open(&plan(cluster, commit), 0)
         .await
         .assured("librdkafka accepts the test consumer configuration");
-    let resumed = source
+    let resumed = ingestor
         .resume()
         .await
         .assured("a consumer subscribes to a topic its broker serves");
     assert!(matches!(resumed, IngestorResume::Ready));
-    source
+    ingestor
 }
 
 /// Reads the next record from `ingestor` once it joined its group, and returns its position.
-pub(super) async fn read_positions(source: &mut KafkaTopicIngestor) -> Vec<KafkaOffsetPosition> {
+pub(super) async fn read_positions(ingestor: &mut KafkaTopicIngestor) -> Vec<KafkaOffsetPosition> {
     let request = IngestorBatchRequest {
         max_messages: NonZeroUsize::MIN,
         batch_timeout: None,
     };
     let batch = timeout(
         READ_DEADLINE,
-        source.next_batch(request, &IngestorReadCancellation::new()),
+        ingestor.next_batch(request, &IngestorReadCancellation::new()),
     )
     .await
-    .assured("the source joins its group and reads the published record within its deadline")
-    .assured("the source reads the record its broker serves");
+    .assured("the ingestor joins its group and reads the published record within its deadline")
+    .assured("the ingestor reads the record its broker serves");
     let IngestorBatch::Messages(messages) = batch else {
-        panic!("a subscribed source reads a batch of messages");
+        panic!("a subscribed ingestor reads a batch of messages");
     };
     messages
         .iter()
@@ -164,15 +164,15 @@ fn committed_offset(cluster: &MockCluster<'static, DefaultProducerContext>) -> O
 async fn an_acknowledged_batch_returns_once_its_group_committed_it() {
     let cluster = cluster();
     publish(&cluster).await;
-    let mut source = subscribed_source(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
-    let positions = read_positions(&mut source).await;
+    let mut ingestor = subscribed_ingestor(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    let positions = read_positions(&mut ingestor).await;
 
     // librdkafka retries this answer, so the broker stores the commit on its third attempt.
     cluster.request_errors(
         RDKafkaApiKey::OffsetCommit,
         &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 2],
     );
-    source
+    ingestor
         .acknowledge(&positions)
         .await
         .assured("the broker stores the commit's third attempt");
@@ -184,14 +184,14 @@ async fn an_acknowledged_batch_returns_once_its_group_committed_it() {
 async fn a_commit_its_group_refuses_fails_the_acknowledgement() {
     let cluster = cluster();
     publish(&cluster).await;
-    let mut source = subscribed_source(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
-    let positions = read_positions(&mut source).await;
+    let mut ingestor = subscribed_ingestor(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    let positions = read_positions(&mut ingestor).await;
 
     cluster.request_errors(
         RDKafkaApiKey::OffsetCommit,
         &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
     );
-    let acknowledged = source.acknowledge(&positions).await;
+    let acknowledged = ingestor.acknowledge(&positions).await;
 
     let Err(report) = acknowledged else {
         panic!("a commit the broker refuses fails the acknowledgement");
@@ -201,7 +201,7 @@ async fn a_commit_its_group_refuses_fails_the_acknowledgement() {
         .assured("the acknowledgement failure names the commit that failed");
     assert!(
         matches!(failure, KafkaTopicIngestorError::CommitOffset { group } if group == GROUP),
-        "unexpected Kafka source failure {failure:?}"
+        "unexpected Kafka ingestor failure {failure:?}"
     );
     let cause = report
         .downcast_ref::<KafkaError>()
@@ -218,9 +218,9 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
     let cluster = cluster();
     publish(&cluster).await;
     publish(&cluster).await;
-    let mut source = subscribed_source(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
-    let first_positions = read_positions(&mut source).await;
-    let second_positions = read_positions(&mut source).await;
+    let mut ingestor = subscribed_ingestor(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    let first_positions = read_positions(&mut ingestor).await;
+    let second_positions = read_positions(&mut ingestor).await;
     let short_deadline = Duration::from_secs(1);
     let mut commits = GroupCommits::new(short_deadline);
 
@@ -234,7 +234,7 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
         let request = GroupCommitRequest::acknowledged(&first_positions)
             .assured("the read position is a valid offset");
         let committed = commits
-            .commit(&source.control, &source.consumer, GROUP, request)
+            .commit(&ingestor.control, &ingestor.consumer, GROUP, request)
             .await;
         let Err(report) = committed else {
             panic!("a commit no coordinator answers fails at its deadline");
@@ -245,7 +245,7 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
                 KafkaTopicIngestorError::CommitUnanswered { group, deadline }
                     if group == GROUP && *deadline == short_deadline
             ),
-            "unexpected Kafka source failure {report:?}"
+            "unexpected Kafka ingestor failure {report:?}"
         );
         assert!(commits.unanswered.is_some());
     }
@@ -259,7 +259,7 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
     let request = GroupCommitRequest::acknowledged(&second_positions)
         .assured("the read position is a valid offset");
     commits
-        .commit(&source.control, &source.consumer, GROUP, request)
+        .commit(&ingestor.control, &ingestor.consumer, GROUP, request)
         .await
         .assured("the group's coordinator answers once it releases its answers");
     assert!(commits.unanswered.is_none());
@@ -270,16 +270,16 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
 async fn suspending_commits_what_the_driver_delivered_since_its_last_commit() {
     let cluster = cluster();
     publish(&cluster).await;
-    let mut source = subscribed_source(&cluster, KafkaGroupCommit::DriverCadence).await;
-    let positions = read_positions(&mut source).await;
+    let mut ingestor = subscribed_ingestor(&cluster, KafkaGroupCommit::DriverCadence).await;
+    let positions = read_positions(&mut ingestor).await;
 
-    source
+    ingestor
         .acknowledge(&positions)
         .await
         .assured("acknowledging under the driver's cadence commits nothing itself");
     assert_eq!(committed_offset(&cluster), None);
 
-    source
+    ingestor
         .suspend()
         .await
         .assured("the broker stores the commit of what the driver delivered");
@@ -290,10 +290,10 @@ async fn suspending_commits_what_the_driver_delivered_since_its_last_commit() {
 async fn closing_commits_what_the_driver_delivered_since_its_last_commit() {
     let cluster = cluster();
     publish(&cluster).await;
-    let mut source = subscribed_source(&cluster, KafkaGroupCommit::DriverCadence).await;
-    read_positions(&mut source).await;
+    let mut ingestor = subscribed_ingestor(&cluster, KafkaGroupCommit::DriverCadence).await;
+    read_positions(&mut ingestor).await;
 
-    source
+    ingestor
         .close()
         .await
         .assured("the broker stores the commit of what the driver delivered");
@@ -304,10 +304,10 @@ async fn closing_commits_what_the_driver_delivered_since_its_last_commit() {
 async fn closing_an_acknowledged_group_commits_nothing_it_did_not_acknowledge() {
     let cluster = cluster();
     publish(&cluster).await;
-    let mut source = subscribed_source(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
-    read_positions(&mut source).await;
+    let mut ingestor = subscribed_ingestor(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    read_positions(&mut ingestor).await;
 
-    source
+    ingestor
         .close()
         .await
         .assured("an acknowledged group has nothing outstanding to commit");

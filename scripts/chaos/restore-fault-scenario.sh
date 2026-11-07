@@ -218,7 +218,7 @@ restore_fault_source_continues() {
     wait_for 'Kafka source advanced past the fault' 60 \
         topic_progressed chaos_input "${restore_fault_source_at_fault}" \
         || recovery_finding "${case_dir}" 'the source did not advance after the fault'
-    wait_for 'Kafka sink advanced past the fault' 180 \
+    wait_for 'Kafka emitter advanced past the fault' 180 \
         topic_progressed chaos_output "${restore_fault_output_at_fault}" \
         || recovery_finding "${case_dir}" 'the source domain did not resume its output after the fault'
 }

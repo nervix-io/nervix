@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Self-test of the sink progress a failover-length pause requires once its graph has moved to the
+# Self-test of the emitter progress a failover-length pause requires once its graph has moved to the
 # survivors. The timelines are those pause-resume retained in soak shard 5 of Docker Build run
 # 38933948103. In the 75-second pause of the leader node-1, which also ran the Kafka ingestor and
 # the relay, the relocated consumer joined the source group 22.9 seconds after the runner requested
 # the pause, the runner observed the relocation at 23.7 seconds, and the broker's group coordinator
 # removed node-1's paused member and gave the partition to node-2 at 45.0 seconds. The 75-second
 # pause of the relay owner node-2 left the consumer running: the runner observed the relocation at
-# 18.6 seconds and sink progress at 20.8 seconds. Each observation runs on a simulated clock and
+# 18.6 seconds and emitter progress at 20.8 seconds. Each observation runs on a simulated clock and
 # costs about what it cost in that run.
 set -euo pipefail
 
@@ -44,9 +44,9 @@ unpause_ms=75000
 group_rebalance_ms="${never}"
 # The coordinator removes the paused member and gives the partition to the relocated consumer.
 group_handoff_ms="${never}"
-# The first record the relocated graph delivers reaches the sink topic.
-sink_resumes_ms="${never}"
-sink_offset_before=140
+# The first record the relocated graph delivers reaches the emitter topic.
+emitter_resumes_ms="${never}"
+emitter_offset_before=140
 
 now() {
     printf '%s\n' "$(<"${clock}")"
@@ -84,10 +84,10 @@ topic_end_offset() {
     advance 1050
     local at
     at="$(now)"
-    if ((at < sink_resumes_ms)); then
-        printf '%s\n' "${sink_offset_before}"
+    if ((at < emitter_resumes_ms)); then
+        printf '%s\n' "${emitter_offset_before}"
     else
-        printf '%s\n' "$((sink_offset_before + 1 + (at - sink_resumes_ms) / 1000))"
+        printf '%s\n' "$((emitter_offset_before + 1 + (at - emitter_resumes_ms) / 1000))"
     fi
 }
 
@@ -163,9 +163,9 @@ expect_delivery() {
         || fail "${case_name}: the check failed with status ${check_status}: ${check_message}"
     local delivery_ms output_during
     read -r delivery_ms output_during <"${tmp_dir}/recorded"
-    ((output_during > sink_offset_before)) \
-        || fail "${case_name}: the check recorded sink offset ${output_during} without progress"
-    ((delivery_ms >= sink_resumes_ms && delivery_ms == $(now) && delivery_ms < unpause_ms)) \
+    ((output_during > emitter_offset_before)) \
+        || fail "${case_name}: the check recorded emitter offset ${output_during} without progress"
+    ((delivery_ms >= emitter_resumes_ms && delivery_ms == $(now) && delivery_ms < unpause_ms)) \
         || fail "${case_name}: the check recorded delivery at ${delivery_ms} ms"
 }
 
@@ -183,12 +183,12 @@ expect_product_failure() {
 }
 
 # The retained leader pause: the coordinator gives the partition to node-2 21.3 seconds after the
-# runner observed the relocation, and the sink resumes 600 ms later.
+# runner observed the relocation, and the emitter resumes 600 ms later.
 leader_round="${tmp_dir}/4-75-leader"
 round_with "${leader_round}" "${leader_role}" node-2
 group_rebalance_ms=22932
 group_handoff_ms=45019
-sink_resumes_ms=45619
+emitter_resumes_ms=45619
 run_check "${leader_round}" 23715
 expect_delivery 'retained leader pause'
 (($(<"${group_reads}") > 0)) || fail 'retained leader pause: the check never read the source consumer group'
@@ -215,49 +215,49 @@ expect_delivery 'relocation observed after the handoff deadline'
 # The coordinator never removes the paused member, so the relocated consumer never reads.
 round_with "${tmp_dir}/handoff-missing" "${leader_role}" node-2
 group_handoff_ms="${never}"
-sink_resumes_ms="${never}"
+emitter_resumes_ms="${never}"
 run_check "${tmp_dir}/handoff-missing" 23715
 expect_product_failure 'missing handoff' \
     'the source consumer group did not move to the relocated ingestor during the pause'
 
-# The partition reaches the relocated consumer, but nothing reaches the sink.
-round_with "${tmp_dir}/sink-stalled" "${leader_role}" node-2
+# The partition reaches the relocated consumer, but nothing reaches the emitter.
+round_with "${tmp_dir}/emitter-stalled" "${leader_role}" node-2
 group_handoff_ms=45019
-sink_resumes_ms="${never}"
-run_check "${tmp_dir}/sink-stalled" 23715
-expect_product_failure 'stalled sink' 'sink did not progress on surviving nodes during pause'
+emitter_resumes_ms="${never}"
+run_check "${tmp_dir}/emitter-stalled" 23715
+expect_product_failure 'stalled emitter' 'emitter did not progress on surviving nodes during pause'
 
 # The handoff is first observed after the unpause, outside the window the case judges.
 round_with "${tmp_dir}/handoff-after-unpause" "${leader_role}" node-2
 unpause_ms=46000
-sink_resumes_ms=45619
+emitter_resumes_ms=45619
 run_check "${tmp_dir}/handoff-after-unpause" 23715
 expect_product_failure 'late handoff' 'the source consumer group moved only after unpause'
 unpause_ms=75000
 
-# The retained relay-owner pause left the consumer in place, so its sink window opens at the
+# The retained relay-owner pause left the consumer in place, so its emitter window opens at the
 # relocation and the group is never read.
 relay_round="${tmp_dir}/3-75-execution-owner"
 round_with "${relay_round}" "${relay_owner_role}" node-1
 group_rebalance_ms="${never}"
 group_handoff_ms="${never}"
-sink_resumes_ms=19800
+emitter_resumes_ms=19800
 run_check "${relay_round}" 18587
 expect_delivery 'retained relay-owner pause'
 [[ "$(<"${group_reads}")" -eq 0 ]] || fail 'retained relay-owner pause: the check read the consumer group'
 
 # Without a consumer handoff, the 20-second window still opens at the relocation.
-round_with "${tmp_dir}/late-sink" "${relay_owner_role}" node-1
-sink_resumes_ms=45619
-run_check "${tmp_dir}/late-sink" 18587
-expect_product_failure 'late sink' 'sink did not progress on surviving nodes during pause'
+round_with "${tmp_dir}/late-emitter" "${relay_owner_role}" node-1
+emitter_resumes_ms=45619
+run_check "${tmp_dir}/late-emitter" 18587
+expect_product_failure 'late emitter' 'emitter did not progress on surviving nodes during pause'
 
-# The sink progresses, but the target was unpaused before the check confirmed the pause.
-round_with "${tmp_dir}/sink-after-unpause" "${relay_owner_role}" node-1
-sink_resumes_ms=19800
+# The emitter progresses, but the target was unpaused before the check confirmed the pause.
+round_with "${tmp_dir}/emitter-after-unpause" "${relay_owner_role}" node-1
+emitter_resumes_ms=19800
 unpause_ms=20700
-run_check "${tmp_dir}/sink-after-unpause" 18587
-expect_failure 'sink after unpause' controller 'sink progress was sampled after the pause window'
+run_check "${tmp_dir}/emitter-after-unpause" 18587
+expect_failure 'emitter after unpause' controller 'emitter progress was sampled after the pause window'
 unpause_ms=75000
 
 printf 'pause delivery self-test passed\n'

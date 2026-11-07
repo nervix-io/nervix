@@ -102,6 +102,10 @@ impl Default for SnapshotStagingLimits {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "IEC 80000-13 defines a gibibyte as 2^30 bytes")
+)]
 const GIBIBYTE: u64 = 1024 * 1024 * 1024;
 
 /// How many staging bytes one quota permit stands for. A quota this large is counted in blocks so

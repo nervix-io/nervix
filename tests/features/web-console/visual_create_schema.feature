@@ -89,14 +89,45 @@ Feature: Web console visual schema and branch creation
       | wire-cbor-schema | CBOR   | text    | TEXT           | 6          |
       | wire-cbor-schema | CBOR   | bytes   | BYTES          | 6          |
       | wire-cbor-schema | CBOR   | array   | ARRAY          | 6          |
-      | wire-avro-schema | AVRO   | boolean | BOOLEAN        | 8          |
-      | wire-avro-schema | AVRO   | int     | INT            | 8          |
-      | wire-avro-schema | AVRO   | long    | LONG           | 8          |
-      | wire-avro-schema | AVRO   | float   | FLOAT          | 8          |
-      | wire-avro-schema | AVRO   | double  | DOUBLE         | 8          |
-      | wire-avro-schema | AVRO   | string  | STRING         | 8          |
-      | wire-avro-schema | AVRO   | bytes   | BYTES          | 8          |
-      | wire-avro-schema | AVRO   | array   | ARRAY          | 8          |
+      | wire-avro-schema | AVRO   | boolean | BOOLEAN        | 7          |
+      | wire-avro-schema | AVRO   | int     | INT            | 7          |
+      | wire-avro-schema | AVRO   | long    | LONG           | 7          |
+      | wire-avro-schema | AVRO   | float   | FLOAT          | 7          |
+      | wire-avro-schema | AVRO   | double  | DOUBLE         | 7          |
+      | wire-avro-schema | AVRO   | string  | STRING         | 7          |
+      | wire-avro-schema | AVRO   | bytes   | BYTES          | 7          |
+
+  @visual_wire_schema_create
+  Scenario: The AVRO form builds an array from the item type it wraps
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='wire-avro-schema']" is clicked
+    And selector ".create-name" is filled with "visual_avro_arrays"
+    And selector ".create-mode-options [data-value='STRICT']" is clicked
+    And selector ".create-add-field" is clicked
+    And selector ".create-field-name" is filled with "matrix"
+    And selector ".create-field-type [data-type='double']" is clicked
+    And selector ".create-add-wire-array" is clicked
+    Then selector ".create-preview" contains "matrix ARRAY<DOUBLE>"
+    When selector ".create-add-wire-array" is clicked
+    Then selector ".create-preview" contains "matrix ARRAY<ARRAY<DOUBLE>>"
+    When selector ".create-wire-array-layers [aria-label='Remove array layer 2']" is clicked
+    Then selector ".create-preview" contains "matrix ARRAY<DOUBLE>"
+    And selector ".create-preview" does not contain "ARRAY<ARRAY<DOUBLE>>"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
+    And selector ".prompt-row input" is filled with "SHOW CREATE WIRE AVRO SCHEMA visual_avro_arrays;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "matrix ARRAY<DOUBLE>" exactly 2 times
 
   Scenario: Wire formats retain separate identities when their names coincide
     Given a 1 node nervix cluster is started

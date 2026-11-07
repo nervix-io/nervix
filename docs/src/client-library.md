@@ -264,13 +264,23 @@ the exact statement and archive and pass their original reference to `restore_wi
 recover the outcome. The report retains the typed validation cause or tonic's bounded receive
 failure. Missing or empty local archives, authentication refusals and valid declared stream
 refusals remain definitive if no earlier attempt could have been admitted. The shared bindings
-classify uncertainty as `NX_ERROR_UNCERTAIN`;
-the CLI exits with status 3 and prints the execution reference.
+classify uncertainty as `NX_ERROR_UNCERTAIN`; the CLI exits with status 3 and prints the execution
+reference.
+
+Uncertainty survives a later attempt. After the client handed over a whole archive without
+learning its outcome, or received `OutcomeUnknown`, a later archive-open/read error, refusal
+before admission, or expired execution reference cannot establish what that earlier attempt did.
+The client returns `UncertainCommand` with the original reference and retains the typed later
+cause beneath it. Restore the original file if needed and repeat the same statement and archive
+under that reference to recover the outcome. An outcome recovered from the command record, or a
+failure carrying the restore's report, still establishes the result, including any steps applied
+before a recorded failure.
 
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.
-A stream the leader refused before the restore ran is a failed outcome whose message names the
-typed failure. The C binding runs `RESTORE` through `nx_session_execute` and reports the report's
+With no earlier uncertain attempt, a stream the leader refused before the restore ran is a failed
+outcome whose message names the typed failure. The C binding runs `RESTORE` through
+`nx_session_execute` and reports the report's
 counts, whether it was a dry run, and whether a step failed through `nx_outcome_restore`.
 
 ## Uploading A Resource
@@ -400,8 +410,9 @@ attempt, and the next call tries again. The events are the Rust client's, coales
   `NX_CLOCK_EVENT_ENDED`, `NX_CLOCK_EVENT_INTERRUPTED` or `NX_CLOCK_EVENT_RESTORATION_FAILED` event
   apart, and `nx_clock_event_domain` borrows the name of the domain it concerns. A restoration
   failure reports that the session refused to attach an interrupted clock again, which it tries
-  again after the growing wait the Rust client reports. The event carries only its kind and domain:
-  the binding exposes neither the server's message nor the wait.
+  again after the growing wait the Rust client reports. The event also carries the refusal message
+  as borrowed UTF-8 bytes and that wait in nanoseconds, read with
+  `nx_clock_event_restoration_message` and `nx_clock_event_restoration_retry_after`.
 - `nx_clock_event_generation` reads the `START` generation of a state or tick event,
   `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
   skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
@@ -413,6 +424,15 @@ attempt, and the next call tries again. The events are the Rust client's, coales
   reading an event allocates nothing on the host's side.
 - `nx_clock_event_retain` and `nx_clock_event_release` count references the way `nx_event_retain`
   and `nx_event_release` do, and a reference may be released on any thread.
+
+For C and C++ hosts, `nx_connect_options_new` starts with the Rust client's defaults. The host
+may set basic credentials, a TLS requirement, a copied CA certificate, seed URLs and the four
+deadlines before it calls `nx_session_connect`. The session copies the options, so the host may
+release them after the call. The Rust client validates endpoint origins and the 1 ms to 24 hour
+deadline bounds when connecting, and an HTTPS initial endpoint requires HTTPS for every later
+server. A subscription's `NX_EVENT_RESTORATION_FAILED` carries its refusal message and retry wait
+through `nx_event_restoration_message` and `nx_event_restoration_retry_after`, with the same
+borrowed-byte and nanosecond rules as the clock event. A wrong event kind returns `NX_ERROR_TYPE`.
 
 `nx_session_domain_clock` reads `domain_clock` for a domain the session follows as an
 `nx_domain_clock` reference, and writes NULL for a domain whose clock the session does not follow.
@@ -444,8 +464,9 @@ An attach the server refuses completes as failed with the server's reason, and
 `nx_session_domain_clock` still reads the earlier attachment's clock when the refusal is that the
 session already follows it. An attach whose session was lost is sent again on the next session the
 client opens. An attach cancelled or expired after its request was sent can still attach the
-session: executing the same prepared execution again is answered after the earlier attempt, and
-`nx_session_domain_clock` then tells whether the session follows the clock.
+session: executing the same prepared execution again sends another session-local request, which
+may be refused as already attached even when the first succeeded. `nx_session_domain_clock` tells
+whether the session follows the clock.
 
 ### Through The JVM Library
 

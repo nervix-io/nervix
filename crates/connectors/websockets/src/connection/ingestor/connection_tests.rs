@@ -2,7 +2,7 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Observing the production connection owner through a local protocol peer.
-//! - **Depends on.** The source's fixture, connector contract and execution primitives.
+//! - **Depends on.** The ingestor's fixture, connector contract and execution primitives.
 //! - **Must not know.** Registry, graph or host synchronization internals.
 
 #![cfg_attr(
@@ -36,8 +36,8 @@ async fn a_message_retains_its_upgrade_snapshot_and_exact_data_frame_kind() {
             value: "Bearer fixture".to_string(),
         }])
         .assured("Authorization is an application field with a valid value");
-        let (mut source, mut peer) = tests::connected_pair_with(Vec::new(), headers).await;
-        let snapshot = source
+        let (mut ingestor, mut peer) = tests::connected_pair_with(Vec::new(), headers).await;
+        let snapshot = ingestor
             .connection
             .as_ref()
             .assured("the pair is connected")
@@ -46,7 +46,7 @@ async fn a_message_retains_its_upgrade_snapshot_and_exact_data_frame_kind() {
         peer.send(case.frame)
             .await
             .assured("the peer sends the data frame");
-        let batch = source
+        let batch = ingestor
             .next_batch(
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
@@ -63,7 +63,7 @@ async fn a_message_retains_its_upgrade_snapshot_and_exact_data_frame_kind() {
         let message = messages
             .pop()
             .verified("the batch contains exactly one message");
-        drop(source);
+        drop(ingestor);
         drop(peer);
         assert_eq!(message.payload(), case.payload);
         let metadata = message.metadata();
@@ -87,15 +87,15 @@ async fn a_message_retains_its_upgrade_snapshot_and_exact_data_frame_kind() {
 }
 
 #[nervix_primitives::test]
-async fn a_configured_ping_is_written_while_the_source_waits_for_data() {
+async fn a_configured_ping_is_written_while_the_ingestor_waits_for_data() {
     let config = vec![ClientConfigEntry {
         key: "ping_interval_ms".to_string(),
         value: "10".to_string(),
     }];
-    let (mut source, mut peer) =
+    let (mut ingestor, mut peer) =
         tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
     let cancellation = IngestorReadCancellation::new();
-    let read = source.next_batch(
+    let read = ingestor.next_batch(
         IngestorBatchRequest {
             max_messages: std::num::NonZeroUsize::MIN,
             batch_timeout: None,
@@ -116,7 +116,7 @@ async fn a_configured_ping_is_written_while_the_source_waits_for_data() {
         batch.assured("a cancellation is an ordinary read outcome"),
         IngestorBatch::Interrupted { .. }
     ));
-    assert!(!source.needs_resume());
+    assert!(!ingestor.needs_resume());
 }
 
 #[nervix_primitives::test]
@@ -132,11 +132,11 @@ async fn a_silent_peer_expires_with_the_explicit_or_ping_derived_idle_bound() {
                 value: "100".to_string(),
             });
         }
-        let (mut source, _silent_peer) =
+        let (mut ingestor, _silent_peer) =
             tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
         let result = timeout(
             Duration::from_secs(60),
-            source.next_batch(
+            ingestor.next_batch(
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
                     batch_timeout: None,
@@ -145,7 +145,7 @@ async fn a_silent_peer_expires_with_the_explicit_or_ping_derived_idle_bound() {
             ),
         )
         .await
-        .assured("the source's idle bound ends its read");
+        .assured("the ingestor's idle bound ends its read");
         let Err(report) = result else {
             panic!("a peer that sends no frame must expire");
         };
@@ -157,7 +157,7 @@ async fn a_silent_peer_expires_with_the_explicit_or_ping_derived_idle_bound() {
             assert!(report.contains::<WebsocketsConnectionIngestorFailure>());
             assert!(rendered.contains("30ms idle read deadline"), "{rendered}");
         }
-        assert!(source.needs_resume());
+        assert!(ingestor.needs_resume());
     }
 }
 
@@ -168,12 +168,12 @@ async fn inbound_message_and_frame_limits_end_the_exact_connection_with_the_driv
             key: key.to_string(),
             value: "4".to_string(),
         }];
-        let (mut source, mut peer) =
+        let (mut ingestor, mut peer) =
             tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
         peer.send(Message::Binary(vec![0; 8]))
             .await
             .assured("the peer can send its small test frame");
-        let result = source
+        let result = ingestor
             .next_batch(
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
@@ -190,6 +190,6 @@ async fn inbound_message_and_frame_limits_end_the_exact_connection_with_the_driv
             report.current_context(),
             IngestorError::Read { .. }
         ));
-        assert!(source.needs_resume());
+        assert!(ingestor.needs_resume());
     }
 }
