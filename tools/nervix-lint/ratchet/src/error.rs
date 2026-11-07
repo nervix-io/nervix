@@ -1,11 +1,18 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: typed refusals of compiler orchestration and evidence validation.
+//! Owns: typed refusals of compiler orchestration, evidence validation and audit provenance.
 //! Depends on: paths and report-bearing errors.
 //! Must not know: rendered driver diagnostics or product failure policy.
 
 use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, error_stack::Report<Error>>;
+
+/// A captured external command diagnostic, retained below the audit's semantic context.
+#[derive(Debug, thiserror::Error)]
+#[error("{stderr}")]
+pub(crate) struct ProcessDiagnostic {
+    pub(crate) stderr: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -64,6 +71,8 @@ pub enum Error {
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum AuditRecord {
+    #[error("UTF-8 text")]
+    Text,
     #[error("baseline")]
     Baseline,
     #[error("commit")]

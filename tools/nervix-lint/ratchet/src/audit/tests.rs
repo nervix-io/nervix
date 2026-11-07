@@ -217,6 +217,14 @@ fn an_excerpt_keeps_the_lines_around_the_candidate_and_the_shorter_sides_end() {
     );
 }
 
+#[test]
+fn invalid_git_text_retains_its_utf8_failure_under_the_audit_context() {
+    let error = Git::decode(vec![0xff])
+        .err()
+        .assured("the fixture byte cannot start a UTF-8 scalar");
+    assert!(format!("{error:#}").contains("invalid UTF-8 text audit record"));
+}
+
 struct Repository {
     directory: TempDir,
 }
@@ -933,6 +941,12 @@ fn audit_inventory_selection_and_output_failures_keep_the_command_contract() {
         error.current_context(),
         crate::error::Error::AuditGit { .. }
     ));
+    let output = git
+        .output(&["rev-parse", "HEAD"])
+        .assured("the fixture Git process starts");
+    let stderr = String::from_utf8(output.stderr).assured("fixture Git emits UTF-8");
+    assert!(!stderr.is_empty());
+    assert!(format!("{error:#}").contains(stderr.trim()));
 }
 
 #[test]

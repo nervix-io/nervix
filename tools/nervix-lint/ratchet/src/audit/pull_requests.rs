@@ -16,7 +16,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 use super::{candidates::normalize, catalog::Rule, git::Git, report::Rewrite};
-use crate::error::{Error, Result};
+use crate::error::{Error, ProcessDiagnostic, Result};
 
 pub(super) trait GithubRead {
     fn read(&mut self, path: &str) -> Result<Vec<u8>>;
@@ -67,11 +67,13 @@ impl Api {
                 pause(Duration::from_secs(seconds));
             }
         }
-        Err(Report::new(Error::AuditGithub {
+        let diagnostic = ProcessDiagnostic {
+            stderr: failures.join("\n"),
+        };
+        Err(Report::new(diagnostic).change_context(Error::AuditGithub {
             path: path.into(),
             attempts: failures.len(),
-        })
-        .attach(failures.join("\n")))
+        }))
     }
 }
 

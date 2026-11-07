@@ -134,6 +134,7 @@ fn a_persisting_github_failure_ends_after_four_reads() {
         ]
     );
     assert!(format!("{error:?}").contains("gh: HTTP 502"));
+    assert_eq!(format!("{error:#}").matches("gh: HTTP 502").count(), 4);
 }
 
 #[test]

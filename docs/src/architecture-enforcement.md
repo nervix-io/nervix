@@ -512,7 +512,9 @@ space after separators. Report JSON uses the same escaping and ordering with com
 `audit.json` and `audit.md` land in `target/lint-audit/<first 16 of source identity>/`, or
 `--output-dir`. JSON is atomically replaced after a complete audit; Markdown and the per-kind
 total, recurring and suspected summary describe that same report. An analysis, history, GitHub or
-output failure exits nonzero. The outputs are generated
+output failure exits nonzero. Captured Git and GitHub diagnostics remain causes beneath the audit's
+typed operation context, so the CLI renders their complete text, including every exhausted read.
+The outputs are generated
 evidence: review dispositions, inventories and measurements belong on the owning task, and nothing
 reads them back as policy.
 

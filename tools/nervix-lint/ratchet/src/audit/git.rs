@@ -12,7 +12,7 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_primitives::{sync::blocking::Mutex, thread::scope};
 
-use crate::error::{Error, Result};
+use crate::error::{AuditRecord, Error, ProcessDiagnostic, Result};
 
 pub(super) struct Git {
     root: PathBuf,
@@ -37,14 +37,16 @@ impl Git {
     pub fn text(&self, arguments: &[&str]) -> Result<String> {
         let output = self.output(arguments)?;
         if !output.status.success() {
-            return Err(Report::new(Error::AuditGit {
+            let diagnostic = ProcessDiagnostic {
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            };
+            return Err(Report::new(diagnostic).change_context(Error::AuditGit {
                 arguments: arguments
                     .iter()
                     .map(|argument| (*argument).into())
                     .collect(),
                 status: output.status.code(),
-            })
-            .attach(String::from_utf8_lossy(&output.stderr).into_owned()));
+            }));
         }
         Self::decode(output.stdout).change_context(Error::Io {
             operation: "decode audit Git history",
@@ -109,7 +111,7 @@ impl Git {
         Ok(results)
     }
 
-    pub fn decode(mut bytes: Vec<u8>) -> std::result::Result<String, std::string::FromUtf8Error> {
+    pub fn decode(mut bytes: Vec<u8>) -> Result<String> {
         // Git reads keep the established text-mode universal-newline contract, in place, so
         // large blame/diff output does not need another complete buffer.
         let mut carriage_return = false;
@@ -121,7 +123,9 @@ impl Git {
             }
             !omit
         });
-        String::from_utf8(bytes)
+        String::from_utf8(bytes).change_context(Error::AuditRecord {
+            record: AuditRecord::Text,
+        })
     }
 
     pub fn lines(text: &str) -> impl Iterator<Item = &str> {
