@@ -501,6 +501,7 @@ impl EmitterDeclaration for IcebergTableEmitter {
             ConnectorKind::AzureBlob,
         ]),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::Parquet,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: IcebergTablePublishingMode::KINDS,

@@ -38,7 +38,7 @@ use nervix_interconnect::{
     LookupResponse as RemoteLookupResponse, RemoteOperationFailure, RemoteOperationSubject,
 };
 use nervix_models::{
-    ClusterNodeName, CodecName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    ClusterNodeName, CodecName, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
     CreateReingestor, CreateReorderer, CreateUdf, CreateWasmProcessor, CreateWindowProcessor,
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
@@ -1455,21 +1455,18 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeEmitter,
     ) -> CommandResult {
-        let DescribedModel {
-            config: emitter,
-            scheduled: scheduled_node,
-        } = match self
-            .described_model::<CreateEmitter>(domain, &describe.name)
-            .await
+        let schedule = self.inner.consensus.current_schedule().await;
+        let scheduled_domain = schedule.domain(domain);
+        let emitter_ref = NodeRef::new(ModelKind::Emitter, &describe.name);
+        let scheduled_node = scheduled_domain
+            .and_then(|domain| domain.nodes.get(&emitter_ref))
+            .cloned();
+        let configured = match self
+            .inner
+            .registry
+            .emitter_configuration(domain, &describe.name)
         {
-            Ok(Some(described)) => described,
-            Ok(None) => {
-                return command_error(format!(
-                    "emitter '{}' does not exist in domain '{}'",
-                    describe.name.as_str(),
-                    domain.as_str()
-                ));
-            }
+            Ok(configured) => configured,
             Err(error) => {
                 return command_error(format!(
                     "failed to read emitter '{}' in domain '{}': {error:?}",
@@ -1477,6 +1474,27 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
+        };
+        let (emitter, payload) = if let Some(configured) = configured {
+            configured
+        } else if let (Some(domain), Some(node)) = (scheduled_domain, scheduled_node.as_ref()) {
+            let emitter = CreateEmitter::from_model_ref(&node.config)
+                .assured("the schedule entry was resolved under the emitter kind");
+            let payload = emitter
+                .payload_presentation(|name| {
+                    domain
+                        .nodes
+                        .get(&NodeRef::new(ModelKind::Codec, name))
+                        .and_then(|node| CreateCodec::from_model_ref(&node.config))
+                })
+                .assured("one validated schedule contains every emitter codec");
+            (emitter.clone(), payload)
+        } else {
+            return command_error(format!(
+                "emitter '{}' does not exist in domain '{}'",
+                describe.name.as_str(),
+                domain.as_str()
+            ));
         };
         let status = self
             .dataflow_node_status_envelope_for_graph(
@@ -1501,6 +1519,7 @@ impl SessionServiceImpl {
         let description = match format_emitter_describe_output(
             &describe.name,
             &emitter,
+            &payload,
             scheduled_node.as_ref(),
             Some(&status),
         ) {

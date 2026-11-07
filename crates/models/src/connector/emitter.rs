@@ -222,6 +222,27 @@ impl EmitterBodyForm {
     }
 }
 
+/// The native payload boundary an entity prepares, or the codec that selects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum EmitterPayloadFormat {
+    #[strum(serialize = "codec")]
+    Codec,
+    #[strum(serialize = "Arrow IPC batch")]
+    ArrowIpc,
+    #[strum(serialize = "OTLP Export request")]
+    Otlp,
+    #[strum(serialize = "JSONEachRow insert")]
+    JsonEachRow,
+    #[strum(serialize = "binary-array insert")]
+    BinaryArrays,
+    #[strum(serialize = "parameterized insert")]
+    Parameters,
+    #[strum(serialize = "BSON bulk write")]
+    Bson,
+    #[strum(serialize = "Parquet data file")]
+    Parquet,
+}
+
 /// One publishing mode an emitter entity offers, and what a statement writes beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeclaredPublishing {
@@ -260,6 +281,8 @@ pub struct EmitterEntityCapabilities {
     pub reference: EmitterReferenceKind,
     /// How an emitter's body is formed.
     pub body: EmitterBodyForm,
+    /// The payload size boundary, selected by the codec or owned by this native entity.
+    pub payload: EmitterPayloadFormat,
     /// Whether an emitter may write the batching clause, and how large a batch may grow.
     pub batch: EmitterBatchLegality,
     /// Whether a batch can only be published through the codec's `ON EMITTING BATCH` value.

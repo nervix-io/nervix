@@ -384,6 +384,7 @@ impl EmitterDeclaration for SyslogCollectorEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Syslog),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: SyslogCollectorPublishingMode::KINDS,

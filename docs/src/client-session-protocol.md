@@ -1054,6 +1054,12 @@ resolves against the committed configuration with the session's own queued state
 while every other session sees committed configuration alone. Inspecting a transaction reads it
 without changing its binding, domain, activity, or queue position.
 
+Emitter inspection resolves its batching policy and effective payload container from one emitter
+and codec view on the serving node. The existing command output carries that projection to every
+client. Its owner-routed preparation counters distinguish encoded payloads from delivered source
+records; [Emitter payload preparation](./metrics-and-observability.md#emitter-payload-preparation)
+owns their units and retry counting.
+
 ## Leader Discovery, Redirect, And Reconnect
 
 ### What A Session Is Told

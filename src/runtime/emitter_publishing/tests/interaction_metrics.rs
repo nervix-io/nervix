@@ -33,7 +33,51 @@ struct DestinationProbe<'a> {
     context: &'a EmitterConnectorContext,
 }
 
+fn measured_buffer(context: &EmitterConnectorContext) -> EmitterBatchBuffer {
+    let mut buffer = EmitterBatchBuffer::new(
+        context,
+        &FlushPolicy::Immediate,
+        Arc::new(EmitterBufferedMessages::default()),
+    );
+    buffer.set_flush_policy(RuntimeFlushPolicy::Each {
+        interval: Duration::from_secs(60),
+        max_batch_size: 1,
+    });
+    buffer
+}
+
 impl DestinationProbe<'_> {
+    fn payload_sample(&self, family: &str, state: Option<&str>, expected: f64) {
+        let text = self.context.runtime.inner.metrics.prometheus_text();
+        let family = format!("{family}{{");
+        let emitter = format!("emitter=\"{}\"", self.context.emitter);
+        let mut observed = None;
+        for line in text.lines() {
+            if !line.starts_with(&family) || !line.contains(&emitter) {
+                continue;
+            }
+            if let Some(state) = state
+                && !line.contains(&format!("state=\"{state}\""))
+            {
+                continue;
+            }
+            let (_, value) = line
+                .rsplit_once(' ')
+                .assured("Prometheus samples end in a numeric value");
+            observed = Some(
+                value
+                    .parse::<f64>()
+                    .assured("the metric encoder emits numbers"),
+            );
+            break;
+        }
+        assert_eq!(
+            observed,
+            Some(expected),
+            "wrong or absent payload sample in {text}"
+        );
+    }
+
     fn assert_sample(&self, family: &str, operation: &str, outcome: Option<&str>, expected: f64) {
         let text = self.context.runtime.inner.metrics.prometheus_text();
         let emitter = format!("emitter=\"{}\"", self.context.emitter);
@@ -170,7 +214,7 @@ async fn a_staged_write_and_its_commit_are_separate_destination_attempts() {
         u64::MAX,
         None,
     )));
-    let mut buffer = releasing_buffer();
+    let mut buffer = measured_buffer(&context);
     let batch = EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
     assert!(
         publish(&mut connector, &context, &mut control, &mut buffer, batch)
@@ -182,16 +226,30 @@ async fn a_staged_write_and_its_commit_are_separate_destination_attempts() {
     metrics.durations("publish", 1.0);
     metrics.durations("commit", 0.0);
 
+    metrics.payload_sample("nervix_emitter_work_messages", Some("staged"), 1.0);
+
     let committed = connector
-        .commit_staged_once(&context, &mut control, &buffer, EmitterCommitReason::Drain)
+        .commit_staged_once(
+            &context,
+            &mut control,
+            &mut buffer,
+            EmitterCommitReason::Drain,
+        )
         .await
         .assured("the scripted staged rows commit successfully");
     assert_eq!(committed.map(|report| report.messages), Some(1));
+    metrics.payload_sample("nervix_emitter_work_messages", Some("staged"), 0.0);
+    metrics.payload_sample("nervix_emitter_work_messages", Some("in_flight"), 0.0);
     metrics.attempts("commit", "succeeded", 1.0);
     metrics.durations("commit", 1.0);
     assert!(
         connector
-            .commit_staged_once(&context, &mut control, &buffer, EmitterCommitReason::Drain)
+            .commit_staged_once(
+                &context,
+                &mut control,
+                &mut buffer,
+                EmitterCommitReason::Drain
+            )
             .await
             .assured("a commit with nothing staged is idle")
             .is_none()
@@ -219,7 +277,7 @@ async fn a_failed_commit_retains_staged_rows_and_counts_its_successful_retry_sep
             connector: "scripted",
         }),
     )));
-    let mut buffer = releasing_buffer();
+    let mut buffer = measured_buffer(&context);
     let batch = EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
     assert!(
         publish(&mut connector, &context, &mut control, &mut buffer, batch)
@@ -227,7 +285,12 @@ async fn a_failed_commit_retains_staged_rows_and_counts_its_successful_retry_sep
             .is_none()
     );
     let failure = match connector
-        .commit_staged_once(&context, &mut control, &buffer, EmitterCommitReason::Drain)
+        .commit_staged_once(
+            &context,
+            &mut control,
+            &mut buffer,
+            EmitterCommitReason::Drain,
+        )
         .await
     {
         Ok(_) => panic!("the scripted commit must report its transient failure"),
@@ -237,14 +300,22 @@ async fn a_failed_commit_retains_staged_rows_and_counts_its_successful_retry_sep
     assert_eq!(connector.staged_messages(), 1);
     let metrics = DestinationProbe { context: &context };
     metrics.attempts("commit", "transient", 1.0);
+    metrics.payload_sample("nervix_emitter_work_messages", Some("staged"), 1.0);
+    metrics.payload_sample("nervix_emitter_work_messages", Some("in_flight"), 0.0);
     metrics.attempts("commit", "succeeded", 0.0);
     metrics.durations("commit", 1.0);
     let committed = connector
-        .commit_staged_once(&context, &mut control, &buffer, EmitterCommitReason::Drain)
+        .commit_staged_once(
+            &context,
+            &mut control,
+            &mut buffer,
+            EmitterCommitReason::Drain,
+        )
         .await
         .assured("retry commits the retained staged row");
     assert_eq!(committed.map(|report| report.messages), Some(1));
     assert_eq!(connector.staged_messages(), 0);
+    metrics.payload_sample("nervix_emitter_work_messages", Some("staged"), 0.0);
     metrics.attempts("commit", "transient", 1.0);
     metrics.attempts("commit", "succeeded", 1.0);
     metrics.durations("commit", 2.0);
@@ -269,7 +340,7 @@ async fn unanswered_records_are_transient_and_their_retry_counts_one_success() {
         PublishAnswer::Members(vec![MemberAnswer::Unanswered]),
         PublishAnswer::ConfirmAll,
     ]);
-    let mut buffer = releasing_buffer();
+    let mut buffer = measured_buffer(&context);
     let batch = EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
     let failure = match connector
         .publish_batch(&context, &mut control, &mut buffer, batch)
@@ -296,6 +367,11 @@ async fn unanswered_records_are_transient_and_their_retry_counts_one_success() {
     metrics.attempts("publish", "transient", 1.0);
     metrics.attempts("publish", "violation", 0.0);
     metrics.durations("publish", 1.0);
+    metrics.payload_sample("nervix_emitter_payloads_total", None, 1.0);
+    metrics.payload_sample("nervix_emitter_payload_source_messages_total", None, 1.0);
+    metrics.payload_sample("nervix_emitter_payload_encoded_bytes_total", None, 11.0);
+    metrics.payload_sample("nervix_emitter_work_messages", Some("prepared"), 1.0);
+    metrics.payload_sample("nervix_emitter_work_messages", Some("in_flight"), 0.0);
     let published = connector
         .flush_buffer(&context, &mut control, &mut buffer)
         .await
@@ -305,6 +381,12 @@ async fn unanswered_records_are_transient_and_their_retry_counts_one_success() {
     metrics.attempts("publish", "succeeded", 1.0);
     metrics.attempts("publish", "transient", 1.0);
     metrics.durations("publish", 2.0);
+    metrics.payload_sample("nervix_emitter_payloads_total", None, 1.0);
+    metrics.payload_sample("nervix_emitter_payload_source_messages_total", None, 1.0);
+    metrics.payload_sample("nervix_emitter_payload_encoded_bytes_total", None, 11.0);
+    metrics.payload_sample("nervix_emitter_work_messages", Some("buffered"), 0.0);
+    metrics.payload_sample("nervix_emitter_work_messages", Some("prepared"), 0.0);
+    metrics.payload_sample("nervix_emitter_work_messages", Some("in_flight"), 0.0);
 }
 
 #[cfg(feature = "testing")]

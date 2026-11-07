@@ -266,6 +266,7 @@ const fn otel_capabilities(
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Otel),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::Otlp,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes,

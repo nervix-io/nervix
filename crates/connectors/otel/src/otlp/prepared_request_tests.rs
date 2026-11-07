@@ -17,7 +17,7 @@ fn config(entries: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
         .collect()
 }
 
-/// Host services the emitter under test never calls.
+/// Host services ignored by tests that inspect the prepared request bytes.
 struct SilentHost;
 
 impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
@@ -28,6 +28,11 @@ impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
 
 impl nervix_connector::EmitterEventReporter for SilentHost {
     fn report_error(&self, _message: String) {}
+}
+
+impl nervix_connector::EmitterPayloadObserver for SilentHost {
+    fn record_prepared_payload(&self, _measurement: nervix_connector::EmitterPayloadMeasurement) {}
+    fn record_payload_subdivisions(&self, _subdivisions: u64) {}
 }
 
 impl nervix_connector::EmitterStagingDirectory for SilentHost {

@@ -24,7 +24,7 @@ use nervix_connector::{
     MappedEmitterRows, RowEmitter, RowRequestEmitter,
 };
 
-use super::*;
+use super::{emitter_record_writes::PreparedContent as _, *};
 
 /// Why an emitter's `VALUES` mapping did not compile. The VM's own failure is beneath, and the
 /// emitter that starts the emitter names itself and its domain in the contexts above.
@@ -193,7 +193,11 @@ impl MappedRowEmitter {
             target_columns: self.projection.target_columns(),
             carriers,
         };
-        let outcome = self.connector.publish(write).await;
+        let outcome = {
+            let mut in_flight = context.interactions.work();
+            in_flight.set(crate::metrics::EmitterWorkKind::InFlight, rows.arch_into());
+            self.connector.publish(write).await
+        };
         let outcome = context.received_outcome(rows, outcome);
         RowAnswers::from(outcome)
             .apply(context, batches, acknowledgements)
@@ -318,7 +322,10 @@ impl EmitterConnector for MappedRequestEmitter {
                 occurred_at,
             )?;
             for request in checked.requests {
+                let messages = request.members.len().arch_into();
+                let bytes = request.content.prepared_bytes().arch_into();
                 row_requests.retain(request, batches)?;
+                context.interactions.record_payload(messages, bytes, bytes);
             }
             finish_rejected_records(
                 context,

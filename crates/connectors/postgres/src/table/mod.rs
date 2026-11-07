@@ -130,6 +130,7 @@ pub enum PostgresConflictAction {
 
 /// The Postgres emitter, which binds each mapped column as one text array of an `unnest` insert.
 pub struct PostgresTableEmitter {
+    host: EmitterHost,
     connections: Box<dyn PostgresConnections>,
     table: PostgresTableName,
     conflict_action: PostgresConflictAction,
@@ -498,7 +499,7 @@ impl PostgresTableEmitter {
     pub fn new(
         config: PostgresTableEmitterConfig,
         connections: Box<dyn PostgresConnections>,
-        _host: EmitterHost,
+        host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let PostgresTableEmitterConfig {
             table,
@@ -510,6 +511,7 @@ impl PostgresTableEmitter {
             table,
             conflict_action,
             limits: RowRequestLimits::from(batch).with_native_bytes(MESSAGE_LIMIT),
+            host,
         })
     }
 
@@ -874,6 +876,7 @@ impl RowEmitter for PostgresTableEmitter {
                 request: (),
             });
         if requests.subdivisions > 0 {
+            self.host.record_payload_subdivisions(requests.subdivisions);
             debug!(
                 table = self.table.as_str(),
                 subdivisions = requests.subdivisions,
@@ -884,8 +887,19 @@ impl RowEmitter for PostgresTableEmitter {
             nervix_primitives::task::consume_budget().await;
             let written = match request {
                 RowRequest::Write {
-                    members: written, ..
-                } => written,
+                    members: written,
+                    size,
+                    ..
+                } => {
+                    self.host.record_prepared_payload(
+                        nervix_connector::EmitterPayloadMeasurement::sized(
+                            u64::try_from(written.len())
+                                .assured("a request's row count fits the addressable range"),
+                            size,
+                        ),
+                    );
+                    written
+                }
                 RowRequest::Oversize { member, oversize } => {
                     let member = members[member];
                     outcome.reject(oversize.rejected(
@@ -1696,6 +1710,7 @@ mod tests {
     #[test]
     fn measures_the_statement_and_the_arrays_the_driver_encodes() {
         let connector = PostgresTableEmitter {
+            host: nervix_connector_fake::FakeEmitterHost::default().host(),
             connections: Box::new(NoConnections),
             table: PostgresTableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
                 .expect("the test table name is valid"),
@@ -1821,6 +1836,7 @@ mod tests {
                 let generated = &case.columns;
                 let rows = case.rows();
                 let connector = PostgresTableEmitter {
+                    host: nervix_connector_fake::FakeEmitterHost::default().host(),
                     connections: Box::new(NoConnections),
                     table: PostgresTableName::parse("events").assured("the table name is valid"),
                     conflict_action: PostgresConflictAction::None,
@@ -1898,6 +1914,7 @@ mod tests {
 
     fn emitter_without_connections() -> PostgresTableEmitter {
         PostgresTableEmitter {
+            host: nervix_connector_fake::FakeEmitterHost::default().host(),
             connections: Box::new(NoConnections),
             table: PostgresTableName::parse("events").expect("the test table name is valid"),
             conflict_action: PostgresConflictAction::None,

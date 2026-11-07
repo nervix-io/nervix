@@ -82,6 +82,7 @@ Feature: Syslog support
       quiesce: none
       envelope: none
       batch: none
+      batch container: SYSLOG record
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: syslog_events

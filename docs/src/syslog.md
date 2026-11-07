@@ -101,6 +101,16 @@ lists the missing fields.
 Timestamps are rendered in UTC. Nanosecond values are truncated to RFC 5424's maximum six
 fractional digits, and trailing fractional zeroes are omitted.
 
+The codec owns the RFC 5424 writer for both a record and a batch frame. It preserves validated
+structured data verbatim, including element and parameter order and escape spelling, and writes
+directly into the caller's bounded output. An empty message keeps its separating space; a leading
+message BOM is omitted. The transport applies its framing separately.
+
+The complete frame counts toward an emitter's payload byte limit. A batch frame also counts the
+JSON escaping around each complete member message; its header carries the first member's
+timestamp. See [batch containers](schemas-and-codecs.md#batch-containers) for the shared batching
+contract.
+
 Record-specific encoding failures follow the emitter's `ON MESSAGE ERROR` policy. These include:
 
 - a facility above 23 or severity above 7

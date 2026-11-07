@@ -107,6 +107,7 @@ impl EmitterDeclaration for SentryEventEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Sentry),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: true,
         publishing_modes: SentryEventPublishingMode::KINDS,
