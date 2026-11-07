@@ -23,7 +23,7 @@
     )
 )]
 
-use std::num::NonZeroUsize;
+use std::{net::SocketAddr, num::NonZeroUsize};
 
 use async_trait::async_trait;
 use bytes::{BufMut as _, buf::Limit};
