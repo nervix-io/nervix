@@ -7,19 +7,22 @@
 use std::{io, ptr, slice, time::Duration};
 
 use nervix_client_ffi::{
-    Cancel, CellState, ClockEvent, ClockEventKind, ClockState, DomainClock, Event, EventKind,
-    Execution, FailureKind, FieldType, Outcome, Part, Schema, Session, nx_cancel_free,
-    nx_cancel_new, nx_cancel_trigger, nx_cancel_with_deadline, nx_clock_event_domain,
-    nx_clock_event_generation, nx_clock_event_kind_of, nx_clock_event_paced,
+    Cancel, CellState, ClockEvent, ClockEventKind, ClockState, ConnectionOptions, DomainClock,
+    Event, EventKind, Execution, FailureKind, FieldType, Outcome, Part, Schema, Session,
+    nx_cancel_free, nx_cancel_new, nx_cancel_trigger, nx_cancel_with_deadline,
+    nx_clock_event_domain, nx_clock_event_generation, nx_clock_event_kind_of, nx_clock_event_paced,
     nx_clock_event_release, nx_clock_event_retain, nx_clock_event_state, nx_clock_event_tick,
-    nx_domain_clock_admission_window, nx_domain_clock_admits, nx_domain_clock_generation,
-    nx_domain_clock_logical_time_at, nx_domain_clock_paced, nx_domain_clock_release,
-    nx_domain_clock_retain, nx_domain_clock_state, nx_domain_clock_tick,
+    nx_connect_options_add_seed, nx_connect_options_basic_auth, nx_connect_options_ca_certificate,
+    nx_connect_options_free, nx_connect_options_new, nx_connect_options_timeout,
+    nx_connect_options_tls_requirement, nx_domain_clock_admission_window, nx_domain_clock_admits,
+    nx_domain_clock_generation, nx_domain_clock_logical_time_at, nx_domain_clock_paced,
+    nx_domain_clock_release, nx_domain_clock_retain, nx_domain_clock_state, nx_domain_clock_tick,
     nx_domain_clock_wall_duration_until, nx_error_execution_reference, nx_error_free,
     nx_error_kind_of, nx_error_message, nx_event_cell_varlen, nx_event_column_fixed,
     nx_event_column_states, nx_event_column_varlen, nx_event_frame, nx_event_kind_of,
-    nx_event_release, nx_event_retain, nx_event_row_count, nx_event_schema, nx_event_subscription,
-    nx_execution_free, nx_execution_reference, nx_outcome_diagnostic, nx_outcome_diagnostic_count,
+    nx_event_release, nx_event_restoration_message, nx_event_restoration_retry_after,
+    nx_event_retain, nx_event_row_count, nx_event_schema, nx_event_subscription, nx_execution_free,
+    nx_execution_reference, nx_outcome_diagnostic, nx_outcome_diagnostic_count,
     nx_outcome_disposition, nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message,
     nx_outcome_schema, nx_outcome_subscription, nx_schema_branch, nx_schema_field,
     nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_domain_clock,
@@ -94,6 +97,15 @@ pub(super) fn hex(bytes: &[u8]) -> String {
 
 /// An open session, freed when dropped.
 pub(super) struct OpenSession(pub(super) *mut Session);
+
+struct OwnedOptions(*mut ConnectionOptions);
+
+impl Drop for OwnedOptions {
+    fn drop(&mut self) {
+        // SAFETY: the handle is live and no connection call still reads it.
+        unsafe { nx_connect_options_free(self.0) };
+    }
+}
 
 impl Drop for OpenSession {
     fn drop(&mut self) {
@@ -174,22 +186,53 @@ impl Drop for Token {
 impl OpenSession {
     fn connect(target: &ProbeTarget) -> io::Result<Self> {
         let mut session = ptr::null_mut();
+        let options = OwnedOptions(nx_connect_options_new());
+        // SAFETY: the options handle is live, and the credential buffers outlive the setter.
+        check(unsafe {
+            nx_connect_options_basic_auth(
+                options.0,
+                target.username.as_ptr(),
+                target.username.len(),
+                target.password.as_ptr(),
+                target.password.len(),
+            )
+        })?;
+        if let Some(pem) = &target.ca_pem {
+            // SAFETY: the options handle is live, and the certificate bytes outlive the setter.
+            check(unsafe {
+                nx_connect_options_ca_certificate(options.0, pem.as_ptr(), pem.len())
+            })?;
+        }
+        if let Some(seed) = &target.seed_uri {
+            // SAFETY: the options handle is live; the seed bytes outlive this setter.
+            check(unsafe { nx_connect_options_tls_requirement(options.0, 2) })?;
+            let unavailable_seed = b"https://127.0.0.1:2";
+            check(unsafe {
+                nx_connect_options_add_seed(
+                    options.0,
+                    unavailable_seed.as_ptr(),
+                    unavailable_seed.len(),
+                )
+            })?;
+            check(unsafe { nx_connect_options_add_seed(options.0, seed.as_ptr(), seed.len()) })?;
+            for (kind, millis) in [(1, 250), (2, 30_000), (3, 30_000)] {
+                check(unsafe { nx_connect_options_timeout(options.0, kind, millis) })?;
+            }
+        }
         // SAFETY: every text argument addresses its length in readable bytes, and `session` is
         // writable.
-        check(unsafe {
+        let connected = check(unsafe {
             nx_session_connect(
                 target.grpc_uri.as_ptr(),
                 target.grpc_uri.len(),
                 target.domain.as_ptr(),
                 target.domain.len(),
-                target.username.as_ptr(),
-                target.username.len(),
-                target.password.as_ptr(),
-                target.password.len(),
+                options.0,
                 ptr::null(),
                 &mut session,
             )
-        })?;
+        });
+        connected?;
         Ok(Self(session))
     }
 
@@ -1044,6 +1087,11 @@ pub(super) fn run(target: &ProbeTarget, emit: &mut Emit<'_>) -> io::Result<()> {
             rows,
         } => run_subscription(&session, relay, subscription, *rows, emit),
         ProbeExercise::DomainClock => run_domain_clock(&session, &target.domain, emit),
+        ProbeExercise::Connection => run_connection(&session, emit),
+        ProbeExercise::Restoration {
+            relay,
+            subscription,
+        } => run_restoration(&session, relay, subscription, emit),
         ProbeExercise::Endpoints { ingestor, emitter } => {
             super::c_abi_endpoints::run(&session, &target.domain, ingestor, emitter, emit)
         }
@@ -1051,6 +1099,115 @@ pub(super) fn run(target: &ProbeTarget, emit: &mut Emit<'_>) -> io::Result<()> {
             super::c_abi_upload::run(&session, query, payload, emit)
         }
     }
+}
+
+fn run_connection(session: &OpenSession, emit: &mut Emit<'_>) -> io::Result<()> {
+    emit("CONNECTED seed")?;
+    let deadline = Token::with_deadline(20)?;
+    let mut event = ptr::null_mut();
+    // SAFETY: the session and deadline are live; the event output is writable.
+    let failure = unsafe { nx_session_next_event(session.0, deadline.0, &mut event) };
+    if expect_failure(failure)? != FailureKind::Deadline {
+        return Err(io::Error::other(
+            "an empty event stream did not wait until its deadline",
+        ));
+    }
+    emit("EVENT wait=deadline")?;
+    for (label, query) in [
+        ("ATTACH", "ATTACH DOMAIN CLOCK;"),
+        ("SUBSCRIBE", "CREATE SUBSCRIPTION probe TO events;"),
+        ("DELETE", "DELETE SUBSCRIPTION probe;"),
+    ] {
+        let mut execution = ptr::null_mut();
+        // SAFETY: the session is live, the query bytes and outputs are valid.
+        check(unsafe {
+            nx_session_prepare(
+                session.0,
+                query.as_ptr(),
+                query.len(),
+                ptr::null(),
+                &mut execution,
+            )
+        })?;
+        let mut first = ptr::null_mut();
+        let mut again = ptr::null_mut();
+        // SAFETY: the session and execution are live; outputs are writable. Every handle is freed.
+        let report = unsafe {
+            let first_result = check(nx_session_execute(
+                session.0,
+                execution,
+                ptr::null(),
+                &mut first,
+            ));
+            let again_result = first_result.and_then(|()| {
+                check(nx_session_execute(
+                    session.0,
+                    execution,
+                    ptr::null(),
+                    &mut again,
+                ))
+            });
+            nx_execution_free(execution);
+            again_result
+        };
+        report?;
+        let first = OwnedOutcome(first);
+        let again = OwnedOutcome(again);
+        emit(&format!(
+            "{label} first={} replay={}",
+            first.disposition(),
+            again.disposition()
+        ))?;
+    }
+    emit("CHECKS ok")?;
+    emit("PASS")
+}
+
+fn run_restoration(
+    session: &OpenSession,
+    relay: &str,
+    subscription: &str,
+    emit: &mut Emit<'_>,
+) -> io::Result<()> {
+    let opened = session.execute(&format!("CREATE SUBSCRIPTION {subscription} TO {relay};"))?;
+    if opened.disposition() != "completed" {
+        return Err(io::Error::other("the subscription was not opened"));
+    }
+    emit("SUBSCRIBED")?;
+    let deadline = Token::with_deadline(120_000)?;
+    let interrupted = session.next_event(&deadline)?;
+    if interrupted.kind() != EventKind::Interrupted {
+        return Err(io::Error::other(
+            "the lost session did not interrupt its subscription",
+        ));
+    }
+    emit("INTERRUPTED")?;
+    let failed = session.next_event(&deadline)?;
+    if failed.kind() != EventKind::RestorationFailed {
+        return Err(io::Error::other(
+            "the refused reopening did not report a restoration failure",
+        ));
+    }
+    let mut message = ptr::null();
+    let mut len = 0;
+    let mut nanos = 0;
+    // SAFETY: the event is live and the outputs are writable; the returned text is copied before
+    // this reference is released.
+    let text = unsafe {
+        check(nx_event_restoration_message(
+            failed.0,
+            &mut message,
+            &mut len,
+        ))?;
+        check(nx_event_restoration_retry_after(failed.0, &mut nanos))?;
+        String::from_utf8(copied(message, len)).map_err(io::Error::other)?
+    };
+    if nanos == 0 {
+        return Err(io::Error::other("the restoration retry wait was zero"));
+    }
+    emit(&format!("RESTORATION message={text} wait=positive"))?;
+    emit("CHECKS ok")?;
+    emit("PASS")
 }
 
 /// Reads rows through a subscription, with an operation and a failing command before it.

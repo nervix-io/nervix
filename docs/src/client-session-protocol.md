@@ -613,6 +613,10 @@ execution reference like any other lost reply.
 ## Command Dispositions
 
 Client CONFIG validation uses the ordinary failed-command outcome before configuration commits.
+An invalid connector/entity mode, option, envelope, metadata read or header write that the registry
+can judge from the declaration is likewise a failed command before graph publication. These
+refusals add no command disposition: the client still decides from the typed disposition and
+recovers an uncertain attempt under its original execution reference.
 The registry checks declared keys and the composition root runs network-free driver checks for
 standalone mutations and transaction preflight. Refusals name the client and key without rendering
 driver values that may contain credentials. A refused transaction statement leaves the transaction
@@ -2089,6 +2093,12 @@ If no earlier attempt could have been admitted, authentication or other server r
 before a response, a declared `RestoreUploadFailed`, and local archive refusals keep their
 definitive meaning. An unreadable reply is no evidence of refusal.
 
+A restore's uncertainty belongs to its execution reference across attempts. If an earlier attempt
+handed over the whole archive without learning its outcome, or received `OutcomeUnknown`, a
+later local read error, stream refusal, or `ExecutionReferenceExpired` does not settle it. The
+Rust client preserves the original reference as uncertain with the later typed cause beneath it;
+only an outcome that establishes the restore's result settles the execution.
+
 Only the leader the archive was streamed to holds it, until the restore finishes or the retry
 validity of its reference ends. If leadership moves, or that leader restarts, while the restore
 applies, the reply is a `LeaderRedirect` or the call fails, and repeating the stream on the new
@@ -2198,10 +2208,18 @@ The C ABI's lifecycle follows from that choice:
   and its producers, consumers and deliveries keep it running until they are released too. Every
   object a function hands out is owned by the caller and has exactly one release function, and a
   borrowed pointer stays valid only until the object it was read from is released.
-- **Execution identity.** `nx_session_prepare` captures one command and its durable execution
-  reference before anything is sent. `nx_session_execute` runs it, and running the same prepared
-  execution again after an uncertain, cancelled, or timed-out call recovers the command's outcome
-  instead of running it twice. Every failure of `nx_session_execute` names that reference.
+- **Connection policy.** A host builds an `nx_connect_options` handle with copied credentials,
+  a TLS requirement, copied CA PEM, additional seed URLs and connect, request, retry and backup
+  wait deadlines. `nx_session_connect` reads a snapshot of that handle and applies the Rust
+  client's URL, TLS and deadline validation. A session begun at an HTTPS URL requires HTTPS on
+  every seed and redirect, even when the host selected preferred TLS.
+- **Execution identity.** `nx_session_prepare` captures one statement and a reference before
+  anything is sent. For a durable command, `nx_session_execute` reuses that reference, so running
+  the same prepared execution after uncertainty, cancellation or timeout recovers its outcome.
+  CREATE SUBSCRIPTION, DELETE SUBSCRIPTION and ATTACH or DETACH DOMAIN CLOCK are session-local
+  requests without durable outcome identity. Repeating CREATE, DELETE or ATTACH can be refused
+  even when the first succeeded; a repeated DELETE fails when the subscription is already absent.
+  The host inspects the session state or events to establish the earlier effect.
 - **Threads.** Each session runs on a runtime of its own, with two threads the library owns. The
   library never calls host code, so no host function ever runs on a library thread. Every blocking
   call runs on the calling thread until it completes, fails, or is cancelled, and a session may be
@@ -2222,6 +2240,12 @@ The C ABI's lifecycle follows from that choice:
   `nx_event_cell_varlen` borrows one string or bytes value. Events are reference counted:
   `nx_event_retain` adds a reference, and the event and its frame are freed with the last
   `nx_event_release`, from any thread.
+- **Restoration failures.** A subscription or clock event with kind `RESTORATION_FAILED` exposes
+  the server or local failure message as borrowed bytes and the wait until the next attempt as
+  unsigned nanoseconds. Accessors return `NX_ERROR_TYPE` for other kinds and
+  `NX_ERROR_INVALID_ARGUMENT` for missing outputs. `NX_ERROR_OVERFLOW` is returned when the
+  bounded subscription event queue loses unread events; a per-subscription consumer overflow is
+  delivered as `NX_EVENT_CONSUMER_OVERFLOW` instead.
 - **Clock events.** `nx_session_next_clock_event` uses the same cancellation and deadline rules as
   the subscription wait, but returns a separate `nx_clock_event` reference. Its kind, domain,
   generation, state, paced mapping, tick and end-reason accessors expose the fields each event

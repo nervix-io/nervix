@@ -30,7 +30,7 @@ Feature: Conditional expressions
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge conditional-expression-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR calculation_source
+      CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations
@@ -101,7 +101,7 @@ Feature: Conditional expressions
       CREATE RELAY conditional_summaries SCHEMA conditional_summary UNBRANCHED;
       CREATE VHOST edge conditional-window-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/conditional-window' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR conditional_sample_source
+      CREATE HTTP ENDPOINT INGESTOR conditional_sample_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_sample_codec
         TO conditional_samples
@@ -180,7 +180,7 @@ Feature: Conditional expressions
       CREATE RELAY conditional_outputs SCHEMA conditional_output UNBRANCHED;
       CREATE VHOST edge conditional-forms-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/conditional-forms' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR conditional_source
+      CREATE HTTP ENDPOINT INGESTOR conditional_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_input_codec
         TO conditional_inputs
@@ -274,7 +274,7 @@ Feature: Conditional expressions
       CREATE RELAY routed_text_errors SCHEMA routed_text_error UNBRANCHED;
       CREATE VHOST edge nested-arms-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/routed-texts' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR routed_text_source
+      CREATE HTTP ENDPOINT INGESTOR routed_text_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_text_codec
         TO routed_texts
@@ -399,7 +399,7 @@ Feature: Conditional expressions
       CREATE RELAY support_decisions SCHEMA support_decision UNBRANCHED;
       CREATE VHOST edge guarded-udf-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/support-requests' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR support_request_source
+      CREATE HTTP ENDPOINT INGESTOR support_request_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING support_request_codec
         TO support_requests
@@ -471,7 +471,7 @@ Feature: Conditional expressions
       CREATE RELAY routed_notes SCHEMA routed_note UNBRANCHED;
       CREATE VHOST edge header-arms-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/notes' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR note_source
+      CREATE HTTP ENDPOINT INGESTOR note_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tagged_note_codec
         TO routed_notes

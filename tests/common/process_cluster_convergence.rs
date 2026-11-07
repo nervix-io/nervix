@@ -12,7 +12,7 @@
 //!   leadership and availability.
 //!
 //! The members have converged when every member reports the same leader, lists every member as a
-//! voter, and reports that its latest application-health probe of every other member reached that
+//! voter in a committed uniform configuration, and reports that its latest application-health probe of every other member reached that
 //! member's application. Agreement on Raft alone does not make a relaunched member usable: its
 //! killed process never left the voter configuration, so the voters agree as soon as the new
 //! process follows the leader, while every peer still judges the member by what it learned of the
@@ -81,6 +81,8 @@ struct MemberStatus {
     /// The member the status names as Raft leader, absent while it knows none.
     leader: Option<String>,
     voters: BTreeSet<String>,
+    membership_joint: Option<bool>,
+    membership_committed: Option<bool>,
     /// The target through which this member observes each peer, by the peer's node name.
     targets: BTreeMap<String, PeerTarget>,
 }
@@ -98,6 +100,8 @@ impl MemberStatus {
         let mut read = Self {
             leader: None,
             voters: BTreeSet::new(),
+            membership_joint: None,
+            membership_committed: None,
             targets: BTreeMap::new(),
         };
         let mut section = StatusSection::Other;
@@ -106,6 +110,13 @@ impl MemberStatus {
                 && leader != NO_LEADER
             {
                 read.leader = Some(leader.to_string());
+            }
+            if let Some(value) = line.strip_prefix("raft.membership_joint: ") {
+                read.membership_joint = Some(value.parse().map_err(|_| unreadable(member, line))?);
+            }
+            if let Some(value) = line.strip_prefix("raft.membership_committed: ") {
+                read.membership_committed =
+                    Some(value.parse().map_err(|_| unreadable(member, line))?);
             }
             if line == MEMBERSHIP_HEADER {
                 section = StatusSection::Membership;
@@ -211,6 +222,13 @@ impl MemberStatus {
                 leader: leader.clone(),
             });
         }
+        if self.membership_joint != Some(false) || self.membership_committed != Some(true) {
+            return Err(Divergence::MembershipPending {
+                member: member.to_string(),
+                joint: self.membership_joint,
+                committed: self.membership_committed,
+            });
+        }
         for voter in members {
             if !self.voters.contains(voter) {
                 return Err(Divergence::VoterMissing {
@@ -314,6 +332,15 @@ pub(crate) enum Divergence {
         leader: String,
         other: String,
         other_leader: String,
+    },
+    #[error(
+        "member '{member}' has not converged on committed uniform membership: joint={joint:?}, \
+         committed={committed:?}"
+    )]
+    MembershipPending {
+        member: String,
+        joint: Option<bool>,
+        committed: Option<bool>,
     },
     #[error("member '{member}' does not list '{voter}' as a voter")]
     VoterMissing { member: String, voter: String },
@@ -603,5 +630,43 @@ impl ClusterConvergence {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod membership_tests {
+    use meticulous::ResultExt as _;
+
+    use super::{BTreeSet, MemberStatus};
+
+    #[rstest::rstest]
+    #[case(true, true, false)]
+    #[case(true, false, false)]
+    #[case(false, false, false)]
+    #[case(false, true, true)]
+    fn convergence_requires_committed_uniform_membership_even_when_every_voter_is_present(
+        #[case] joint: bool,
+        #[case] committed: bool,
+        #[case] ready: bool,
+    ) {
+        let members = BTreeSet::from([
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ]);
+        let status = format!(
+            "raft.current_leader: node-1\nraft.membership_joint: \
+             {joint}\nraft.membership_committed: {committed}\nraft.membership:\n- node-1 [voter] \
+             127.0.0.1:41001\n- node-2 [voter] 127.0.0.1:41002\n- node-3 [voter] \
+             127.0.0.1:41003\n[interconnect]\n- node-2: addr=127.0.0.1:41002 generation=1 \
+             status=connected\n- node-3: addr=127.0.0.1:41003 generation=2 status=connected"
+        );
+        let read = MemberStatus::read("node-1", &status)
+            .assured("the fixture is a current cluster status");
+        assert_eq!(
+            read.converged_leader("node-1", &members, None).is_ok(),
+            ready,
+            "joint={joint}, committed={committed}"
+        );
     }
 }

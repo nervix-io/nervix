@@ -395,31 +395,25 @@ fn derive_peer_addr_returns_none_on_port_overflow() {
 }
 
 #[test]
-fn runtime_revision_readiness_advances_monotonically() {
+fn the_installed_domain_clock_revision_advances_monotonically() {
     let mut state = NodeState::for_test();
+    assert!(!revision_is_at_least(
+        &state,
+        KEY_DOMAIN_CLOCK_REVISION_INSTALLED,
+        0
+    ));
 
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 12);
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 11);
-    assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("12"));
-
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 13);
-    assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("13"));
-}
-
-#[test]
-fn runtime_preparation_and_completion_advance_independently() {
-    let mut state = NodeState::for_test();
-
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_PREPARED, 8);
+    advance_revision(&mut state, KEY_DOMAIN_CLOCK_REVISION_INSTALLED, 12);
+    advance_revision(&mut state, KEY_DOMAIN_CLOCK_REVISION_INSTALLED, 11);
+    assert_eq!(state.get(KEY_DOMAIN_CLOCK_REVISION_INSTALLED), Some("12"));
     assert!(revision_is_at_least(
         &state,
-        KEY_RUNTIME_REVISION_PREPARED,
-        8
+        KEY_DOMAIN_CLOCK_REVISION_INSTALLED,
+        12
     ));
-    assert!(!revision_is_at_least(&state, KEY_RUNTIME_REVISION_READY, 8));
 
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 8);
-    assert!(revision_is_at_least(&state, KEY_RUNTIME_REVISION_READY, 8));
+    advance_revision(&mut state, KEY_DOMAIN_CLOCK_REVISION_INSTALLED, 13);
+    assert_eq!(state.get(KEY_DOMAIN_CLOCK_REVISION_INSTALLED), Some("13"));
 }
 
 #[test]

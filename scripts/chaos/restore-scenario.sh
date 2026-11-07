@@ -431,7 +431,7 @@ restore_take_archive() {
     local archive_dir="${case_dir}/archive"
     mkdir -p "${archive_dir}"
     wait_for 'source baseline' 40 topic_progressed chaos_input 9
-    wait_for 'acknowledged sink baseline' 60 topic_progressed chaos_output 9
+    wait_for 'acknowledged emitter baseline' 60 topic_progressed chaos_output 9
     backup_archive_domain "${archive_dir}" chaos_baseline "${archive_dir}/domain.nvxb" \
         "${archive_dir}/report.json" \
         || restore_fail product 'the packaged CLI could not create the quiesced archive'

@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Kafka consumer configuration, polling, headers and metadata, partition assignment,
 //!   offset acknowledgement, partition inspection, consumer retirement, and the opaque services
-//!   through which a ingestor reads and advances host-owned domain offsets.
+//!   through which an ingestor reads and advances host-owned domain offsets.
 //! - **Depends on.** The connector contract, Kafka vocabulary values, the bounded executor,
 //!   the primitive boundary, `error-stack` and `rust-rdkafka`.
 //! - **Must not know.** Runtime offset-state types, domain execution maps, relays, branches,
@@ -193,7 +193,7 @@ impl KafkaDomainOffsetHost {
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
-            "Kafka resume installs its exact domain-offset placement before polling; the source \
+            "Kafka resume installs its exact domain-offset placement before polling; the ingestor \
              retains the resulting position",
             self.inner.services.initialization(partitions)
         )
@@ -309,9 +309,9 @@ pub struct KafkaTopicIngestorPlan {
 
 #[derive(Debug, Error)]
 pub enum KafkaTopicIngestorError {
-    #[error("the {connector} source cannot admit its control call", connector = ConnectorKind::Kafka)]
+    #[error("the {connector} ingestor cannot admit its control call", connector = ConnectorKind::Kafka)]
     ControlAdmission,
-    #[error("the {connector} source control call could not run", connector = ConnectorKind::Kafka)]
+    #[error("the {connector} ingestor control call could not run", connector = ConnectorKind::Kafka)]
     ControlExecution,
     #[error("the {connector} control call did not finish within socket.timeout.ms {bound}", connector = ConnectorKind::Kafka, bound = humantime::format_duration(*timeout))]
     ControlTimeout { timeout: Duration },

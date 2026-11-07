@@ -16,7 +16,7 @@
 
 use nervix_client_wire::{
     CancellationStage, ClientRequest, ClientRequestKind, CommandDisposition, EmitterOpenRefusal,
-    ReplyBody, ReplyBodyKind, RequestRejection,
+    ReplyBody, ReplyBodyKind, RequestRejection, RestoreUploadFailure,
 };
 use nervix_models::{ClientProducerRefusal, CommandExecutionReference, ResourceUploadIdentity};
 use thiserror::Error;
@@ -270,6 +270,12 @@ pub enum ClientError {
     EmptyRestoreArchive { path: std::path::PathBuf },
     #[error("restore request failed")]
     Restore(#[source] Box<tonic::Status>),
+    /// A later stream refusal cannot establish what an earlier uncertain restore did.
+    #[error("the restore stream was refused ({failure:?}): {message}")]
+    RestoreStreamRefused {
+        failure: RestoreUploadFailure,
+        message: String,
+    },
     /// The wire codec's report is beneath.
     #[error("the restore reply does not decode")]
     InvalidRestoreReply,

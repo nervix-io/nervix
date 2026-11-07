@@ -210,6 +210,10 @@ pub(crate) struct ProbeTarget {
     pub(crate) websocket_uri: String,
     pub(crate) username: String,
     pub(crate) password: String,
+    /// Custom trust root for an HTTPS gRPC target; empty for ordinary HTTP scenarios.
+    pub(crate) ca_pem: Option<String>,
+    /// A configured endpoint that should recover an unavailable initial address.
+    pub(crate) seed_uri: Option<String>,
     pub(crate) domain: String,
     /// The leader-only operation's identity, held to its redirect and outcome by the fixture.
     pub(crate) execution_reference: String,
@@ -236,6 +240,11 @@ pub(crate) enum ProbeExercise {
     Endpoints { ingestor: String, emitter: String },
     /// Repeats a prepared local upload, then changes its source file under the same identity.
     ResourceUpload { query: String, payload: PathBuf },
+    /// Connects through a live seed after an unavailable initial address, then checks that
+    /// session-local execution is a new request rather than durable outcome recovery.
+    Connection,
+    /// Reads a refused restoration after the scenario ends the session and removes the relay.
+    Restoration { relay: String, subscription: String },
 }
 
 impl ProbeExercise {
@@ -246,6 +255,8 @@ impl ProbeExercise {
             Self::DomainClock => Some("clock"),
             Self::Endpoints { .. } => Some("io"),
             Self::ResourceUpload { .. } => Some("upload"),
+            Self::Connection => Some("connection"),
+            Self::Restoration { .. } => Some("restoration"),
         }
     }
 
@@ -253,7 +264,11 @@ impl ProbeExercise {
     fn needs_binding(&self) -> bool {
         match self {
             Self::Subscription { .. } => false,
-            Self::DomainClock | Self::Endpoints { .. } | Self::ResourceUpload { .. } => true,
+            Self::DomainClock
+            | Self::Endpoints { .. }
+            | Self::ResourceUpload { .. }
+            | Self::Connection
+            | Self::Restoration { .. } => true,
         }
     }
 }
@@ -272,6 +287,12 @@ impl ProbeTarget {
                 self.execution_reference.clone(),
             ),
         ]);
+        if let Some(pem) = &self.ca_pem {
+            environment.insert("NERVIX_PROBE_CA_PEM", pem.clone());
+        }
+        if let Some(seed) = &self.seed_uri {
+            environment.insert("NERVIX_PROBE_SEED_URI", seed.clone());
+        }
         match &self.exercise {
             ProbeExercise::Subscription {
                 relay,
@@ -283,6 +304,14 @@ impl ProbeTarget {
                 environment.insert("NERVIX_PROBE_ROWS", rows.to_string());
             }
             ProbeExercise::DomainClock => {}
+            ProbeExercise::Connection => {}
+            ProbeExercise::Restoration {
+                relay,
+                subscription,
+            } => {
+                environment.insert("NERVIX_PROBE_RELAY", relay.clone());
+                environment.insert("NERVIX_PROBE_SUBSCRIPTION", subscription.clone());
+            }
             ProbeExercise::Endpoints { ingestor, emitter } => {
                 environment.insert("NERVIX_PROBE_INGESTOR", ingestor.clone());
                 environment.insert("NERVIX_PROBE_EMITTER", emitter.clone());

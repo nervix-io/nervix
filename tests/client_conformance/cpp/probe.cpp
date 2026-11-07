@@ -68,6 +68,8 @@ template <typename T, void (*Release)(T *)> struct Releaser {
 };
 
 using Session = std::unique_ptr<nx_session, Releaser<nx_session, nx_session_free>>;
+using ConnectOptions =
+    std::unique_ptr<nx_connect_options, Releaser<nx_connect_options, nx_connect_options_free>>;
 using Execution = std::unique_ptr<nx_execution, Releaser<nx_execution, nx_execution_free>>;
 using Outcome = std::unique_ptr<nx_outcome, Releaser<nx_outcome, nx_outcome_free>>;
 using Schema = std::unique_ptr<nx_schema, Releaser<nx_schema, nx_schema_free>>;
@@ -315,6 +317,74 @@ nx_error_kind failure_kind(const std::function<void()> &call) {
         return failure.kind;
     }
     throw std::runtime_error("a call succeeded where it had to fail");
+}
+
+void replay_session_local(const Session &session, const char *label, const char *query) {
+    nx_execution *raw_execution = nullptr;
+    check(nx_session_prepare(session.get(), bytes(query), std::strlen(query), nullptr,
+                             &raw_execution));
+    Execution execution(raw_execution);
+    nx_outcome *raw_first = nullptr;
+    nx_outcome *raw_again = nullptr;
+    check(nx_session_execute(session.get(), execution.get(), nullptr, &raw_first));
+    Outcome first(raw_first);
+    check(nx_session_execute(session.get(), execution.get(), nullptr, &raw_again));
+    Outcome again(raw_again);
+    std::cout << label << " first=" << disposition_name(nx_outcome_disposition(first.get()))
+              << " replay=" << disposition_name(nx_outcome_disposition(again.get())) << std::endl;
+}
+
+void run_connection(const Session &session) {
+    std::cout << "CONNECTED seed" << std::endl;
+    Cancel deadline = with_deadline(20);
+    if (failure_kind([&] {
+            nx_event *event = nullptr;
+            check(nx_session_next_event(session.get(), deadline.get(), &event));
+            Event owned(event);
+        }) != NX_ERROR_DEADLINE) {
+        throw std::runtime_error("an empty event stream did not wait until its deadline");
+    }
+    std::cout << "EVENT wait=deadline" << std::endl;
+    replay_session_local(session, "ATTACH", "ATTACH DOMAIN CLOCK;");
+    replay_session_local(session, "SUBSCRIBE", "CREATE SUBSCRIPTION probe TO events;");
+    replay_session_local(session, "DELETE", "DELETE SUBSCRIPTION probe;");
+    std::cout << "CHECKS ok" << std::endl << "PASS" << std::endl;
+}
+
+void run_restoration(const Session &session) {
+    const std::string query = "CREATE SUBSCRIPTION " + env("NERVIX_PROBE_SUBSCRIPTION") +
+                              " TO " + env("NERVIX_PROBE_RELAY") + ";";
+    Outcome opened = execute(session, query, nullptr);
+    if (nx_outcome_disposition(opened.get()) != NX_DISPOSITION_COMPLETED) {
+        throw std::runtime_error("the subscription was not opened");
+    }
+    std::cout << "SUBSCRIBED" << std::endl;
+
+    nx_event *raw_event = nullptr;
+    check(nx_session_next_event(session.get(), nullptr, &raw_event));
+    Event interrupted(raw_event);
+    if (nx_event_kind_of(interrupted.get()) != NX_EVENT_INTERRUPTED) {
+        throw std::runtime_error("the lost session did not interrupt its subscription");
+    }
+    std::cout << "INTERRUPTED" << std::endl;
+
+    raw_event = nullptr;
+    check(nx_session_next_event(session.get(), nullptr, &raw_event));
+    Event failed(raw_event);
+    if (nx_event_kind_of(failed.get()) != NX_EVENT_RESTORATION_FAILED) {
+        throw std::runtime_error("the refused reopening did not report a restoration failure");
+    }
+    const uint8_t *message = nullptr;
+    size_t message_len = 0;
+    uint64_t wait_nanos = 0;
+    check(nx_event_restoration_message(failed.get(), &message, &message_len));
+    check(nx_event_restoration_retry_after(failed.get(), &wait_nanos));
+    if (wait_nanos == 0) {
+        throw std::runtime_error("the restoration retry wait was zero");
+    }
+    std::cout << "RESTORATION message=" << borrowed(message, message_len)
+              << " wait=positive" << std::endl;
+    std::cout << "CHECKS ok" << std::endl << "PASS" << std::endl;
 }
 
 void check_cancellation(const Session &session) {
@@ -1794,13 +1864,37 @@ void run(const std::string &mode) {
     const std::string password = env("NERVIX_PROBE_PASSWORD");
     const std::string domain = env("NERVIX_PROBE_DOMAIN");
 
+    ConnectOptions options(nx_connect_options_new());
+    check(nx_connect_options_basic_auth(options.get(), bytes(username), username.size(),
+                                        bytes(password), password.size()));
+    if (const char *ca_pem = std::getenv("NERVIX_PROBE_CA_PEM")) {
+        check(nx_connect_options_ca_certificate(options.get(), bytes(ca_pem),
+                                                std::strlen(ca_pem)));
+    }
+    if (const char *seed = std::getenv("NERVIX_PROBE_SEED_URI")) {
+        const char *unavailable_seed = "https://127.0.0.1:2";
+        check(nx_connect_options_tls_requirement(options.get(), NX_TLS_REQUIRED));
+        check(nx_connect_options_add_seed(options.get(), bytes(unavailable_seed),
+                                          std::strlen(unavailable_seed)));
+        check(nx_connect_options_add_seed(options.get(), bytes(seed), std::strlen(seed)));
+        check(nx_connect_options_timeout(options.get(), NX_TIMEOUT_CONNECT, 250));
+        check(nx_connect_options_timeout(options.get(), NX_TIMEOUT_REQUEST, 30000));
+        check(nx_connect_options_timeout(options.get(), NX_TIMEOUT_RETRY, 30000));
+    }
     nx_session *raw_session = nullptr;
     check(nx_session_connect(bytes(server), server.size(), bytes(domain), domain.size(),
-                             bytes(username), username.size(), bytes(password), password.size(),
-                             nullptr, &raw_session));
+                             options.get(), nullptr, &raw_session));
     Session session(raw_session);
     if (mode == "upload") {
         run_upload(session);
+        return;
+    }
+    if (mode == "connection") {
+        run_connection(session);
+        return;
+    }
+    if (mode == "restoration") {
+        run_restoration(session);
         return;
     }
     if (mode == "clock") {

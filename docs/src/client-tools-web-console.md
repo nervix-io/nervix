@@ -164,7 +164,9 @@ fixed arrays; each fixed array needs a positive length. Optional and sensitive f
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
 mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; CBOR offers `integer`,
 `float`, `boolean`, `text`, `bytes`, and `array`, with native byte strings for `bytes`. AVRO offers
-`boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
+the item types `boolean`, `int`, `long`, `float`, `double`, `string`, and `bytes`, and wraps the
+picked item type in one array per added layer, building `array<item>` the way an internal field
+builds vectors and fixed arrays; a layer can be removed again. Codec field encoding controls
 select `RFC3339` or `BASE64` for explicit text interchange, as described in
 [Schemas And Codecs](schemas-and-codecs.md#codecs).
 A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
@@ -499,11 +501,15 @@ both references, takes nothing from that reply, neither its result nor its redir
 retry, and stops reading the connection. It reconnects as after a lost connection and sends the
 command again in its place under its own reference, so the leader answers with the command's own
 outcome; a Create form shows **Queued until reconnect** until then. The transaction id and
-status are replicated. A reply that cannot be decoded or reassembled, or answers with another
-kind of body, also violates the session contract. The console reports why and stops reading that
-connection. Every command still waiting keeps its whole original request and its place in the
-issue order, including its reference, transaction position, preview and uncertain-outcome retry
-history. The next connection restores the session before repeating those commands; a visual Create
+status are replicated. A reply that cannot be decoded or reassembled also violates the session
+contract, and so does a readable reply of a kind that does not answer its request, such as a
+domain listing under a command's request identity: a request is answered only by its own outcome,
+a rejection or a cancellation. The console checks a reply's kind before it applies anything the
+reply carries, so it takes no listing, selection, subscription, clock attachment, transaction or
+redirect from a reply of another kind and never shows it as the command's failure. It reports why
+the reply broke the contract and stops reading that connection. Every command still waiting keeps
+its whole original request and its place in the issue order, including its reference, transaction
+position, preview and uncertain-outcome retry history. The next connection restores the session before repeating those commands; a visual Create
 waits for its own recovered outcome.
 
 If the WebSocket closes

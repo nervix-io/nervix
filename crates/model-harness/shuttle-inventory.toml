@@ -63,6 +63,7 @@ checks = [
   "producer::slots::shuttle_tests::shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit",
   "producer::slots::shuttle_tests::shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once",
   "producer::slots::shuttle_tests::shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit",
+  "restore::shuttle_tests::shuttle_finishing_a_restore_attempt_fences_its_last_frame",
   "subscriptions::shuttle_tests::shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change",
 ]
 name = "nervix-client-core"
@@ -127,6 +128,8 @@ checks = [
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
+  "application::completion::progress::shuttle_tests::shuttle_a_barrier_that_observes_before_it_reads_sees_every_racing_report_and_advance",
+  "application::completion::progress::shuttle_tests::shuttle_racing_reports_of_one_incarnation_keep_its_newest_progress",
   "application::resource::upload_executions::tests::shuttle_waiter_cancellation_and_retirement_keep_one_execution_per_upload",
   "application::restore::shuttle_tests::shuttle_a_resumed_restore_never_repeats_a_recorded_effect",
   "application::restore::shuttle_tests::shuttle_an_abandoned_restore_upload_releases_its_quota_exactly_once",

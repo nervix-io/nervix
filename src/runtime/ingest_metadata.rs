@@ -6,7 +6,7 @@
 //!   namespaces programs read them through.
 //! - **Depends on.** Arrow arrays, the vocabulary's metadata declarations, the connector contract's
 //!   metadata rows, value sink and header trait, and explicit execution timestamps.
-//! - **Must not know.** Plexus parsing, source-client lifecycle or persisted control state.
+//! - **Must not know.** Plexus parsing, ingestor-client lifecycle or persisted control state.
 
 #![cfg_attr(
     nervix_lint,
@@ -662,7 +662,7 @@ nervix_primitives::thread_local! {
 impl IngestMetadataBuilders {
     /// Opens a builder set for `projection`, sizing the read fields' columns for `row_bound` rows.
     ///
-    /// Header builders start empty because most sources carry no headers at all.
+    /// Header builders start empty because most ingestors carry no headers at all.
     #[inline(never)]
     pub(super) fn new(projection: Arc<IngestMetadataProjection>, row_bound: usize) -> Self {
         let columns = projection
@@ -684,15 +684,13 @@ impl IngestMetadataBuilders {
         }
     }
 
-    // Keep Arrow's builder machinery behind this boundary. Inlining it into the source collector
+    // Keep Arrow's builder machinery behind this boundary. Inlining it into the ingestor collector
     // doubles that per-message function's machine code and measurably reduces ingest throughput.
     #[inline(never)]
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(
-            reason = "the source supplies its metadata values and transport header visitor; this \
-                      host appends the bounded row metadata"
-        )
+        nervix::dispatch(reason = "the ingestor supplies its metadata values and transport \
+                                   header visitor; this host appends the bounded row metadata")
     )]
     pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
         if self.projection.reads_any() {

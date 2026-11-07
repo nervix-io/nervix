@@ -116,6 +116,81 @@ static nx_outcome *execute(nx_session *session, const char *query) {
     return outcome;
 }
 
+static void expect_kind(nx_error *error, nx_error_kind kind, const char *what);
+
+static void replay_session_local(nx_session *session, const char *label, const char *query) {
+    nx_execution *execution = NULL;
+    check(nx_session_prepare(session, text(query), strlen(query), NULL, &execution),
+          "prepare session-local statement");
+    nx_outcome *first = NULL;
+    nx_outcome *again = NULL;
+    check(nx_session_execute(session, execution, NULL, &first), "first session-local execution");
+    check(nx_session_execute(session, execution, NULL, &again), "repeated session-local execution");
+    printf("%s first=%s replay=%s\n", label,
+           disposition_name(nx_outcome_disposition(first)),
+           disposition_name(nx_outcome_disposition(again)));
+    nx_outcome_free(first);
+    nx_outcome_free(again);
+    nx_execution_free(execution);
+}
+
+static int run_connection(nx_session *session) {
+    printf("CONNECTED seed\n");
+    nx_cancel *deadline = NULL;
+    check(nx_cancel_with_deadline(20, &deadline), "event deadline");
+    nx_event *event = NULL;
+    expect_kind(nx_session_next_event(session, deadline, &event), NX_ERROR_DEADLINE,
+                "an empty event stream must wait for another session");
+    nx_cancel_free(deadline);
+    printf("EVENT wait=deadline\n");
+    replay_session_local(session, "ATTACH", "ATTACH DOMAIN CLOCK;");
+    replay_session_local(session, "SUBSCRIBE", "CREATE SUBSCRIPTION probe TO events;");
+    replay_session_local(session, "DELETE", "DELETE SUBSCRIPTION probe;");
+    nx_session_free(session);
+    printf("CHECKS ok\nPASS\n");
+    return 0;
+}
+
+static int run_restoration(nx_session *session) {
+    const char *relay = env("NERVIX_PROBE_RELAY");
+    const char *subscription = env("NERVIX_PROBE_SUBSCRIPTION");
+    char query[512];
+    snprintf(query, sizeof query, "CREATE SUBSCRIPTION %s TO %s;", subscription, relay);
+    nx_outcome *opened = execute(session, query);
+    if (nx_outcome_disposition(opened) != NX_DISPOSITION_COMPLETED) {
+        fail("the subscription was not opened");
+    }
+    nx_outcome_free(opened);
+    printf("SUBSCRIBED\n");
+
+    nx_event *event = NULL;
+    check(nx_session_next_event(session, NULL, &event), "interruption");
+    if (nx_event_kind_of(event) != NX_EVENT_INTERRUPTED) {
+        fail("the lost session did not interrupt its subscription");
+    }
+    nx_event_release(event);
+    printf("INTERRUPTED\n");
+
+    event = NULL;
+    check(nx_session_next_event(session, NULL, &event), "restoration failure");
+    if (nx_event_kind_of(event) != NX_EVENT_RESTORATION_FAILED) {
+        fail("the refused reopening did not report a restoration failure");
+    }
+    const uint8_t *message = NULL;
+    size_t message_len = 0;
+    uint64_t wait_nanos = 0;
+    check(nx_event_restoration_message(event, &message, &message_len), "restoration message");
+    check(nx_event_restoration_retry_after(event, &wait_nanos), "restoration wait");
+    if (wait_nanos == 0) {
+        fail("the restoration retry wait was zero");
+    }
+    printf("RESTORATION message=%.*s wait=positive\n", (int)message_len, (const char *)message);
+    nx_event_release(event);
+    nx_session_free(session);
+    printf("CHECKS ok\nPASS\n");
+    return 0;
+}
+
 typedef struct field {
     const uint8_t *name;
     size_t name_len;
@@ -2027,13 +2102,39 @@ int main(int argc, char **argv) {
     const char *domain = env("NERVIX_PROBE_DOMAIN");
     setvbuf(stdout, NULL, _IOLBF, 0);
 
+    nx_connect_options *options = nx_connect_options_new();
+    check(nx_connect_options_basic_auth(options, text(username), strlen(username), text(password),
+                                        strlen(password)),
+          "basic auth");
+    const char *ca_pem = getenv("NERVIX_PROBE_CA_PEM");
+    if (ca_pem != NULL) {
+        check(nx_connect_options_ca_certificate(options, text(ca_pem), strlen(ca_pem)),
+              "CA certificate");
+    }
+    const char *seed = getenv("NERVIX_PROBE_SEED_URI");
+    if (seed != NULL) {
+        const char *unavailable_seed = "https://127.0.0.1:2";
+        check(nx_connect_options_tls_requirement(options, NX_TLS_REQUIRED), "require TLS");
+        check(nx_connect_options_add_seed(options, text(unavailable_seed), strlen(unavailable_seed)),
+              "unavailable seed server");
+        check(nx_connect_options_add_seed(options, text(seed), strlen(seed)), "seed server");
+        check(nx_connect_options_timeout(options, NX_TIMEOUT_CONNECT, 250), "connect deadline");
+        check(nx_connect_options_timeout(options, NX_TIMEOUT_REQUEST, 30000), "request deadline");
+        check(nx_connect_options_timeout(options, NX_TIMEOUT_RETRY, 30000), "retry deadline");
+    }
     nx_session *session = NULL;
-    check(nx_session_connect(text(server), strlen(server), text(domain), strlen(domain),
-                             text(username), strlen(username), text(password), strlen(password),
+    check(nx_session_connect(text(server), strlen(server), text(domain), strlen(domain), options,
                              NULL, &session),
           "connect");
+    nx_connect_options_free(options);
     if (argc > 1 && strcmp(argv[1], "upload") == 0) {
         return run_upload(session);
+    }
+    if (argc > 1 && strcmp(argv[1], "connection") == 0) {
+        return run_connection(session);
+    }
+    if (argc > 1 && strcmp(argv[1], "restoration") == 0) {
+        return run_restoration(session);
     }
     if (argc > 1 && strcmp(argv[1], "clock") == 0) {
         return run_clock(session, domain);

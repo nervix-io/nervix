@@ -766,6 +766,8 @@ impl Application {
         };
         let cluster = Arc::new(cluster);
         let local_health_identity = cluster.local_node_identity().await;
+        let application_progress =
+            completion::ApplicationProgressState::new(local_health_identity.clone());
         #[cfg(feature = "testing")]
         let health_fault_injection = fault_injection.clone();
         let health_handler = interconnect.register_handler::<ApplicationHealthProbe, _, _>({
@@ -794,7 +796,7 @@ impl Application {
             .require_handler_registration(&cluster, health_handler)
             .await?;
         let application_revision_handler = completion::register_application_revision_handler(
-            cluster.clone(),
+            application_progress.clone(),
             &interconnect,
             #[cfg(feature = "testing")]
             fault_injection.clone(),
@@ -809,10 +811,24 @@ impl Application {
                 .as_ref()
                 .verified("startup assigns consensus before registering completion handlers")
                 .observer(),
+            application_progress.clone(),
             &interconnect,
         );
         let startup = startup
             .require_handler_registration(&cluster, completion_peers_handler)
+            .await?;
+        let progress_report_handler = completion::register_application_progress_report_handler(
+            application_progress.clone(),
+            cluster.clone(),
+            startup
+                .consensus
+                .as_ref()
+                .verified("startup assigns consensus before registering completion handlers")
+                .observer(),
+            &interconnect,
+        );
+        let startup = startup
+            .require_handler_registration(&cluster, progress_report_handler)
             .await?;
         let clock_probe_handler = cluster::register_clock_probe_handler(&interconnect);
         let startup = startup
@@ -1004,6 +1020,7 @@ impl Application {
                 ),
                 subscription_sampler: SubscriptionSampler::default(),
                 interconnect: interconnect.clone(),
+                application_progress: application_progress.clone(),
                 client_producers: ClientProducerRouter::new(
                     runtime.clone(),
                     interconnect.clone(),
@@ -1806,9 +1823,16 @@ impl Application {
                 }
             }
         }));
-        background_tasks.push(completion::spawn_authoritative_revision_reporting(
-            cluster.clone(),
+        background_tasks.push(completion::spawn_authoritative_progress_recording(
+            application_progress.clone(),
             consensus.observer(),
+            shutdown.clone(),
+        ));
+        background_tasks.push(completion::spawn_application_progress_reporting(
+            application_progress.clone(),
+            consensus.observer(),
+            interconnect.clone(),
+            fault_injection.clone(),
             shutdown.clone(),
         ));
 
@@ -1821,6 +1845,7 @@ impl Application {
         let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
         let interconnect_for_schedule = interconnect.clone();
+        let progress_for_schedule = application_progress.clone();
         let schedule_shutdown = shutdown.clone();
         let schedule_runtime_admission = runtime_admission.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
@@ -1831,6 +1856,7 @@ impl Application {
                 interconnect: &interconnect_for_schedule,
                 registry: &registry_for_schedule,
                 consensus: &consensus_for_schedule,
+                progress: &progress_for_schedule,
                 admission: &schedule_runtime_admission,
                 shutdown: &schedule_shutdown,
             };
@@ -1865,6 +1891,8 @@ impl Application {
         }));
         #[cfg(feature = "testing")]
         service.register_wasm_state_reset_test_coordinator(&fault_injection, shutdown.clone());
+        #[cfg(feature = "testing")]
+        service.register_application_progress_test_queries(&fault_injection, shutdown.clone());
         let domain_clock_progress_service = service.clone();
         interconnect
             .register_handler::<RemoteDomainClockProgressRequest, _, _>(move |context, request| {

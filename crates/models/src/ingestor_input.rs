@@ -4,12 +4,12 @@
 //!
 //! - **Owns.** The two input contracts an ingestor declares — an external transport together with
 //!   the codec that decodes its payloads, or the typed batches application clients submit through
-//!   their sessions — and how either one answers what its source declares: header reads, execution
+//!   their sessions — and how either one answers what its entity declares: header reads, execution
 //!   on every node, the model it references, its quiesce mode and its acknowledgement. A client
 //!   contract writes no quiesce mode, so the one it honors is fixed here.
-//! - **Depends on.** The source Models with what their entities declare, and the schema and codec
+//! - **Depends on.** The ingestor Models with what their entities declare, and the schema and codec
 //!   names they reference.
-//! - **Must not know.** How a source is opened, how a batch is decoded or admitted, or which node
+//! - **Must not know.** How an ingestor is opened, how a batch is decoded or admitted, or which node
 //!   executes an ingestor.
 //!
 //! The codec belongs to the transport contract, so a client ingestor cannot name one and a
@@ -29,7 +29,7 @@ use crate::{
     ModelName,
 };
 
-/// The only quiesce mode a client source honors: admission stops and the producer keeps its
+/// The only quiesce mode a client ingestor honors: admission stops and the producer keeps its
 /// unsent batches.
 const CLIENT_QUIESCE: IngestQuiesceMode = IngestQuiesceMode::Suspend;
 
@@ -54,7 +54,7 @@ pub struct TransportIngestorInput {
 }
 
 impl IngestorInput {
-    /// The units declared by an instance-capable source; a client or single transport has none.
+    /// The units declared by an instance-capable ingestor; a client or single transport has none.
     pub fn instances(&self) -> Option<crate::IngestorInstances> {
         match self {
             Self::Transport(input) => input.source.instances(),
@@ -62,7 +62,7 @@ impl IngestorInput {
         }
     }
 
-    /// The connector and entity of the source, which capability decisions read: whether its
+    /// The connector and entity of the ingestor, which capability decisions read: whether its
     /// messages carry headers, which metadata they expose, and where it executes.
     pub const fn entity_kind(&self) -> IngestorEntityKind {
         match self {
@@ -91,7 +91,7 @@ impl IngestorInput {
     }
 
     /// The model this input references: the client or endpoint a transport reads through, or the
-    /// schema a client source's batches carry.
+    /// schema a client ingestor's batches carry.
     pub fn source_ref(&self) -> ModelName {
         match self {
             Self::Transport(input) => input.source.source_ref(),
@@ -104,7 +104,7 @@ impl IngestorInput {
         self.entity_kind().capabilities().reference.model_kind()
     }
 
-    /// The external transport this input reads. A client source reads none.
+    /// The external transport this input reads. A client ingestor reads none.
     pub fn transport_entity(&self) -> Option<&IngestorEntity> {
         match self {
             Self::Transport(input) => Some(&input.source),
@@ -120,7 +120,7 @@ impl IngestorInput {
         }
     }
 
-    /// The source application clients produce into. A transport input has none.
+    /// The ingestor application clients produce into. A transport input has none.
     pub(crate) fn client_entity_mut(&mut self) -> Option<&mut ClientProducerIngestor> {
         match self {
             Self::Transport(_) => None,
@@ -128,7 +128,7 @@ impl IngestorInput {
         }
     }
 
-    /// The codec that decodes a transport's payloads. A client source has none.
+    /// The codec that decodes a transport's payloads. A client ingestor has none.
     pub fn codec(&self) -> Option<&CodecName> {
         match self {
             Self::Transport(input) => Some(&input.codec),
@@ -171,7 +171,7 @@ impl IngestorInput {
     }
 
     /// The requirement of a transport's delivery mode its statement leaves unmet, as its entity
-    /// declares the mode. A client source's window requires no option choice.
+    /// declares the mode. A client ingestor's window requires no option choice.
     pub fn unmet_delivery(&self) -> Option<crate::UnmetDeliveryRequirement> {
         match self {
             Self::Transport(input) => input.source.unmet_delivery(),
@@ -179,7 +179,7 @@ impl IngestorInput {
         }
     }
 
-    /// The acknowledgement a transport's delivery mode declares. A client source acknowledges
+    /// The acknowledgement a transport's delivery mode declares. A client ingestor acknowledges
     /// through its own window, which [`ClientIngestMode`](crate::ClientIngestMode) describes.
     pub fn transport_acknowledgement(&self) -> Option<IngestAcknowledgement<'_>> {
         match self {
