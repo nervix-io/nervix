@@ -168,6 +168,20 @@ lists. `pause`, `advance` and `resume` exist only with the `test-util` capabilit
 tests of elapsed-time behavior enable and no production graph has, because a clock that can be
 paused is checked on every read.
 
+A watch receiver's `mark_unchanged` marks its current version seen without borrowing the value,
+publishing a change or changing another receiver. The Shuttle adapter takes a scheduling point
+before reading that version, matching the registration it observes. Shared native/Shuttle
+conformance exercises it while the value's write guard is held, its next send and channel closure;
+the paired race checks expose marking after a predicate read as a lost wake and keep marking before
+the read sound. Ordinary builds still re-export Tokio's operation directly.
+
+The clock-attachment Shuttle checks have at most two explicitly permitted modeled participants,
+an observer and replacement handler, or two competing attachment handlers. They race finite
+attachment, availability observation and authority-stop operations,
+join before each execution ends and explore at most 1,000 depth-first schedules under the model
+runner's step and wall bounds. Its production owner uses the boundary's watch and cancellation
+primitives; the permission adds no product thread or executor bypass.
+
 The executor admits decoded materialized snapshots into `state_read` and optional retained
 generator source views into `state_read_cache`. Each pool derives its capacity from the relay
 budget and counts independently in the startup total. A snapshot reserves its complete retained
@@ -416,6 +430,7 @@ a file whose owners block in different ways, such as the CLI's, has a permission
 | The Rust client's backup download and restore upload, and the CLI's event printer | `task::spawn_blocking` | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
 | The CLI's completion prompt | `task::block_in_place` | A client tool is not a node and has no executor; its line editor asks for completions synchronously on the thread that runs the CLI's main task, so the prompt waits there for the completion while the runtime's workers keep the session running | One completion at a time, only while the operator waits at the prompt; each page of suggestions ends by the client's retry deadline, and a repeated continuation ends the completion |
 | The benchmark driver and the scenario harness | `task::spawn_blocking` | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |
+| The architecture audit's local Git provenance reads | `thread::scope` | The standalone tooling process has no node executor; independent blame and line-history reads retain their bounded parallelism | At most eight scoped workers and eight Git children per finite read group; each input is read once, the dispatch lock is released before I/O, and every worker joins before return |
 
 The boundary check rejects either item in a file no permission lists it for, and a listed item its
 file no longer names.

@@ -11,6 +11,17 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+`just test-domain-clock-delivery` runs the one- and three-node receiver attachment scenarios:
+clock installation while gossip exchanges are blocked, session tick delivery and receiver restart.
+It prepares the console assets, WASM guests and ONNX runtime required by the in-process nodes;
+these cases start no CLI, paced simulation or Python driver. Arguments pass to the ordinary
+scenario runner, whose startup, execution, parallelism and teardown budgets stay unchanged.
+
+After a peer stops, these scenarios observe its unavailability through the cluster-status
+warning from the same availability view the clock authority reads. The warning stays observable
+after discovery retires the peer's interconnect row. Observation keeps the existing status budget,
+and the surviving session must still receive increasing ticks within ten seconds.
+
 The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
 system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
 address explicitly and presents the node's fixture certificate. The redirect scenario launches a
@@ -243,6 +254,19 @@ expressions containing spaces, and brace input globs, are single arguments when 
 caller; the recipe does not expand their contents as shell code. The reuse recipe also sets
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
+
+`just test-resource-upload-identity-scenarios` prepares the in-process server's console assets,
+WASM guests and ONNX runtime, then runs the four `@resource_upload_idempotency` examples in
+`resource_describe.feature`, on one and three nodes with two concurrent scenarios and no retries.
+They check the installed and recovered origins, the typed conflict and its assigned version, and
+that a conflicting archive creates no additional version. This focused recipe builds no unrelated
+client tools; broad qualification stays with the ordinary scenario suite.
+
+`just test-client-upload-conflict-conformance` builds the binding probes and runs the twelve
+`@client_upload_failure` examples in `client_conformance.feature`, on one and three nodes with two
+concurrent scenarios and no retries. The C ABI in process, C, C++, Python, Java and Ruby each reuse
+one prepared upload handle, repeat its completed archive and read the typed conflict after changing
+that archive. The full client conformance lane qualifies the remaining client behavior in CI.
 
 `just test-endpoint-heads` selects `kinded_endpoint_heads.feature` for its in-process endpoint
 inspection and reference-kind refusal cases. It prepares the console, ONNX and guest assets,
@@ -3527,6 +3551,38 @@ expression that selects runtimes. The `client-conformance` CI job, which runs on
 request labeled `client-conformance`, runs it on its own runner with a 60-minute limit and a
 15-minute suite budget, which leaves the builds before the scenarios up to 40 minutes of the limit
 and keeps the same 5-minute reserve.
+
+## Client Suites
+
+`client_suites.feature` runs a host binding's own test suite, in its host's test framework, against
+a scenario's cluster: the cluster tier of the suite under `tests/client_conformance/<host>/suite`.
+The cluster serves its session listener over TLS. The step that starts a suite waits for every node
+to agree on its leader and starts it on a follower when the cluster has one, so its sessions follow
+a leader redirect. It starts the host's runner as one child process with its standard input closed,
+its target in the probe's `NERVIX_PROBE_*` variables and what a suite needs beside them in
+`NERVIX_SUITE_*` ones: the leader's listener, which the suite relays a session through to cut it,
+every node's listener as seeds, the fixture certificate authority, and a backup directory the step
+creates and removes once it reads the run. The runner prints one `NERVIX-SUITE <outcome> <identity>`
+line per test, and the fixture keeps every line it read.
+
+The step that reads the run waits for the runner to end, for the duration the step names and never
+longer than 600 seconds, so a suite that stops making progress fails with its own report inside the
+`client-conformance` job's 15-minute suite budget. A whole tier of tests that each open their own
+sessions over TLS fits that bound: the Python cluster tier took up to 471 seconds on a development
+host where every committed command took about ten seconds, and the job ran its forty-seven probe
+scenarios in 17 seconds in Check run 42325403607. A suite's own waits are its tests' `Cancel`
+deadlines, of 120 seconds for anything the cluster does. Each example declares `@long_running`,
+because a cluster tier runs for minutes, so it starts beside the probes rather than after them, and
+weighs one slot: its runner and cluster use no more CPU while they run than a probe and its cluster.
+The run passes only when every test `tests/client-suites-inventory.toml` registers for the host's
+cluster tier ran once and passed, nothing was skipped, nothing ran that the inventory does not
+register, and the runner exited successfully. A failure names each such test and quotes everything
+the runner printed and its standard error. Dropping the fixture kills the runner, so a failed
+scenario never leaves one running.
+
+Every example is tagged `@client_conformance_toolchain` and `@client_suite_<host>`, so the suite
+excludes it unless a run selects it: `just test-client-conformance` runs the suites' rows beside
+the probes, and `just test-client-python-cluster` runs the Python rows alone.
 
 ## The Suite Watchdog
 

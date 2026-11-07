@@ -1920,8 +1920,9 @@ admitted under a key binds it to that archive's digest and takes the next versio
 resource. Repeating the same identity with the same archive joins the installation or reports its
 recorded outcome, with the same version, and the reply's origin says whether this call installed it
 (`Executed`) or found it recorded (`Recovered`). The same identity with another archive fails as
-`InstallationFailed` with a message naming the conflict and, when the leader finds the identity
-recorded, the version it already holds. Upload identities never expire. Because the digest is
+`IdentityConflict`, carrying the version already assigned to that identity and a diagnostic naming
+the digest conflict. The client must keep that identity bound to its original archive; another
+logical upload takes a fresh identity. Upload identities never expire. Because the digest is
 computed from the body, recovering an uncertain upload means sending the whole archive again; the
 protocol has no request that asks for an upload's outcome without it.
 
@@ -1934,7 +1935,8 @@ no chunk. The leader refuses what a stream gets wrong with a typed failure:
 | `ResourceNotDeclared` | The domain declares no resource of that name. |
 | `SizeMismatch` | The chunks add up to more or fewer bytes than the start declared. |
 | `QuotaExceeded` | The declared or received size exceeds the archive quota. |
-| `InstallationFailed` | The archive could not be staged or installed, its identity is bound to another archive, or the completed version's outcome could not be confirmed on every live node. It carries the assigned version when one was assigned, and repeating the same identity and archive returns the recorded outcome. |
+| `IdentityConflict` | The upload identity already names another archive. It carries that identity's assigned version; the conflicting call assigns no new version and changes no recorded outcome. |
+| `InstallationFailed` | The archive could not be staged or installed, or the completed version's outcome could not be confirmed on every live node. It carries the assigned version when one was assigned, and repeating the same identity and archive returns the recorded outcome. |
 
 A body that ends early or overruns its declaration admits nothing and leaves its identity unused, so
 it can be sent again. Once the complete body is admitted, installation belongs to the cluster: it
@@ -2371,9 +2373,12 @@ runtime, so every decision above is the C ABI's, and it differs from the C ABI o
 host differs from a C one:
 
 - **Lifetimes.** An object owns its share of the session and releases it when Python collects it;
-  no application retain or release call exists. A producer, a consumer and a delivery keep their
-  session running until they are collected, and a `memoryview` of an event's frame or a batch's or
-  delivery's stream keeps that object alive.
+  no application retain or release call exists. A session, a producer, a consumer and a delivery
+  also release their share when their `with` block ends, after which a call on them raises
+  `ClosedError`; a call another thread is in keeps its own share until it returns. A producer, a
+  consumer and a delivery keep their session running until they are released, and a `memoryview`
+  of an event's frame or a batch's or delivery's stream keeps that object alive, a released
+  delivery's stream included.
 - **Threads.** Every call that waits runs on the calling Python thread with the GIL released for
   as long as it waits, and the library never calls Python from a thread of its own. A `Cancel`
   triggered from another thread ends a wait with `CancelledError`, and one created with a deadline

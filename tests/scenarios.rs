@@ -129,6 +129,7 @@ use crate::common::{
         ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
         SUBSCRIBED_LINE, corpus_report,
     },
+    client_suites::{ClientSuite, SuiteHost, SuiteTarget, fixture_certificate_authority},
     client_wire_tls_cost::TransportCostServers,
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
@@ -740,6 +741,8 @@ struct ScenarioWorld {
     last_server_signal_at: Option<Instant>,
     /// The cross-language client probe a scenario started, until a step reads its report.
     client_probe: Option<ClientProbe>,
+    /// The host suite a scenario started on its cluster tier, until a step reads its results.
+    client_suite: Option<ClientSuite>,
     /// The producers a scenario opened on client ingestors, and the batches they submitted.
     producers: client_producers::ScenarioProducers,
     /// Native and console consumers and the Arrow attempts they received.
@@ -882,6 +885,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("held_resource_upload", &self.held_resource_upload.is_some())
             .field("last_server_signal_at", &self.last_server_signal_at)
             .field("client_probe", &self.client_probe)
+            .field("client_suite", &self.client_suite)
             .finish()
     }
 }
@@ -4871,6 +4875,59 @@ async fn start_client_probe(
 }
 
 #[when(
+    expr = "the {string} client probe retries resource {string} from directory {string} on a \
+            follower when available"
+)]
+async fn when_client_probe_retries_resource_upload(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    resource: String,
+    directory: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .assured("the step names a known binding host");
+    let leader = current_leader_node(world).await;
+    let follower = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .find(|node| node != &leader);
+    let node_id = match follower {
+        Some(follower) => follower,
+        None => leader,
+    };
+    let source_path = world
+        .placeholders
+        .get(&directory)
+        .verified("a preceding step created the upload source directory")
+        .clone();
+    let payload = PathBuf::from(&source_path).join("payload.txt");
+    let resource = expand_placeholders(world, &resource);
+    let upload = nervix_models::Statement::UploadResource(nervix_models::UploadResource {
+        identifier: nervix_models::ResourceName::parse(&resource)
+            .assured("the step names a resource"),
+        source_path,
+    });
+    let query = upload
+        .to_canonical_plexus()
+        .assured("the upload has a canonical Plexus command");
+    let target = client_probe_target(
+        world,
+        &node_id,
+        ProbeExercise::ResourceUpload { query, payload },
+    );
+    start_client_probe(
+        world,
+        runtime,
+        &node_id,
+        target,
+        "CONFLICT IdentityConflict",
+    )
+    .await;
+}
+
+#[when(
     expr = "the {string} client probe subscribes as {string} to relay {string} on a follower when \
             available expecting {int} rows"
 )]
@@ -5083,6 +5140,83 @@ async fn then_client_probe_reports(world: &mut ScenarioWorld, within: String, #[
         .check(&expected)
         .unwrap_or_else(|error| panic!("{error}"));
     append_cucumber_log_line(&format!("client probe report verified: {report:?}"));
+}
+
+/// How long a host's whole cluster tier may take: dozens of tests, each opening its own sessions
+/// over TLS, against a cluster on a machine that runs many scenarios at once. It stays inside the
+/// `client-conformance` job's 15-minute suite budget, so a suite that stops making progress fails
+/// with its own report. The run ends as soon as the runner does, so the bound costs nothing when
+/// nothing is wrong.
+const CLIENT_SUITE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Starts a host's suite on its cluster tier. The suite starts on a follower when the cluster has
+/// one, so its sessions follow a leader redirect, and reaches every node through its seeds.
+#[when(expr = "the {string} client suite runs its cluster tests")]
+async fn when_client_suite_runs_its_cluster_tests(world: &mut ScenarioWorld, host: String) {
+    let host: SuiteHost = host.parse().expect("the step names a known suite host");
+    let leader = current_leader_node(world).await;
+    // This fixture runs with one or three nodes; select a follower from that bounded topology.
+    let node_ids = world.cluster().node_ids();
+    let follower = node_ids.iter().find(|node| **node != leader).cloned();
+    let node_id = match follower {
+        Some(follower) => follower,
+        None => leader.clone(),
+    };
+    let cluster = world.cluster();
+    let mut seeds = Vec::with_capacity(node_ids.len());
+    for node in &node_ids {
+        seeds.push(
+            cluster
+                .grpc_uri(node)
+                .expect("every node belongs to the cluster"),
+        );
+    }
+    let backups = TempDir::new().expect("the suite's backup directory is created");
+    let target = SuiteTarget {
+        grpc_uri: cluster
+            .grpc_uri(&node_id)
+            .expect("the suite's node belongs to the cluster"),
+        leader_grpc_uri: cluster
+            .grpc_uri(&leader)
+            .expect("the leader belongs to the cluster"),
+        seeds,
+        username: TEST_AUTH_USERNAME.to_string(),
+        password: TEST_AUTH_PASSWORD.to_string(),
+        domain: world.domain.clone(),
+        ca_certificate: fixture_certificate_authority(),
+        backups: backups.path().to_path_buf(),
+    };
+    append_cucumber_log_line(&format!(
+        "client suite {host}: leader={leader} initial_node={node_id} target={target:?}"
+    ));
+    let suite =
+        ClientSuite::start(host, &target, backups).unwrap_or_else(|error| panic!("{error}"));
+    world.client_suite = Some(suite);
+}
+
+#[then(expr = "within {string} the client suite passes every registered cluster test")]
+async fn then_client_suite_passes_every_registered_cluster_test(
+    world: &mut ScenarioWorld,
+    within: String,
+) {
+    let within = parse_duration_text(&within).expect("step duration must be a valid duration");
+    assert!(
+        within <= CLIENT_SUITE_TIMEOUT,
+        "a suite's cluster tier is bounded by {CLIENT_SUITE_TIMEOUT:?}"
+    );
+    let suite = world
+        .client_suite
+        .take()
+        .verified("a preceding step started a client suite");
+    let report = suite
+        .finish(within)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    report.check().unwrap_or_else(|error| panic!("{error}"));
+    append_cucumber_log_line(&format!(
+        "client suite verified: {} registered cluster tests passed",
+        report.passed()
+    ));
 }
 
 #[then(expr = "the server process exits with status {int}")]
@@ -19047,7 +19181,21 @@ async fn when_named_client_resource_upload_fails_with(
         outcome.message
     );
     world.last_command_error = Some(outcome.message.clone());
-    world.last_command_output = Some(outcome.message);
+    world.last_command_output = Some(outcome.message.clone());
+    world.last_client_outcome = Some(outcome);
+}
+
+#[then(expr = "the last client upload refused version {int} with typed failure {string}")]
+async fn then_last_client_upload_refused_with_typed_failure(
+    world: &mut ScenarioWorld,
+    version: u64,
+    expected: String,
+) {
+    let upload = last_client_upload_of_version(world, version);
+    let failure = upload
+        .failure
+        .assured("the refused upload has a typed failure");
+    assert_eq!(format!("{failure:?}"), expected, "{upload:?}");
 }
 
 #[then(expr = "client {string} active domain is {string}")]

@@ -132,6 +132,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/audit/tests/__fuzz__/audit__tests__representations__bolero_complete_audit_report_round_trip/corpus"
+domain_version = 1
+features = []
+id = "typed-audit-report"
+invariant = "Every current audit candidate kind, identity, span, expansion, configuration, nullable context, rule event, rewrite, attribution origin, suggestion and summary survives complete JSON round trips unchanged; deterministic bytes and Markdown remain identical."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/audit/tests/representations.rs"
+test = "audit::tests::representations::bolero_complete_audit_report_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__clickhouse__tests__bolero_clickhouse_tls_pairing_matches_the_transport_contract/corpus"
 domain_version = 1
 features = []
@@ -1152,6 +1167,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/request/__fuzz__/request__clock_attachment_properties__bolero_domain_clock_attachments_round_trip/corpus"
+domain_version = 1
+features = []
+id = "domain-clock-attachment-wire"
+invariant = "Every current domain clock attachment request and receipt preserves its complete domain, receiver incarnation, installed revision, generation and authority fence through the production typed-request payload encoder and decoder unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/request/clock_attachment_properties.rs"
+test = "request::clock_attachment_properties::bolero_domain_clock_attachments_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/node_drain__wire_properties__bolero_stopping_node_drain_messages_round_trip/corpus"
 domain_version = 1
 features = []
@@ -1708,7 +1738,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__streams__bolero_stream_frames_keep_values_and_chunk_ownership/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "client-streams"
 invariant = "Every upload, restore and backup stream root preserves complete typed values and retained chunk ownership."

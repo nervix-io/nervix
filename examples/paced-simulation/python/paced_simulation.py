@@ -20,6 +20,8 @@ the clock, consumer, inspection and outcome threads wait in the binding side by 
 cancelling a token wakes whichever of them waits on it.
 """
 
+from __future__ import annotations
+
 import argparse
 from array import array
 import json
@@ -29,8 +31,11 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from enum import Enum
+from types import FrameType
+from typing import Any, Literal, NotRequired, TypedDict
 
 import nervix_client as nx
 
@@ -90,14 +95,14 @@ CLOCK_END_REASONS = {nx.ClockEndReason.DOMAIN_REMOVED: "domain_removed"}
 PRINT = threading.Lock()
 
 
-def line(message):
+def line(message: str) -> None:
     """Prints one report line whole, so lines of concurrent threads never interleave."""
     with PRINT:
         sys.stdout.write(message + "\n")
         sys.stdout.flush()
 
 
-def error_line(message):
+def error_line(message: str) -> None:
     with PRINT:
         sys.stderr.write("error: " + message + "\n")
         sys.stderr.flush()
@@ -106,7 +111,7 @@ def error_line(message):
 class Counters:
     """The counters every thread of a run adds to; the summary prints them."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.lock = threading.Lock()
         self.readings = 0
         self.completed = 0
@@ -116,7 +121,7 @@ class Counters:
         self.effects = 0
         self.rejection_notices = 0
         self.duplicates = 0
-        self.generations = set()
+        self.generations: set[int] = set()
         self.ticks_observed = 0
         self.inspections = 0
         self.credit_waits = 0
@@ -124,26 +129,26 @@ class Counters:
         self.consumers_joined = 0
         self.consumers_left = 0
 
-    def add(self, name, amount=1):
+    def add(self, name: str, amount: int = 1) -> None:
         with self.lock:
             setattr(self, name, getattr(self, name) + amount)
 
-    def outcome(self, kind, readings):
+    def outcome(self, kind: str, readings: int) -> None:
         self.add(kind, readings)
 
-    def generation(self, generation):
+    def generation(self, generation: int) -> None:
         with self.lock:
             self.generations.add(generation)
 
-    def outstanding(self, held):
+    def outstanding(self, held: int) -> None:
         with self.lock:
             self.peak_outstanding_bytes = max(self.peak_outstanding_bytes, held)
 
-    def all_completed(self):
+    def all_completed(self) -> bool:
         with self.lock:
             return self.completed == self.readings
 
-    def summary(self):
+    def summary(self) -> str:
         with self.lock:
             return (
                 f"SUMMARY readings={self.readings} completed={self.completed} "
@@ -160,7 +165,7 @@ class Counters:
 # ---- Text the report and the files share with the Rust driver ---------------------------------
 
 
-def rfc3339(nanos):
+def rfc3339(nanos: int) -> str:
     """The RFC 3339 text of a Unix-nanosecond instant: UTC, with as many groups of three
     fractional digits as it needs, which is how the Rust driver writes it."""
     seconds, fraction = divmod(nanos, 1_000_000_000)
@@ -174,7 +179,7 @@ def rfc3339(nanos):
     return f"{moment}.{fraction:09d}Z"
 
 
-def parse_rfc3339(value):
+def parse_rfc3339(value: str) -> int:
     """Reads the RFC 3339 text the drivers write back into Unix nanoseconds."""
     match = re.fullmatch(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z", value)
     if match is None:
@@ -185,7 +190,7 @@ def parse_rfc3339(value):
     return seconds * 1_000_000_000 + fraction
 
 
-def duration_text(nanos):
+def duration_text(nanos: int) -> str:
     """A duration the way Plexus writes it, in the largest unit that divides it."""
     if nanos % 1_000_000_000 == 0:
         return f"{nanos // 1_000_000_000}s"
@@ -196,7 +201,7 @@ def duration_text(nanos):
     return f"{nanos}ns"
 
 
-def rate_text(rate):
+def rate_text(rate: float) -> str:
     """A time rate the way the Rust driver prints it: without a fraction when it has none."""
     rendered = repr(rate)
     if rendered.endswith(".0"):
@@ -208,7 +213,7 @@ DURATION_UNITS = {"ns": 1, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000,
                   "m": 60_000_000_000, "h": 3_600_000_000_000}
 
 
-def duration_argument(value):
+def duration_argument(value: str) -> int:
     """A duration argument such as 250ms, 1s or 5m, in nanoseconds."""
     match = re.fullmatch(r"(\d+)(ns|us|ms|s|m|h)", value)
     if match is None:
@@ -216,7 +221,7 @@ def duration_argument(value):
     return int(match.group(1)) * DURATION_UNITS[match.group(2)]
 
 
-def byte_size_argument(value):
+def byte_size_argument(value: str) -> int:
     """A byte size: a count of bytes, or a count of KiB, MiB or GiB."""
     match = re.fullmatch(r"(\d+)(GiB|MiB|KiB)?", value)
     if match is None:
@@ -240,7 +245,7 @@ class ConfigurationError(Exception):
     """The command line, the graph or the domain is not one the simulation can run against."""
 
 
-def options(arguments):
+def options(arguments: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="paced_simulation.py",
         description="Paced sensor simulation over a Nervix client ingestor and attached client "
@@ -311,7 +316,8 @@ REJECTED_FIELDS = [("reading_id", nx.FieldType.STRING), ("occurred_at", nx.Field
 class Reading:
     """One simulated sensor reading, named and valued by where it is planned."""
 
-    def __init__(self, generation, tick, sensor, position, occurred_at, stamp):
+    def __init__(self, generation: int, tick: int, sensor: int, position: int, occurred_at: int,
+                 stamp: str) -> None:
         self.reading_id = f"g{generation}-t{tick}-s{sensor}-{position}"
         self.generation = generation
         self.tick = tick
@@ -321,7 +327,7 @@ class Reading:
         self.stamp = stamp
 
     @classmethod
-    def recorded(cls, record):
+    def recorded(cls, record: dict[str, Any]) -> Reading:
         """A reading as the ledger recorded it."""
         reading = cls.__new__(cls)
         reading.reading_id = record["reading_id"]
@@ -334,7 +340,7 @@ class Reading:
         return reading
 
 
-def fields(declared):
+def fields(declared: list[tuple[str, nx.FieldType]]) -> nx.Fields:
     """The expected fields an endpoint open declares, in the graph's field order."""
     expected = nx.Fields()
     for name, kind in declared:
@@ -342,17 +348,17 @@ def fields(declared):
     return expected
 
 
-def varlen(values):
+def varlen(values: list[str]) -> tuple[list[int], bytes]:
     """The offsets and bytes of a STRING column."""
     offsets = [0]
-    encoded = []
+    encoded: list[bytes] = []
     for value in values:
         encoded.append(value.encode())
         offsets.append(offsets[-1] + len(encoded[-1]))
     return offsets, b"".join(encoded)
 
 
-def build_batch(schema, readings):
+def build_batch(schema: nx.Schema, readings: list[Reading]) -> nx.Batch:
     """One batch of readings, set column by column through the package's builder."""
     builder = nx.BatchBuilder(schema, len(readings))
     for column, values in ((0, [reading.reading_id for reading in readings]),
@@ -365,7 +371,7 @@ def build_batch(schema, readings):
     return builder.finish()
 
 
-def observed_readings(batch):
+def observed_readings(batch: nx.Batch) -> list[dict[str, Any]]:
     """The readings of one delivery, copied in bulk from its typed columns."""
     identities, sensors, ticks, occurred, admitted, sources, values = (
         batch.column(column) for column in range(7)
@@ -378,7 +384,7 @@ def observed_readings(batch):
     ]
 
 
-def rejection_notices(batch):
+def rejection_notices(batch: nx.Batch) -> list[dict[str, Any]]:
     """The notices of one delivery, copied in bulk from its typed columns."""
     identities, occurred, codes, messages = (batch.column(column) for column in range(4))
     return [
@@ -396,21 +402,21 @@ class Ledger:
     generation each run plans in, and the outcome of every batch. A production outbox would make
     each append durable before submitting; this example only flushes it."""
 
-    def __init__(self, path):
+    def __init__(self, path: str) -> None:
         self.lock = threading.Lock()
         self.file = open(path, "a", encoding="utf-8")
 
     @staticmethod
-    def unresolved(path):
+    def unresolved(path: str) -> list[Reading]:
         """The readings the ledger holds without a completed outcome, in planned order."""
         try:
             with open(path, encoding="utf-8") as ledger:
                 content = ledger.read()
         except FileNotFoundError:
             return []
-        order = []
-        readings = {}
-        outcomes = {}
+        order: list[str] = []
+        readings: dict[str, dict[str, Any]] = {}
+        outcomes: dict[str, str] = {}
         for number, entry in enumerate(content.splitlines(), start=1):
             try:
                 record = json.loads(entry)
@@ -429,16 +435,16 @@ class Ledger:
         return [Reading.recorded(readings[reading_id]) for reading_id in order
                 if outcomes.get(reading_id) != "completed"]
 
-    def append(self, records):
+    def append(self, records: list[dict[str, Any]]) -> None:
         rendered = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
         with self.lock:
             self.file.write(rendered)
             self.file.flush()
 
-    def generation(self, generation):
+    def generation(self, generation: int) -> None:
         self.append([{"record": "generation", "generation": generation}])
 
-    def readings(self, readings, ingestor, timestamps):
+    def readings(self, readings: list[Reading], ingestor: str, timestamps: str) -> None:
         self.append([
             {"record": "reading", "reading_id": reading.reading_id,
              "generation": reading.generation, "tick": reading.tick, "sensor": reading.sensor,
@@ -447,7 +453,7 @@ class Ledger:
             for reading in readings
         ])
 
-    def outcome(self, reading_ids, outcome, cause):
+    def outcome(self, reading_ids: list[str], outcome: str, cause: str) -> None:
         self.append([{"record": "outcome", "reading_ids": reading_ids, "outcome": outcome,
                       "cause": cause}])
 
@@ -456,10 +462,10 @@ class EffectStore:
     """The application's idempotent effect store: each reading and rejection notice is applied
     exactly once, keyed by the reading's own identity, which survives replays."""
 
-    def __init__(self, path):
+    def __init__(self, path: str) -> None:
         self.condition = threading.Condition()
-        self.readings = set()
-        self.rejections = set()
+        self.readings: set[str] = set()
+        self.rejections: set[str] = set()
         try:
             with open(path, encoding="utf-8") as store:
                 content = store.read()
@@ -480,7 +486,7 @@ class EffectStore:
                 self.rejections.add(reading_id)
         self.file = open(path, "a", encoding="utf-8")
 
-    def apply(self, kind, record):
+    def apply(self, kind: str, record: dict[str, Any]) -> bool:
         """Records `record` unless its reading was recorded before; returns whether it was new."""
         applied = self.readings if kind == "reading" else self.rejections
         with self.condition:
@@ -492,7 +498,8 @@ class EffectStore:
             self.condition.notify_all()
             return True
 
-    def await_rejections(self, reading_ids, until, stopping):
+    def await_rejections(self, reading_ids: list[str], until: float,
+                         stopping: Callable[[], bool]) -> None:
         """Waits until the store holds the rejection notice of every reading in `reading_ids`, or
         `until` passes or `stopping` reports an application failure. A notice still missing then
         reaches a later run."""
@@ -521,7 +528,7 @@ class EffectStore:
 class Window:
     """The event times a TIMESTAMP AT ingestor admits at one UTC instant."""
 
-    def __init__(self, clock, utc, earliest, latest):
+    def __init__(self, clock: nx.DomainClock, utc: int, earliest: int, latest: int) -> None:
         self.clock = clock
         self.utc = utc
         self.earliest = earliest
@@ -529,19 +536,21 @@ class Window:
         self.skew = clock.paced.skew
 
     @classmethod
-    def at(cls, clock, utc):
+    def at(cls, clock: nx.DomainClock, utc: int) -> Window | None:
         bounds = clock.admission_window(utc)
         if bounds is None:
             return None
         return cls(clock, utc, *bounds)
 
-    def contains(self, event):
+    def contains(self, event: int) -> bool:
         return self.clock.admits(self.utc, event)
 
 
-def clock_line(generation, state, paced):
+def clock_line(generation: int, state: nx.ClockState, paced: nx.PacedClock | None) -> str:
     """The report line of a clock observation."""
     if state == nx.ClockState.PACED:
+        # Every caller passes the paced clock of a PACED observation.
+        assert paced is not None
         return (f"CLOCK generation={generation} state=paced period={duration_text(paced.period)} "
                 f"skew={duration_text(paced.skew)} origin={rfc3339(paced.origin)} "
                 f"anchor={rfc3339(paced.anchor)} rate={rate_text(paced.rate)}")
@@ -549,10 +558,21 @@ def clock_line(generation, state, paced):
     return f"CLOCK generation={generation} state={names[state]}"
 
 
+# Each name is its own literal type, so a pace's first item tells which of its shapes it has.
+PACED: Literal["paced"]
+PAUSED: Literal["paused"]
+STOPPED: Literal["stopped"]
+UNPACED: Literal["unpaced"]
+ENDED: Literal["ended"]
 PACED, PAUSED, STOPPED, UNPACED, ENDED = "paced", "paused", "stopped", "unpaced", "ended"
 
+type Pace = (tuple[Literal["paced", "paused", "stopped", "unpaced"], int]
+             | tuple[Literal["ended"], None])
+type Reach = (tuple[Literal["center"], Window] | tuple[Literal["moved"], Pace]
+              | tuple[Literal["stopping", "recheck"], None])
 
-def pace_of(generation, state):
+
+def pace_of(generation: int, state: nx.ClockState) -> Pace:
     """What a clock observation lets the simulation do: pace by it, wait, or stop."""
     if state == nx.ClockState.PACED:
         return (PACED, generation)
@@ -567,7 +587,8 @@ class Clock:
     """The clock the session follows, and the pace its latest observation allows. A session gap
     pauses the pace until the restored attachment reports the clock again."""
 
-    def __init__(self, session, domain, counters, initial):
+    def __init__(self, session: nx.Session, domain: str, counters: Counters,
+                 initial: Pace) -> None:
         self.session = session
         self.domain = domain
         self.counters = counters
@@ -577,24 +598,25 @@ class Clock:
         self.cancel = nx.Cancel()
         self.thread = threading.Thread(target=self.follow, name="clock", daemon=True)
 
-    def start(self):
+    def start(self) -> None:
         self.thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         self.cancel.trigger()
         self.thread.join()
 
-    def publish(self, pace):
+    def publish(self, pace: Pace) -> None:
         with self.condition:
             self.pace = pace
             self.changes += 1
             self.condition.notify_all()
 
-    def current(self):
+    def current(self) -> tuple[Pace, int]:
         with self.condition:
             return self.pace, self.changes
 
-    def wait_change(self, changes, stopping, timeout=None):
+    def wait_change(self, changes: int, stopping: threading.Event,
+                    timeout: float | None = None) -> bool:
         """Waits until the pace changes after `changes`, for at most `timeout` seconds. Returns
         False once `stopping` is set."""
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -606,7 +628,7 @@ class Clock:
                 self.condition.wait(remaining)
         return not stopping.is_set()
 
-    def follow(self):
+    def follow(self) -> None:
         while True:
             try:
                 event = self.session.next_clock_event(cancel=self.cancel)
@@ -622,7 +644,7 @@ class Clock:
             finally:
                 del event
 
-    def observe(self, event):
+    def observe(self, event: nx.ClockEvent) -> bool:
         if event.kind == nx.ClockEventKind.TICK:
             self.counters.add("ticks_observed")
             return True
@@ -644,17 +666,17 @@ class Clock:
         self.publish((ENDED, None))
         return False
 
-    def snapshot(self):
+    def snapshot(self) -> nx.DomainClock | None:
         return self.session.domain_clock(self.domain)
 
-    def paced(self, generation):
+    def paced(self, generation: int) -> nx.DomainClock | None:
         """The paced clock of `generation` as the session last observed it, if it still has it."""
         clock = self.snapshot()
         if clock is None or clock.generation != generation or clock.state != nx.ClockState.PACED:
             return None
         return clock
 
-    def reach(self, generation, center, stopping):
+    def reach(self, generation: int, center: int, stopping: threading.Event) -> Reach:
         """Waits until the clock of `generation` reaches `center`. Returns ("center", window),
         ("moved", pace), ("stopping", None) or ("recheck", None) after a bounded wait."""
         while True:
@@ -689,7 +711,7 @@ class Clock:
             return ("center", window)
 
 
-def attach(session, domain):
+def attach(session: nx.Session, domain: str) -> None:
     """Attaches to the active domain clock before the driver reads its state."""
     try:
         execution = session.prepare("ATTACH DOMAIN CLOCK;")
@@ -702,7 +724,7 @@ def attach(session, domain):
         raise ConfigurationError(f"cannot attach to the clock of domain '{domain}': {outcome.message}")
 
 
-def detach(session):
+def detach(session: nx.Session) -> None:
     try:
         execution = session.prepare("DETACH DOMAIN CLOCK;")
         session.execute(execution)
@@ -713,18 +735,18 @@ def detach(session):
 class TickGrid:
     """The tick centers of one paced generation: origin + n × period."""
 
-    def __init__(self, generation, paced):
+    def __init__(self, generation: int, paced: nx.PacedClock) -> None:
         self.generation = generation
         self.origin = paced.origin
         self.period = paced.period
 
-    def reached(self, logical):
+    def reached(self, logical: int) -> int:
         """The newest tick center at or before the logical instant."""
         if logical < self.origin:
             return 0
         return (logical - self.origin) // self.period
 
-    def center(self, tick):
+    def center(self, tick: int) -> int | None:
         center = self.origin + tick * self.period
         if center >= 2**63:
             return None
@@ -742,7 +764,8 @@ class OpenIntent(Enum):
     FOLLOWING_START = "following START"
 
 
-def open_endpoint(open_call, endpoint, role, intent=OpenIntent.CURRENT_GENERATION):
+def open_endpoint[Handle](open_call: Callable[[], Handle], endpoint: str, role: str,
+                          intent: OpenIntent = OpenIntent.CURRENT_GENERATION) -> Handle:
     """Opens an endpoint, asking again while it is not running on its node yet."""
     deadline = time.monotonic() + OPEN_RETRY_BUDGET
     while True:
@@ -766,7 +789,8 @@ def open_endpoint(open_call, endpoint, role, intent=OpenIntent.CURRENT_GENERATIO
             ) from failure
 
 
-def open_consumer(session, domain, emitter, declared):
+def open_consumer(session: nx.Session, domain: str, emitter: str,
+                  declared: list[tuple[str, nx.FieldType]]) -> nx.Consumer:
     expected = fields(declared)
     return open_endpoint(
         lambda: session.subscribe_emitter(domain, emitter, expected, batches=4, bytes=1024 * 1024),
@@ -775,7 +799,8 @@ def open_consumer(session, domain, emitter, declared):
     )
 
 
-def open_producer(session, settings, intent=OpenIntent.CURRENT_GENERATION):
+def open_producer(session: nx.Session, settings: argparse.Namespace,
+                  intent: OpenIntent = OpenIntent.CURRENT_GENERATION) -> nx.Producer:
     expected = fields(READING_FIELDS)
     return open_endpoint(
         lambda: session.open_ingestor(
@@ -787,13 +812,13 @@ def open_producer(session, settings, intent=OpenIntent.CURRENT_GENERATION):
     )
 
 
-def consumer_line(name, emitter, consumer):
+def consumer_line(name: str, emitter: str, consumer: nx.Consumer) -> str:
     grant = consumer.grant
     return (f"CONSUMER opened consumer={name} emitter={emitter} generation={consumer.generation} "
             f"batches={grant.batches} bytes={grant.bytes}")
 
 
-def producer_line(settings, producer):
+def producer_line(settings: argparse.Namespace, producer: nx.Producer) -> str:
     grant = producer.grant
     return (f"PRODUCER opened ingestor={settings.ingestor} generation={producer.generation} "
             f"batches={grant.batches} bytes={grant.bytes} max_batch_rows={grant.max_batch_rows} "
@@ -803,22 +828,24 @@ def producer_line(settings, producer):
 class Reopen:
     """The endpoint's typed reopen reason and its application reporting policy."""
 
-    def __init__(self, reopen):
+    def __init__(self, reopen: nx.Reopen) -> None:
         self.reason = reopen.reason
         self.refusal = reopen.refusal
 
     @classmethod
-    def of(cls, endpoint):
+    def of(cls, endpoint: nx.Producer | nx.Consumer) -> Reopen | None:
         reopen = endpoint.reopen
         if reopen is None:
             return None
         return cls(reopen)
 
-    def waits_for_generation(self):
+    def waits_for_generation(self) -> bool:
         return self.reason in (nx.ReopenReason.DOMAIN_STOPPED, nx.ReopenReason.GENERATION_CHANGED)
 
-    def text(self):
+    def text(self) -> str:
         if self.reason == nx.ReopenReason.REFUSED:
+            # The binding gives every REFUSED reopen the refusal it carries.
+            assert self.refusal is not None
             return f"refused ({REFUSALS[self.refusal]})"
         return REOPEN_REASONS[self.reason]
 
@@ -830,7 +857,7 @@ class Producer:
     credit against the replacement while that thread still uses the previous producer.
     """
 
-    def __init__(self, endpoint):
+    def __init__(self, endpoint: nx.Producer) -> None:
         self.endpoint = endpoint
         self.schema = endpoint.schema
         self.outstanding = {"batches": 0, "bytes": 0}
@@ -839,7 +866,8 @@ class Producer:
 class ConsumerLoop:
     """One consumer: reads deliveries, records their effects, and only then acknowledges them."""
 
-    def __init__(self, run, name, emitter, kind, processing_time, leave_after):
+    def __init__(self, run: Run, name: str, emitter: str, kind: str, processing_time: int,
+                 leave_after: int | None) -> None:
         self.run = run
         self.name = name
         self.emitter = emitter
@@ -847,17 +875,17 @@ class ConsumerLoop:
         self.processing_time = processing_time
         self.leave_after = leave_after
         self.cancel = nx.Cancel()
-        self.thread = None
+        self.thread: threading.Thread | None = None
 
-    def start(self, consumer):
+    def start(self, consumer: nx.Consumer) -> None:
         self.thread = threading.Thread(target=self.loop, args=(consumer,), name=self.name,
                                        daemon=True)
         self.thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         self.cancel.trigger()
 
-    def loop(self, consumer):
+    def loop(self, consumer: nx.Consumer) -> None:
         generation = consumer.generation
         handled = 0
         while not self.run.stopped.is_set():
@@ -903,11 +931,12 @@ class ConsumerLoop:
                 return
         self.close(consumer)
 
-    def reopen(self, generation, reason):
+    def reopen(self, generation: int, reason: Reopen) -> nx.Consumer | None:
         """Accepts a changed contract now; a lifecycle ending waits for the next START."""
         while reason.waits_for_generation() and self.run.generation_now() <= generation:
             if not self.run.wait_generation(generation):
                 return None
+        assert self.run.session is not None
         try:
             consumer = open_consumer(self.run.session, self.run.settings.domain, self.emitter,
                                      OBSERVED_FIELDS if self.kind == "reading" else REJECTED_FIELDS)
@@ -918,7 +947,7 @@ class ConsumerLoop:
              f"generation={consumer.generation}")
         return consumer
 
-    def handle(self, delivery, generation):
+    def handle(self, delivery: nx.Delivery, generation: int) -> None:
         try:
             batch = delivery.batch
         except nx.ClientError as failure:
@@ -935,6 +964,7 @@ class ConsumerLoop:
             time.sleep(self.processing_time / 1e9)
         applied = 0
         duplicates = 0
+        assert self.run.effects is not None
         try:
             for record in records:
                 if self.kind == "reading":
@@ -970,7 +1000,7 @@ class ConsumerLoop:
              f"applied={applied} duplicates={duplicates}")
         self.settle("ACK", delivery.ack)
 
-    def settle(self, action, call):
+    def settle(self, action: str, call: Callable[[], nx.Settlement]) -> None:
         try:
             outcome = SETTLEMENTS[call()]
         except nx.ClientError as failure:
@@ -982,7 +1012,7 @@ class ConsumerLoop:
                 outcome = f"failed reason={failure.message}"
         line(f"{action} consumer={self.name} emitter={self.emitter} {outcome}")
 
-    def close(self, consumer):
+    def close(self, consumer: nx.Consumer) -> None:
         try:
             consumer.close()
         except nx.ClientError as failure:
@@ -996,7 +1026,7 @@ INSTALL_BUDGET = 30.0
 CLOSE_BUDGET = 30.0
 
 
-def outcome_of(outcome):
+def outcome_of(outcome: nx.SubmissionOutcome) -> tuple[str, str]:
     """The ledger's outcome and cause of a submission's terminal outcome."""
     if outcome.result == nx.SubmissionResult.COMPLETED:
         return "completed", ""
@@ -1007,16 +1037,26 @@ def outcome_of(outcome):
     return "outcome_unknown", UNCERTAINTIES[outcome.uncertainty]
 
 
-def outcome_line(tick, readings, kind, cause):
+def outcome_line(tick: int, readings: int, kind: str, cause: str) -> str:
     if cause:
         return f"OUTCOME tick={tick} readings={readings} {kind} {cause}"
     return f"OUTCOME tick={tick} readings={readings} {kind}"
 
 
+class Prepared(TypedDict):
+    """The readings of one tick with the producer's batch of them and its size in bytes."""
+
+    tick: int
+    readings: list[Reading]
+    # A replay deletes the batch before it encodes again the readings the window still admits.
+    batch: NotRequired[nx.Batch]
+    size: int
+
+
 class Run:
     """One run of the simulation: its session, its endpoints and its planner."""
 
-    def __init__(self, settings):
+    def __init__(self, settings: argparse.Namespace) -> None:
         self.settings = settings
         self.counters = Counters()
         self.stopped = threading.Event()
@@ -1024,58 +1064,62 @@ class Run:
         self.planning = nx.Cancel()
         self.refusal_cancel = nx.Cancel()
         self.generation_lock = threading.Condition()
-        self.generation = None
-        self.session = None
-        self.clock = None
-        self.producer = None
+        # The run sets the generation, session, clock, producer, ledger and effect store before
+        # any method that reads one runs; such a method asserts it for the type checker.
+        self.generation: int | None = None
+        self.session: nx.Session | None = None
+        self.clock: Clock | None = None
+        self.producer: Producer | None = None
         # The producer credit the run's submissions hold. The run waits for credit before it
         # checks the admission window and submits, so it never checks a batch's event times and
         # then holds the batch back while the window moves on.
         self.credit = threading.Condition()
-        self.outcomes = []
-        self.consumer_loops = []
-        self.refused = None
-        self.ledger = None
-        self.effects = None
+        self.outcomes: list[threading.Thread] = []
+        self.consumer_loops: list[ConsumerLoop] = []
+        self.refused: ConfigurationError | None = None
+        self.ledger: Ledger | None = None
+        self.effects: EffectStore | None = None
         # The readings of completed batches whose rejection notices the run waits for before it
         # stops its consumers: an error route acknowledges a reading once its notice is
         # published, before the rejection emitter delivers it.
-        self.awaited_notices = []
+        self.awaited_notices: list[str] = []
 
     # The generation the consumers follow.
 
-    def generation_now(self):
+    def generation_now(self) -> int:
         with self.generation_lock:
+            assert self.generation is not None
             return self.generation
 
-    def set_generation(self, generation):
+    def set_generation(self, generation: int) -> None:
         with self.generation_lock:
             self.generation = generation
             self.generation_lock.notify_all()
 
-    def wait_generation(self, generation):
+    def wait_generation(self, generation: int) -> bool:
         with self.generation_lock:
+            assert self.generation is not None
             while self.generation <= generation and not self.stopped.is_set():
                 self.generation_lock.wait(0.2)
         return not self.stopped.is_set()
 
-    def stop_planning(self):
+    def stop_planning(self) -> None:
         self.planning_stopped.set()
         self.planning.trigger()
 
-    def fail(self, failure):
+    def fail(self, failure: ConfigurationError) -> None:
         self.refused = failure
         self.refusal_cancel.trigger()
         self.stop_planning()
 
-    def check_refusal(self):
+    def check_refusal(self) -> None:
         if self.refused is not None:
             self.stopped.set()
             for consumer_loop in self.consumer_loops:
                 consumer_loop.stop()
             raise self.refused
 
-    def connect(self):
+    def connect(self) -> None:
         try:
             self.session = nx.Session(
                 self.settings.server, domain=self.settings.domain,
@@ -1085,10 +1129,11 @@ class Run:
                 f"cannot connect to '{self.settings.server}': {failure.message}"
             ) from failure
 
-    def starting_generation(self):
+    def starting_generation(self) -> int:
         """The generation a run starts in: the attached clock's, once the node installed it."""
         deadline = time.monotonic() + INSTALL_BUDGET
         domain = self.settings.domain
+        assert self.clock is not None
         while True:
             pace, changes = self.clock.current()
             if pace[0] == PACED:
@@ -1115,27 +1160,31 @@ class Run:
                 )
             self.clock.wait_change(changes, self.stopped, timeout=remaining)
 
-    def open_producer(self, intent=OpenIntent.CURRENT_GENERATION):
+    def open_producer(self, intent: OpenIntent = OpenIntent.CURRENT_GENERATION) -> int:
+        assert self.session is not None
         return self.install_producer(Producer(open_producer(self.session, self.settings, intent)))
 
-    def install_producer(self, producer):
+    def install_producer(self, producer: Producer) -> int:
         self.producer = producer
         line(producer_line(self.settings, producer.endpoint))
         return producer.endpoint.generation
 
-    def close_producer(self):
+    def close_producer(self) -> None:
+        assert self.producer is not None
         try:
             self.producer.endpoint.close(cancel=self.refusal_cancel)
         except nx.ClientError as failure:
             self.check_refusal()
             line(f"PRODUCER close_failed reason={failure.message}")
 
-    def reopen(self, grid):
+    def reopen(self, grid: TickGrid) -> TickGrid | None:
         """Accepts a changed contract with fresh credit, leaving pending outcomes with their owner."""
+        assert self.producer is not None
         reason = Reopen.of(self.producer.endpoint)
         if reason is None or reason.waits_for_generation():
             return grid
         self.close_producer()
+        assert self.session is not None
         producer = Producer(open_producer(self.session, self.settings))
         opened = producer.endpoint.generation
         if opened != grid.generation:
@@ -1148,9 +1197,10 @@ class Run:
              f"reason={reason.text()}")
         return grid
 
-    def start_consumers(self):
+    def start_consumers(self) -> None:
         rejections = ConsumerLoop(self, "rejections", self.settings.rejections, "rejection", 0,
                                   None)
+        assert self.session is not None
         consumer = open_consumer(self.session, self.settings.domain, self.settings.rejections,
                                  REJECTED_FIELDS)
         line(consumer_line("rejections", self.settings.rejections, consumer))
@@ -1170,7 +1220,7 @@ class Run:
         line(f"CONSUMER delayed emitter={self.settings.emitter} "
              f"for={duration_text(self.settings.consumer_delay)}")
 
-        def open_later():
+        def open_later() -> None:
             if self.stopped.wait(self.settings.consumer_delay / 1e9):
                 return
             for consumer_loop in loops:
@@ -1182,7 +1232,8 @@ class Run:
 
         threading.Thread(target=open_later, name="late-consumers", daemon=True).start()
 
-    def open_output(self, consumer_loop):
+    def open_output(self, consumer_loop: ConsumerLoop) -> None:
+        assert self.session is not None
         consumer = open_consumer(self.session, self.settings.domain, consumer_loop.emitter,
                                  OBSERVED_FIELDS)
         line(consumer_line(consumer_loop.name, consumer_loop.emitter, consumer))
@@ -1191,15 +1242,20 @@ class Run:
 
     # The planner.
 
-    def first_tick(self, grid):
+    def first_tick(self, grid: TickGrid) -> int:
+        assert self.clock is not None
         clock = self.clock.paced(grid.generation)
         if clock is None:
             return 0
         return grid.reached(clock.logical_time_at(time.time_ns()))
 
-    def simulate(self, grid):
+    def simulate(self, grid: TickGrid | None) -> None:
+        # The caller passes a grid; reopening or following gives back None only to stop.
+        assert grid is not None
         tick = self.first_tick(grid)
         planned = 0
+        assert self.clock is not None
+        assert self.producer is not None
         while planned < self.settings.ticks:
             generation = grid.generation
             grid = self.reopen(grid)
@@ -1217,11 +1273,16 @@ class Run:
             if reached == "recheck":
                 continue
             if reached == "moved":
+                # A moved reach carries the pace the clock moved to.
+                assert isinstance(value, tuple)
                 grid = self.follow(value, grid)
                 if grid is None:
                     return
                 tick = self.first_tick(grid)
                 continue
+            # The only reach left is the center, which carries its admission window.
+            assert isinstance(value, Window)
+            window: Window | None
             window = value
             generation = grid.generation
             grid = self.reopen(grid)
@@ -1255,7 +1316,8 @@ class Run:
                 del prepared
             tick += 1
 
-    def plan(self, generation, tick, center, window, planned):
+    def plan(self, generation: int, tick: int, center: int, window: Window,
+             planned: int) -> list[Reading]:
         every = self.settings.invalid_every
         stale = None
         if every and planned % every == 0:
@@ -1270,8 +1332,9 @@ class Run:
                     readings.append(Reading(generation, tick, sensor, position, center, "center"))
         return readings
 
-    def prepare(self, tick, readings):
+    def prepare(self, tick: int, readings: list[Reading]) -> Prepared:
         """Encodes the readings of one tick as the producer's batch."""
+        assert self.producer is not None
         batch = build_batch(self.producer.schema, readings)
         size = len(batch.ipc)
         max_batch_bytes = self.producer.endpoint.grant.max_batch_bytes
@@ -1280,9 +1343,10 @@ class Run:
                                f"exceed the {max_batch_bytes} bytes one submission may carry")
         return {"tick": tick, "readings": readings, "batch": batch, "size": size}
 
-    def wait_for_credit(self, size):
+    def wait_for_credit(self, size: int) -> bool:
         """Waits until a batch of `size` bytes fits in the producer's credit beside the batches it
         holds. Returns False when the planning stops first."""
+        assert self.producer is not None
         grant = self.producer.endpoint.grant
         batches, granted = grant.batches, grant.bytes
         reported = False
@@ -1303,7 +1367,7 @@ class Run:
                     return False
                 self.credit.wait(0.2)
 
-    def send(self, prepared):
+    def send(self, prepared: Prepared) -> None:
         """Records the readings in the ledger, submits them as one batch, and starts awaiting its
         outcome."""
         tick, readings, batch, size = (prepared["tick"], prepared["readings"], prepared["batch"],
@@ -1311,8 +1375,10 @@ class Run:
         reading_ids = [reading.reading_id for reading in readings]
         rejected_ids = [reading.reading_id for reading in readings
                         if self.settings.timestamps == "at" and reading.stamp == "before_window"]
+        assert self.ledger is not None
         self.ledger.readings(readings, self.settings.ingestor, self.settings.timestamps)
         self.counters.add("readings", len(readings))
+        assert self.producer is not None
         while True:
             try:
                 submission = self.producer.endpoint.submit(batch, cancel=self.planning)
@@ -1347,13 +1413,14 @@ class Run:
         thread.start()
         self.outcomes.append(thread)
 
-    def not_sent(self, tick, reading_ids, cause):
+    def not_sent(self, tick: int, reading_ids: list[str], cause: str) -> None:
+        assert self.ledger is not None
         self.ledger.outcome(reading_ids, "not_admitted", cause)
         self.counters.outcome("not_admitted", len(reading_ids))
         line(outcome_line(tick, len(reading_ids), "not_admitted", cause))
 
-    def await_outcome(self, producer, tick, reading_ids, rejected_ids, size,
-                      submission):
+    def await_outcome(self, producer: Producer, tick: int, reading_ids: list[str],
+                      rejected_ids: list[str], size: int, submission: int) -> None:
         outcome = producer.endpoint.rejoin(submission)
         kind, cause = outcome_of(outcome)
         del outcome
@@ -1363,6 +1430,7 @@ class Run:
             if kind == "completed":
                 self.awaited_notices.extend(rejected_ids)
             self.credit.notify_all()
+        assert self.ledger is not None
         try:
             self.ledger.outcome(reading_ids, kind, cause)
         except OSError as failure:
@@ -1370,11 +1438,12 @@ class Run:
         self.counters.outcome(kind, len(reading_ids))
         line(outcome_line(tick, len(reading_ids), kind, cause))
 
-    def follow(self, pace, grid):
+    def follow(self, pace: Pace, grid: TickGrid) -> TickGrid | None:
         """Follows the domain into a later START generation, when the run is asked to."""
         if not self.settings.follow_generations:
             line(f"STOPPING generation={grid.generation} reason=generation_ended")
             return None
+        assert self.clock is not None
         while True:
             if pace[0] == PACED and pace[1] > grid.generation:
                 break
@@ -1402,16 +1471,19 @@ class Run:
                 return None
         grid = TickGrid(opened, paced)
         self.set_generation(opened)
+        assert self.ledger is not None
         self.ledger.generation(opened)
         self.counters.generation(opened)
         line(f"REOPENED generation={opened} ingestor={self.settings.ingestor} after={target}")
         return grid
 
-    def replay(self, unresolved, grid):
+    def replay(self, unresolved: list[Reading], grid: TickGrid | None) -> None:
         """Resubmits the ledger's readings without a completed outcome, when they belong to the
         generation the run is in and the window still admits them."""
+        # The caller passes a grid; reopening gives back None only to stop.
+        assert grid is not None
         generation = grid.generation
-        by_tick = {}
+        by_tick: dict[int, list[Reading]] = {}
         for reading in unresolved:
             if reading.generation != grid.generation:
                 line(f"REPLAY skipped reading_id={reading.reading_id} "
@@ -1441,9 +1513,10 @@ class Run:
             finally:
                 del prepared
 
-    def admissible(self, readings, grid):
+    def admissible(self, readings: list[Reading], grid: TickGrid) -> list[Reading]:
         """The readings a replay may still submit: under TIMESTAMP AT, those whose event time the
         window admits now. The others are reported, and stay unresolved in the ledger."""
+        assert self.clock is not None
         clock = self.clock.paced(grid.generation)
         window = Window.at(clock, time.time_ns()) if clock is not None else None
         admissible = []
@@ -1461,7 +1534,7 @@ class Run:
                  f"occurred_at={rfc3339(reading.occurred_at)}")
         return admissible
 
-    def settle_outcomes(self):
+    def settle_outcomes(self) -> int:
         """Waits for every outcome still outstanding, and then for the rejection notices of the
         completed batches, up to the deadline. Returns how many outcomes never came."""
         until = time.monotonic() + self.settings.deadline / 1e9
@@ -1477,11 +1550,12 @@ class Run:
         with self.credit:
             awaited = list(self.awaited_notices)
             self.awaited_notices.clear()
+        assert self.effects is not None
         self.effects.await_rejections(awaited, until, lambda: self.refused is not None)
         self.check_refusal()
         return missing
 
-    def inspect(self):
+    def inspect(self) -> None:
         """Inspects the ingestor and the output emitter on the session at an interval."""
         every = self.settings.inspect_every / 1e9
         while not self.stopped.wait(every):
@@ -1504,7 +1578,8 @@ class Run:
                  f"retained_batches={values['retained batches: ']}")
             self.counters.add("inspections")
 
-    def execute(self, query):
+    def execute(self, query: str) -> str | None:
+        assert self.session is not None
         try:
             execution = self.session.prepare(query)
             return self.session.execute(execution).message
@@ -1512,10 +1587,11 @@ class Run:
             line(f"INSPECT failed reason={failure.message}")
             return None
 
-    def execute_run(self):
+    def execute_run(self) -> int:
         """Runs the simulation, from connecting to the summary. Returns the exit status."""
         self.connect()
         line(f"CONNECTED server={self.settings.server} domain={self.settings.domain}")
+        assert self.session is not None
         attach(self.session, self.settings.domain)
         snapshot = self.session.domain_clock(self.settings.domain)
         if snapshot is None:
@@ -1543,6 +1619,7 @@ class Run:
                 f"the clock of domain '{self.settings.domain}' changed while the simulation "
                 f"started; run the simulation again"
             )
+        grid: TickGrid | None
         grid = TickGrid(generation, clock.paced)
         inspector = None
         if self.settings.inspect_every is not None:
@@ -1589,7 +1666,7 @@ class Run:
         return 0 if self.counters.all_completed() else 3
 
 
-def main(arguments):
+def main(arguments: list[str]) -> int:
     try:
         settings = options(arguments)
     except ConfigurationError as failure:
@@ -1597,14 +1674,14 @@ def main(arguments):
         return 2
     run = Run(settings)
 
-    def interrupt(signum, frame):
+    def interrupt(signum: int, frame: FrameType | None) -> None:
         line("STOPPING reason=interrupt")
         run.stop_planning()
 
     signal.signal(signal.SIGINT, interrupt)
-    status = {}
+    status: dict[str, int] = {}
 
-    def body():
+    def body() -> None:
         try:
             status["code"] = run.execute_run()
         except ConfigurationError as failure:

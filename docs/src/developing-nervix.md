@@ -55,11 +55,25 @@ the configured build root's path so instrumented Rust builds use the same jar an
 
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
-`target/client-conformance/wheels`. The recipe installs the wheel and `pyarrow`, the probe's test
-dependency, into a CPython 3.12 environment at `target/client-conformance/python`, which uv
-downloads when no CPython 3.12 is installed. The package's own tests run with `cargo test` and embed
-the CPython that pyo3 finds on `PATH`, with its library's directory as the tests' run path, so an
-interpreter outside the loader's default path, such as pyenv's, runs them too.
+`target/client-conformance/wheels`, with its typed stub `crates/client-python/nervix_client.pyi`
+and a `py.typed` marker. The recipe installs the wheel with `pyarrow`, `polars`, `pytest` and `mypy`
+into a CPython 3.12 environment at `target/client-conformance/python`, which the probe and the
+package's suite run in, and alone into `target/client-conformance/python-bare`, which the boundary
+tier's packaging test loads it from; uv downloads CPython 3.12 when none is installed. The
+package's own tests run with `cargo test` and embed the CPython that pyo3 finds on `PATH`, with its
+library's directory as the tests' run path, so an interpreter outside the loader's default path,
+such as pyenv's, runs them too.
+
+The package's pytest suite, `tests/client_conformance/python/suite`, runs in two tiers.
+`just test-client-python-api`, which `just test` runs, builds the wheel and runs the boundary tier,
+which needs no cluster, and `just test-client-python-cluster` runs the cluster tier's one- and
+three-node rows of `tests/features/runtime/client_suites.feature`, building only the wheel and the
+scenario suite. `just validate-client-suites`, part of `just validate`, types the suite and the
+paced simulation driver with `mypy --strict` against the stub through the repository's uv project,
+and holds the suite, its inventory, the stub and the
+[Python Client Library](client-library-python.md) chapter to the package's source. The
+`client-conformance` CI job builds every host's artifacts, runs the JVM and Python boundary tiers,
+then runs the probes and the suites' cluster rows together.
 
 `just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
 from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
@@ -552,13 +566,13 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The cross-language client probes against one- and three-node clusters |
+| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM and Python boundary tiers |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
 | `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
-| `extra-compiler` | Check | Source contracts, compiler diagnostics, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's runners |
+| `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
 | `extra-completion-walk` | Check | The Plexus completion walk |
@@ -632,10 +646,15 @@ just test-typed-ratchet
 just test-typed-ratchet-docs
 just qualify-typed-ratchet-cache
 just lint-audit
+just lint-audit --inventory
+just test-ratchet-audit
 ```
 
 `just lint-audit` reads the same complete evidence and reports review candidates for code shaped
 around an inaccurate lint, each attributed to the commits and debt counts that introduced it.
+It invokes `nervix-ratchet audit`, which calls the matrix runner in-process; `--inventory` and
+`--configuration` use warning levels. `just test-ratchet-audit` exercises the audit owners over
+private Git histories and recorded GitHub pages, plus its CLI, without compiling a product graph.
 [Architecture Rules And The Debt Ratchet](architecture-enforcement.md#auditing-lint-workarounds)
 states the candidates, the attribution and the review contract.
 

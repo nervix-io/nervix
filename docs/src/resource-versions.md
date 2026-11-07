@@ -93,12 +93,21 @@ rejects further uploads rather than wrapping.
 An upload identity is scoped to the authenticated user, the domain, and the resource. Repeating an
 upload with the same identity and the same archive digest continues or reports the upload already
 recorded under that identity, with the number already assigned; the same identity with a different
-digest is rejected as a digest conflict. An upload admitted through the client protocol keeps
-installing when the uploading connection closes. The identity rules and client retries are covered
+digest is rejected with the typed `IdentityConflict` upload failure and the identity's assigned
+version, without changing its retained outcome or assigning another number. An upload admitted
+through the client protocol keeps installing when the uploading connection closes. The identity
+rules and client retries are covered
 in [Resources](./resources.md#lifecycle) and
 [Command Completion](./command-completion.md#lifecycle-and-ownership), and the upload stream, its
 typed failures, and its recovery in
 [Resource Uploads](./client-session-protocol.md#resource-uploads).
+
+The node keeps one execution owner per upload key while any installation, imported-version
+installation, reconciliation or waiting retry uses it. Ending or cancelling an attempt releases
+its hold; the final hold removes the entry. A queued retry keeps the same owner as the attempt it
+joined, so cleanup cannot admit another installation concurrently under a replacement lock.
+The durable upload record retains the outcome independently of this local owner. Reconciliation
+can acquire a fresh owner for an applying upload after an interrupted or deferred attempt ends.
 
 ### Installing One Copy
 

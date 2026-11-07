@@ -62,8 +62,8 @@ use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_rat
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
 use domain_clock::{
-    DomainClockRetirements, DomainClockTask, reconcile_domain_clock_tasks,
-    run_domain_clock_authority_reconciliation,
+    DomainClockAttachmentSenders, DomainClockRetirements, DomainClockTask,
+    reconcile_domain_clock_tasks, run_domain_clock_authority_reconciliation,
 };
 use error_stack::{Report, ResultExt};
 use futures_util::{
@@ -768,6 +768,8 @@ impl Application {
         let local_health_identity = cluster.local_node_identity().await;
         let application_progress =
             completion::ApplicationProgressState::new(local_health_identity.clone());
+        let (domain_clock_attachments, mut clock_attachment_installation) =
+            domain_clock::DomainClockAttachments::new(application_progress.identity());
         #[cfg(feature = "testing")]
         let health_fault_injection = fault_injection.clone();
         let health_handler = interconnect.register_handler::<ApplicationHealthProbe, _, _>({
@@ -1021,6 +1023,7 @@ impl Application {
                 subscription_sampler: SubscriptionSampler::default(),
                 interconnect: interconnect.clone(),
                 application_progress: application_progress.clone(),
+                domain_clock_attachments,
                 client_producers: ClientProducerRouter::new(
                     runtime.clone(),
                     interconnect.clone(),
@@ -1039,7 +1042,7 @@ impl Application {
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_recovery: Default::default(),
                 ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
-                resource_upload_executions: DashMap::with_hasher(RandomState::new()),
+                resource_upload_executions: Default::default(),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
                 retained_backups: Default::default(),
                 captured_backup_sections: DashMap::with_hasher(RandomState::new()),
@@ -1902,6 +1905,19 @@ impl Application {
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let clock_attach_service = service.clone();
+        interconnect
+            .register_handler::<nervix_interconnect::DomainClockAttachRequest, _, _>(move |context, request| {
+                let service = clock_attach_service.clone();
+                async move {
+                    let availability = service.inner.cluster.availability_state().await;
+                    service.inner.domain_clock_attachments.attach(
+                        context.peer_node_id(), context.peer_process_epoch(), &request,
+                        &availability.live_identities(),
+                    )
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let resource_archive_service = service.clone();
         interconnect
             .register_stream_handler::<FetchResourceArchive, _, _>(move |_context, request| {
@@ -2580,25 +2596,28 @@ impl Application {
         background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domain_state_rx = clock_service.inner.runtime.subscribe_domain_state();
             // The clock owner installs committed authority fences ahead of graph installation and
-            // advertises each runtime revision its domain clocks match, so it follows committed
+            // attaches after each runtime revision its domain clocks match, so it follows committed
             // domain and schedule changes itself.
             let mut committed_domains_rx = clock_service.inner.consensus.subscribe_domains();
             let mut committed_schedule_rx = clock_service.inner.consensus.subscribe_schedule();
             let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
             let mut retirements = DomainClockRetirements::default();
+            let mut attachment_senders = DomainClockAttachmentSenders::default();
 
             loop {
                 nervix_primitives::task::consume_budget().await;
                 let state = clock_service.inner.consensus.current_runtime_state().await;
-                clock_service.install_committed_domain_clocks(&state).await;
+                clock_service.install_committed_domain_clocks(&state);
                 reconcile_domain_clock_tasks(
                     &clock_service,
                     &clock_shutdown,
                     &state,
                     &mut tasks,
                     &mut retirements,
+                    &mut clock_attachment_installation,
                 )
                 .await;
+                attachment_senders.reconcile(&clock_service, &clock_shutdown, &state).await;
                 nervix_primitives::select! {
                     _ = clock_shutdown.cancelled() => break,
                     changed = domain_state_rx.changed() => {
@@ -2620,6 +2639,8 @@ impl Application {
                 }
             }
 
+            clock_attachment_installation.clear();
+            attachment_senders.stop_all().await;
             for (_, task) in tasks {
                 task.task.stop().await;
             }

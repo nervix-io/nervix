@@ -99,6 +99,10 @@ codes!(disposition(host::Disposition) {
     Completed=1,Failed=2,NotLeader=3,TransactionDetached=4,TransactionTakenOver=5,OutcomeUnknown=6,
     ExecutionReferenceConflict=7,ExecutionReferenceExpired=8,PreviewStale=9,
 });
+codes!(upload_failure(host::UploadFailure) {
+    InvalidStream=1,ResourceNotDeclared=2,SizeMismatch=3,QuotaExceeded=4,
+    InstallationFailed=5,IdentityConflict=6,
+});
 codes!(event_kind(host::EventKind) {
     Rows=1,DeliveryLost=2,RowsSkipped=3,Ended=4,Interrupted=5,ConsumerOverflow=6,RestorationFailed=7,
 });

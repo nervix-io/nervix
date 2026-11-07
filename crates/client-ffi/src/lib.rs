@@ -97,12 +97,13 @@ pub use nervix_client_host::{
     DomainClock, EndReason, EndpointState, Event, EventKind, Execution, Failure, FailureKind,
     FieldType, Fields, OpenRefusal, Outcome, Part, ProcessingFailure, Producer, Reopen,
     ReopenReason, RestorationCause, Schema, Session, Settlement, SubmissionOutcome,
-    SubmissionRefusal, SubmissionResult, Suggestions, Uncertainty, Window, WindowKind,
+    SubmissionRefusal, SubmissionResult, Suggestions, Uncertainty, UploadFailure, Window,
+    WindowKind,
 };
 pub use outcome::{
     nx_outcome_backup, nx_outcome_diagnostic, nx_outcome_diagnostic_count, nx_outcome_disposition,
     nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message, nx_outcome_restore,
-    nx_outcome_schema, nx_outcome_subscription,
+    nx_outcome_schema, nx_outcome_subscription, nx_outcome_upload_failure,
 };
 pub use producer::{
     nx_producer_admission, nx_producer_close, nx_producer_contract, nx_producer_free,

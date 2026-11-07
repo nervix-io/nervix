@@ -177,6 +177,8 @@ pub enum UploadFailure {
     SizeMismatch,
     QuotaExceeded,
     InstallationFailed,
+    /// The upload identity is bound to another archive, whose assigned version is retained.
+    IdentityConflict,
 }
 
 wire_enum!(ALL_UPLOAD_FAILURES: UploadFailure => wire::UploadFailure {
@@ -185,6 +187,7 @@ wire_enum!(ALL_UPLOAD_FAILURES: UploadFailure => wire::UploadFailure {
     SizeMismatch,
     QuotaExceeded,
     InstallationFailed,
+    IdentityConflict,
 });
 
 /// What became of an upload.

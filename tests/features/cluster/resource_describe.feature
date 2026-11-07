@@ -428,6 +428,7 @@ Feature: Resource lifecycle
       """
     And the last client upload recovered version 1 from an earlier upload
     When client "uploader" upload of resource "proto" from "{{different_proto_dir}}" with identity "retry-one" fails with "already assigned version 1 with digest"
+    Then the last client upload refused version 1 with typed failure "IdentityConflict"
     When client "uploader" executes these Plexus commands
       """
       DESCRIBE RESOURCE proto;
@@ -487,6 +488,7 @@ Feature: Resource lifecycle
       """
     And the last client upload recovered version 1 from an earlier upload
     When client "uploader" upload of resource "proto" from "{{different_proto_dir}}" with identity "lost-reply" fails with "already assigned version 1 with digest"
+    Then the last client upload refused version 1 with typed failure "IdentityConflict"
     When client "uploader" executes these Plexus commands
       """
       DESCRIBE RESOURCE proto;

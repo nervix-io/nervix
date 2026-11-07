@@ -1,11 +1,12 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: complete compiler-analysis evidence, compilation lifetimes and host memory admission.
+//! Owns: complete compiler-analysis evidence and review audits, compilation lifetimes and memory admission.
 //! Depends on: the report vocabulary, selected primitives, Cargo and operating-system processes.
 //! Must not know: product graph policy, runtime execution or manually curated source findings.
 
 pub mod admission;
 pub mod admission_queue;
 pub mod analysis;
+pub mod audit;
 pub mod cache;
 pub mod configuration;
 pub mod contracts;

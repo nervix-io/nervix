@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -19,6 +20,7 @@ from scripts.build_book import (
     rewrite_external_assets,
     run_mdbook,
     stage_book,
+    stage_included_sources,
     verify_mdbook_version,
     verify_published_images,
 )
@@ -297,6 +299,54 @@ class BookStagingTests(unittest.TestCase):
                 stage_book(staged)
 
             self.assertTrue((staged / "src" / IMAGES_DIR_NAME / "console-overview.png").is_file())
+
+    def test_a_file_a_chapter_includes_from_outside_the_chapters_is_staged_beside_them(self) -> None:
+        # mdBook resolves an include against the chapter that holds it, so the staged copy of a
+        # guide finds its suite's test at the same relative place.
+        with TemporaryDirectory() as tmp:
+            repository = Path(tmp) / "repository"
+            chapters = repository / "docs" / "src"
+            chapters.mkdir(parents=True)
+            (chapters / "guide.md").write_text(
+                "```python\n{{#include ../../tests/suite/test_connect.py:connect}}\n```\n",
+                encoding="utf-8",
+            )
+            suite = repository / "tests" / "suite"
+            suite.mkdir(parents=True)
+            (suite / "test_connect.py").write_text("# ANCHOR: connect\n", encoding="utf-8")
+            staged_chapters = Path(tmp) / "staging" / "book" / "src"
+            shutil.copytree(chapters, staged_chapters)
+
+            stage_included_sources(chapters, staged_chapters)
+
+            staged = Path(tmp) / "staging" / "tests" / "suite" / "test_connect.py"
+            self.assertEqual(staged.read_text(encoding="utf-8"), "# ANCHOR: connect\n")
+
+    def test_an_include_that_leaves_the_repository_is_an_error(self) -> None:
+        with TemporaryDirectory() as tmp:
+            chapters = Path(tmp) / "repository" / "docs" / "src"
+            chapters.mkdir(parents=True)
+            (chapters / "guide.md").write_text(
+                "{{#include ../../../outside.py}}\n", encoding="utf-8"
+            )
+            staged_chapters = Path(tmp) / "staging" / "book" / "src"
+            shutil.copytree(chapters, staged_chapters)
+
+            with self.assertRaises(SystemExit):
+                stage_included_sources(chapters, staged_chapters)
+
+    def test_an_include_of_a_missing_file_is_an_error(self) -> None:
+        with TemporaryDirectory() as tmp:
+            chapters = Path(tmp) / "repository" / "docs" / "src"
+            chapters.mkdir(parents=True)
+            (chapters / "guide.md").write_text(
+                "{{#include ../../tests/absent.py:anchor}}\n", encoding="utf-8"
+            )
+            staged_chapters = Path(tmp) / "staging" / "book" / "src"
+            shutil.copytree(chapters, staged_chapters)
+
+            with self.assertRaises(SystemExit):
+                stage_included_sources(chapters, staged_chapters)
 
     def test_a_book_built_without_captured_screenshots_is_an_error(self) -> None:
         # The chapters reference the images unconditionally, so an uncaptured

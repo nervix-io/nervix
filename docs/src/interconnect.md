@@ -1971,16 +1971,44 @@ while the loop waits for capacity or a response, so a fast clock or slow peer ca
 unbounded tick queue. The node-wide progress quota bounds attempts across every domain and peer.
 Liveness, relay admission, cancellation, and terminal outcomes retain their independent capacity.
 
-Only live peers that advertise installation of the domain clocks of the required revision receive
-progress. A node installs a reassigned authority fence ahead of its graph installation and
-advertises the revision through discovery once every domain clock it holds matches it, so a
-receiver whose graph preparation waits on a departed node still receives progress. A node that
-joins or reconnects receives the newest retained frontier once its advertisement reaches that
-revision. Each attempt has a two-second physical deadline. A failed attempt waits 200
-milliseconds, then retries the newest frontier; authority shutdown cancels both an active request
-and its retry delay.
+The receiver opens delivery with `domain_clock_attach`, a management request in the same progress
+subquota with the same two-second attempt deadline. The attachment request derives that deadline
+from the progress request: their equality is a fixed protocol invariant, not a second timeout policy.
+It names its full process identity, domain,
+installed runtime revision, lifecycle generation and addressed authority fence. It attaches once
+its local installed-clock phase reaches that revision, ahead of graph readiness, and replaces the
+attachment after a newer installation or authority reassignment. A receiver whose graph preparation
+waits on a departed node can therefore still receive progress.
 
-The wire report contains typed logical and UTC timestamps and no process-local monotonic instant.
+The authority checks the authenticated node name, live incarnation, addressed fence and installed
+revision. The typed receipt distinguishes acceptance, a foreign target, an unavailable target, a
+superseded authority and a stale revision. Equal repeated requests are idempotent; a newer
+attachment cancels the preceding delivery lifetime, and an older request from the same receiver
+incarnation cannot replace it. A replacement incarnation inherits no installed revision from its
+predecessor and must meet the authority's minimum revision. A reassigned authority begins without
+targets. Accepted attachments intersected with effective availability select delivery tasks; a
+newly attached or reconnected target receives the newest retained frontier. Inactive attachment
+metadata is bounded by current members and live joiners, one incarnation per node name, and holds
+no delivery task or pending report.
+
+An attachment accepted while the producer reads availability invalidates that observation before
+it can prune targets. A delayed handler also cannot replace an accepted newer receiver incarnation
+using a preceding availability view. These checks keep an accepted attachment alive without asking
+its receiver to retry an already successful request.
+
+This includes retries whose preceding acceptance reply was lost: the first duplicate overlapping
+the observation invalidates it without replacing its lifetime. Later duplicates in that read, and
+duplicates outside a read, send no redundant notification.
+
+A failed attachment or progress attempt waits 200 milliseconds before retrying the current
+attachment or newest frontier. Replacement and authority shutdown cancel both active requests
+and their retry delays. Revision installation reaches the authority directly through attachment;
+gossip supplies membership and availability.
+
+The authority retains the authenticated receiver transport's process epoch with its attachment.
+Each progress request checks that epoch on the selected connection lease before sending, so a
+retained delivery cannot reach a replacement process under the same node name. The recurring wire
+report retains its typed logical and UTC timestamps and contains no process-local monotonic instant.
 The receiver authenticates the reporting node and applies the committed generation, revision,
 authority, and fence checks before retaining the frontier. A stale, duplicate, reordered, or
 superseded report cannot replace the mapping or move logical time backward. See
@@ -2087,8 +2115,8 @@ the runtime revisions it prepared and made ready, and the runtime revision throu
 domain clocks match the committed ones. A phase is absent until the incarnation reaches a revision
 in it and only advances, and a new incarnation starts with every phase absent. The consensus
 applied revision, the runtime applicator and the domain clock installer are the record's only
-writers, and no gossip key carries it. Domain clock delivery still selects its targets from the
-installed-clock gossip advertisement; the record's clock phase is not read for it.
+writers. The clock installer also uses its local installed phase to open domain clock delivery
+with each remote authority through `domain_clock_attach`, ahead of graph readiness.
 
 Each node reports its record to the Raft leader it observes in an `application_progress`
 management progress request whenever a phase advances or the leadership it observes changes. The
