@@ -1656,7 +1656,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-server"
 random_iterations = 256
-source = "src/runtime/entity_gate.rs"
+source = "src/runtime/entity_gate_tests.rs"
 test = "runtime::entity_gate::tests::bolero_freeze_sequences_publish_exact_coordination_owners"
 test_target = "lib"
 
