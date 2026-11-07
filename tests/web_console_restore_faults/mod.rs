@@ -88,6 +88,7 @@ async fn install_fault(world: &ScenarioWorld, later_failure: &str) {
     let configuration = serde_json::json!({
         "restorePath": CONSOLE_RESTORE_PATH,
         "laterFailure": later_failure,
+        "replyFrameBytes": SessionLimits::DEFAULT.frame_bytes(),
     });
     let installed = browser_page(world)
         .evaluate::<_, bool>(LOSE_RESTORE_REPLY, Some(&configuration))

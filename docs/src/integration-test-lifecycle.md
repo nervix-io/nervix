@@ -53,8 +53,8 @@ the normal frame limit, and holds at most sixteen later messages. It leaves subs
 unchanged after substitution. In the unrecorded-failure case Rust verifies the original request
 and execution reference of each lost candidate. A valid `OutcomeUnknown` can advance to the next
 held reply, within the same capture and wait bounds; a real completed outcome and its restore
-report are still required before substituting the later failure. The UI must retain Unknown under the original reference and name
-the later cause; a separate public restore stream repeats the retained start's statement and exact
+report are still required before substituting the later failure. The UI must retain Unknown under
+the original reference and name the later cause; a separate public restore stream repeats the retained start's statement and exact
 archive and checks every field of the recovered original outcome. These are one- and three-node
 browser scenarios with no retry, exclusivity or modified product deadline.
 

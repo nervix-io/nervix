@@ -13,7 +13,7 @@
 // It holds back at most MAX_HELD_MESSAGES messages, retains one bounded start and replacement,
 // and records what went wrong in itself, so a scenario never mistakes a broken fault for the
 // console's behavior.
-({ restorePath, laterFailure }) => {
+({ restorePath, laterFailure, replyFrameBytes }) => {
   if (window.__nervixRestoreFault !== undefined) {
     throw new Error("a page installs the restore fault once");
   }
@@ -21,6 +21,9 @@
   const nativeArrayBuffer = Blob.prototype.arrayBuffer;
   const MAX_HELD_MESSAGES = 16;
   const MAX_START_BYTES = 1024 * 1024;
+  if (!Number.isSafeInteger(replyFrameBytes) || replyFrameBytes <= 0) {
+    throw new Error("the fixture needs the normal restore reply frame bound");
+  }
   const state = {
     lostReply: null,
     lostReplies: 0,
@@ -59,7 +62,7 @@
       state.failure = "the connection whose reply was lost received a second message";
       return;
     }
-    if (!(data instanceof ArrayBuffer) || data.byteLength > MAX_START_BYTES) {
+    if (!(data instanceof ArrayBuffer) || data.byteLength > replyFrameBytes) {
       state.failure = "the lost restore reply was not a bounded binary message";
       return;
     }
@@ -101,7 +104,7 @@
               state.failure = "a later restore connection received a second reply";
               return;
             }
-            if (!(event.data instanceof ArrayBuffer) || event.data.byteLength > MAX_START_BYTES) {
+            if (!(event.data instanceof ArrayBuffer) || event.data.byteLength > replyFrameBytes) {
               state.failure = "a held restore reply was not a bounded binary message";
               return;
             }
