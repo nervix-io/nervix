@@ -184,14 +184,21 @@ instead. See [Sessions](sessions.md#subscription-lifecycle).
 
 A subscription the server acknowledged, and did not end, outlives its session. When the session
 ends, `next_subscription()` reports `Interrupted`, the gap before the subscription opens again, and
-the client opens it again as a new generation on its next session. When that session refuses it, for
-example because its relay no longer exists, `next_subscription()` reports `RestorationFailed` with
-the server's message and the wait before the next attempt; the client keeps trying on that session,
-after a wait that starts at one second and doubles up to thirty seconds, until the subscription
-opens, the session ends, or the subscription is deleted. `Client::subscription_lifecycle(&name)`
-reads the state a subscription is in. `subscribe` and `unsubscribe` reopen a closed session like
-every other call. Deleting a subscription that no open session holds, because its session ended or
-the current session refused to open it again, completes without a request and releases the name.
+the client opens it again as a new generation on its next session, expecting the schema the
+generation it replaces announced. When that session refuses it because its relay or the relay's
+domain no longer exists, or because the relay was redefined so that it announces another schema, the
+subscription ends: `next_subscription()` reports `Ended` with `RelayRemoved` or `RelayChanged` and
+the server's message, exactly as when the server ends a generation, and the client never opens it
+again on its own. When the session refuses it for any other reason, `next_subscription()` reports
+`RestorationFailed` with its `SubscriptionRestorationCause`, the server's message and the wait
+before the next attempt: the session holds a transaction, the statement, name or filter was refused,
+the serving node could not open it now, the session rejected the request without serving it, or the
+attempt failed in the client. The client keeps trying on that session, after a wait that starts at
+one second and doubles up to thirty seconds, until the subscription opens, the session ends, or the
+subscription is deleted. `Client::subscription_lifecycle(&name)` reads the state a subscription is
+in. `subscribe` and `unsubscribe` reopen a closed session like every other call. Deleting a
+subscription that no open session holds, because its session ended or the current session refused to
+open it again, completes without a request and releases the name.
 
 An unanswered reopening ends its session at `request_timeout`. The exchange reader then stops
 routing frames and wakes the subscription reader, which opens the next session even when the
@@ -379,8 +386,10 @@ newer tick. A new session
 that answers the attach with the domain not found ends the attachment with `Ended`, as the server
 would. A node that is still starting answers that attach only once it has installed the cluster's
 committed domains, so a restart never ends an attachment. When the new session refuses that attach
-for any other reason, the event is `RestorationFailed` with the server's message and the wait
-before the client sends the attach again on the same session; the wait starts at one second on
+for any other reason, the event is `RestorationFailed` with its `DomainClockRestorationCause`, the
+server's message and the wait before the client sends the attach again on the same session: the
+session holds a transaction, it rejected the request without serving it, or the attempt failed in
+the client. The wait starts at one second on
 each new session and doubles up to thirty seconds. An attach the session leaves unanswered past
 `request_timeout` ends that session, and the next one attaches the clock again. Waiting for the
 next event reopens a closed session when a followed clock waits for it, including a call already
@@ -410,9 +419,10 @@ attempt, and the next call tries again. The events are the Rust client's, coales
   `NX_CLOCK_EVENT_ENDED`, `NX_CLOCK_EVENT_INTERRUPTED` or `NX_CLOCK_EVENT_RESTORATION_FAILED` event
   apart, and `nx_clock_event_domain` borrows the name of the domain it concerns. A restoration
   failure reports that the session refused to attach an interrupted clock again, which it tries
-  again after the growing wait the Rust client reports. The event also carries the refusal message
-  as borrowed UTF-8 bytes and that wait in nanoseconds, read with
-  `nx_clock_event_restoration_message` and `nx_clock_event_restoration_retry_after`.
+  again after the growing wait the Rust client reports. `nx_clock_event_restoration_cause` reads its
+  cause, `NX_RESTORATION_IN_TRANSACTION`, `NX_RESTORATION_REJECTED` or `NX_RESTORATION_FAILED`. The
+  event also carries the refusal message as borrowed UTF-8 bytes and that wait in nanoseconds, read
+  with `nx_clock_event_restoration_message` and `nx_clock_event_restoration_retry_after`.
 - `nx_clock_event_generation` reads the `START` generation of a state or tick event,
   `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
   skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
@@ -488,9 +498,9 @@ bounded by a `Cancel` with or without a deadline, and returns a `ClockEvent`: it
 `end_reason` read what a state, tick or ended event carries, raising `TypeMismatchError` for an
 event whose kind does not carry it. A restoration failure also carries what the C ABI withholds:
 `restoration_failure` holds the server's message and the wait, in nanoseconds, before the session
-tries again. `paced` reads a `PacedClock` whose period, skew, origin, anchor and rate are those of
-`nx_clock_event_paced`, and `tick` a `Tick` with the id, logical boundary, authority UTC
-observation and serving node's logical reading.
+tries again, beside its `RestorationCause`. `paced` reads a `PacedClock` whose period, skew, origin,
+anchor and rate are those of `nx_clock_event_paced`, and `tick` a `Tick` with the id, logical
+boundary, authority UTC observation and serving node's logical reading.
 
 `Session.domain_clock` returns the `DomainClock` the session holds for a followed domain, or
 `None`, without waiting, with the same guarantees as `nx_session_domain_clock`. Its
