@@ -148,6 +148,8 @@ defines each status.
 For `RESTORE`, retain the same archive bytes as well as the statement and execution reference after
 status `3`, including an invalid reply after upload. Follow the Rust client guide's
 [Restoring](https://docs.nervix.io/client-library.html#restoring) contract when recovering it.
+For browser restore recovery, read [the web console's Backup And Restore section](../../../docs/src/client-tools-web-console.md#backup-and-restore)
+before interpreting a later request failure as the result of an earlier possibly admitted restore.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
 URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
@@ -455,7 +457,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Read `Schemas And Codecs` → `Wire Schemas` for each format's vocabulary and exact
   binding matrix. Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
-  datetime in a JSON or AVRO `string`, and `ENCODE <field> AS BASE64` for bytes in one.
+  datetime in a JSON or AVRO `string` or a CBOR `text`, and `ENCODE <field> AS BASE64` for bytes
+  in a JSON or AVRO `string`.
   An AVRO array names its item type (`array<long>`, `array<array<double>>`); a JSON or CBOR
   `array` is bare. A list field's `ENCODE` rule governs its innermost elements: read `List Fields`.
   Read `Value Fidelity` before relying on non-finite floats.

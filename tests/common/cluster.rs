@@ -735,6 +735,12 @@ pub(crate) enum InterconnectCredentialFault {
     ExpiredCertificate,
 }
 
+/// The database directory of one node of a stopped cluster, which no node holds open.
+pub(crate) struct StoppedNodeDatabase {
+    pub(crate) node: String,
+    pub(crate) path: PathBuf,
+}
+
 /// What a whole-cluster restart arms after every node has stopped and before any starts again.
 #[derive(Debug, Clone, Copy)]
 enum RestartArrangement<'a> {
@@ -2207,7 +2213,41 @@ impl Cluster {
         Ok(())
     }
 
+    /// Restarts every node as [`Cluster::restart`] does, handing `inspect` the database directory
+    /// of every node once all of them have stopped and before any starts again, so a step reads
+    /// exactly what each node stored when it stopped. `inspect` runs on a blocking task, and the
+    /// cluster starts again only once it has returned.
+    pub(crate) async fn restart_inspecting_stopped_databases<T, J>(
+        &mut self,
+        inspect: J,
+    ) -> io::Result<T>
+    where
+        T: Send + 'static,
+        J: FnOnce(Vec<StoppedNodeDatabase>) -> T + Send + 'static,
+    {
+        self.stop_every_node().await?;
+        let mut databases = Vec::with_capacity(self.nodes.len());
+        for (node, handle) in &self.nodes {
+            databases.push(StoppedNodeDatabase {
+                node: node.clone(),
+                path: handle.spec.db_path()?,
+            });
+        }
+        let inspected =
+            crate::common::runner_offload::off_the_runner(move || inspect(databases)).await;
+        self.start_stopped_nodes(RestartArrangement::Unchanged)
+            .await?;
+        Ok(inspected)
+    }
+
     async fn restart_arranged(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
+        self.stop_every_node().await?;
+        self.start_stopped_nodes(arrangement).await
+    }
+
+    /// Asks every node to stop and waits until each has, failing with the first node that did not
+    /// stop cleanly.
+    async fn stop_every_node(&mut self) -> io::Result<()> {
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let mut first_error = None;
 
@@ -2234,7 +2274,13 @@ impl Cluster {
         if let Some(error) = first_error {
             return Err(error);
         }
+        Ok(())
+    }
 
+    /// Starts every stopped node again as `arrangement` says and waits until the restarted cluster
+    /// has a consistent leader and, with several nodes, a full interconnect.
+    async fn start_stopped_nodes(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
+        let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let nodes_to_start = u32::try_from(node_ids.len())
             .assured("a test cluster is built from a handful of nodes, not billions");
         let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
@@ -2348,7 +2394,19 @@ impl Cluster {
         group: &str,
         expected: usize,
     ) -> io::Result<()> {
-        let deadline = Instant::now() + STATUS_WAIT_BUDGET;
+        self.wait_for_kafka_consumer_group_members_within(group, expected, STATUS_WAIT_BUDGET)
+            .await
+    }
+
+    /// Waits until the Kafka consumer group `group` has exactly `expected` members, for at most
+    /// `budget`.
+    pub(crate) async fn wait_for_kafka_consumer_group_members_within(
+        &self,
+        group: &str,
+        expected: usize,
+        budget: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + budget;
         loop {
             nervix_primitives::task::consume_budget().await;
             match kafka_consumer_group_member_count(&self.dependencies, group) {

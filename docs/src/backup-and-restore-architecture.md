@@ -751,6 +751,14 @@ only of its fixed archived root, so a reader checks a header's stored size befor
 decodes it, and a larger valid value is an inline checkpoint. A namespace's generation is separate
 from a WASM branch's guest-state lifetime and from a checkpoint's revision.
 
+A namespace keeps one revision-index entry for each placement, naming the revision of its selected
+checkpoint, inline or segmented, so the index a placement occupies does not grow with the number of
+checkpoints it takes. A checkpoint write replaces the header, removes the entry of the revision it
+supersedes and adds its own in one database batch under the installation barrier; a segmented
+checkpoint does so only once its chunks are durable. The selected header, never the index, decides
+which chunk set stays referenced, so maintenance reclaims a superseded chunk set whether or not an
+entry names it.
+
 Ordinary checkpoints use the same segmented form when they are large: a materialized relay, and a
 window whose retained rows exceed one 8 MiB snapshot section, seal in bounded pieces to quota-owned
 disk, cross-node generator reads stream the sealed file, and periodic persistence replaces a

@@ -10,13 +10,16 @@ use futures_util::FutureExt as _;
 use leptos::prelude::{GetUntracked as _, Owner};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    CommandDisposition, LeaderRedirect, NodeEndpoints, RestoreDisposition, RestoreMessage,
-    RestoreReply, RestoreUploadFailure, UnknownOutcomeCause,
+    CommandDisposition, LeaderRedirect, NodeEndpoints, OutcomeOrigin, RestoreDisposition,
+    RestoreMessage, RestoreReply, RestoreUploadFailure, UnknownOutcomeCause,
     websocket::{ServerRestoreWebSocketCodec, WebSocketData},
 };
-use nervix_models::{ArchiveDigest, ClusterNodeName, CommandExecutionReference, RestoreArchive};
+use nervix_models::{
+    ArchiveDigest, ClusterNodeName, CommandExecutionReference, RestoreArchive, RestoreMode,
+    RestoreStepOutcome,
+};
 
-use super::{dialog_signals, outcome, reference};
+use super::{dialog_signals, outcome, reference, restore_report};
 use crate::{
     SESSION_LIMITS,
     backup_dialog::{
@@ -669,6 +672,173 @@ fn a_restore_whose_reply_was_lost_ends_with_the_outcome_a_later_attempt_recovers
         5,
         "the leader answered the later attempt after its start, before any chunk"
     );
+}
+
+#[test]
+fn an_unrecorded_request_failure_cannot_settle_an_earlier_possibly_admitted_restore() {
+    for earlier_unknown in [false, true] {
+        for after_sent in [1, 4] {
+            let earlier = if earlier_unknown {
+                answering_after(
+                    1,
+                    answered(CommandDisposition::OutcomeUnknown(
+                        UnknownOutcomeCause::StillApplying,
+                    )),
+                )
+            } else {
+                answering_at_the_end(Received::Ended)
+            };
+            let mut later = outcome(CommandDisposition::Failed);
+            later.diagnostics.push(nervix_client_wire::Diagnostic {
+                message: "the attempt's structured diagnostic".to_string(),
+                span: Some(
+                    nervix_client_wire::SourceSpan::new(0, 7)
+                        .assured("RESTORE occupies the first seven bytes"),
+                ),
+            });
+            let browser = InMemoryBrowser::with_scripts([
+                earlier,
+                answering_after(
+                    after_sent,
+                    reply(RestoreDisposition::Outcome(Box::new(later.clone()))),
+                ),
+            ]);
+            let bytes = archive_bytes();
+            let ended = run(upload(bytes.clone()), &browser);
+            let Ok(RestoreEnd::Unresolved(unrecorded)) = ended.result else {
+                panic!(
+                    "an unrecorded failure cannot settle the earlier attempt \
+                     (unknown={earlier_unknown}, after_sent={after_sent}): {:?}",
+                    ended.result
+                );
+            };
+            assert_eq!(
+                unrecorded.as_ref(),
+                &later,
+                "the entire typed later answer stays beneath"
+            );
+            Owner::new().with(|| {
+                let backups = dialog_signals();
+                backups.restore_ended(
+                    RestoreEnd::Unresolved(unrecorded),
+                    STATEMENT,
+                    RestoreMode::Apply,
+                    0,
+                );
+                let RestoreProgress::Unknown {
+                    reference: unknown,
+                    reason,
+                } = backups.restore.get_untracked()
+                else {
+                    panic!("the dialog keeps the original restore unknown");
+                };
+                assert_eq!(unknown, reference());
+                assert!(reason.contains(&later.message), "{reason}");
+                let lines = super::terminal_texts(backups);
+                assert_eq!(
+                    lines.len(),
+                    2,
+                    "one uncertainty line and the original diagnostic"
+                );
+                assert!(lines[0].contains(reference().as_str()) && lines[0].contains("unknown"));
+                assert_eq!(
+                    lines[1],
+                    "- RESTORE at 0..7: the attempt's structured diagnostic"
+                );
+            });
+            assert_eq!(attempts_of_one_restore(&browser.observed().sent, &bytes), 2);
+        }
+    }
+}
+
+#[test]
+fn an_unrecorded_request_failure_keeps_its_statement_diagnostics_beneath_uncertainty() {
+    let mut later = outcome(CommandDisposition::Failed);
+    later.statements.push(nervix_client_wire::StatementOutcome {
+        disposition: nervix_client_wire::StatementDisposition::Failed,
+        message: "the statement's failure".to_string(),
+        diagnostics: vec![nervix_client_wire::Diagnostic {
+            message: "the statement's structured diagnostic".to_string(),
+            span: Some(
+                nervix_client_wire::SourceSpan::new(0, 7)
+                    .assured("RESTORE occupies the first seven bytes"),
+            ),
+        }],
+    });
+    let conclusion = crate::backup_dialog::RestoreConclusion::of(
+        RestoreEnd::Unresolved(Box::new(later)),
+        STATEMENT,
+        RestoreMode::Apply,
+        0,
+    );
+    assert!(matches!(conclusion.progress,
+        RestoreProgress::Unknown { reference: own, .. } if own == reference()));
+    let lines: Vec<_> = conclusion
+        .lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].contains(reference().as_str()) && lines[0].contains("unknown"));
+    assert_eq!(lines[1], "error: the statement's failure");
+    assert_eq!(
+        lines[2],
+        "- RESTORE at 0..7: the statement's structured diagnostic"
+    );
+}
+
+#[test]
+fn an_initial_unrecorded_request_failure_is_definitive() {
+    for after_sent in [1, 4] {
+        let failed = outcome(CommandDisposition::Failed);
+        let browser = InMemoryBrowser::with_scripts([answering_after(
+            after_sent,
+            reply(RestoreDisposition::Outcome(Box::new(failed.clone()))),
+        )]);
+        let ended = run(upload(archive_bytes()), &browser);
+        assert_eq!(
+            ended
+                .result
+                .as_ref()
+                .assured("the initial refusal is final"),
+            &RestoreEnd::Outcome(Box::new(failed))
+        );
+        assert_eq!(browser.observed().opened.len(), 1);
+        assert!(browser.observed().waits.is_empty());
+    }
+}
+
+#[test]
+fn a_recorded_or_report_bearing_failure_settles_an_earlier_possibly_admitted_restore() {
+    let mut recovered = outcome(CommandDisposition::Failed);
+    recovered.origin = OutcomeOrigin::Recovered;
+    let mut applied = outcome(CommandDisposition::Failed);
+    applied.restore = Some(Box::new(restore_report(
+        RestoreMode::Apply,
+        [
+            RestoreStepOutcome::Applied,
+            RestoreStepOutcome::Failed,
+            RestoreStepOutcome::NotAttempted,
+        ],
+    )));
+    for failed in [recovered, applied] {
+        let browser = InMemoryBrowser::with_scripts([
+            answering_at_the_end(Received::Ended),
+            answering_after(
+                1,
+                reply(RestoreDisposition::Outcome(Box::new(failed.clone()))),
+            ),
+        ]);
+        let ended = run(upload(archive_bytes()), &browser);
+        assert_eq!(
+            ended
+                .result
+                .as_ref()
+                .assured("the recorded or reported failure settles the restore"),
+            &RestoreEnd::Outcome(Box::new(failed))
+        );
+        assert_eq!(browser.observed().opened.len(), 2);
+    }
 }
 
 #[test]

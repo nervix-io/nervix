@@ -9,12 +9,12 @@
 
 use std::ptr;
 
-use nervix_client_core::{ConnectOptions, DomainName};
+use nervix_client_core::DomainName;
 use nervix_client_host::{
     Cancel, ClockEvent, DomainClock, Event, Execution, Failure, Outcome, Session,
 };
 
-use crate::abi;
+use crate::{abi, connect_options::ConnectionOptions};
 
 /// # Safety
 ///
@@ -26,74 +26,40 @@ pub unsafe extern "C" fn nx_session_connect(
     server_len: usize,
     domain: *const u8,
     domain_len: usize,
-    username: *const u8,
-    username_len: usize,
-    password: *const u8,
-    password_len: usize,
+    options: *const ConnectionOptions,
     cancel: *const Cancel,
     out: *mut *mut Session,
 ) -> *mut Failure {
     // SAFETY: the header's contract is this function's.
     abi::outcome(unsafe {
-        write_connected(
-            server,
-            server_len,
-            domain,
-            domain_len,
-            username,
-            username_len,
-            password,
-            password_len,
-            cancel,
-            out,
-        )
+        write_connected(server, server_len, domain, domain_len, options, cancel, out)
     })
 }
 
 /// # Safety
 ///
 /// As [`nx_session_connect`].
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the C ABI passes each string as a pointer and a length"
-)]
 unsafe fn write_connected(
     server: *const u8,
     server_len: usize,
     domain: *const u8,
     domain_len: usize,
-    username: *const u8,
-    username_len: usize,
-    password: *const u8,
-    password_len: usize,
+    options: *const ConnectionOptions,
     cancel: *const Cancel,
     out: *mut *mut Session,
 ) -> Result<(), Failure> {
     abi::require_out(out, "out")?;
     // SAFETY: the caller guarantees every non-null argument is valid for its length.
-    let (server, domain, username, password) = unsafe {
+    let (server, domain, options) = unsafe {
         (
             abi::text(server, server_len, "server")?,
             abi::optional_text(domain, domain_len, "domain")?,
-            abi::optional_text(username, username_len, "username")?,
-            abi::optional_text(password, password_len, "password")?,
+            abi::handle(options, "options")?,
         )
-    };
-    let options = match (username, password) {
-        (Some(username), Some(password)) => {
-            ConnectOptions::default().with_basic_auth(username, password)
-        }
-        (None, None) => ConnectOptions::default(),
-        (Some(_), None) | (None, Some(_)) => {
-            return Err(Failure::invalid_argument(
-                "username",
-                "and `password` must both be present or both be absent",
-            ));
-        }
     };
     // SAFETY: the caller guarantees a live token or null.
     let cancel = unsafe { cancel.as_ref() };
-    let session = Session::connect(server, domain, options, cancel)?;
+    let session = Session::connect(server, domain, options.0.clone(), cancel)?;
     // SAFETY: `out` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(out, abi::into_handle(session)) };
     Ok(())

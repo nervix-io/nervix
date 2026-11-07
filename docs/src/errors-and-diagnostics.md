@@ -674,9 +674,10 @@ the codec and field when one is known and never attach the rejected payload valu
 
 Registry validation checks each `ENCODE` rule against its internal field and declared wire
 representation. `RFC3339` applies to datetime text, and `BASE64` to byte text in JSON or AVRO
-strings; an AVRO native `bytes` field accepts no rule. A refusal names the codec and field, including
-unknown fields, duplicate rules and incompatible types. Canonical base64 decoding retains the typed
-binary-builder failure beneath the codec's field context without including the encoded input.
+strings; a CBOR or AVRO native `bytes` field accepts no rule. A refusal names the codec and field,
+including unknown fields, duplicate rules and incompatible types. Canonical base64 decoding retains
+the typed binary-builder failure beneath the codec's field context without including the encoded
+input.
 
 Codec jaq transformations are compiled during registry validation for every declared direction.
 A syntax error names the codec, domain, and direction and rejects the transaction before the model
@@ -2687,11 +2688,13 @@ of any call: the Rust client reports it as a typed restoration failure carrying 
 message and the wait before it tries again, and reports a refused subscription reopening the same
 way. An attach the new session leaves unanswered past the request timeout ends that session instead,
 and the next session attaches the clock again; one it answers `DomainNotFound` ends the attachment
-as the server would. In the shared C binding a restoration failure carries only its domain, without
-the message or the wait. Each disposition's message is display text for a client that prints it; a
-client decides from the variant. The Rust client's `execute` turns any disposition but `Attached` or
-`Detached` into a `Failed` command outcome carrying that message, and its clock helper reports a
-stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
+as the server would. In the shared C binding both clock and subscription restoration failures
+expose their message as borrowed UTF-8 bytes and the next retry wait as unsigned nanoseconds;
+the wrong event kind returns `NX_ERROR_TYPE`. Each disposition's message is display text for a
+client that prints it; a client decides from the variant. The Rust client's `execute` turns any
+disposition but `Attached` or `Detached` into a `Failed` command outcome carrying that message,
+and its clock helper reports a stopped or uninstalled clock, or a projection outside the timestamp
+range, as a typed
 `DomainClockReadError`. When `execute` runs either statement, it fails with `NoActiveDomain` while
 no domain is selected and refuses the statement as client-local while a transaction is active,
 before it sends a request. Waiting for the next clock event returns a failure to reopen a session
@@ -3005,6 +3008,14 @@ restore may have been admitted. If a later archive read, missing console address
 expired execution reference ends it, that failure sits beneath `the console stopped before learning
 the outcome of a restore the leader may have admitted`; the dialog reports the outcome as unknown
 naming the execution reference. An already uncertain reply failure keeps its own typed context.
+For an unrecorded request failure, `RestoreEnd::Unresolved` retains the complete typed
+`CommandOutcome` until presentation consumes it through the existing command renderer. It leaves
+the earlier outcome unknown and appends `the outcome of restore '<reference>' is unknown` to the
+later request's original message.
+The terminal prints the original diagnostics, including statement diagnostics, with the same
+request-relative source spans as a known failure. Its matching identities do not settle an earlier
+possible admission. Initial refusals,
+recovered failures and failures carrying a restore step report keep their definitive classification.
 The dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
 could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
 restore's own outcome as the dispatcher renders any command's. A session reply whose

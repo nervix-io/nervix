@@ -1,5 +1,10 @@
 //! Streaming a restore from the browser.
 //!
+//! Layer: edges.
+//! - **Owns.** Browser restore attempts, bounded archive streaming and outcome classification.
+//! - **Depends on.** The browser boundary, typed restore frames and vocabulary identities.
+//! - **Must not know.** Server admission, execution or persistence implementation.
+//!
 //! A restore is the `RestoreBackup` call carried over a console WebSocket of its own: its start
 //! names the restore's execution reference, its canonical statement and the archive's exact size
 //! and BLAKE3 digest, and the archive follows in chunks read from the file the operator chose. A
@@ -30,7 +35,7 @@ use error_stack::Report;
 use futures_util::future::{Either, select};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    CommandDisposition, CommandOutcome, LeaderRedirect, RequestId, RestoreChunk,
+    CommandDisposition, CommandOutcome, LeaderRedirect, OutcomeOrigin, RequestId, RestoreChunk,
     RestoreDisposition, RestoreReply, RestoreStart, RestoreUploadFailure,
     websocket::{CONSOLE_RESTORE_PATH, ClientRestoreWebSocketCodec, WebSocketData},
 };
@@ -226,6 +231,22 @@ impl Admission {
         failure.change_context(RestoreStreamError::UnresolvedAdmission)
     }
 
+    /// An unrecorded request failure cannot settle an earlier possible admission. Recovered
+    /// failures and failures carrying a restore report remain authoritative, with every step.
+    fn answered(self, end: RestoreEnd) -> RestoreEnd {
+        match end {
+            RestoreEnd::Outcome(outcome)
+                if matches!(self, Self::Possible)
+                    && matches!(&outcome.disposition, CommandDisposition::Failed)
+                    && outcome.origin == OutcomeOrigin::Executed
+                    && outcome.restore.is_none() =>
+            {
+                RestoreEnd::Unresolved(outcome)
+            }
+            end => end,
+        }
+    }
+
     /// How the leader's refusal of the current attempt's stream ends the restore: it changed
     /// nothing when no attempt can have had the restore admitted, and otherwise leaves the
     /// outcome of the earlier admission unknown.
@@ -268,6 +289,9 @@ impl Admission {
 pub(crate) enum RestoreEnd {
     /// The restore's outcome, as the command it is.
     Outcome(Box<CommandOutcome>),
+    /// A later request failed without giving an earlier possibly admitted restore's outcome.
+    /// Its complete typed answer is consumed only at the presentation boundary.
+    Unresolved(Box<CommandOutcome>),
     /// The stream was refused before the restore ran, which changed nothing.
     Refused {
         failure: RestoreUploadFailure,
@@ -426,7 +450,7 @@ impl<F: ArchiveFile> RestoreUpload<F> {
                 ReplyStep::End(RestoreEnd::Refused { failure, message }) => {
                     return admission.refused(failure, message);
                 }
-                ReplyStep::End(end) => return Ok(end),
+                ReplyStep::End(end) => return Ok(admission.answered(end)),
                 ReplyStep::Redirect(console) => {
                     // A leader that loses its leadership while the restore applies redirects too.
                     admission = admission.after(attempt.streamed);

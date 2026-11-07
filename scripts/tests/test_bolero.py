@@ -207,6 +207,7 @@ class InventoryTests(unittest.TestCase):
             "client-ffi-host-columns",
             "client-ffi-field-descriptors",
             "client-ffi-field-descriptors-malformed",
+            "client-ffi-seed-urls",
             "client-host-arrow-columns",
             "client-host-typed-field-descriptors",
             "client-jvm-columns",

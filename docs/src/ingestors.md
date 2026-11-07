@@ -609,7 +609,7 @@ The expression type surface matches the full Nervix internal schema type set:
 - `F32`, `F64`
 - `BOOL`, `STRING`, `DATETIME`
 
-`DATETIME` is the internal logical timestamp type. JSON or AVRO string wire values require `ENCODE <field> AS RFC3339` on the codec before they can decode into the named `DATETIME` field.
+`DATETIME` is the internal logical timestamp type. JSON or AVRO `string` and CBOR `text` wire values require `ENCODE <field> AS RFC3339` on the codec before they can decode into the named `DATETIME` field.
 
 ### Header Context
 

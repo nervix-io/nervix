@@ -102,6 +102,7 @@ use nervix_server::{
         AppError, InternalTransportMode, SettingOverride, ShutdownPhaseOutcome, run_server_process,
     },
     memory_pressure::MemoryPressureConfig,
+    runtime::revision_index_inspection::{StoredRevisionIndex, read_stored_revision_index},
 };
 use nervix_test_environment::{TestParallelism, TestParallelismArgs, workspace_root};
 use nervix_wasm::{
@@ -671,6 +672,9 @@ struct ScenarioWorld {
     /// Contents each Plexus file was given, so "is unchanged" has something to compare against.
     formatter_original_files: BTreeMap<String, String>,
     last_cluster_operation_elapsed: Option<Duration>,
+    /// What each node's runtime state store held for the counted domain when the cluster last
+    /// stopped for a counted restart.
+    stopped_revision_indexes: BTreeMap<String, StoredRevisionIndex>,
     /// The last node start a scenario attempted without requiring it to succeed.
     node_start_attempt: Option<NodeStartAttempt>,
     browser_page: Option<playwright_rs::Page>,
@@ -792,6 +796,7 @@ impl fmt::Debug for ScenarioWorld {
                 "last_cluster_operation_elapsed",
                 &self.last_cluster_operation_elapsed,
             )
+            .field("stopped_revision_indexes", &self.stopped_revision_indexes)
             .field("node_start_attempt", &self.node_start_attempt)
             .field("clickhouse_table", &self.clickhouse_table)
             .field("clickhouse_tls", &self.clickhouse_tls)
@@ -4832,6 +4837,11 @@ fn client_probe_target(
         websocket_uri: websocket_uri.to_string(),
         username: TEST_AUTH_USERNAME.to_string(),
         password: TEST_AUTH_PASSWORD.to_string(),
+        ca_pem: (world.cluster_config.grpc_mode == InternalTransportMode::Https).then(|| {
+            std::fs::read_to_string(workspace_root().join("tls/dev/ca.pem"))
+                .expect("the conformance fixture CA exists")
+        }),
+        seed_uri: None,
         domain: world.domain.clone(),
         execution_reference: Uuid::now_v7().to_string(),
         exercise,
@@ -4905,6 +4915,56 @@ async fn when_client_probe_subscribes(
         .placeholders
         .insert("client_probe_redirect_report".to_string(), redirect_report);
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
+}
+
+#[when(
+    expr = "the {string} client probe connects through a seed after its first gRPC address is \
+            unavailable"
+)]
+async fn when_client_probe_connects_through_seed(world: &mut ScenarioWorld, runtime: String) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a binding probe runtime");
+    let node_id = "node-1";
+    let mut target = client_probe_target(world, node_id, ProbeExercise::Connection);
+    target.seed_uri = Some(target.grpc_uri.clone());
+    let scheme = if world.cluster_config.grpc_mode == InternalTransportMode::Https {
+        "https"
+    } else {
+        "http"
+    };
+    target.grpc_uri = format!("{scheme}://127.0.0.1:1");
+    start_client_probe(world, runtime, node_id, target, "CONNECTED seed").await;
+}
+
+#[when(
+    expr = "the {string} client probe subscribes for restoration through the forwarded gRPC \
+            endpoint of node {string}"
+)]
+async fn when_client_probe_subscribes_for_restoration(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a binding probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let forwarded = world
+        .placeholders
+        .get("forwarded_grpc")
+        .verified("a preceding step forwarded the node's gRPC endpoint")
+        .clone();
+    let mut target = client_probe_target(
+        world,
+        &node_id,
+        ProbeExercise::Restoration {
+            relay: "watched".to_string(),
+            subscription: "watching".to_string(),
+        },
+    );
+    target.grpc_uri = forwarded;
+    start_client_probe(world, runtime, &node_id, target, "SUBSCRIBED").await;
 }
 
 /// Starts a probe that follows the domain's clock through the TCP forwarder a preceding step stood
@@ -15591,6 +15651,73 @@ async fn when_the_cluster_restarts_from_on_disk_tables(world: &mut ScenarioWorld
     }
 }
 
+/// Every node stops, the runtime state store of each stopped node is counted for `domain` before
+/// any node starts again, and the cluster then restarts as "the cluster is restarted" does.
+#[when(
+    expr = "the cluster is restarted after counting the runtime state each node stored for domain \
+            {string}"
+)]
+async fn when_the_cluster_restarts_counting_stored_runtime_state(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = nervix_models::DomainName::parse(&expand_placeholders(world, &domain))
+        .expect("the counted domain is a valid domain name");
+    world.forget_session_observations();
+    let counted = world
+        .cluster_mut()
+        .restart_inspecting_stopped_databases(move |databases| {
+            let mut counted = BTreeMap::new();
+            for database in databases {
+                let index = match read_stored_revision_index(&database.path, &domain) {
+                    Ok(index) => index,
+                    Err(error) => panic!(
+                        "the stopped runtime state store of node '{}' could not be counted: \
+                         {error:#}",
+                        database.node
+                    ),
+                };
+                counted.insert(database.node, index);
+            }
+            counted
+        })
+        .await
+        .expect("failed to restart cluster");
+    world.stopped_revision_indexes = counted;
+}
+
+/// Reads the counts of the last counted restart: every node kept exactly one revision-index entry
+/// for each runtime state checkpoint it stored, and together the nodes stored at least `minimum`.
+#[then(
+    expr = "the stopped nodes stored at least {int} runtime state checkpoints, each with one \
+            revision-index entry"
+)]
+async fn then_stopped_nodes_kept_one_index_entry_per_checkpoint(
+    world: &mut ScenarioWorld,
+    minimum: usize,
+) {
+    assert!(
+        !world.stopped_revision_indexes.is_empty(),
+        "no counted restart recorded what the stopped nodes stored"
+    );
+    let mut stored = 0_usize;
+    for (node, index) in &world.stopped_revision_indexes {
+        assert_eq!(
+            index.index_entries, index.checkpoints,
+            "node '{node}' stopped with {} revision-index entries beside {} runtime state \
+             checkpoints",
+            index.index_entries, index.checkpoints
+        );
+        stored = stored
+            .checked_add(index.checkpoints)
+            .assured("a test cluster stores fewer checkpoints than a usize counts");
+    }
+    assert!(
+        stored >= minimum,
+        "the stopped nodes stored {stored} runtime state checkpoints, fewer than {minimum}"
+    );
+}
+
 #[then(expr = "the last cluster operation completes within {string}")]
 async fn then_last_cluster_operation_completes_within(world: &mut ScenarioWorld, duration: String) {
     let max_duration =
@@ -15912,6 +16039,25 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .wait_for_kafka_consumer_group_members(&group, expected)
         .await
         .expect("kafka consumer group did not reach expected member count");
+}
+
+/// A restarted node starts its ingestors only once it has prepared the cluster's runtime revision,
+/// so a group that regains its member shows the restarted runtime installed. The budget covers an
+/// installation that compiles WASM modules again on a loaded host.
+#[then(expr = "within {string} Kafka consumer group {string} eventually has {int} consumers")]
+async fn then_within_duration_kafka_consumer_group_eventually_has_consumers(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    expected: usize,
+) {
+    let budget = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_group_members_within(&group, expected, budget)
+        .await
+        .expect("kafka consumer group did not reach expected member count within the duration");
 }
 
 #[then(expr = "Kafka topic {string} does not exist")]
