@@ -1,12 +1,16 @@
 //! Syslog wire decoding and encoding.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Typed Arrow conversion for RFC 3164 and RFC 5424 syslog messages, the fixed field
-//!   contract a codec's schema is compiled against, and the RFC 5424 frame one batch of records is
-//!   published in.
+//! - **Owns.** Typed Arrow conversion for RFC 3164 and RFC 5424 syslog messages, the fixed schema
+//!   contract, and the version-1 RFC 5424 UTF-8 writer shared by records and batch frames. Its
+//!   borrowed headers preserve nil fields, UTC microseconds and validated structured data verbatim.
 //! - **Depends on.** Wire codec models, Arrow builders, the kernel crate's byte classes and UTC for
 //!   omitted RFC 3164 years.
 //! - **Must not know.** Domains, runtime clocks, schedules or connector lifecycle.
+//!
+//! The custom RFC 5424 writer is approved on the owning
+//! [Emitter Batching task](https://app.clickup.com/t/86bczy7g6). It streams into the caller's
+//! bounded writer without adding transport framing or a message BOM.
 
 #![cfg_attr(
     nervix_lint,
@@ -317,19 +321,15 @@ pub(super) struct SyslogFrameHeader {
 }
 
 impl SyslogFrameHeader {
-    /// Writes `<PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID STRUCTURED-DATA` with the given
-    /// timestamp, without the space that separates the header from `MSG`.
-    fn write(&self, timestamp: &str, output: &mut impl std::io::Write) -> std::io::Result<()> {
-        write!(
-            output,
-            "<{}>1 {timestamp} {} {} {} {} {}",
-            self.priority,
-            self.hostname.as_deref().unwrap_or("-"),
-            self.app_name.as_deref().unwrap_or("-"),
-            self.proc_id.as_deref().unwrap_or("-"),
-            self.msg_id.as_deref().unwrap_or("-"),
-            self.structured_data.as_deref().unwrap_or("-"),
-        )
+    fn as_fields(&self) -> SyslogHeaderFields<'_> {
+        SyslogHeaderFields {
+            priority: self.priority,
+            hostname: self.hostname.as_deref(),
+            app_name: self.app_name.as_deref(),
+            proc_id: self.proc_id.as_deref(),
+            msg_id: self.msg_id.as_deref(),
+            structured_data: self.structured_data.as_deref(),
+        }
     }
 }
 
@@ -384,8 +384,8 @@ impl SyslogBatchMember {
         let Some(first) = members.first() else {
             return Ok(());
         };
-        first.header.write(&first.timestamp, output)?;
-        output.write_all(b" ")?;
+        let header = first.header.as_fields();
+        header.write_prefix(&first.timestamp, output)?;
         let messages = members
             .iter()
             .map(|member| member.message.as_str())
@@ -394,7 +394,7 @@ impl SyslogBatchMember {
     }
 }
 
-/// The header fields one record's RFC 5424 message carries, borrowed from its row.
+/// Validated RFC 5424 header fields, borrowed from a row or a retained frame header.
 struct SyslogHeaderFields<'a> {
     priority: u16,
     hostname: Option<&'a str>,
@@ -405,6 +405,25 @@ struct SyslogHeaderFields<'a> {
 }
 
 impl SyslogHeaderFields<'_> {
+    /// Writes the version-1 header and its separating space directly, without rebuilding or
+    /// re-escaping structured data. Both message forms use this one syntax owner.
+    fn write_prefix(
+        &self,
+        timestamp: &str,
+        output: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        write!(
+            output,
+            "<{}>1 {timestamp} {} {} {} {} {} ",
+            self.priority,
+            self.hostname.unwrap_or("-"),
+            self.app_name.unwrap_or("-"),
+            self.proc_id.unwrap_or("-"),
+            self.msg_id.unwrap_or("-"),
+            self.structured_data.unwrap_or("-"),
+        )
+    }
+
     fn to_owned_header(&self) -> SyslogFrameHeader {
         SyslogFrameHeader {
             priority: self.priority,
@@ -485,20 +504,12 @@ impl<'a> SyslogMessage<'a> {
         row: &ArrowCodecRow<'_>,
         output: &mut impl std::io::Write,
     ) -> error_stack::Result<(), CodecError> {
-        let header = &self.header;
-        write!(
-            output,
-            "<{}>1 {} {} {} {} {} {} {}",
-            header.priority,
-            self.timestamp,
-            header.hostname.unwrap_or("-"),
-            header.app_name.unwrap_or("-"),
-            header.proc_id.unwrap_or("-"),
-            header.msg_id.unwrap_or("-"),
-            header.structured_data.unwrap_or("-"),
-            self.message,
-        )
-        .map_err(|source| Report::new(source).change_context(encode_context(row)))
+        self.header
+            .write_prefix(&self.timestamp, output)
+            .change_context_lazy(|| encode_context(row))?;
+        output
+            .write_all(self.message.as_bytes())
+            .change_context_lazy(|| encode_context(row))
     }
 }
 
@@ -1270,3 +1281,7 @@ fn header_value<'a>(
 #[cfg(test)]
 #[path = "syslog_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "syslog_encoding_tests.rs"]
+mod encoding_tests;
