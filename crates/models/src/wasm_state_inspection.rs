@@ -10,15 +10,15 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::{collections::BTreeMap, num::NonZeroU64};
 
 use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BranchKeyFingerprint, CommandExecutionReference, ResourceName, ScheduledNode,
-    WasmSavedStateRejection, WasmStateGeneration, WasmStateRecoveryOutcome, WasmStateReset,
+    BranchKeyFingerprint, CommandExecutionReference, ResourceName, ScheduledNode, ScheduledUnit,
+    Unit, WasmSavedStateRejection, WasmStateGeneration, WasmStateRecoveryOutcome, WasmStateReset,
     WasmStateResetPhase, WasmStateResetScope,
 };
 
@@ -172,6 +172,15 @@ pub struct WasmStateInspection {
     pub resource: ResourceName,
     pub resource_version: u64,
     pub file: String,
+    pub units: Vec<WasmUnitStateInspection>,
+}
+
+/// Guest-state lifetimes and checkpoint facts of one independently owned execution unit.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct WasmUnitStateInspection {
+    pub unit: Unit,
     pub default_generation: WasmStateGeneration,
     pub reset: Option<WasmStateResetInspection>,
     pub reset_readiness: Option<WasmStateResetReadiness>,
@@ -193,10 +202,52 @@ impl WasmStateInspection {
         checkpoints: Vec<WasmCheckpointInspection>,
     ) -> Option<Self> {
         let processor = scheduled.wasm_processor()?;
-        let generations = scheduled.wasm_state_generations()?;
-        let recorded = scheduled.wasm_state_recoveries()?;
+        let mut by_unit = BTreeMap::<Unit, Vec<WasmCheckpointInspection>>::new();
+        for checkpoint in checkpoints {
+            if let Some(unit) = scheduled.unit_of_branch(checkpoint.branch.as_ref()) {
+                by_unit.entry(unit).or_default().push(checkpoint);
+            }
+        }
+        let mut checkpoint_budget = MAX_REPORTED_SCOPES;
+        let mut recovery_budget = MAX_REPORTED_SCOPES;
+        let mut units = Vec::with_capacity(scheduled.units.len());
+        for (unit, state) in &scheduled.units {
+            let inspection = WasmUnitStateInspection::of_unit(
+                *unit,
+                state,
+                by_unit.remove(unit).unwrap_or_default(),
+                checkpoint_budget,
+                recovery_budget,
+            )?;
+            checkpoint_budget = checkpoint_budget
+                .checked_sub(inspection.checkpoints.len())
+                .verified("each unit consumes at most the remaining checkpoint report budget");
+            recovery_budget = recovery_budget
+                .checked_sub(inspection.recoveries.len())
+                .verified("each unit consumes at most the remaining recovery report budget");
+            units.push(inspection);
+        }
+        Some(Self {
+            resource: processor.resource.clone(),
+            resource_version: processor.resource_version,
+            file: processor.file.clone(),
+            units,
+        })
+    }
+}
+
+impl WasmUnitStateInspection {
+    fn of_unit(
+        unit: Unit,
+        scheduled: &ScheduledUnit,
+        checkpoints: Vec<WasmCheckpointInspection>,
+        checkpoint_budget: usize,
+        recovery_budget: usize,
+    ) -> Option<Self> {
+        let generations = scheduled.wasm_state_generations.as_ref()?;
+        let recorded = scheduled.wasm_state_recoveries.as_ref()?;
         let mut recoveries = Vec::new();
-        for (scope, recovery) in recorded.iter().take(MAX_REPORTED_SCOPES) {
+        for (scope, recovery) in recorded.iter().take(recovery_budget) {
             recoveries.push(WasmRecoveryInspection {
                 scope: *scope,
                 generation: recovery.generation(),
@@ -212,7 +263,8 @@ impl WasmStateInspection {
         let mut current = Vec::new();
         let mut checkpoint_counts = WasmCheckpointCounts::default();
         let reset = scheduled
-            .wasm_state_reset()
+            .wasm_state_reset
+            .as_ref()
             .map(|reset| WasmStateResetInspection {
                 reset: reset.clone(),
                 generation: generations.of_reset_scope(reset.scope()),
@@ -232,15 +284,15 @@ impl WasmStateInspection {
             }
         }
         current.sort_by_key(|checkpoint| checkpoint.branch);
-        let omitted_checkpoints = if current.len() > MAX_REPORTED_SCOPES {
+        let omitted_checkpoints = if current.len() > checkpoint_budget {
             current
                 .len()
-                .checked_sub(MAX_REPORTED_SCOPES)
+                .checked_sub(checkpoint_budget)
                 .verified("the checkpoint count was checked above against the report limit")
         } else {
             0
         };
-        current.truncate(MAX_REPORTED_SCOPES);
+        current.truncate(checkpoint_budget);
         let reset_readiness = reset.as_ref().map(|reset| match reset.reset.phase() {
             WasmStateResetPhase::Ready => WasmStateResetReadiness::Ready,
             WasmStateResetPhase::Publishing if selected_checkpoint_confirmed => {
@@ -249,9 +301,7 @@ impl WasmStateInspection {
             WasmStateResetPhase::Publishing => WasmStateResetReadiness::Resetting,
         });
         Some(Self {
-            resource: processor.resource.clone(),
-            resource_version: processor.resource_version,
-            file: processor.file.clone(),
+            unit,
             default_generation: generations.default_generation(),
             reset,
             reset_readiness,

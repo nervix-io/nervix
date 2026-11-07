@@ -22,25 +22,25 @@ CREATE CODEC chaos_state_json
   FROM WIRE JSON SCHEMA chaos_state_wire
   TO SCHEMA chaos_state_record;
 
-CREATE RELAY chaos_state_records SCHEMA chaos_state_record BRANCHED BY chaos_branch CAPACITY 1;
+CREATE RELAY chaos_state_records SCHEMA chaos_state_record BRANCHED BY chaos_state_branch CAPACITY 1;
 
 CREATE KAFKA TOPIC INGESTOR chaos_state_ingestor
   FROM chaos_kafka TOPIC 'chaos_state_input' OFFSET BY CONSUMER GROUP 'chaos_stateful' START AT EARLIEST MODE ACK PARALLEL MAX 32 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_state_json
   TO chaos_state_records
     INHERIT ALL
-    BRANCHED BY chaos_branch SET branch_name = message.branch_name
+    BRANCHED BY chaos_state_branch SET branch_name = message.branch_name
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE RELAY chaos_unique SCHEMA chaos_state_record BRANCHED BY chaos_branch CAPACITY 1;
+CREATE RELAY chaos_unique SCHEMA chaos_state_record BRANCHED BY chaos_state_branch CAPACITY 1;
 
 CREATE ATTACHED DEDUPLICATOR chaos_dedup
   FROM chaos_state_records
   DEDUPLICATE ON input.dedup_key
   MAX TIME 1h
-  BRANCHED BY chaos_branch
+  BRANCHED BY chaos_state_branch
   TO chaos_unique
     INHERIT ALL
     FLUSH IMMEDIATE
@@ -78,13 +78,13 @@ CREATE CODEC chaos_window_json
   FROM WIRE JSON SCHEMA chaos_window_wire
   TO SCHEMA chaos_window_summary;
 
-CREATE RELAY chaos_windows SCHEMA chaos_window_summary BRANCHED BY chaos_branch CAPACITY 1;
+CREATE RELAY chaos_windows SCHEMA chaos_window_summary BRANCHED BY chaos_state_branch CAPACITY 1;
 
 CREATE DETACHED WINDOW PROCESSOR chaos_window
   FROM chaos_state_records
   WIDTH 12 MESSAGES
   STEP 12 MESSAGES
-  BRANCHED BY chaos_branch
+  BRANCHED BY chaos_state_branch
   TO chaos_windows
     SET branch_name = first(input.branch_name),
         records = count(input.branch_index),
@@ -118,14 +118,14 @@ CREATE CODEC chaos_profile_json
   FROM WIRE JSON SCHEMA chaos_profile_wire
   TO SCHEMA chaos_profile;
 
-CREATE RELAY chaos_profiles SCHEMA chaos_profile BRANCHED BY chaos_branch CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+CREATE RELAY chaos_profiles SCHEMA chaos_profile BRANCHED BY chaos_state_branch CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
 CREATE KAFKA TOPIC INGESTOR chaos_profile_ingestor
   FROM chaos_kafka TOPIC 'chaos_profile_input' OFFSET BY CONSUMER GROUP 'chaos_profiles' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_profile_json
   TO chaos_profiles
     INHERIT ALL
-    BRANCHED BY chaos_branch SET branch_name = message.branch_name
+    BRANCHED BY chaos_state_branch SET branch_name = message.branch_name
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
@@ -156,11 +156,11 @@ CREATE CODEC chaos_enriched_json
   FROM WIRE JSON SCHEMA chaos_enriched_wire
   TO SCHEMA chaos_enriched_record;
 
-CREATE RELAY chaos_enriched SCHEMA chaos_enriched_record BRANCHED BY chaos_branch CAPACITY 1;
+CREATE RELAY chaos_enriched SCHEMA chaos_enriched_record BRANCHED BY chaos_state_branch CAPACITY 1;
 
 CREATE ATTACHED JUNCTION chaos_enrich
   FROM chaos_state_records
-  BRANCHED BY chaos_branch
+  BRANCHED BY chaos_state_branch
   USING MATERIALIZED STATE chaos_profiles DEFAULT { branch_name = 'none', profile_version = 0 }
   TO chaos_enriched
     INHERIT ALL
@@ -203,7 +203,7 @@ CREATE CODEC chaos_counted_json
   FROM WIRE JSON SCHEMA chaos_counted_wire
   TO SCHEMA chaos_counted_record;
 
-CREATE RELAY chaos_counted SCHEMA chaos_counted_record BRANCHED BY chaos_branch CAPACITY 1;
+CREATE RELAY chaos_counted SCHEMA chaos_counted_record BRANCHED BY chaos_state_branch CAPACITY 1;
 
 CREATE ATTACHED WASM PROCESSOR chaos_counter
   FROM chaos_state_records
@@ -211,7 +211,7 @@ CREATE ATTACHED WASM PROCESSOR chaos_counter
   FILE 'processors/branch-counter.wat'
   MAX FUEL 100000000
   MAX MEMORY 16MiB
-  BRANCHED BY chaos_branch
+  BRANCHED BY chaos_state_branch
   TO chaos_counted
     SET event_id = event_id,
         branch_name = branch_name,

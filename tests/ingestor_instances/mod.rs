@@ -1,8 +1,8 @@
-//! Public checks of scheduled ingestor instance ownership.
+//! Public checks of scheduled execution-unit ownership.
 //!
 //! Outside the layer order: a scenario harness.
 //!
-//! - **Owns.** Inspecting instance identities and owners through `SHOW CLUSTER STATUS`.
+//! - **Owns.** Inspecting instance and partition identities and owners through `SHOW CLUSTER STATUS`.
 //! - **Depends on.** Public command output and the scenario world.
 //! - **Must not know.** Scheduler decisions, runtime maps or connector internals.
 
@@ -94,6 +94,180 @@ impl UnitPlacements {
                 "every scheduled instance has an owner: {status}"
             );
         }
+    }
+}
+
+#[then(
+    expr = "the last cluster status lists {int} partitions of {word} {string} on {int} distinct \
+            owners"
+)]
+async fn partitioned_node_has_every_unit(
+    world: &mut ScenarioWorld,
+    partitions: u64,
+    kind: String,
+    name: String,
+    owners: usize,
+) {
+    let name = expand_placeholders(world, &name);
+    let status = world
+        .last_command_output
+        .as_deref()
+        .assured("SHOW CLUSTER STATUS ran before its partition assertion");
+    let placements = UnitPlacements::from_status(status, &world.domain, &kind, &name, "partition:");
+    placements.assert_spread(partitions, owners, status);
+}
+
+#[then(
+    expr = "the last cluster status colocates every partition of {word} {string} with the \
+            corresponding partition of relay {string}"
+)]
+async fn processor_partition_follows_its_upstream_partition(
+    world: &mut ScenarioWorld,
+    kind: String,
+    name: String,
+    relay: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let relay = expand_placeholders(world, &relay);
+    let status = world
+        .last_command_output
+        .as_deref()
+        .assured("SHOW CLUSTER STATUS ran before its locality assertion");
+    let processor = UnitPlacements::from_status(status, &world.domain, &kind, &name, "partition:");
+    let upstream =
+        UnitPlacements::from_status(status, &world.domain, "relay", &relay, "partition:");
+    assert!(
+        !processor.owners.is_empty(),
+        "the processor has partition units: {status}"
+    );
+    assert_eq!(
+        processor.owners, upstream.owners,
+        "a pipeline's corresponding partitions must prefer the same owners: {status}"
+    );
+}
+
+#[then(
+    expr = "the owner of every partition of {word} {string} is saved with placeholder prefix \
+            {string}"
+)]
+async fn save_processor_partition_owners(
+    world: &mut ScenarioWorld,
+    kind: String,
+    name: String,
+    prefix: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let status = world
+        .last_command_output
+        .as_deref()
+        .assured("the scenario read cluster status");
+    let placements = UnitPlacements::from_status(status, &world.domain, &kind, &name, "partition:");
+    assert!(
+        !placements.owners.is_empty(),
+        "the node reports partition owners: {status}"
+    );
+    for (partition, owner) in placements.owners {
+        assert_ne!(owner, "-", "every partition has an owner: {status}");
+        world
+            .placeholders
+            .insert(format!("{prefix}_{partition}"), owner);
+    }
+}
+
+#[then(
+    expr = "a partition owner of {word} {string} other than placeholder {string} is saved as \
+            placeholder {string}"
+)]
+async fn save_processor_partition_owner_except(
+    world: &mut ScenarioWorld,
+    kind: String,
+    name: String,
+    excluded: String,
+    placeholder: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let excluded = world
+        .placeholders
+        .get(&excluded)
+        .assured("the excluded node was saved");
+    let status = world
+        .last_command_output
+        .as_deref()
+        .assured("the scenario read cluster status");
+    let placements = UnitPlacements::from_status(status, &world.domain, &kind, &name, "partition:");
+    let owner = placements
+        .owners
+        .into_values()
+        .find(|owner| owner != "-" && owner != excluded)
+        .assured("a partition owner differs from the excluded node");
+    world.placeholders.insert(placeholder, owner);
+}
+
+#[then(
+    expr = "within {string} node {string} eventually reports {word} {string} partitions moved \
+            from node {string} and all other owners unchanged from placeholder prefix {string}"
+)]
+async fn wait_for_only_affected_processor_partition_owners_to_move(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    former_owner: String,
+    prefix: String,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario writes a valid timeout");
+    let node_id = expand_placeholders(world, &node_id);
+    let name = expand_placeholders(world, &name);
+    let former_owner = expand_placeholders(world, &former_owner);
+    let before = world
+        .placeholders
+        .iter()
+        .filter_map(|(key, owner)| {
+            let partition = key
+                .strip_prefix(&format!("{prefix}_"))?
+                .parse::<u64>()
+                .ok()?;
+            Some((partition, owner.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert!(
+        !before.is_empty(),
+        "the scenario saved the previous partition owners"
+    );
+    let deadline = PhaseDeadline::after(duration);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !deadline.has_passed(),
+            "only partitions on {former_owner} must move; before={before:?}, output={:?}, \
+             error={:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, deadline).await {
+            Ok(output) => {
+                let after =
+                    UnitPlacements::from_status(&output, &world.domain, &kind, &name, "partition:");
+                let settled = before.len() == after.owners.len()
+                    && before.iter().all(|(partition, owner)| {
+                        after.owners.get(partition).is_some_and(|current| {
+                            current != "-"
+                                && if *owner == former_owner {
+                                    *current != former_owner
+                                } else {
+                                    current == owner
+                                }
+                        })
+                    });
+                world.last_command_output = Some(output);
+                if settled {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        deadline.pause(Duration::from_millis(100)).await;
     }
 }
 

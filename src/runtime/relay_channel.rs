@@ -2,10 +2,10 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** The dispatch gate that fences relay delivery while the runtime mutates a relay, and
-//!   the fan-out that hands every batch published into one relay to each of its live consumers
+//!   the fan-out that hands each batch to its selected live consumers
 //!   under bounded, resizable backpressure.
-//! - **Depends on.** Tokio synchronization, lock-free queues and wakers, `arc-swap`, and panic
-//!   classification.
+//! - **Depends on.** The primitive boundary's synchronization, publication, queues, wakers and
+//!   timers, and panic classification.
 //! - **Must not know.** Relays, branches, batches, acknowledgements, placement, or any Model.
 
 #![cfg_attr(
@@ -21,7 +21,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_primitives::{
     collections::{ConcurrentQueue, PopError, PushError},
     publication::{ArcSwap, Guard},
@@ -658,17 +658,215 @@ pub(crate) struct RelayBroadcast<T> {
     fanout: Arc<RelayFanout<T>>,
 }
 
+/// One opaque audience in a fan-out. Product identities stay with the caller that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(in crate::runtime) struct RelayAudienceId(usize);
+
+pub(in crate::runtime) struct RelayAudience<T> {
+    fanout: Arc<RelayFanout<T>>,
+    id: RelayAudienceId,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the relay fan-out exhausted its audience identity space")]
+pub(in crate::runtime) struct RelayAudienceExhausted;
+
+/// One publication of the registrations, including their audience projections.
+/// An ordinary fan-out allocates no audience map. Counts and delivery select the same snapshot.
+pub(in crate::runtime) struct RelayConsumerSet<T> {
+    global: Vec<Arc<RelayConsumerQueue<T>>>,
+    audiences: Option<Box<RelayAudiences<T>>>,
+}
+
+struct RelayAudiences<T> {
+    next_id: usize,
+    groups: BTreeMap<RelayAudienceId, RelayAudienceConsumers<T>>,
+}
+
+struct RelayAudienceConsumers<T> {
+    dedicated: Vec<Arc<RelayConsumerQueue<T>>>,
+    publication: Vec<Arc<RelayConsumerQueue<T>>>,
+}
+
+impl<T> Clone for RelayAudienceConsumers<T> {
+    fn clone(&self) -> Self {
+        Self {
+            dedicated: self.dedicated.clone(),
+            publication: self.publication.clone(),
+        }
+    }
+}
+
+impl<T> Clone for RelayAudiences<T> {
+    fn clone(&self) -> Self {
+        Self {
+            next_id: self.next_id,
+            groups: self.groups.clone(),
+        }
+    }
+}
+
+impl<T> Clone for RelayConsumerSet<T> {
+    fn clone(&self) -> Self {
+        Self {
+            global: self.global.clone(),
+            audiences: self.audiences.clone(),
+        }
+    }
+}
+
+impl<T> RelayConsumerSet<T> {
+    fn all(&self) -> impl Iterator<Item = &Arc<RelayConsumerQueue<T>>> {
+        let groups = self
+            .audiences
+            .iter()
+            .flat_map(|audiences| audiences.groups.values());
+        let dedicated = groups.flat_map(|group| group.dedicated.iter());
+        self.global.iter().chain(dedicated)
+    }
+
+    fn with_receiver(
+        &self,
+        consumer: &Arc<RelayConsumerQueue<T>>,
+        audience: Option<RelayAudienceId>,
+    ) -> Self {
+        if audience.is_none() && self.audiences.is_none() {
+            let capacity = self
+                .global
+                .len()
+                .checked_add(1)
+                .assured("a live receiver occupies memory before it can register");
+            let mut global = Vec::with_capacity(capacity);
+            global.extend(self.global.iter().cloned());
+            global.push(consumer.clone());
+            return Self {
+                global,
+                audiences: None,
+            };
+        }
+        let mut next = self.clone();
+        if let Some(audience) = audience {
+            let group = next
+                .audiences
+                .as_mut()
+                .assured("an audience is published before it registers")
+                .groups
+                .get_mut(&audience)
+                .assured("an audience remains registered for its fan-out lifetime");
+            group.dedicated.push(consumer.clone());
+            group.publication.push(consumer.clone());
+        } else {
+            next.global.push(consumer.clone());
+            if let Some(audiences) = &mut next.audiences {
+                for group in audiences.groups.values_mut() {
+                    group.publication.push(consumer.clone());
+                }
+            }
+        }
+        next
+    }
+
+    fn without_receiver(&self, consumer: &Arc<RelayConsumerQueue<T>>) -> Self {
+        if self.audiences.is_none() {
+            let mut global = Vec::with_capacity(self.global.len());
+            global.extend(
+                self.global
+                    .iter()
+                    .filter(|registered| !Arc::ptr_eq(registered, consumer))
+                    .cloned(),
+            );
+            return Self {
+                global,
+                audiences: None,
+            };
+        }
+        let mut next = self.clone();
+        next.global
+            .retain(|registered| !Arc::ptr_eq(registered, consumer));
+        if let Some(audiences) = &mut next.audiences {
+            for group in audiences.groups.values_mut() {
+                group
+                    .dedicated
+                    .retain(|registered| !Arc::ptr_eq(registered, consumer));
+                group
+                    .publication
+                    .retain(|registered| !Arc::ptr_eq(registered, consumer));
+            }
+        }
+        next
+    }
+
+    fn with_audience(
+        &self,
+    ) -> error_stack::Result<(Self, RelayAudienceId), RelayAudienceExhausted> {
+        let mut next = self.clone();
+        let audiences = next.audiences.get_or_insert_with(|| {
+            Box::new(RelayAudiences {
+                next_id: 0,
+                groups: BTreeMap::new(),
+            })
+        });
+        let id = RelayAudienceId(audiences.next_id);
+        audiences.next_id = audiences
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| error_stack::Report::new(RelayAudienceExhausted))?;
+        audiences.groups.insert(
+            id,
+            RelayAudienceConsumers {
+                dedicated: Vec::new(),
+                publication: self.global.clone(),
+            },
+        );
+        Ok((next, id))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::runtime) struct AllRelayConsumers;
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "selection borrows one immutable registration projection without synchronization \
+                  or lifecycle work"
+    )
+)]
+pub(in crate::runtime) trait RelayConsumerSelection<T>: Copy {
+    fn select(self, registrations: &RelayConsumerSet<T>) -> &[Arc<RelayConsumerQueue<T>>];
+}
+
+impl<T> RelayConsumerSelection<T> for AllRelayConsumers {
+    fn select(self, registrations: &RelayConsumerSet<T>) -> &[Arc<RelayConsumerQueue<T>>] {
+        &registrations.global
+    }
+}
+
+impl<T> RelayConsumerSelection<T> for RelayAudienceId {
+    fn select(self, registrations: &RelayConsumerSet<T>) -> &[Arc<RelayConsumerQueue<T>>] {
+        let audiences = registrations
+            .audiences
+            .as_ref()
+            .assured("an audience was installed before use");
+        &audiences
+            .groups
+            .get(&self)
+            .assured("an audience remains installed until its fan-out ends")
+            .publication
+    }
+}
+
 struct RelayFanout<T> {
     /// The live consumers in registration order.
     ///
     /// A publisher reserves admission in this order, so it holds a later consumer's reservation
     /// only while it holds every earlier one. Two publishers into one relay therefore never each
     /// hold a reservation that the other is waiting for.
-    consumers: ArcSwap<Vec<Arc<RelayConsumerQueue<T>>>>,
+    consumers: ArcSwap<RelayConsumerSet<T>>,
     /// The admitted backlog each consumer may hold. It changes only together with a notification,
     /// so a publisher that enables its wait before reading it cannot miss a change.
     capacity: AtomicUsize,
-    receiver_count: AtomicUsize,
     /// Publishers waiting in [`Self::admit`].
     ///
     /// `Notify::notify_waiters` takes the waiter-list lock on every call, so a consumer notifies
@@ -685,7 +883,7 @@ struct RelayFanout<T> {
 }
 
 /// One consumer's share of a relay fan-out.
-struct RelayConsumerQueue<T> {
+pub(in crate::runtime) struct RelayConsumerQueue<T> {
     /// Batches delivered to this consumer and not yet taken.
     batches: ConcurrentQueue<T>,
     /// Batches admitted to this consumer and not yet taken, including any that a publisher has
@@ -699,6 +897,13 @@ struct RelayConsumerQueue<T> {
 /// Counts one publisher as waiting for admission until its wait returns or is cancelled.
 struct RelayAdmissionWait<'fanout, T> {
     fanout: &'fanout RelayFanout<T>,
+}
+
+/// Admissions reserved before a publisher can deliver to every selected consumer. Cancelling
+/// that publisher returns them, including room a sibling audience needs in a common queue.
+struct RelayPendingAdmissions<'a, T> {
+    fanout: &'a RelayFanout<T>,
+    consumers: Vec<&'a Arc<RelayConsumerQueue<T>>>,
 }
 
 /// Whether the admission a consumer returned frees room a publisher waits for.
@@ -736,18 +941,21 @@ pub(in crate::runtime) struct RelayFanoutClosed<T> {
 /// One publication into a relay fan-out: the consumers registered when it began, which it both
 /// counts and delivers to. A consumer that registers later receives later publications only, so
 /// whatever a publisher prepares for each counted consumer matches the deliveries.
-pub(in crate::runtime) struct RelayPublication<'fanout, T> {
+pub(in crate::runtime) struct RelayPublication<'fanout, T, Selection = AllRelayConsumers> {
     fanout: &'fanout RelayFanout<T>,
-    consumers: Guard<StdArc<Vec<Arc<RelayConsumerQueue<T>>>>>,
+    consumers: Guard<StdArc<RelayConsumerSet<T>>>,
+    selection: Selection,
 }
 
 impl<T> RelayBroadcast<T> {
     pub(crate) fn with_capacity(capacity: NonZeroUsize) -> Self {
         Self {
             fanout: Arc::new(RelayFanout {
-                consumers: ArcSwap::from_pointee(Vec::new()),
+                consumers: ArcSwap::from_pointee(RelayConsumerSet {
+                    global: Vec::new(),
+                    audiences: None,
+                }),
                 capacity: AtomicUsize::new(capacity.get()),
-                receiver_count: AtomicUsize::new(0),
                 waiting_publishers: AtomicUsize::new(0),
                 admission: Notify::new(),
             }),
@@ -757,24 +965,49 @@ impl<T> RelayBroadcast<T> {
     /// Adds a consumer that receives every batch whose publishing begins after this call.
     pub(crate) fn new_receiver(&self) -> RelayReceiver<T> {
         let consumer = Arc::new(RelayConsumerQueue::new());
-        self.fanout.register(&consumer);
+        self.fanout.register(&consumer, None);
         RelayReceiver {
             consumer,
             fanout: self.fanout.clone(),
         }
     }
 
-    pub(crate) fn receiver_count(&self) -> usize {
-        self.fanout.receiver_count.load(Ordering::Acquire)
+    /// Creates a fixed audience. Its publications include the common consumers and its own
+    /// consumers, each once. Common consumers keep one queue across all audiences.
+    pub(in crate::runtime) fn new_audience(
+        &self,
+    ) -> error_stack::Result<RelayAudience<T>, RelayAudienceExhausted> {
+        loop {
+            let observed = self.fanout.consumers.load_full();
+            let (next, id) = observed.with_audience()?;
+            let published = self
+                .fanout
+                .consumers
+                .compare_and_swap(&observed, StdArc::new(next));
+            if StdArc::ptr_eq(&published, &observed) {
+                return Ok(RelayAudience {
+                    fanout: self.fanout.clone(),
+                    id,
+                });
+            }
+        }
     }
 
-    /// The backlog of the slowest consumer, which is the number of batches the fan-out still holds.
-    ///
-    /// Every consumer receives every batch, so the backlog is a maximum over all of them and this
-    /// visits each consumer once.
+    pub(crate) fn receiver_count(&self) -> usize {
+        self.fanout.consumers.load().global.len()
+    }
+
+    /// The maximum backlog among the common and dedicated consumers, visiting each queue once.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the closed immutable registration iterator visits only this module's queue \
+                      handles; its callbacks do not run operator code"
+        )
+    )]
     pub(in crate::runtime) fn len(&self) -> usize {
         let mut backlog = 0;
-        for consumer in self.fanout.consumers.load().iter() {
+        for consumer in self.fanout.consumers.load().all() {
             backlog = backlog.max(consumer.admitted.load(Ordering::Acquire));
         }
         backlog
@@ -794,9 +1027,9 @@ impl<T> RelayBroadcast<T> {
     /// Buffered batches are kept. A smaller capacity holds publishers until every consumer's
     /// backlog drains below it, and a larger one admits waiting publishers at once.
     pub(in crate::runtime) fn set_capacity(&self, capacity: NonZeroUsize) {
-        self.fanout
-            .capacity
-            .store(capacity.get(), Ordering::Release);
+        // Every capacity mutation participates in the lifetime handshake: a resize between an
+        // audience registration and shutdown must carry that registration through to the ending.
+        self.fanout.capacity.swap(capacity.get(), Ordering::AcqRel);
         self.fanout.admission.notify_waiters();
     }
 
@@ -808,11 +1041,70 @@ impl<T> RelayBroadcast<T> {
     /// hold the fan-out. A consumer registered afterwards receives every batch whose publishing
     /// begins after it registers, as any consumer does.
     pub(in crate::runtime) fn close_receivers(&self) {
-        for consumer in self.fanout.consumers.load().iter() {
+        for consumer in self.fanout.consumers.load().all() {
             consumer.batches.close();
             consumer.delivered.wake();
         }
         self.fanout.admission.notify_waiters();
+    }
+}
+
+impl<T> RelayAudience<T> {
+    /// Queued or reserved batches belonging only to this audience. Common consumers have their
+    /// own lifecycle and cannot keep an unrelated partition's handoff waiting.
+    pub(in crate::runtime) fn dedicated_len(&self) -> usize {
+        let registrations = self.fanout.consumers.load();
+        let audiences = registrations
+            .audiences
+            .as_ref()
+            .verified("the audience was published");
+        audiences
+            .groups
+            .get(&self.id)
+            .verified("the audience remains published")
+            .dedicated
+            .iter()
+            .map(|consumer| consumer.admitted.load(Ordering::Acquire))
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(in crate::runtime) fn new_receiver(&self) -> RelayReceiver<T> {
+        let consumer = Arc::new(RelayConsumerQueue::new());
+        self.fanout.register(&consumer, Some(self.id));
+        if !self.fanout.audience_registration_is_live() {
+            consumer.batches.close();
+        }
+        RelayReceiver {
+            consumer,
+            fanout: self.fanout.clone(),
+        }
+    }
+
+    pub(in crate::runtime) fn publication(&self) -> RelayPublication<'_, T, RelayAudienceId> {
+        RelayPublication {
+            fanout: &self.fanout,
+            consumers: self.fanout.consumers.load(),
+            selection: self.id,
+        }
+    }
+}
+
+impl<T> Clone for RelayAudience<T> {
+    fn clone(&self) -> Self {
+        Self {
+            fanout: self.fanout.clone(),
+            id: self.id,
+        }
+    }
+}
+
+impl<T> fmt::Debug for RelayAudience<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayAudience")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -822,6 +1114,7 @@ impl<T> RelayBroadcast<T> {
         RelayPublication {
             fanout: &self.fanout,
             consumers: self.fanout.consumers.load(),
+            selection: AllRelayConsumers,
         }
     }
 }
@@ -833,30 +1126,35 @@ impl<T: Clone> RelayBroadcast<T> {
     }
 }
 
-impl<T> RelayPublication<'_, T> {
+impl<T, Selection: RelayConsumerSelection<T>> RelayPublication<'_, T, Selection> {
     /// How many consumers this publication delivers to.
     pub(in crate::runtime) fn receivers(&self) -> usize {
-        self.consumers.len()
+        self.selection.select(&self.consumers).len()
     }
 }
 
-impl<T: Clone> RelayPublication<'_, T> {
+impl<T: Clone, Selection: RelayConsumerSelection<T>> RelayPublication<'_, T, Selection> {
     /// Delivers `batch` to every consumer this publication counted.
     ///
     /// Waits while any of those consumers is at capacity. A consumer that leaves during the wait is
     /// skipped, and the batch comes back only when no consumer is left to take it.
     pub(in crate::runtime) async fn broadcast(self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
-        let Self { fanout, consumers } = self;
+        let Self {
+            fanout,
+            consumers,
+            selection,
+        } = self;
+        let selected = selection.select(&consumers);
         let capacity = fanout.capacity.load(Ordering::Acquire);
         let mut first_full = None;
-        for (index, consumer) in consumers.iter().enumerate() {
+        for (index, consumer) in selected.iter().enumerate() {
             if !consumer.try_admit(capacity) {
                 first_full = Some(index);
                 break;
             }
         }
         let Some(first_full) = first_full else {
-            return RelayConsumerQueue::deliver_each(consumers.iter(), batch)
+            return RelayConsumerQueue::deliver_each(selected.iter(), batch)
                 .map_err(|batch| RelayFanoutClosed { batch });
         };
 
@@ -864,14 +1162,17 @@ impl<T: Clone> RelayPublication<'_, T> {
         // reference count rather than through the short-lived load guard. Admissions already
         // reserved stay held while the remaining consumers are admitted in registration order.
         let consumers = Guard::into_inner(consumers);
-        let (reserved, remaining) = consumers.split_at(first_full);
-        let mut admitted: Vec<&Arc<RelayConsumerQueue<T>>> = reserved.iter().collect();
+        let (reserved, remaining) = selection.select(&consumers).split_at(first_full);
+        let mut admitted = RelayPendingAdmissions {
+            fanout,
+            consumers: reserved.iter().collect(),
+        };
         for consumer in remaining {
             if fanout.admit(consumer).await {
-                admitted.push(consumer);
+                admitted.consumers.push(consumer);
             }
         }
-        RelayConsumerQueue::deliver_each(admitted, batch)
+        RelayConsumerQueue::deliver_each(std::mem::take(&mut admitted.consumers), batch)
             .map_err(|batch| RelayFanoutClosed { batch })
     }
 }
@@ -886,6 +1187,13 @@ impl<T: Clone> RelayBroadcast<T> {
 }
 
 impl<T> RelayFanout<T> {
+    /// Meets the parent's ending after publishing an audience's receiver. If this read-modify-write
+    /// comes first, the ending acquires the registration; otherwise this read acquires the ending
+    /// and the caller closes its own queue. Resizing keeps that release sequence intact.
+    fn audience_registration_is_live(&self) -> bool {
+        self.capacity.fetch_add(0, Ordering::AcqRel) != 0
+    }
+
     /// Reserves one admission on `consumer`, waiting while it is at capacity.
     ///
     /// Returns `false` once the consumer has left the fan-out. The wait keeps every admission the
@@ -922,43 +1230,16 @@ impl<T> RelayFanout<T> {
         Ok((batch, RelayAdmissionFreed::NobodyWaiting))
     }
 
-    fn register(&self, consumer: &Arc<RelayConsumerQueue<T>>) {
-        self.consumers.rcu(|consumers| {
-            let count = consumers
-                .len()
-                .checked_add(1)
-                .assured("a node cannot hold usize::MAX consumers of one relay");
-            let mut registered = Vec::with_capacity(count);
-            registered.extend(consumers.iter().cloned());
-            registered.push(consumer.clone());
-            registered
-        });
-        #[allow(deprecated)] // until try_update is stabilized
-        self.receiver_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .assured("a node cannot hold usize::MAX consumers of one relay");
+    fn register(&self, consumer: &Arc<RelayConsumerQueue<T>>, audience: Option<RelayAudienceId>) {
+        self.consumers
+            .rcu(|consumers| consumers.with_receiver(consumer, audience));
     }
 
     fn deregister(&self, consumer: &Arc<RelayConsumerQueue<T>>) {
         // Copy-on-write rebuilds the whole list on every change, so finding the leaving consumer
         // is part of that copy rather than a separate lookup.
-        self.consumers.rcu(|consumers| {
-            let mut remaining = Vec::with_capacity(consumers.len());
-            for registered in consumers.iter() {
-                if !Arc::ptr_eq(registered, consumer) {
-                    remaining.push(registered.clone());
-                }
-            }
-            remaining
-        });
-        #[allow(deprecated)] // until try_update is stabilized
-        self.receiver_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_sub(1)
-            })
-            .verified("the leaving consumer raised the count when it registered");
+        self.consumers
+            .rcu(|consumers| consumers.without_receiver(consumer));
     }
 }
 
@@ -1094,14 +1375,32 @@ impl<T> Drop for RelayAdmissionWait<'_, T> {
     }
 }
 
+impl<T> Drop for RelayPendingAdmissions<'_, T> {
+    fn drop(&mut self) {
+        for consumer in &self.consumers {
+            consumer.release_admission();
+        }
+        // Returning an admission uses the same read-modify-write as a receiver taking a batch.
+        // It acquires an earlier waiting publisher's raised count; a publisher that comes later
+        // observes the returned room in its own read-modify-write before deciding to sleep.
+        if !self.consumers.is_empty() && self.fanout.waiting_publishers.load(Ordering::Relaxed) > 0
+        {
+            self.fanout.admission.notify_waiters();
+        }
+    }
+}
+
 impl<T> Drop for RelayBroadcast<T> {
     fn drop(&mut self) {
-        // Publishers borrow this handle, so none outlives it. Closing every queue lets each
-        // receiver take what was already delivered and then observe that nothing more will come.
-        for consumer in self.fanout.consumers.load().iter() {
+        // Acquire a retained audience's preceding registration; a later registration acquires
+        // this ending swap and closes its own queue. No retained audience can reopen delivery.
+        self.fanout.capacity.swap(0, Ordering::AcqRel);
+        // Each receiver takes what was already delivered and then observes the ending.
+        for consumer in self.fanout.consumers.load().all() {
             consumer.batches.close();
             consumer.delivered.wake();
         }
+        self.fanout.admission.notify_waiters();
     }
 }
 
@@ -1202,7 +1501,194 @@ impl<T> fmt::Display for RelayFanoutClosed<T> {
 mod tests {
     use std::num::NonZeroUsize;
 
+    use meticulous::ResultExt as _;
+
     use super::{RelayBroadcast, RelayTryRecv};
+
+    #[nervix_primitives::test]
+    async fn audiences_isolate_dedicated_consumers_and_share_one_common_queue() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let first = channel
+            .new_audience()
+            .assured("two audiences fit in memory");
+        let second = channel
+            .new_audience()
+            .assured("two audiences fit in memory");
+        let mut common = channel.new_receiver();
+        let mut left = first.new_receiver();
+        let mut right = second.new_receiver();
+        first
+            .publication()
+            .broadcast(11)
+            .await
+            .assured("all selected queues are empty");
+        assert_eq!(left.recv().await, Some(11));
+        assert_eq!(right.try_recv(), RelayTryRecv::Empty);
+
+        let publication = second.publication();
+        assert_eq!(publication.receivers(), 2);
+        let blocked = publication.broadcast(22);
+        tokio::pin!(blocked);
+        assert!(
+            futures_util::poll!(blocked.as_mut()).is_pending(),
+            "the common reader retains its one-slot bound across audiences"
+        );
+        assert_eq!(common.recv().await, Some(11));
+        blocked.await.assured("the common reader returned its slot");
+        assert_eq!(right.recv().await, Some(22));
+        assert_eq!(common.recv().await, Some(22));
+        assert_eq!(left.try_recv(), RelayTryRecv::Empty);
+    }
+
+    #[nervix_primitives::test]
+    async fn an_audience_counts_and_delivers_the_same_registration_snapshot() {
+        let channel = RelayBroadcast::with_capacity(capacity(2));
+        let audience = channel
+            .new_audience()
+            .assured("one audience fits in memory");
+        let mut first = audience.new_receiver();
+        let publication = audience.publication();
+        let mut joined = audience.new_receiver();
+        let mut common = channel.new_receiver();
+        assert_eq!(publication.receivers(), 1);
+        publication
+            .broadcast(7)
+            .await
+            .assured("the original receiver has room");
+        assert_eq!(first.recv().await, Some(7));
+        assert_eq!(joined.try_recv(), RelayTryRecv::Empty);
+        assert_eq!(common.try_recv(), RelayTryRecv::Empty);
+        assert_eq!(audience.publication().receivers(), 3);
+    }
+
+    #[nervix_primitives::test]
+    async fn cancelling_a_blocked_audience_returns_its_common_queue_reservation() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let first = channel
+            .new_audience()
+            .assured("two audiences fit in memory");
+        let second = channel
+            .new_audience()
+            .assured("two audiences fit in memory");
+        let mut common = channel.new_receiver();
+        let _blocked_consumer = first.new_receiver();
+        let _ready_consumer = second.new_receiver();
+        first
+            .publication()
+            .broadcast(1)
+            .await
+            .assured("the queues start empty");
+        assert_eq!(common.recv().await, Some(1));
+        {
+            let pending = first.publication().broadcast(2);
+            tokio::pin!(pending);
+            assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        }
+        assert_eq!(common.try_recv(), RelayTryRecv::Empty);
+        let next = second.publication().broadcast(3);
+        tokio::pin!(next);
+        assert!(
+            futures_util::poll!(next.as_mut()).is_ready(),
+            "cancellation must return the reservation for the undelivered batch"
+        );
+        assert_eq!(common.recv().await, Some(3));
+    }
+
+    #[cfg(feature = "shuttle")]
+    #[test]
+    fn shuttle_cancelling_a_partial_audience_admission_wakes_a_sibling_publisher() {
+        nervix_model_harness::shuttle::check_dfs(
+            || {
+                shuttle::future::block_on(async {
+                    let channel = RelayBroadcast::with_capacity(capacity(1));
+                    let left = channel
+                        .new_audience()
+                        .assured("two audiences fit in memory");
+                    let right = channel
+                        .new_audience()
+                        .assured("two audiences fit in memory");
+                    let mut common = channel.new_receiver();
+                    let _left_consumer = left.new_receiver();
+                    let _right_consumer = right.new_receiver();
+                    left.publication()
+                        .broadcast(1)
+                        .await
+                        .assured("the queues start empty");
+                    assert_eq!(common.recv().await, Some(1));
+                    let mut held = Box::pin(left.publication().broadcast(2));
+                    assert!(futures_util::poll!(held.as_mut()).is_pending());
+                    let (started, observed) = nervix_primitives::sync::oneshot::channel();
+                    let sibling = nervix_primitives::task::spawn(async move {
+                        started
+                            .send(())
+                            .assured("the cancellation observes the sibling's attempt");
+                        right.publication().broadcast(3).await
+                    });
+                    observed
+                        .await
+                        .assured("the sibling starts before the partial admission ends");
+                    drop(held);
+                    sibling
+                        .await
+                        .assured("the sibling task completes")
+                        .assured("released admission reaches the sibling");
+                    assert_eq!(common.recv().await, Some(3));
+                });
+            },
+            Some(128),
+        );
+    }
+
+    #[cfg(feature = "shuttle")]
+    #[test]
+    fn shuttle_an_audience_registering_during_parent_shutdown_observes_the_ending() {
+        nervix_model_harness::shuttle::check_dfs(
+            || {
+                shuttle::future::block_on(async {
+                    let channel = RelayBroadcast::<u8>::with_capacity(capacity(1));
+                    let audience = channel
+                        .new_audience()
+                        .assured("one audience fits in memory");
+                    let closing = nervix_primitives::task::spawn(async move {
+                        channel.set_capacity(capacity(2));
+                        drop(channel);
+                    });
+                    let registering = nervix_primitives::task::spawn(async move {
+                        let mut receiver = audience.new_receiver();
+                        receiver.recv().await
+                    });
+                    closing.await.assured("the parent ends its lifetime");
+                    assert_eq!(
+                        registering
+                            .await
+                            .assured("the new receiver observes the ending"),
+                        None
+                    );
+                });
+            },
+            Some(128),
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_retained_audience_cannot_reopen_an_ended_publisher() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let audience = channel
+            .new_audience()
+            .assured("one audience fits in memory");
+        let mut queued = audience.new_receiver();
+        audience
+            .publication()
+            .broadcast(9)
+            .await
+            .assured("the receiver has room");
+        drop(channel);
+        assert_eq!(queued.recv().await, Some(9));
+        assert_eq!(queued.recv().await, None);
+        let mut late = audience.new_receiver();
+        assert_eq!(late.recv().await, None);
+        assert!(audience.publication().broadcast(10).await.is_err());
+    }
 
     fn capacity(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test capacities are nonzero")

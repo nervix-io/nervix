@@ -1,3 +1,12 @@
+//! Layer: data plane.
+//! - **Owns.** Retained entity and partition dispatch gates, drain observation and branch freezes.
+//! - **Depends on.** Typed execution revisions, relay boundaries and coordination identities.
+//! - **Must not know.** Plexus Models, consensus publication or placement decisions.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -762,6 +771,7 @@ pub(in crate::runtime) struct OwnershipHandoffFreeze<'watch> {
 }
 
 impl OwnershipHandoffFreezeWatch {
+    #[cfg(any(test, feature = "benchmarks"))]
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -906,6 +916,87 @@ impl Runtime {
         }
     }
 
+    /// Ownership moves of partition units fence only those input partitions. A logical selection
+    /// and an instance whose intake can produce every branch keep the whole-relay boundary.
+    pub(in crate::runtime) fn engage_entity_unit_gates(
+        &self,
+        domain: &DomainName,
+        relays: &[RelayName],
+        targets: &EntityGateTargets,
+        deadline: Instant,
+        reason: &str,
+    ) -> EntityGateHold {
+        let EntityGateTargets::Units(_) = targets else {
+            return self.engage_entity_gates(domain, relays, deadline, reason);
+        };
+        let revision = self
+            .inner
+            .executions
+            .get(domain)
+            .map(|execution| execution.revision.clone());
+        let mut gates = Vec::new();
+        for relay in relays {
+            let selected = Self::relay_partition_targets(revision.as_deref(), relay, targets);
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
+            let Some(fanout) = self
+                .inner
+                .relay_boundary_fanouts
+                .get(&key)
+                .map(|fanout| fanout.clone())
+            else {
+                continue;
+            };
+            if let Some(selected) = selected {
+                for unit in selected {
+                    let gate = fanout
+                        .unit_dispatch_gate(unit)
+                        .verified("a partition has its own dispatch gate");
+                    gates.push(RelayDispatchGateLease::engage(gate, deadline, reason));
+                }
+            } else {
+                gates.push(RelayDispatchGateLease::engage(
+                    fanout.dispatch_gate(),
+                    deadline,
+                    reason,
+                ));
+            }
+        }
+        EntityGateHold {
+            gates,
+            branch_gates: Vec::new(),
+        }
+    }
+
+    fn relay_partition_targets(
+        revision: Option<&ExecutionRevision>,
+        relay: &RelayName,
+        targets: &EntityGateTargets,
+    ) -> Option<BTreeSet<Unit>> {
+        let EntityGateTargets::Units(members) = targets else {
+            return None;
+        };
+        let mut selected = BTreeSet::new();
+        for member in members {
+            let affects = revision
+                .and_then(|revision| revision.nodes.get(&member.node))
+                .is_some_and(|node| node.gate_relays.contains(relay))
+                || (member.node.kind == ModelKind::Relay
+                    && member.node.identifier == ModelName::from(relay));
+            if !affects {
+                continue;
+            }
+            match member.unit.kind() {
+                nervix_models::UnitKind::Partition(_) => {
+                    selected.insert(member.unit);
+                }
+                nervix_models::UnitKind::Single | nervix_models::UnitKind::Instance(_) => {
+                    return None;
+                }
+            }
+        }
+        (!selected.is_empty()).then_some(selected)
+    }
+
     async fn engage_wasm_state_reset_gates(
         &self,
         domain: &DomainName,
@@ -1045,7 +1136,14 @@ impl Runtime {
                 };
                 gates
             }
-            EntityGatePurpose::ModelAlteration | EntityGatePurpose::OwnershipHandoff => {
+            EntityGatePurpose::OwnershipHandoff => self.engage_entity_unit_gates(
+                domain,
+                &scope.relays,
+                &scope.targets,
+                deadline,
+                &reason,
+            ),
+            EntityGatePurpose::ModelAlteration => {
                 self.engage_entity_gates(domain, &scope.relays, deadline, &reason)
             }
         };
@@ -1454,6 +1552,14 @@ impl Runtime {
         targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
     ) -> EntityDrainStatus {
+        let revision = match targets {
+            EntityGateTargets::Units(_) => self
+                .inner
+                .executions
+                .get(domain)
+                .map(|execution| execution.revision.clone()),
+            EntityGateTargets::Entities(_) => None,
+        };
         let buffered_relay_batches = relays
             .iter()
             .filter_map(|relay| {
@@ -1464,7 +1570,12 @@ impl Runtime {
                         ModelKind::Relay,
                         relay.clone(),
                     ))
-                    .map(|fanout| fanout.outstanding_work_len())
+                    .map(|fanout| {
+                        match Self::relay_partition_targets(revision.as_deref(), relay, targets) {
+                            Some(units) => fanout.unit_outstanding_work_len(&units),
+                            None => fanout.outstanding_work_len(),
+                        }
+                    })
             })
             .sum();
         #[cfg(feature = "testing")]
@@ -1606,6 +1717,13 @@ impl Runtime {
         self.unit_quiesce_counters(domain, NodeUnitRef::new(node, Unit::SINGLE))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "task startup retains the exact unit counters before processing input"
+        )
+    )]
     pub(super) fn unit_quiesce_counters(
         &self,
         domain: &DomainName,

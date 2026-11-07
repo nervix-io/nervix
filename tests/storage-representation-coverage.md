@@ -4,6 +4,11 @@ Names drawn from `nervix-arbitrary` include current Plexus keyword spellings whe
 kind and domain admit them. The [property register](../docs/src/property-testing-and-fuzzing.md)
 records each generated domain's revision and input bounds.
 
+`scheduled-units` generates each node's declared current units, including independent partition
+placements and WASM state lifetimes, and compares the complete domain schedule after archiving.
+`models-archived-counts` compares complete WASM inspections with Single or partition units,
+independent generations and full-width counts in each unit's checkpoint and recovery facts.
+
 Sentry event generators retain the optional authored platform, including empty and Unicode
 strings. The Model/archive, registry, consensus and canonical Plexus properties preserve that
 complete field; entity presentation distinguishes omission from an explicitly written default.
@@ -93,7 +98,7 @@ contain synthetic data and describe the current shapes.
 | --- | --- | --- |
 | Committed cluster parameters | `cluster-parameters` | All 22 class-typed parameter values, duration nanoseconds, byte limits, counts and revision identities survive validated archive and JSON round trips with complete equality |
 | Domain schedule units in control-plane storage | `scheduled-units` | The complete schedule, including each unit kind, full-width ordinal, primary, assigned nodes and ownership state, survives archive encoding unchanged |
-| Execution revision built from a scheduled domain | `execution-revision-units` | Every scheduled unit retains its placement and the handoff fingerprint changes with it; moving one unit names that exact unit in the reassignment |
+| Execution revision built from a scheduled domain | `execution-revision-units` | Every declared partition retains its placement and the handoff fingerprint changes with it; moving one unit names that exact unit in the reassignment and preserves every sibling |
 | Consensus state records: unit-keyed schedules, domains with their clock mappings and authorities, users, resource versions, node statuses and uploads, cordons, admission fences, mutation leases, restore installations, transactions, commit plans, impact reports, command executions and the metadata with its retry fence and required cluster parameters | `consensus-state-records` | The recovered `StateMachineData` equals the stored one, records, derived indexes and metadata alike, for a revision written into an empty keyspace and for a second revision written as the changes from it, with records replaced and removed |
 | Damaged consensus state | `consensus-state-corruption` | Recovery fails with `StorageFailure::InvalidState`, or recovers a state in which every record that names its key is stored under it, each resource version has at most one upload, and every transaction counts its pending and completed operations and numbers a failing one within those it accepted, and which stores and recovers again unchanged |
 | Raft votes, log positions, log entries of every command, current state metadata, snapshot manifests, log keys, section keys and sections | `consensus-raft-records` | Complete equality through the storage codec and its conversions; a log key names its entry's index and a section key its section |

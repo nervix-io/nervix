@@ -358,6 +358,187 @@ invocation = "stress-scenarios"
 scenario = "Pulsar batch members retain their own sequence ids and complete metadata"
 selections = ["deloxide-stress"]
 
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-deduplicator"
+invariant = "A deduplicator runs each branch partition on its scheduled owner."
+invocation = "scenarios"
+scenario = "A deduplicator runs each branch partition on its scheduled owner"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-deduplicator"
+invariant = "A deduplicator runs each branch partition on its scheduled owner."
+invocation = "stress-scenarios"
+scenario = "A deduplicator runs each branch partition on its scheduled owner"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-generator"
+invariant = "A generator reads and emits only the keys of its own partition."
+invocation = "scenarios"
+scenario = "A generator reads and emits only the keys of its own partition"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-generator"
+invariant = "A generator reads and emits only the keys of its own partition."
+invocation = "stress-scenarios"
+scenario = "A generator reads and emits only the keys of its own partition"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 3
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-window"
+invariant = "A partitioned window restores each units incomplete window after cluster restart."
+invocation = "scenarios"
+scenario = "A partitioned window restores each units incomplete window after cluster restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 3
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-window"
+invariant = "A partitioned window restores each units incomplete window after cluster restart."
+invocation = "stress-scenarios"
+scenario = "A partitioned window restores each units incomplete window after cluster restart"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-wasm"
+invariant = "A partitioned WASM processor resets only the selected units branch lifetime."
+invocation = "scenarios"
+scenario = "A partitioned WASM processor resets only the selected units branch lifetime"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-wasm"
+invariant = "A partitioned WASM processor resets only the selected units branch lifetime."
+invocation = "stress-scenarios"
+scenario = "A partitioned WASM processor resets only the selected units branch lifetime"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-correlator"
+invariant = "A partitioned correlator matches interleaved keys only inside their partition."
+invocation = "scenarios"
+scenario = "A partitioned correlator matches interleaved keys only inside their partition"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-correlator"
+invariant = "A partitioned correlator matches interleaved keys only inside their partition."
+invocation = "stress-scenarios"
+scenario = "A partitioned correlator matches interleaved keys only inside their partition"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-dependency"
+invariant = "Partitioned dependency reads resolve each keys materialized owner locally and remotely."
+invocation = "scenarios"
+scenario = "Partitioned dependency reads resolve each keys materialized owner locally and remotely"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-dependency"
+invariant = "Partitioned dependency reads resolve each keys materialized owner locally and remotely."
+invocation = "stress-scenarios"
+scenario = "Partitioned dependency reads resolve each keys materialized owner locally and remotely"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 1
+feature = "tests/features/cluster/processor_partition_recovery.feature"
+id = "scenario.processor-partition-recovery-loss"
+invariant = "Losing one processor partition owner preserves both units state and sibling progress."
+invocation = "scenarios"
+scenario = "Losing one processor partition owner preserves both units state and sibling progress"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 1
+feature = "tests/features/cluster/processor_partition_recovery.feature"
+id = "stress.processor-partition-recovery-loss"
+invariant = "Losing one processor partition owner preserves both units state and sibling progress."
+invocation = "stress-scenarios"
+scenario = "Losing one processor partition owner preserves both units state and sibling progress"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 1
+feature = "tests/features/cluster/processor_partition_recovery.feature"
+id = "scenario.processor-partition-recovery-drain"
+invariant = "Draining one processor partition owner hands off its state and keeps sibling owners."
+invocation = "scenarios"
+scenario = "Draining one processor partition owner hands off its state and keeps sibling owners"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 1
+feature = "tests/features/cluster/processor_partition_recovery.feature"
+id = "stress.processor-partition-recovery-drain"
+invariant = "Draining one processor partition owner hands off its state and keeps sibling owners."
+invocation = "stress-scenarios"
+scenario = "Draining one processor partition owner hands off its state and keeps sibling owners"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/cluster/processor_partition_restore.feature"
+id = "scenario.processor-partition-restore"
+invariant = "Partitioned deduplicator keys and windows resume on their scheduled unit owners."
+invocation = "scenarios"
+scenario = "Partitioned deduplicator keys and windows resume on their scheduled unit owners"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/cluster/processor_partition_restore.feature"
+id = "stress.processor-partition-restore"
+invariant = "Partitioned deduplicator keys and windows resume on their scheduled unit owners."
+invocation = "stress-restore-scenarios"
+scenario = "Partitioned deduplicator keys and windows resume on their scheduled unit owners"
+selections = ["deloxide-stress-restore"]
+
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
 # real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
@@ -455,6 +636,9 @@ tags = [
   "@ingestor_instance_lifecycle",
   "@kafka_record_metadata",
   "@mqtt_metadata",
+  "@processor_partitions",
+  "@processor_partition_recovery",
+  "@processor_partition_restore",
   "@nats_authentication",
   "@nats_authentication_refusal",
   "@pulsar_message_metadata",
@@ -596,7 +780,12 @@ inputs = ["tests/features/**/*.feature"]
 kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide-stress"]
-tags = ["@deloxide_stress", "@ingestor_instance_lifecycle"]
+tags = [
+  "@deloxide_stress",
+  "@ingestor_instance_lifecycle",
+  "@processor_partitions",
+  "@processor_partition_recovery",
+]
 target = "test:scenarios"
 
 # The ten endpoint ACK lifecycle examples have a separate bounded serial phase. They do not
@@ -4485,6 +4674,24 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/processor_branch_task.rs"
 workloads = [
+  "scenario.processor-partitions-deduplicator",
+  "stress.processor-partitions-deduplicator",
+  "scenario.processor-partitions-generator",
+  "stress.processor-partitions-generator",
+  "scenario.processor-partitions-window",
+  "stress.processor-partitions-window",
+  "scenario.processor-partitions-wasm",
+  "stress.processor-partitions-wasm",
+  "scenario.processor-partitions-correlator",
+  "stress.processor-partitions-correlator",
+  "scenario.processor-partitions-dependency",
+  "stress.processor-partitions-dependency",
+  "scenario.processor-partition-recovery-loss",
+  "stress.processor-partition-recovery-loss",
+  "scenario.processor-partition-recovery-drain",
+  "stress.processor-partition-recovery-drain",
+  "scenario.processor-partition-restore",
+  "stress.processor-partition-restore",
   "owner.branch-lane-channel-retirement",
   "scenario.wasm-kafka-restore",
   "scenario.client-alter-drain",
@@ -4497,6 +4704,22 @@ workloads = [
 [[owner]]
 path = "src/runtime/relay_boundary.rs"
 workloads = [
+  "scenario.processor-partitions-deduplicator",
+  "stress.processor-partitions-deduplicator",
+  "scenario.processor-partitions-generator",
+  "stress.processor-partitions-generator",
+  "scenario.processor-partitions-window",
+  "stress.processor-partitions-window",
+  "scenario.processor-partitions-wasm",
+  "stress.processor-partitions-wasm",
+  "scenario.processor-partitions-correlator",
+  "stress.processor-partitions-correlator",
+  "scenario.processor-partitions-dependency",
+  "stress.processor-partitions-dependency",
+  "scenario.processor-partition-recovery-loss",
+  "stress.processor-partition-recovery-loss",
+  "scenario.processor-partition-recovery-drain",
+  "stress.processor-partition-recovery-drain",
   "scenario.diagnostic-nodes",
   "scenario.forced-failover-delivery",
   "scenario.materialized-retention-activation",
@@ -4514,6 +4737,18 @@ workloads = [
 [[owner]]
 path = "src/runtime/relay_channel.rs"
 workloads = [
+  "scenario.processor-partitions-deduplicator",
+  "stress.processor-partitions-deduplicator",
+  "scenario.processor-partitions-generator",
+  "stress.processor-partitions-generator",
+  "scenario.processor-partitions-window",
+  "stress.processor-partitions-window",
+  "scenario.processor-partitions-wasm",
+  "stress.processor-partitions-wasm",
+  "scenario.processor-partitions-correlator",
+  "stress.processor-partitions-correlator",
+  "scenario.processor-partitions-dependency",
+  "stress.processor-partitions-dependency",
   "scenario.diagnostic-nodes",
   "stress.diagnostic-nodes",
   "scenario.forced-failover-delivery",

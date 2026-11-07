@@ -369,6 +369,7 @@ take.
 | `--case CASE`, `--partition-seconds N` | `partition-recovery` | `all`, `follower`, `asymmetric`, `leader` or `quorum-loss`, default `all`; 20 to 600, default 45 |
 | `--isolation-seconds N` | `former-owner-restart` | 20 to 600, default 45 |
 | `--fault FAULT` | `stateful`, `endpoints`, `lifetimes`, `domain-time`, `backup-fault`, `restore-fault` | See those scenarios. One node supports `none` and `cluster-restart`. Default `none`; `backup-fault` requires `owner-crash`, `leader-crash`, `owner-partition` or `rolling-restart`, and `restore-fault` requires `leader-crash`, `leader-partition`, `owner-crash` or `reclamation-owner-crash` |
+| `--state-partitions N` | `stateful` | 1 or 4; default 1. Smoke and soak include four partitions through an owner crash. |
 | `--profile NAME` | `degraded-links` | `all`, `delay`, `jitter`, `random-loss`, `burst-loss`, `rate-limit` or `combined`, default `all` |
 | `--load-interval-ms N` | `degraded-links` | 100 to 5,000, default 750 |
 | `--baseline-seconds N`, `--degrade-seconds N`, `--drain-seconds N` | `degraded-links` | 10 to 120, default 15; 10 to 120, default 20; 10 to 180, default 90 |
@@ -1655,6 +1656,7 @@ nothing about host power loss or storage corruption.
 just chaos run stateful --image nervix:debian
 just chaos run stateful --image nervix:debian --nodes 1
 just chaos run stateful --image nervix:debian --fault owner-crash
+just chaos run stateful --image nervix:debian --state-partitions 4 --fault owner-crash
 just chaos run stateful --image nervix:debian --fault owner-pause
 just chaos run stateful --image nervix:debian --fault owner-partition
 just chaos run stateful --image nervix:debian --fault cluster-restart
@@ -1679,6 +1681,11 @@ and output topic:
   branch.
 - **The WASM processor `chaos_counter`.** Each branch's guest counts the rows it has processed,
   saves that count as its state, and emits every row with all of its input fields and the count.
+
+The stateful graph declares its own `chaos_state_branch`. Its partitioned case uses four units:
+`alpha` lands in partition 2 and `beta` in partition 0. Placement evidence records every unit, and
+the durability milestone requires confirmed checkpoints in two distinct active units. The same
+per-processor ledgers judge the owner crash and recovery. The one-partition cases remain in soak.
 
 The deployment uses a one-second state snapshot interval and, on three nodes, one state replica, so
 the loss of an owner promotes a replica of each processor's state instead of resetting it. A pause

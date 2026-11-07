@@ -337,6 +337,13 @@ test-inferencer-state *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
 
+# Exercise processor and generator partition ownership through the public interface.
+test-processor-partitions *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/processor_partitions.feature {{ quote(args) }}
+
 # Run the native-client and CLI foreign-reference witnesses with only the tools they start.
 test-client-foreign-execution: (test-client-recovery-witnesses "client-foreign-execution" "(A native command|The CLI) recovers its own execution after a foreign command reply")
 
@@ -625,6 +632,21 @@ bench-checked-lanes-x86-64-v3 *args:
 
 test-admission-runtime *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+
+# Explore one runtime owner without unrelated inventory packages. The complete inventory,
+# completion and nondeterminism gate remains test-shuttle in CI.
+test-runtime-shuttle check: download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/shuttle") }} SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-server/" + check) }} cargo test --package nervix-server --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
+
+# Explore one registered runtime model with its production harness. The complete inventory and
+# weakening/replay qualification remain test-loom and test-loom-qualification in CI.
+test-runtime-loom check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{ quote(cargo_target_dir + "/loom-owner-checks") }}
+    checkpoint_dir="$(mktemp -d {{ quote(cargo_target_dir + "/loom-owner-checks/run.XXXXXX") }})"
+    printf 'Loom owner checkpoint directory: %s\n' "$checkpoint_dir"
+    LOOM_CHECKPOINT_FILE="$checkpoint_dir/checkpoint.json" LOOM_CHECKPOINT_INTERVAL=1 cargo test --profile loom --package nervix-server --features loom --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
 # Focused ordinary-mode regressions for runtime owners.
 test-runtime *args: build-web-console wasm-processor-guests download-onnxruntime
@@ -947,6 +969,10 @@ test-deloxide-replay record launch:
 # record in tests/deloxide-inventory.toml, using the compiler catalog `just ratchet` writes.
 validate-deloxide-applicability: ratchet
     python3 -m scripts.deloxide_lane applicability --catalog {{ quote(cargo_target_dir + "/typed-ratchet/gate.json") }}
+
+# Check workload registration without building or running a diagnostic lane.
+validate-deloxide-inventory:
+    python3 -m scripts.deloxide_lane validate
 
 # Focused disposable-process reproducer and diagnostic checks, preserving configured kache.
 test-deadlock-probes features="deloxide" *args:
@@ -1457,7 +1483,7 @@ test-client-conformance-run tags="@client_conformance_toolchain" *args:
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
     cargo test --package nervix-scenarios --test scenarios -- \
         --input tests/features/runtime/client_conformance.feature \
-        --tags {{ quote(tags) }} {{ args }}
+        --tags {{ quote(tags) }} {{ quote(args) }}
 
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
@@ -2704,6 +2730,10 @@ fmt: cargo-fmt fmt-typed-ratchet taplo-format dockerfmt gherkin-fmt plexus-fmt a
 cargo-fmt-check:
     cargo +nightly fmt --check
 
+# Check one Rust file with the workspace's formatter and edition.
+rustfmt-check path:
+    rustfmt +nightly --edition 2024 --check {{ quote(path) }}
+
 taplo-format-check:
     git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format --check
 
@@ -3892,6 +3922,10 @@ verify-chaos-clock *args:
 # Run the state, clock and window verifier controls without the other external harness checks.
 test-chaos-stateful-verifiers:
     exec bash scripts/chaos/tests/stateful-self-test.sh
+
+# Validate suite selection, budgets and the controller against its deterministic stand-ins.
+test-chaos-suites:
+    exec bash scripts/chaos/tests/suite-self-test.sh
 
 # Run the endpoint route and WebSocket verifier controls without the other external harness checks.
 test-chaos-endpoint-verifiers:

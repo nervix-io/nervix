@@ -31,7 +31,7 @@ curl http://127.0.0.1:<observability-port>/metrics
 Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay
 branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a
 relay is branched by high-cardinality values such as tenant, user, account, or device id. Branch
-lifecycle metrics identify the declared branch, not the concrete key. A partitioned relay's series
+lifecycle metrics identify the declared branch, not the concrete key. A partitioned relay or processor's series
 carry its partition, whose cardinality is bounded by the partition count its branch declares.
 
 ## Metric Labels
@@ -45,8 +45,8 @@ Graph metric series use these labels:
 - `direction`: `received` or `sent`
 - `relay`: logical relay associated with the observation, or `-` when no relay applies
 - `peer_kind` and `peer`: relay peer labels for node-to-relay observations, or `-` when no peer applies
-- `partition`: the partition of a partitioned relay that records a `RELAY` series, or `-` for a
-  relay with one owner and for every other series
+- `partition`: the partition of a partitioned relay or processor recording the series, or `-`
+  for a unit without partitions
 - `instance`: the global index of an ingestor instance, or `-` for a non-instance unit
 - `branch`: named branch declaration on branch lifecycle metrics
 - `reason`: branch eviction reason, either `lru` or `ttl`
@@ -79,6 +79,10 @@ nervix_messages_total{domain="prod",target_kind="RELAY",target="tenant_events",p
 Every `RELAY` series a partitioned relay records names one of its partitions, so such a relay has no
 `RELAY` series with `partition="-"`. A partition's series exist on the node that owns it and are
 withdrawn when that owner ends, as when the partition moves to another node.
+
+Processor input, output, latency and branch-aggregated series carry the processor unit's partition.
+`DESCRIBE` gathers those series from each unit's execution owner; state replicas do not repeat a
+sibling owner's series. Concrete branch keys remain outside the Prometheus label set.
 
 Example `DESCRIBE INGESTOR` edge metric section:
 

@@ -651,7 +651,12 @@ Decoded materialized containers keep their metadata and column charges in the in
 equals the relay budget and counts separately in startup sizing, leaving relay work the capacity
 it needs to evaluate, encode and dispatch while those source columns remain admitted.
 
-Running generators keep remote source views only in their task-local read cache. They describe
+Partitioned processors restore each archived branch under its scheduled partition unit, including
+that unit's generation and ownership fence. Each unit starts its own supervisor, state writer and
+replica poller. Moving or restoring one unit retains the sibling units' tasks and state identities.
+
+Running generators enumerate only their own source partition and keep remote source views only in
+their task-local read cache. They describe
 the selected owner's complete sealed identity before each reuse and replace a changed view even
 when its revision equals or precedes the one they observed before restart or restore. Cached
 rows carry their admission charges in the separate bounded `state_read_cache` pool, whose

@@ -67,7 +67,7 @@ pub(crate) struct DomainRoutingSnapshot {
     pub(super) materialized_stream_owner_nodes: HashMap<RelayName, RelayOwnerRoutes>,
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
-    pub(super) processor_plans: HashMap<NodeRef, StdArc<PublishedProcessorPlan>>,
+    pub(super) processor_plans: HashMap<NodeUnitRef, StdArc<PublishedProcessorPlan>>,
 }
 
 impl DomainRoutingSnapshot {
@@ -219,13 +219,13 @@ pub(super) struct DomainExecution {
     pub(super) routing: DomainRouting,
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
-    pub(super) node_tasks: HashMap<NodeRef, ScheduledNodeTask>,
+    pub(super) node_tasks: HashMap<NodeUnitRef, ScheduledNodeTask>,
     pub(super) emitter_tasks: HashMap<NodeRef, ScheduledEmitterTask>,
-    pub(super) generator_tasks: HashMap<NodeRef, JoinHandle<()>>,
+    pub(super) generator_tasks: HashMap<NodeUnitRef, JoinHandle<()>>,
     pub(super) reingestor_tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
     /// Placement-derived tasks grouped by the scheduled node whose assignment owns them, so a
     /// reassignment can replace one node's replication runtime without disturbing its siblings.
-    pub(super) placement_tasks: HashMap<NodeRef, PlacementTasks>,
+    pub(super) placement_tasks: HashMap<NodeUnitRef, PlacementTasks>,
     /// The task maintaining each locally owned unit of a materialized relay, keyed by that unit.
     pub(super) relay_state_tasks: BTreeMap<RelayUnitRef, RelayStateTask>,
     /// The buffer-and-fan-out task of every relay unit this cluster node owns: a relay without
@@ -710,6 +710,7 @@ impl Runtime {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
+                    unit_runtime_consumer_counts: BTreeMap::new(),
                     branch_presences,
                     remote_runtime_consumers: Vec::new(),
                 },
@@ -783,21 +784,31 @@ impl Runtime {
 
         let mut processor_input_specs = Vec::new();
         for node_spec in &branched_specs.processors {
-            let mut inputs = Vec::new();
-            for input_relay in &node_spec.spec.input_relays {
-                let Some(relay) = relay_builders.get_mut(input_relay) else {
-                    return Err(Report::new(ExecutionBuildError::MissingInputRelay {
-                        node: NodeRef::new(node_spec.spec.kind, node_spec.spec.processor.clone()),
-                        relay: input_relay.clone(),
-                    })
-                    .change_context(build()));
-                };
-                inputs.push((
-                    input_relay.clone(),
-                    relay.runtime_consumer_fan_in_for_mode(node_spec.spec.mode),
-                ));
+            let identity = NodeRef::new(node_spec.spec.kind, node_spec.spec.processor.clone());
+            let node = revision
+                .nodes
+                .get(&identity)
+                .verified("processor plans and execution nodes come from one revision");
+            for unit in node.units.keys().copied() {
+                let mut inputs = Vec::new();
+                for input_relay in &node_spec.spec.input_relays {
+                    let Some(relay) = relay_builders.get_mut(input_relay) else {
+                        return Err(Report::new(ExecutionBuildError::MissingInputRelay {
+                            node: NodeRef::new(
+                                node_spec.spec.kind,
+                                node_spec.spec.processor.clone(),
+                            ),
+                            relay: input_relay.clone(),
+                        })
+                        .change_context(build()));
+                    };
+                    inputs.push((
+                        input_relay.clone(),
+                        relay.runtime_consumer_fan_in_for_unit(node_spec.spec.mode, unit),
+                    ));
+                }
+                processor_input_specs.push((NodeUnitRef::new(identity.clone(), unit), inputs));
             }
-            processor_input_specs.push((node_spec.clone(), inputs));
         }
 
         let relay_services = relay_builders
@@ -805,15 +816,18 @@ impl Runtime {
             .map(|(identifier, relay)| {
                 (
                     identifier,
-                    Arc::new(RelayBoundaryServices::new(
-                        relay.fanout,
-                        relay.attached_runtime_consumer_count,
-                        relay.detached_runtime_consumer_count,
-                        relay.remote_runtime_consumers,
-                        None,
-                        relay.branch_presences,
-                        self.domain_ack_root_tracker(domain),
-                    )),
+                    Arc::new(
+                        RelayBoundaryServices::new(
+                            relay.fanout,
+                            relay.attached_runtime_consumer_count,
+                            relay.detached_runtime_consumer_count,
+                            relay.remote_runtime_consumers,
+                            None,
+                            relay.branch_presences,
+                            self.domain_ack_root_tracker(domain),
+                        )
+                        .with_unit_runtime_consumer_counts(relay.unit_runtime_consumer_counts),
+                    ),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -835,13 +849,9 @@ impl Runtime {
         }
 
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
-        let processor_specs = processor_input_specs
-            .iter()
-            .map(|(spec, _)| spec.clone())
-            .collect::<Vec<_>>();
         let previous_processor_plans = HashMap::default();
         let processor_plans = bind_published_processor_plans(
-            &processor_specs,
+            &branched_specs.processors,
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
@@ -851,6 +861,8 @@ impl Runtime {
                 materialized_stream_specs: &materialized_stream_specs,
                 lookups: &lookup_runtimes,
                 udfs: Some(&udf_executor),
+                nodes: &revision.nodes,
+                unit: None,
                 previous: &previous_processor_plans,
             },
         )
@@ -871,11 +883,7 @@ impl Runtime {
             .change_context_lazy(build)?,
         );
 
-        for (node_spec, inputs) in processor_input_specs {
-            let entity = NodeRef {
-                kind: node_spec.spec.kind,
-                identifier: node_spec.spec.processor.clone(),
-            };
+        for (entity, inputs) in processor_input_specs {
             let template = processor_plans
                 .get(&entity)
                 .verified("the published plan binder returns every planned processor")
@@ -904,14 +912,34 @@ impl Runtime {
         };
 
         for generator in resource_plans.generators.values() {
-            let spec = GeneratorTaskSpec::bind(domain, generator, &relay_services, &udf_executor)
-                .change_context_lazy(build)?;
-            let entity = NodeRef::new(ModelKind::Generator, &generator.name);
-            generator_tasks.insert(
-                entity,
-                self.spawn_generator_task(domain, &shutdown_tx, spec)
+            let mut units = generator.assignment.units_executing_on(None).peekable();
+            let Some(first) = units.peek().copied() else {
+                continue;
+            };
+            let mut prepared = Some(
+                GeneratorTaskSpec::bind(domain, generator, first, &relay_services, &udf_executor)
                     .change_context_lazy(build)?,
             );
+            while let Some(unit) = units.next() {
+                let mut spec = if units.peek().is_some() {
+                    prepared
+                        .as_ref()
+                        .verified("the prepared programs are moved only into the final unit")
+                        .clone()
+                } else {
+                    prepared
+                        .take()
+                        .verified("the final unit consumes the prepared programs once")
+                };
+                spec.unit = unit;
+                let entity =
+                    NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &generator.name), unit);
+                generator_tasks.insert(
+                    entity,
+                    self.spawn_generator_task(domain, &shutdown_tx, spec)
+                        .change_context_lazy(build)?,
+                );
+            }
         }
 
         for (emitter, inputs) in emitter_specs {
@@ -1686,9 +1714,9 @@ mod tests {
             .executions
             .get(&domain)
             .assured("the running domain has an execution");
-        assert!(execution.generator_tasks.contains_key(&NodeRef::new(
-            ModelKind::Generator,
-            named::<GeneratorName>("synth")
+        assert!(execution.generator_tasks.contains_key(&NodeUnitRef::new(
+            NodeRef::new(ModelKind::Generator, named::<GeneratorName>("synth")),
+            Unit::SINGLE
         )));
         drop(execution);
         runtime

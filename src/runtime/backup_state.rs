@@ -446,7 +446,7 @@ impl Runtime {
                             domain.as_str()
                         ))
                     })?;
-                    let task = execution.node_tasks.get(entity).ok_or_else(|| {
+                    let task = execution.node_tasks.get(&member).ok_or_else(|| {
                         OwnershipHandoffError::checkpoint(format!(
                             "{} '{}' has no local task during backup checkpoint",
                             entity.kind.as_str(),

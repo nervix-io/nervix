@@ -48,9 +48,15 @@ apply anything. The revision holds:
 Each scheduled node owns a map of `Unit` identities with `Single`, `Partition(p)`, or `Instance(i)`
 placements. The unit carries its primary, assigned nodes, ownership transition, and WASM guest
 generations. The revision and planned resource assignments preserve those unit keys, and schedule
-reassignments name the node and unit together. A relay branched by a branch of several partitions
-emits one `Partition` unit per partition. An instance-capable ingestor emits one `Instance` unit
-per resolved intake index; other nodes emit one `Single` unit.
+reassignments name the node and unit together. Relays, processors and generators branched by a
+branch of several partitions emit one `Partition` unit per partition. An instance-capable ingestor
+emits one `Instance` unit per resolved intake index; other nodes emit one `Single` unit.
+
+Processor specifications share the logical node's compiled VM, inference and WASM artifacts.
+Published task plans are keyed by `NodeUnitRef` and carry that unit's WASM generations and reset.
+A changed unit lifetime replaces its publication while retaining reusable compiled artifacts.
+Processor, generator and placement-task ownership is unit-qualified, so an assignment delta ends
+only lost units and preserves unchanged sibling supervisors, checkpoint writers and replica polls.
 
 Ingestor entrypoints are keyed by `NodeUnitRef`. Planning lowers the common input declaration and
 routes once, then binds each unit's identity and Kafka primary into its start plan. Validation

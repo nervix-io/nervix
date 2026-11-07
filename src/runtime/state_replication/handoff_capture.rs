@@ -97,7 +97,7 @@ impl Runtime {
                 })?;
                 let commands = execution
                     .node_tasks
-                    .get(entity)
+                    .get(&NodeUnitRef::new(entity.clone(), unit))
                     .map(|task| task.commands.clone());
                 if commands.is_none() && !execution.passive_only {
                     return Err(OwnershipHandoffError::checkpoint(format!(

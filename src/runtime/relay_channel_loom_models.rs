@@ -7,7 +7,8 @@
 //!   finds the gate open, a lease follows what every counted dispatch did, the last dispatch to
 //!   leave a closed gate wakes its fence, and a dispatch that finds the gate reopened follows what
 //!   the protected mutation changed. And the fan-out's: a consumer that frees room a waiting
-//!   publisher needs either admits it or wakes it.
+//!   publisher needs either admits it or wakes it; an audience registering as its parent ends
+//!   either observes that ending or has its publication observed by the ending parent.
 //! - **Depends on.** The production gate and fan-out, and the Loom runner of
 //!   `nervix-model-harness`.
 //! - **Must not know.** Relays, batches, acknowledgements, or why a gate is engaged.
@@ -49,10 +50,45 @@ const DRAIN_WAKEUP: InvariantId = InvariantId::new("runtime.relay-dispatch-gate.
 const REOPEN_PUBLICATION: InvariantId =
     InvariantId::new("runtime.relay-dispatch-gate.reopen-publication");
 const ADMISSION_WAKEUP: InvariantId = InvariantId::new("runtime.relay-fanout.admission-wakeup");
+const AUDIENCE_ENDING: InvariantId = InvariantId::new("runtime.relay-fanout.audience-ending");
 
 /// What a dispatch writes under its permit, or the protected mutation writes while the gate is
 /// closed. Both sides access it with `Relaxed`, so only the gate's own orderings can publish it.
 const WITNESSED: usize = 1;
+
+#[test]
+fn loom_an_audience_registering_as_its_parent_ends_is_seen_or_observes_the_ending() {
+    explore(AUDIENCE_ENDING, || {
+        let channel = RelayBroadcast::<u8>::with_capacity(
+            NonZeroUsize::new(1).assured("the model starts with capacity one"),
+        );
+        let audience = channel
+            .new_audience()
+            .assured("the model retains one audience");
+        let published = Arc::new(AtomicUsize::new(0));
+        let registration = published.clone();
+        let registering = spawn(move || {
+            // Represents the write preceding the production registration predicate. Both
+            // witness accesses are relaxed: only the production lifetime handshake orders them.
+            // ArcSwap and queue internals are outside this memory-ordering claim.
+            registration.store(WITNESSED, Ordering::Relaxed);
+            audience.fanout.audience_registration_is_live()
+        });
+
+        // A resize may intervene between registration and ending. It must carry the registration
+        // through the same capacity word, without a load that a later store could overwrite.
+        channel.set_capacity(NonZeroUsize::new(2).assured("the resized capacity is positive"));
+        drop(channel);
+        let observed = published.load(Ordering::Relaxed);
+        let remained_live = registering
+            .join()
+            .assured("the registering side only publishes and checks the lifetime");
+        assert!(
+            !remained_live || observed == WITNESSED,
+            "audience registration escaped both the parent's ending and its own ending check"
+        );
+    });
+}
 
 #[test]
 fn loom_a_fence_counts_every_dispatch_that_finds_the_gate_open() {

@@ -4,15 +4,21 @@
 //! and replicas each member gets, the quiesce level, the relays a hold would gate, and the
 //! preferences the move leaves unsatisfied. `DESCRIBE RELOCATION` returns that plan; `RELOCATE`
 //! executes it as one gated handoff and returns it with the executed outcome.
+//!
+//! Layer: control plane.
+//! - **Owns.** Validating relocation owners and destination, staging assignments and coordinating
+//!   one atomic handoff for the selected logical nodes and every unit they own.
+//! - **Depends on.** Pure registry selections, committed schedules and ownership coordination.
+//! - **Must not know.** Parser internals, record delivery or connector drivers.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusError, DomainMutationLease, DomainPlanningInputs};
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, PlacementPolicy,
-    QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode,
+    QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode, Unit,
 };
 
 use super::{
@@ -58,8 +64,6 @@ enum RelocationError {
         member: NodeRef,
         owner: ClusterNodeName,
     },
-    #[error("{kind} '{name}' in domain '{domain}' has multiple execution units; RELOCATE requires a member with one owner", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
-    MemberMultipleUnits { domain: DomainName, member: NodeRef },
 }
 
 /// One unit member with the assignment the relocation gives it.
@@ -68,6 +72,12 @@ struct RelocationPlanMember {
     group: usize,
     strategy: RelocationPreferenceStrategy,
     reason: RelocationMemberReason,
+    moves: bool,
+    units: Vec<RelocationPlanUnit>,
+}
+
+struct RelocationPlanUnit {
+    unit: Unit,
     owner: ClusterNodeName,
     moves: bool,
     replicas: Vec<ClusterNodeName>,
@@ -127,24 +137,39 @@ impl RelocationPlan {
         }
         lines.push("unit:".to_string());
         for member in &self.members {
-            let mut line = format!(
-                "- kind={} name={} group={} strategy={} reason={} owner={} moves={}",
-                member.runtime_node.kind.as_str(),
-                member.runtime_node.identifier.as_str(),
-                member.group,
-                member.strategy.as_ref(),
-                member.reason.as_ref(),
-                member.owner,
-                if member.moves { "yes" } else { "no" }
-            );
-            line.push_str(&format!(" replicas={}", format_node_list(&member.replicas)));
-            if member.moves {
+            for assignment in &member.units {
+                let unit_label = match assignment.unit.kind() {
+                    nervix_models::UnitKind::Single => String::new(),
+                    nervix_models::UnitKind::Partition(index) => format!(" unit=partition:{index}"),
+                    nervix_models::UnitKind::Instance(index) => format!(" unit=instance:{index}"),
+                };
+                let mut line = format!(
+                    "- kind={} name={}{unit_label} group={} strategy={} reason={} owner={} \
+                     moves={}",
+                    member.runtime_node.kind.as_str(),
+                    member.runtime_node.identifier.as_str(),
+                    member.group,
+                    member.strategy.as_ref(),
+                    member.reason.as_ref(),
+                    assignment.owner,
+                    if assignment.moves { "yes" } else { "no" }
+                );
                 line.push_str(&format!(
-                    " promoted_replica={}",
-                    if member.promoted_replica { "yes" } else { "no" }
+                    " replicas={}",
+                    format_node_list(&assignment.replicas)
                 ));
+                if assignment.moves {
+                    line.push_str(&format!(
+                        " promoted_replica={}",
+                        if assignment.promoted_replica {
+                            "yes"
+                        } else {
+                            "no"
+                        }
+                    ));
+                }
+                lines.push(line);
             }
-            lines.push(line);
         }
         lines.push(format!(
             "unsatisfied preferences: {}",
@@ -404,10 +429,12 @@ impl SessionServiceImpl {
 
         let mut owners = Vec::with_capacity(unit.members.len());
         for member in &unit.members {
-            owners.push(
-                relocation_member_owner(domain, current, &member.runtime_node, &live_nodes)?
-                    .clone(),
-            );
+            owners.push(relocation_member_owners(
+                domain,
+                current,
+                &member.runtime_node,
+                &live_nodes,
+            )?);
         }
 
         Self::validate_relocation_destination(
@@ -421,7 +448,11 @@ impl SessionServiceImpl {
             .members
             .iter()
             .zip(&owners)
-            .filter(|(_, owner)| **owner != relocation.destination)
+            .filter(|(_, owners)| {
+                owners
+                    .values()
+                    .any(|owner| *owner != &relocation.destination)
+            })
             .map(|(member, _)| member.runtime_node.clone())
             .collect::<Vec<_>>();
 
@@ -456,38 +487,52 @@ impl SessionServiceImpl {
             Vec::new()
         };
 
-        let members = unit
-            .members
-            .iter()
-            .zip(&owners)
-            .map(|(member, owner)| {
-                let moves = *owner != relocation.destination;
-                let mut assignment = None;
-                if moves && let Some(planned) = planned.as_ref() {
-                    assignment = planned.nodes.get(&member.runtime_node);
-                }
-                if assignment.is_none() {
-                    assignment = current.nodes.get(&member.runtime_node);
-                }
-                RelocationPlanMember {
-                    runtime_node: member.runtime_node.clone(),
-                    group: member.group,
-                    strategy: member.strategy,
-                    reason: member.reason,
-                    owner: owner.clone(),
-                    moves,
-                    replicas: match assignment {
-                        Some(node) => node.replica_nodes().into_iter().cloned().collect(),
-                        None => Vec::new(),
-                    },
-                    promoted_replica: moves
-                        && current
-                            .nodes
-                            .get(&member.runtime_node)
-                            .is_some_and(|node| node.is_assigned_to(&relocation.destination)),
-                }
-            })
-            .collect::<Vec<_>>();
+        let members =
+            unit.members
+                .iter()
+                .zip(&owners)
+                .map(|(member, owners)| {
+                    let planned_assignment = planned
+                        .as_ref()
+                        .and_then(|planned| planned.nodes.get(&member.runtime_node));
+                    let assignment = match planned_assignment {
+                        Some(assignment) => Some(assignment),
+                        None => current.nodes.get(&member.runtime_node),
+                    }
+                    .verified("owner validation resolved every relocation member in this schedule");
+                    let units = owners
+                        .iter()
+                        .map(|(unit, owner)| {
+                            let moves = *owner != &relocation.destination;
+                            let scheduled = assignment.units.get(unit).verified(
+                                "relocation preserves the selected member's unit identities",
+                            );
+                            RelocationPlanUnit {
+                                unit: *unit,
+                                owner: (*owner).clone(),
+                                moves,
+                                replicas: scheduled.replica_nodes().into_iter().cloned().collect(),
+                                promoted_replica: moves
+                                    && current
+                                        .nodes
+                                        .get(&member.runtime_node)
+                                        .and_then(|node| node.units.get(unit))
+                                        .is_some_and(|unit| {
+                                            unit.is_assigned_to(&relocation.destination)
+                                        }),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    RelocationPlanMember {
+                        runtime_node: member.runtime_node.clone(),
+                        group: member.group,
+                        strategy: member.strategy,
+                        reason: member.reason,
+                        moves: units.iter().any(|unit| unit.moves),
+                        units,
+                    }
+                })
+                .collect::<Vec<_>>();
 
         let unsatisfied = unsatisfied_preference_lines(
             &unit,
@@ -591,61 +636,52 @@ fn planned_relocation_schedule(
         let Some(node) = planned.nodes.get_mut(member) else {
             continue;
         };
-        let former_owner = node.execution_node().cloned();
         let replica_slots = if relay_without_materialized_state(node) {
             0
         } else {
             replica_count
         };
-        let mut candidates = Vec::new();
-        if let Some(former_owner) = former_owner
-            && schedulable_nodes.contains(&former_owner)
-        {
-            candidates.push(former_owner);
-        }
-        candidates.extend(
-            node.replica_nodes()
-                .into_iter()
-                .filter(|replica| live_nodes.contains(*replica))
-                .cloned(),
-        );
-        // The graph may divide this member into partitions that its current schedule, written
-        // before a stopped domain's partition count changed, does not have yet. Such a desired
-        // entry has no single assignment to borrow replica slots from.
-        if let Some(desired_node) = desired.nodes.get(member)
-            && let Some(desired_unit) = desired_node.sole_unit()
-        {
+        for (identity, unit) in &mut node.units {
+            if unit.execution_node() == Some(destination) {
+                continue;
+            }
+            let mut candidates = Vec::new();
+            if let Some(former_owner) = unit.execution_node()
+                && schedulable_nodes.contains(former_owner)
+            {
+                candidates.push(former_owner.clone());
+            }
             candidates.extend(
-                desired_unit
-                    .assigned_nodes
-                    .iter()
-                    .filter(|node_id| schedulable_nodes.contains(*node_id))
+                unit.replica_nodes()
+                    .into_iter()
+                    .filter(|replica| live_nodes.contains(*replica))
                     .cloned(),
             );
-        }
-
-        let mut assigned_nodes = vec![destination.clone()];
-        for candidate in candidates {
-            if assigned_nodes.len() > replica_slots {
-                break;
+            if let Some(desired) = desired
+                .nodes
+                .get(member)
+                .and_then(|node| node.units.get(identity))
+            {
+                candidates.extend(
+                    desired
+                        .assigned_nodes
+                        .iter()
+                        .filter(|node| schedulable_nodes.contains(*node))
+                        .cloned(),
+                );
             }
-            if !assigned_nodes.contains(&candidate) {
-                assigned_nodes.push(candidate);
+            let mut assigned = vec![destination.clone()];
+            for candidate in candidates {
+                if assigned.len() > replica_slots {
+                    break;
+                }
+                if !assigned.contains(&candidate) {
+                    assigned.push(candidate);
+                }
             }
+            unit.primary_node = Some(destination.clone());
+            unit.assigned_nodes = assigned;
         }
-        // `replica_slots` is an operator-supplied replica count with no upper bound, so it is
-        // clamped to what the loop above could have collected before the primary slot is added.
-        assigned_nodes.truncate(
-            replica_slots
-                .min(assigned_nodes.len())
-                .checked_add(1)
-                .assured("a slot count clamped to a collected list leaves room for the primary"),
-        );
-        let unit = node
-            .sole_unit_mut()
-            .assured("relocation validated that each member has exactly one unit");
-        unit.primary_node = Some(destination.clone());
-        unit.assigned_nodes = assigned_nodes;
     }
 
     for group in &mut planned.placement_groups {
@@ -679,30 +715,55 @@ fn unsatisfied_preference_lines(
         let Some(left_node) = schedule.nodes.get(&preference.left) else {
             continue;
         };
-        let Some(left) = left_node.execution_node() else {
-            continue;
-        };
         let Some(right_node) = schedule.nodes.get(&preference.right) else {
             continue;
         };
-        let Some(right) = right_node.execution_node() else {
-            continue;
-        };
-        let unsatisfied = match preference.policy {
-            PlacementPolicy::PreferColocation => left != right,
-            PlacementPolicy::SuggestSeparation => left == right,
-            PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => false,
-        };
-        if !unsatisfied {
-            continue;
+        let identities = left_node
+            .units
+            .keys()
+            .chain(right_node.units.keys())
+            .copied()
+            .filter(|unit| {
+                *unit != Unit::SINGLE
+                    || (left_node.units.contains_key(unit) && right_node.units.contains_key(unit))
+            })
+            .collect::<BTreeSet<_>>();
+        for identity in identities {
+            let left_unit = match left_node.units.get(&identity) {
+                Some(unit) => Some(unit),
+                None => left_node.units.get(&Unit::SINGLE),
+            };
+            let Some(left) = left_unit.and_then(|unit| unit.execution_node()) else {
+                continue;
+            };
+            let right_unit = match right_node.units.get(&identity) {
+                Some(unit) => Some(unit),
+                None => right_node.units.get(&Unit::SINGLE),
+            };
+            let Some(right) = right_unit.and_then(|unit| unit.execution_node()) else {
+                continue;
+            };
+            let unsatisfied = match preference.policy {
+                PlacementPolicy::PreferColocation => left != right,
+                PlacementPolicy::SuggestSeparation => left == right,
+                PlacementPolicy::RequireColocation | PlacementPolicy::Neutral => false,
+            };
+            if !unsatisfied {
+                continue;
+            }
+            let suffix = match identity.kind() {
+                nervix_models::UnitKind::Single => String::new(),
+                nervix_models::UnitKind::Partition(index) => format!(" unit=partition:{index}"),
+                nervix_models::UnitKind::Instance(index) => format!(" unit=instance:{index}"),
+            };
+            lines.push(format!(
+                "- {} {} <-> {} ({}){suffix}",
+                preference.policy.as_ref().to_lowercase(),
+                format_placement_runtime_node(&preference.left, &context),
+                format_placement_runtime_node(&preference.right, &context),
+                placement_claim_owner(&preference.winning_rules)
+            ));
         }
-        lines.push(format!(
-            "- {} {} <-> {} ({})",
-            preference.policy.as_ref().to_lowercase(),
-            format_placement_runtime_node(&preference.left, &context),
-            format_placement_runtime_node(&preference.right, &context),
-            placement_claim_owner(&preference.winning_rules)
-        ));
     }
     lines
 }
@@ -711,37 +772,35 @@ fn unsatisfied_preference_lines(
 ///
 /// A member whose owner is unavailable cannot be relocated: there is nothing to drain from a dead
 /// owner, and failover is already reassigning it.
-fn relocation_member_owner<'a>(
+fn relocation_member_owners<'a>(
     domain: &DomainName,
     schedule: &'a DomainSchedule,
     member: &NodeRef,
     live_nodes: &BTreeSet<ClusterNodeName>,
-) -> error_stack::Result<&'a ClusterNodeName, RelocationError> {
-    let Some(node) = schedule.nodes.get(member) else {
-        return Err(Report::new(RelocationError::MemberNotScheduled {
+) -> error_stack::Result<BTreeMap<Unit, &'a ClusterNodeName>, RelocationError> {
+    let node = schedule.nodes.get(member).ok_or_else(|| {
+        Report::new(RelocationError::MemberNotScheduled {
             domain: domain.clone(),
             member: member.clone(),
-        }));
-    };
-    if node.units.len() > 1 {
-        return Err(Report::new(RelocationError::MemberMultipleUnits {
-            domain: domain.clone(),
-            member: member.clone(),
-        }));
+        })
+    })?;
+    let mut owners = BTreeMap::new();
+    for (unit, scheduled) in &node.units {
+        let owner = scheduled.execution_node().ok_or_else(|| {
+            Report::new(RelocationError::MemberWithoutOwner {
+                domain: domain.clone(),
+                member: member.clone(),
+            })
+        })?;
+        if !live_nodes.contains(owner) {
+            return Err(Report::new(RelocationError::MemberOwnerUnavailable {
+                member: member.clone(),
+                owner: owner.clone(),
+            }));
+        }
+        owners.insert(*unit, owner);
     }
-    let Some(owner) = node.execution_node() else {
-        return Err(Report::new(RelocationError::MemberWithoutOwner {
-            domain: domain.clone(),
-            member: member.clone(),
-        }));
-    };
-    if !live_nodes.contains(owner) {
-        return Err(Report::new(RelocationError::MemberOwnerUnavailable {
-            member: member.clone(),
-            owner: owner.clone(),
-        }));
-    }
-    Ok(owner)
+    Ok(owners)
 }
 
 fn relay_without_materialized_state(node: &ScheduledNode) -> bool {
@@ -900,9 +959,9 @@ mod tests {
         let schedule = schedule(vec![junction_node("route", "node-1", &["node-2"])]);
         let domain = schedule.domain.clone();
         assert_eq!(
-            relocation_member_owner(&domain, &schedule, &member("route"), &live(&["node-1"]))
+            relocation_member_owners(&domain, &schedule, &member("route"), &live(&["node-1"]))
                 .expect("a live owner must resolve"),
-            &node_name("node-1")
+            BTreeMap::from([(Unit::SINGLE, &node_name("node-1"))])
         );
     }
 
@@ -910,7 +969,7 @@ mod tests {
     fn rejects_a_member_whose_owner_is_unavailable() {
         let schedule = schedule(vec![junction_node("route", "node-3", &[])]);
         let domain = schedule.domain.clone();
-        let error = relocation_member_owner(
+        let error = relocation_member_owners(
             &domain,
             &schedule,
             &member("route"),
@@ -930,7 +989,7 @@ mod tests {
         let schedule = schedule(Vec::new());
         let domain = schedule.domain.clone();
         let error =
-            relocation_member_owner(&domain, &schedule, &member("route"), &live(&["node-1"]))
+            relocation_member_owners(&domain, &schedule, &member("route"), &live(&["node-1"]))
                 .expect_err("an unscheduled member must be rejected");
         let expected_member = member("route");
         assert!(matches!(

@@ -3720,6 +3720,12 @@ checked against the entity's declaration and exact types at `CREATE` and `ALTER`
 
 ## Ingestor Instancing Boundaries
 
+Execution planning validates scheduled unit identities against the current node declaration before
+building tasks. A mismatch is a typed `ExecutionRevisionError::UnitDeclaration` naming the domain
+and node and asking for its schedule to be recreated. No branch state is reassigned under a
+different unit identity. A WASM reset whose selected local unit has no supervisor reports typed
+`UnitUnavailable` with that unit; cleanup still reaches the other selected units and owners.
+
 The registry owns typed `IngestorInstancingError` causes for unsupported instancing, missing or
 different construction partition structures and Kafka's required domain-offset mode. The
 surrounding report identifies the domain and ingestor. Correct the declaration before activation.

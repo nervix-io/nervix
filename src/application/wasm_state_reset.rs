@@ -92,7 +92,7 @@ pub(in crate::application) enum WasmStateResetError {
 struct WasmStateResetPlan {
     inputs: DomainPlanningInputs,
     schedule: DomainSchedule,
-    owner: ClusterNodeName,
+    owners: Vec<ClusterNodeName>,
     relays: Vec<RelayName>,
     entity: NodeRef,
     scope: WasmStateResetScope,
@@ -407,7 +407,8 @@ impl SessionServiceImpl {
         let Some(node) = schedule.nodes.get(&entity) else {
             return true;
         };
-        let Some(generations) = node.wasm_state_generations() else {
+        let Some(generations) = node.wasm_state_generations_of_branch(request.branch_fingerprint())
+        else {
             return true;
         };
         generations.of_branch(request.branch_fingerprint()) != request.generation()
@@ -523,36 +524,70 @@ impl SessionServiceImpl {
             node.resolved_branching.as_ref(),
             target,
         )?;
-        let mut published = false;
-        let mut ready = false;
-        if let Some(current) = node.wasm_state_reset() {
-            if current.request() == request {
-                if current.scope() != &scope || current.reason() != reason {
+        let selected_units = node.units_for_wasm_state_scope(&scope);
+        if node
+            .units
+            .values()
+            .filter_map(|unit| unit.wasm_state_reset.as_ref())
+            .any(|current| {
+                (current.request() == request
+                    && (current.scope() != &scope || current.reason() != reason))
+                    || (current.request() != request
+                        && current.phase() == WasmStateResetPhase::Publishing)
+            })
+        {
+            return Err(Report::new(WasmStateResetError::RequestConflict {
+                processor: processor.clone(),
+                request: request.clone(),
+            }));
+        }
+        let mut published_units = 0usize;
+        let mut ready_units = 0usize;
+        for unit in &selected_units {
+            if let Some(current) = node.units[unit].wasm_state_reset.as_ref() {
+                if current.request() == request {
+                    if current.scope() != &scope || current.reason() != reason {
+                        return Err(Report::new(WasmStateResetError::RequestConflict {
+                            processor: processor.clone(),
+                            request: request.clone(),
+                        }));
+                    }
+                    published_units += 1;
+                    if current.phase() == WasmStateResetPhase::Ready {
+                        ready_units += 1;
+                    }
+                } else if current.phase() == WasmStateResetPhase::Publishing {
                     return Err(Report::new(WasmStateResetError::RequestConflict {
                         processor: processor.clone(),
                         request: request.clone(),
                     }));
                 }
-                published = true;
-                ready = current.phase() == WasmStateResetPhase::Ready;
-            } else if current.phase() == WasmStateResetPhase::Publishing {
-                return Err(Report::new(WasmStateResetError::RequestConflict {
-                    processor: processor.clone(),
-                    request: request.clone(),
-                }));
             }
         }
-        let owner = node.execution_node().cloned().ok_or_else(|| {
-            Report::new(WasmStateResetError::OwnerUnavailable {
+        if selected_units.is_empty() {
+            return Err(Report::new(WasmStateResetError::InvalidTarget {
                 domain: domain.clone(),
                 processor: processor.clone(),
-            })
-        })?;
+            }));
+        }
+        let published = published_units == selected_units.len();
+        let ready = ready_units == selected_units.len();
+        let mut owners = BTreeSet::new();
+        for unit in selected_units {
+            let owner = node.units[&unit].execution_node().cloned().ok_or_else(|| {
+                Report::new(WasmStateResetError::OwnerUnavailable {
+                    domain: domain.clone(),
+                    processor: processor.clone(),
+                })
+            })?;
+            owners.insert(owner);
+        }
+        let owners = owners.into_iter().collect();
         let relays = wasm.from.relays().to_vec();
         Ok(WasmStateResetPlan {
             inputs,
             schedule,
-            owner,
+            owners,
             relays,
             entity,
             scope,
@@ -622,7 +657,7 @@ impl SessionServiceImpl {
             return self
                 .activate_wasm_state_reset_schedule(
                     gate,
-                    &plan.owner,
+                    &plan.owners,
                     processor,
                     request,
                     plan.scope,
@@ -633,8 +668,8 @@ impl SessionServiceImpl {
                 });
         }
 
-        self.send_wasm_state_reset_action(
-            &plan.owner,
+        self.send_wasm_state_reset_actions(
+            &plan.owners,
             gate,
             processor,
             request,
@@ -659,7 +694,7 @@ impl SessionServiceImpl {
             let began = node.begin_wasm_state_reset(request.clone(), plan.scope, reason);
             if !began {
                 self.abort_unpublished_wasm_state_reset(
-                    &plan.owner,
+                    &plan.owners,
                     gate,
                     processor,
                     request,
@@ -670,17 +705,13 @@ impl SessionServiceImpl {
                     processor: processor.clone(),
                 }));
             }
-            let generation = node
-                .wasm_state_generations()
-                .verified("the reset began on a scheduled WASM processor")
-                .of_reset_scope(&plan.scope);
             if self
                 .inner
                 .runtime
                 .wasm_reset_publication_failure_is_enabled(domain)
             {
                 self.abort_unpublished_wasm_state_reset(
-                    &plan.owner,
+                    &plan.owners,
                     gate,
                     processor,
                     request,
@@ -701,7 +732,7 @@ impl SessionServiceImpl {
                 .take_armed_schedule_publication_fault(domain)
             {
                 self.abort_unpublished_wasm_state_reset(
-                    &plan.owner,
+                    &plan.owners,
                     gate,
                     processor,
                     request,
@@ -738,7 +769,7 @@ impl SessionServiceImpl {
                     plan.published = true;
                 } else {
                     self.abort_unpublished_wasm_state_reset(
-                        &plan.owner,
+                        &plan.owners,
                         gate,
                         processor,
                         request,
@@ -756,13 +787,12 @@ impl SessionServiceImpl {
                     processor = processor.as_str(),
                     scope = plan.scope.kind(),
                     reason = reason.as_ref(),
-                    %generation,
                     "WASM guest-state reset generation published"
                 );
             }
         }
 
-        self.activate_wasm_state_reset_schedule(gate, &plan.owner, processor, request, plan.scope)
+        self.activate_wasm_state_reset_schedule(gate, &plan.owners, processor, request, plan.scope)
             .await
             .change_context_lazy(|| WasmStateResetError::CommittedNotUsable {
                 processor: processor.clone(),
@@ -825,7 +855,7 @@ impl SessionServiceImpl {
             }
         }
 
-        self.activate_wasm_state_reset_schedule(gate, &plan.owner, processor, request, plan.scope)
+        self.activate_wasm_state_reset_schedule(gate, &plan.owners, processor, request, plan.scope)
             .await
             .change_context_lazy(|| WasmStateResetError::CommittedNotUsable {
                 processor: processor.clone(),
@@ -853,22 +883,30 @@ impl SessionServiceImpl {
         let Some(node) = schedule.nodes.get(entity) else {
             return false;
         };
-        let Some(reset) = node.wasm_state_reset() else {
-            return false;
-        };
-        reset.request() == request && reset.scope() == &scope && reset.phase() == phase
+        let selected = node.units_for_wasm_state_scope(&scope);
+        !selected.is_empty()
+            && selected.iter().all(|unit| {
+                node.units[unit]
+                    .wasm_state_reset
+                    .as_ref()
+                    .is_some_and(|reset| {
+                        reset.request() == request
+                            && reset.scope() == &scope
+                            && reset.phase() == phase
+                    })
+            })
     }
 
     async fn abort_unpublished_wasm_state_reset(
         &self,
-        owner: &ClusterNodeName,
+        owners: &[ClusterNodeName],
         gate: &ClusterEntityGate,
         processor: &ModelName,
         request: &CommandExecutionReference,
         scope: WasmStateResetScope,
     ) -> error_stack::Result<(), WasmStateResetError> {
-        self.send_wasm_state_reset_action(
-            owner,
+        self.send_wasm_state_reset_actions(
+            owners,
             gate,
             processor,
             request,
@@ -884,7 +922,7 @@ impl SessionServiceImpl {
     async fn activate_wasm_state_reset_schedule(
         &self,
         gate: &ClusterEntityGate,
-        owner: &ClusterNodeName,
+        owners: &[ClusterNodeName],
         processor: &ModelName,
         request: &CommandExecutionReference,
         scope: WasmStateResetScope,
@@ -893,7 +931,7 @@ impl SessionServiceImpl {
         let replica_activations =
             nodes
                 .iter()
-                .filter(|node| *node != owner)
+                .filter(|node| !owners.contains(node))
                 .map(|node| async move {
                     self.send_wasm_state_reset_action(
                         node,
@@ -911,8 +949,8 @@ impl SessionServiceImpl {
                     })
                 });
         try_join_all(replica_activations).await?;
-        self.send_wasm_state_reset_action(
-            owner,
+        self.send_wasm_state_reset_actions(
+            owners,
             gate,
             processor,
             request,
@@ -923,6 +961,64 @@ impl SessionServiceImpl {
         .change_context_lazy(|| WasmStateResetError::CommittedNotUsable {
             processor: processor.clone(),
         })
+    }
+
+    async fn send_wasm_state_reset_actions(
+        &self,
+        nodes: &[ClusterNodeName],
+        gate: &ClusterEntityGate,
+        processor: &ModelName,
+        request: &CommandExecutionReference,
+        scope: WasmStateResetScope,
+        action: RemoteWasmStateResetRuntimeAction,
+    ) -> error_stack::Result<(), WasmStateResetError> {
+        let mut abort_failure: Option<Report<WasmStateResetError>> = None;
+        for (index, node) in nodes.iter().enumerate() {
+            nervix_primitives::task::consume_budget().await;
+            if let Err(mut error) = self
+                .send_wasm_state_reset_action(node, gate, processor, request, scope, action.clone())
+                .await
+            {
+                if matches!(action, RemoteWasmStateResetRuntimeAction::Abort) {
+                    match &mut abort_failure {
+                        Some(failure) => failure.extend_one(error),
+                        None => abort_failure = Some(error),
+                    }
+                    continue;
+                }
+                if matches!(
+                    action,
+                    RemoteWasmStateResetRuntimeAction::Prepare {
+                        published: false,
+                        ..
+                    }
+                ) {
+                    // An unpublished preparation can be rolled back. Include the failing peer:
+                    // its response can be lost after it prepared its local units.
+                    for prepared in &nodes[..=index] {
+                        nervix_primitives::task::consume_budget().await;
+                        if let Err(abort) = self
+                            .send_wasm_state_reset_action(
+                                prepared,
+                                gate,
+                                processor,
+                                request,
+                                scope,
+                                RemoteWasmStateResetRuntimeAction::Abort,
+                            )
+                            .await
+                        {
+                            error.extend_one(abort);
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        }
+        if let Some(error) = abort_failure {
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn send_wasm_state_reset_action(

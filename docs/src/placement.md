@@ -268,11 +268,12 @@ ordinary relay has no replicas; a materialized relay's replicas contain only mat
 Concrete branches have no separate placement dimension: every concrete relay branch is owned by the
 owner of its relay, and every processor branch executes within that processor's assignment.
 
-A relay whose branch declares several partitions is placed one partition at a time. Each partition
+A relay, processor or generator whose branch declares several partitions is placed one partition at a time. Each partition
 is a unit with its own primary and replicas; the scheduler places the units least loaded first and
 then round-robin, so a relay's partitions spread over the eligible cluster nodes. Inside a
 `REQUIRE COLOCATION` group every partition stays with the group's cluster node. `PREFER COLOCATION`,
-`SUGGEST SEPARATION` and upstream locality do not move partitions. Failover and drain move each
+`SUGGEST SEPARATION` remain logical-node preferences. Upstream locality scores matching partition
+indices, so a consumer partition prefers the corresponding producer partition's owner. Failover and drain move each
 partition on its own: losing a node moves only the partitions that node owned, and the relay's other
 partitions keep flowing. See [Relay Partitions](relay.md#relay-partitions).
 
@@ -592,8 +593,8 @@ Placement policies do not provide:
 `RELOCATE` moves work onto a named cluster node once. It is not pinning: nothing keeps the moved
 runtime node there, and a later failover, drain, or hard-group consolidation may move it again. It
 also does not relocate endpoint or Syslog ingestors, an individual replica, an individual branch, a
-relay divided into partitions, which has no one owner to move, or a unit spanning domains, and it
-never applies a unit in part.
+unit spanning domains, and it never applies a selection in part. A selected partitioned node moves
+every partition in the same handoff; each retains its unit identity, state and replica choice.
 
 Use `SUGGEST SEPARATION` as a performance hint only. Security, tenant isolation, and failure-domain
 requirements need controls outside placement policies.
