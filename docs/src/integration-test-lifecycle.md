@@ -3321,6 +3321,38 @@ request labeled `client-conformance`, runs it on its own runner with a 60-minute
 15-minute suite budget, which leaves the builds before the scenarios up to 40 minutes of the limit
 and keeps the same 5-minute reserve.
 
+## Client Suites
+
+`client_suites.feature` runs a host binding's own test suite, in its host's test framework, against
+a scenario's cluster: the cluster tier of the suite under `tests/client_conformance/<host>/suite`.
+The cluster serves its session listener over TLS. The step that starts a suite waits for every node
+to agree on its leader and starts it on a follower when the cluster has one, so its sessions follow
+a leader redirect. It starts the host's runner as one child process with its standard input closed,
+its target in the probe's `NERVIX_PROBE_*` variables and what a suite needs beside them in
+`NERVIX_SUITE_*` ones: the leader's listener, which the suite relays a session through to cut it,
+every node's listener as seeds, the fixture certificate authority, and a backup directory the step
+creates and removes once it reads the run. The runner prints one `NERVIX-SUITE <outcome> <identity>`
+line per test, and the fixture keeps every line it read.
+
+The step that reads the run waits for the runner to end, for the duration the step names and never
+longer than 600 seconds, so a suite that stops making progress fails with its own report inside the
+`client-conformance` job's 15-minute suite budget. A whole tier of tests that each open their own
+sessions over TLS fits that bound: the Python cluster tier took up to 471 seconds on a development
+host where every committed command took about ten seconds, and the job ran its thirty-nine probe
+scenarios in 18 seconds in Check run 42325403607. A suite's own waits are its tests' `Cancel`
+deadlines, of 120 seconds for anything the cluster does. Each example declares `@long_running`,
+because a cluster tier runs for minutes, so it starts beside the probes rather than after them, and
+weighs one slot: its runner and cluster use no more CPU while they run than a probe and its cluster.
+The run passes only when every test `tests/client-suites-inventory.toml` registers for the host's
+cluster tier ran once and passed, nothing was skipped, nothing ran that the inventory does not
+register, and the runner exited successfully. A failure names each such test and quotes everything
+the runner printed and its standard error. Dropping the fixture kills the runner, so a failed
+scenario never leaves one running.
+
+Every example is tagged `@client_conformance_toolchain` and `@client_suite_<host>`, so the suite
+excludes it unless a run selects it: `just test-client-conformance` runs the suites' rows beside
+the probes, and `just test-client-python-cluster` runs the Python rows alone.
+
 ## The Suite Watchdog
 
 The scenario run has one budget, 105 minutes from the moment it starts, which `--suite-budget` or

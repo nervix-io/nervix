@@ -98,7 +98,7 @@ impl RestorationFailure {
 ///
 /// A rows event exports its verified frame through the buffer protocol: `memoryview(event)`, or
 /// `event.frame`, borrows it without a copy and keeps the event alive.
-#[pyclass(frozen, module = "nervix_client")]
+#[pyclass(frozen, module = "nervix_client", weakref)]
 pub(crate) struct Event {
     event: host::Event,
 }

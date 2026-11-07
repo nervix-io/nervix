@@ -8,7 +8,9 @@ Manual](./client-implementation-manual.md), and [Client Session
 Protocol](./client-session-protocol.md) explains the protocol behavior it relies on.
 
 For a complete graph, data-handle lifetimes, credit and failure decisions, read
-[Client Ingestors And Emitters](./client-io-architecture.md).
+[Client Ingestors And Emitters](./client-io-architecture.md). A Python program uses the same client
+through the [Python Client Library](./client-library-python.md), which this chapter does not
+describe.
 
 Capabilities:
 
@@ -39,8 +41,8 @@ Suggestion pages report `Ready`, `MissingContext`, `StaleContext`, or `LookupFai
 candidate carries a UTF-8 byte text edit against the full input and a continuation requests the
 next bounded page. The shared C binding exposes the same result through `nx_session_suggest`,
 `nx_suggestions_at`, and `nx_suggestions_continuation`; its header is
-`crates/client-ffi/include/nervix_client.h`. The Python package returns it from `Session.suggest`
-as a `Suggestions` page whose `status`, `suggestions` and `continuation` read the same fields.
+`crates/client-ffi/include/nervix_client.h`. The [Python Client Library](client-library-python.md)
+returns it from `Session.suggest`.
 
 Structured choice pages carry typed enum variants or domain, resource, and model references beside
 separate presentation metadata. The request includes typed dependencies, search, and a
@@ -418,26 +420,6 @@ Close handles with try-with-resources; Cleaner supplies fallback cleanup. Build 
 native library with `just build-client-jvm`. The [implementation manual](./client-implementation-manual.md#using-the-jvm-library)
 owns the Java lifetime, unsigned-width, error and threading rules.
 
-### Through The Python Package
-
-The Python package, `nervix_client`, reads the same events and attached clocks for a CPython host.
-`ATTACH DOMAIN CLOCK;` and `DETACH DOMAIN CLOCK;` run through `Session.prepare` and
-`Session.execute` like any statement. `Session.next_clock_event` waits with the GIL released,
-bounded by a `Cancel` with or without a deadline, and returns a `ClockEvent`: its `kind` is a
-`ClockEventKind`, `domain` names its domain, and `generation`, `state`, `paced`, `tick` and
-`end_reason` read what a state, tick or ended event carries, raising `TypeMismatchError` for an
-event whose kind does not carry it. A restoration failure also carries what the C ABI withholds:
-`restoration_failure` holds the server's message and the wait, in nanoseconds, before the session
-tries again. `paced` reads a `PacedClock` whose period, skew, origin, anchor and rate are those of
-`nx_clock_event_paced`, and `tick` a `Tick` with the id, logical boundary, authority UTC
-observation and serving node's logical reading.
-
-`Session.domain_clock` returns the `DomainClock` the session holds for a followed domain, or
-`None`, without waiting, with the same guarantees as `nx_session_domain_clock`. Its
-`logical_time_at`, `wall_duration_until`, `admission_window` and `admits` project with the
-arithmetic of `AttachedDomainClock`. Instants are integers of nanoseconds since the Unix epoch, and
-a read and an event are released when Python collects them, on any thread.
-
 ## Events Across Reconnects
 
 `next_subscription()`, `next_domain_clock_event()`, and `next_server_event()` read streams that
@@ -651,33 +633,6 @@ Arrow IPC with Arrow Java. Direct `ipcBuffer` views retain their data through ev
 Endpoint `description`, `pending`, `state`, `admission` and `reopen` read the shared client's typed
 results. `submit`, `rejoin`, `next`, `ack`, `retry`, `reject` and `end` take optional cancellation
 and deadline tokens; none owns a Java retry policy. `close` releases ownership and settles nothing.
-
-### Endpoints Through The Python Package
-
-The Python package exposes the same producers and consumers to a CPython host, with the same
-credit, restoration, outcomes and settlements:
-
-- **Opening.** A `Fields` list describes the expected fields one level at a time, as `nx_fields`
-  does, with `FieldType` members. `Session.open_ingestor` and `Session.subscribe_emitter` take the
-  domain, the endpoint, the fields and the `batches` and `bytes` of credit, and a refusal raises
-  `RejectedError` whose `open_refusal` is an `OpenRefusal`.
-- **Description.** A producer's and a consumer's `schema`, `generation`, `contract`, `grant`,
-  `policy`, `state` and `reopen` read what the open established; a producer's `admission` reads
-  whether its batches are admitted.
-- **Submitting.** `Producer.submit` takes a batch a `BatchBuilder` finished, the canonical Arrow
-  IPC stream of one as bytes, or any Arrow data that exports itself through the Arrow PyCapsule
-  interface, such as a pyarrow record batch or table, held to the producer's schema before
-  anything is sent. It waits for credit and returns the submission's id; `rejoin`, `release` and
-  `pending` behave as `nx_producer_rejoin`, `nx_producer_release` and `nx_producer_pending`.
-- **Consuming.** `Consumer.next` returns a `Delivery` whose `ipc` is a `memoryview` of its stream
-  and whose `batch` decodes it once and is then shared. A `Batch` reads a column as Python values
-  with `column`, one level at a time with `states`, `offsets`, `fixed` and `varlen`, and exports
-  itself through `__arrow_c_schema__`, `__arrow_c_array__` and `__arrow_c_stream__`, so
-  `pyarrow.record_batch(delivery.batch)` reads it without a copy. `ack`, `retry` and `reject`
-  return a `Settlement`; collecting a delivery settles nothing.
-- **Interruption.** The gap after a lost session raises `ConsumerInterruptedError` once from
-  `Consumer.next`, a delivery read before it fails to settle with `RejectedError`, and an endpoint
-  whose contract changed raises `ReopenRequiredError` and reads why from `reopen`.
 
 ## Transaction Handles And Attach
 

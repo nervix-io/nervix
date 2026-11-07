@@ -214,6 +214,11 @@ jobs:
         with:
           phase: start
 
+      # `just validate-client-suites` types the host suites with mypy through the repository's uv
+      # project in either part, and the second part's script tests run through it too.
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
       - name: Runner diagnostics before Validate
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -237,13 +242,6 @@ jobs:
           phase: finish
           artifact-name: runner-load-checks-${{ matrix.shard }}
 
-      # Every script test, the book tooling's and the docs worker's included, for every pull request:
-      # the book build that also runs them runs only for a pull request labeled `book`. They run in
-      # the second part, which has already built the ratchet's tools they measure with.
-      - name: Setup uv for the script tests
-        if: matrix.shard == 2
-        uses: astral-sh/setup-uv@v6
-
       # The docs worker's tests run under Node.js. Boat's own Node.js comes from nvm, which a job's
       # shell may not load.
       - name: Setup Node.js for the docs worker's tests
@@ -252,6 +250,9 @@ jobs:
         with:
           node-version: "24"
 
+      # Every script test, the book tooling's and the docs worker's included, for every pull request:
+      # the book build that also runs them runs only for a pull request labeled `book`. They run in
+      # the second part, which has already built the ratchet's tools they measure with.
       - name: Script tests
         if: matrix.shard == 2
         run: just test-docs
@@ -1547,8 +1548,9 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
-      # Twenty-nine scenarios finish in a few minutes. A short budget leaves the builds before them
-      # up to 40 minutes of the job limit instead of the suite job's 25.
+      # The thirty-nine probe scenarios took 18 seconds in Check run 42325403607, and the two host
+      # suite scenarios, which start first, bound their runners at ten minutes. A short budget leaves
+      # the builds before them up to 40 minutes of the job limit instead of the suite job's 25.
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust
@@ -1683,7 +1685,11 @@ jobs:
       - name: JVM binding boundary and embedded properties
         run: just test-client-jvm
 
-      - name: Client conformance
+      # The Python package's suite on its boundary tier, from the environment the build prepared.
+      - name: Python package boundary tier
+        run: just test-client-python-api-run
+
+      - name: Client conformance and host suites
         run: just test-client-conformance-run
 
       - name: Publish runner load

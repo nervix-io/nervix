@@ -84,7 +84,7 @@ create_exception!(
     nervix_client,
     ClosedError,
     ClientError,
-    "The session or the endpoint ended."
+    "The session or the endpoint ended, or the `with` block of the object called released it."
 );
 create_exception!(
     nervix_client,
@@ -165,6 +165,18 @@ fn annotate(py: Python<'_>, error: &PyErr, failure: &Failure) -> PyResult<()> {
     let refusal = failure.open_refusal().map(OpenRefusal::from);
     value.setattr("open_refusal", refusal)?;
     Ok(())
+}
+
+/// Raises the failure of a call on an object whose `with` block released it: `ClosedError`, naming
+/// what was released.
+pub(crate) fn released(py: Python<'_>, object: &'static str) -> PyErr {
+    raise(
+        py,
+        Failure::new(
+            HostKind::Closed,
+            format!("the {object} was released when its `with` block ended"),
+        ),
+    )
 }
 
 /// Raises `argument` as invalid for `problem`, as the host session runtime refuses its own

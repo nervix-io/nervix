@@ -55,11 +55,25 @@ the configured build root's path so instrumented Rust builds use the same jar an
 
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
-`target/client-conformance/wheels`. The recipe installs the wheel and `pyarrow`, the probe's test
-dependency, into a CPython 3.12 environment at `target/client-conformance/python`, which uv
-downloads when no CPython 3.12 is installed. The package's own tests run with `cargo test` and embed
-the CPython that pyo3 finds on `PATH`, with its library's directory as the tests' run path, so an
-interpreter outside the loader's default path, such as pyenv's, runs them too.
+`target/client-conformance/wheels`, with its typed stub `crates/client-python/nervix_client.pyi`
+and a `py.typed` marker. The recipe installs the wheel with `pyarrow`, `polars`, `pytest` and `mypy`
+into a CPython 3.12 environment at `target/client-conformance/python`, which the probe and the
+package's suite run in, and alone into `target/client-conformance/python-bare`, which the boundary
+tier's packaging test loads it from; uv downloads CPython 3.12 when none is installed. The
+package's own tests run with `cargo test` and embed the CPython that pyo3 finds on `PATH`, with its
+library's directory as the tests' run path, so an interpreter outside the loader's default path,
+such as pyenv's, runs them too.
+
+The package's pytest suite, `tests/client_conformance/python/suite`, runs in two tiers.
+`just test-client-python-api`, which `just test` runs, builds the wheel and runs the boundary tier,
+which needs no cluster, and `just test-client-python-cluster` runs the cluster tier's one- and
+three-node rows of `tests/features/runtime/client_suites.feature`, building only the wheel and the
+scenario suite. `just validate-client-suites`, part of `just validate`, types the suite and the
+paced simulation driver with `mypy --strict` against the stub through the repository's uv project,
+and holds the suite, its inventory, the stub and the
+[Python Client Library](client-library-python.md) chapter to the package's source. The
+`client-conformance` CI job builds every host's artifacts, runs the JVM and Python boundary tiers,
+then runs the probes and the suites' cluster rows together.
 
 `just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
 from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
@@ -543,7 +557,7 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `client-conformance` | Check | The cross-language client probes against one- and three-node clusters |
+| `client-conformance` | Check | The cross-language client probes and the host suites' cluster tiers against one- and three-node clusters, and the JVM and Python boundary tiers |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |

@@ -2,6 +2,7 @@ pub(crate) mod backup_phase;
 pub(crate) mod broker_observer;
 pub(crate) mod cli_terminal;
 pub(crate) mod client_conformance;
+pub(crate) mod client_suites;
 pub(crate) mod client_wire_baseline;
 pub(crate) mod client_wire_tls_cost;
 pub(crate) mod cluster;

@@ -17,21 +17,26 @@ use std::{
     num::{NonZeroU32, NonZeroU64},
 };
 
+use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     AckWindow, ClientAttachmentId, ClientEndpointContract, ClientProducerAdmission,
-    ClientProducerDescription, ClientProducerGrant, ClientProducerPolicy, DomainName, IngestorName,
-    RowSchema, SchemaField, SubscriptionEvent, SubscriptionHandle, SubscriptionRowsEvent,
+    ClientProducerDescription, ClientProducerGrant, ClientProducerPolicy, DomainName, EmitterName,
+    IngestorName, RowSchema, SchemaField, SubscriptionEvent, SubscriptionHandle,
+    SubscriptionRowsEvent, Timestamp,
     wire::{
-        ClientRequest, CloseIngestorDisposition, CloseIngestorOutcome, OpenIngestorDisposition,
-        OpenIngestorOutcome, ProducerOpened, ReplyBody, ServerEvent, ServerMessage, SessionLimits,
-        SubmissionOutcome, SubscriptionRowsEncoder,
+        ClientRequest, CloseEmitterOutcome, CloseIngestorDisposition, CloseIngestorOutcome,
+        EmitterBatchReceived, EmitterCloseDisposition, EmitterOpened, OpenEmitterDisposition,
+        OpenEmitterOutcome, OpenIngestorDisposition, OpenIngestorOutcome, ProducerOpened,
+        ReadEmitterBatchOutcome, ReadEmitterDisposition, ReplyBody, ServerEvent, ServerMessage,
+        SessionLimits, SubmissionOutcome, SubscriptionRowsEncoder,
     },
 };
 use nervix_client_host as host;
-use nervix_models::{ClientSubmissionOutcome, ParseAsType, RelayName};
+use nervix_models::{ClientConsumerLimits, ClientSubmissionOutcome, ParseAsType, RelayName};
 use nervix_primitives::sync::Arc;
 use pyo3::{prelude::*, types::PyDict};
+use uuid::Uuid;
 
 use self::server::TestServer;
 
@@ -629,4 +634,198 @@ else:
             )
         },
     );
+}
+
+fn opened_consumer() -> ReplyBody {
+    ReplyBody::OpenEmitter(OpenEmitterOutcome {
+        disposition: OpenEmitterDisposition::Opened(Box::new(EmitterOpened {
+            domain: DomainName::parse("sim").assured("the test domain name is valid"),
+            emitter: EmitterName::parse("orders_out").assured("the test emitter name is valid"),
+            fields: endpoint_fields(),
+            generation: 3,
+            contract: ClientEndpointContract::from_digest([6; 32]),
+            window: AckWindow::Sequential,
+            ack_timeout: std::time::Duration::from_secs(20),
+            retry_backoff: std::time::Duration::from_millis(50),
+            retry_max_backoff: std::time::Duration::from_secs(2),
+            granted: ClientConsumerLimits {
+                batches: NonZeroU32::new(2).assured("two is not zero"),
+                bytes: NonZeroU64::new(8192).assured("a literal size is not zero"),
+            },
+            max_batch_bytes: 8192,
+            max_batch_rows: 32,
+        })),
+        message: String::new(),
+    })
+}
+
+/// The canonical Arrow IPC stream of one row of the endpoint's fields.
+fn endpoint_stream() -> Vec<u8> {
+    let mut builder = host::BatchBuilder::new(host::Schema::of_fields(endpoint_fields()), 1);
+    builder
+        .fixed(0, 0, &7_u32.to_ne_bytes())
+        .assured("an id is four bytes");
+    builder
+        .offsets(1, 0, &[0, 1])
+        .assured("one row holds one list");
+    builder
+        .varlen(1, 1, &[0, 5], b"tag-7")
+        .assured("the list holds one tag");
+    let batch = builder.finish().assured("every column was set");
+    batch
+        .ipc()
+        .assured("a finished batch writes its stream")
+        .to_vec()
+}
+
+fn delivered(ipc: Vec<u8>) -> ReplyBody {
+    ReplyBody::ReadEmitterBatch(ReadEmitterBatchOutcome {
+        disposition: ReadEmitterDisposition::Batch(EmitterBatchReceived {
+            identity: Uuid::from_u128(1),
+            reference: Uuid::from_u128(2),
+            source_relay: RelayName::parse("orders").assured("the test relay name is valid"),
+            branch_fingerprint: None,
+            batch: Bytes::from(ipc),
+            members: 1,
+            execution_now: Timestamp::from_unix_nanos(1_700_000_000_000_000_007),
+        }),
+        message: String::new(),
+    })
+}
+
+#[test]
+fn a_with_block_releases_its_object_and_a_view_outlives_the_release() {
+    let mut server = TestServer::start();
+    let script = Script::new();
+    let address = server.address.to_string();
+    script.set("address", |py| {
+        Ok(address.into_pyobject(py)?.into_any().unbind())
+    });
+    script.run(
+        c"
+import gc, threading
+
+session = nx.Session(f'http://{address}', domain='sim')
+fields = nx.Fields()
+fields.add('id', nx.FieldType.U32)
+fields.add('tags', nx.FieldType.LIST)
+fields.element(nx.FieldType.STRING)
+opened = []
+def open_endpoints():
+    opened.append(session.open_ingestor('sim', 'orders_in', fields, batches=2, bytes=4096))
+    opened.append(session.subscribe_emitter('sim', 'orders_out', fields, batches=2, bytes=8192))
+opening = threading.Thread(target=open_endpoints)
+opening.start()
+",
+    );
+    let mut exchange = server.next_exchange();
+    let (request_id, request) = server.next_request(&mut exchange);
+    assert!(matches!(request, ClientRequest::OpenIngestor(_)));
+    server.answer(&exchange, request_id, opened_producer());
+    let (request_id, request) = server.next_request(&mut exchange);
+    assert!(matches!(request, ClientRequest::OpenEmitter(_)));
+    server.answer(&exchange, request_id, opened_consumer());
+
+    script.run(
+        c"
+opening.join()
+producer, consumer = opened
+deliveries = []
+reading = threading.Thread(target=lambda: deliveries.append(consumer.next()))
+reading.start()
+",
+    );
+    let (request_id, request) = server.next_request(&mut exchange);
+    assert!(matches!(request, ClientRequest::ReadEmitterBatch(_)));
+    let ipc = endpoint_stream();
+    server.answer(&exchange, request_id, delivered(ipc.clone()));
+    script.set("written", |py| {
+        Ok(pyo3::types::PyBytes::new(py, &ipc).into_any().unbind())
+    });
+
+    // Every object enters as itself, and leaving its block releases it: a later call raises
+    // ClosedError, an exception raised inside the block still releases it and is not swallowed,
+    // and a view of the delivery's stream outlives the release.
+    script.run(
+        c"
+reading.join()
+delivery = deliveries.pop()
+
+def closed(call):
+    try:
+        call()
+    except nx.ClosedError as failure:
+        assert failure.kind == nx.FailureKind.CLOSED, failure.kind
+        return
+    raise AssertionError('a released object answered a call')
+
+with delivery as entered:
+    assert entered is delivery
+    view = memoryview(delivery)
+    assert bytes(view) == written
+closed(lambda: delivery.identity)
+closed(lambda: delivery.ipc)
+closed(lambda: delivery.ack())
+gc.collect()
+assert bytes(view) == written
+
+try:
+    with producer as entered:
+        assert entered is producer
+        assert producer.state == nx.EndpointState.ACTIVE
+        raise KeyError('raised inside the block')
+except KeyError:
+    pass
+else:
+    raise AssertionError('leaving a block swallowed its exception')
+closed(lambda: producer.state)
+closed(lambda: producer.submit(b''))
+closed(lambda: producer.__enter__())
+
+with consumer:
+    assert consumer.state == nx.EndpointState.ACTIVE
+closed(lambda: consumer.state)
+closed(lambda: consumer.next())
+
+with session as entered:
+    assert entered is session
+    assert session.domain_clock('sim') is None
+closed(lambda: session.domain_clock('sim'))
+closed(lambda: session.prepare('LIST DOMAINS;'))
+del opened, deliveries, entered
+",
+    );
+    // Releasing an open producer or consumer closes it without waiting, in either order.
+    let mut closed = (false, false);
+    while closed != (true, true) {
+        let (request_id, request) = server.next_request(&mut exchange);
+        let body = match request {
+            ClientRequest::CloseIngestor(_) if !closed.0 => {
+                closed.0 = true;
+                ReplyBody::CloseIngestor(CloseIngestorOutcome {
+                    disposition: CloseIngestorDisposition::Closed,
+                    message: String::new(),
+                })
+            }
+            ClientRequest::CloseEmitter(_) if !closed.1 => {
+                closed.1 = true;
+                ReplyBody::CloseEmitter(CloseEmitterOutcome {
+                    disposition: EmitterCloseDisposition::Closed,
+                    message: String::new(),
+                })
+            }
+            other => panic!("a release sent {other:?} where it closes its endpoint once"),
+        };
+        server.answer(&exchange, request_id, body);
+    }
+    // The view still holds the delivery's share of the session, so the exchange outlives every
+    // other release until the view is released too.
+    script.run(
+        c"
+view.release()
+del view
+gc.collect()
+",
+    );
+    server.ends(&mut exchange);
 }

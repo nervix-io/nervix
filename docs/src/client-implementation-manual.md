@@ -894,9 +894,11 @@ retain and release, B-2 to B-4, B-6 and the release clauses of B-9, B-11 and B-1
 it. A CPython host follows these rules instead:
 
 - **N-1.** A host MUST let Python own every object the package returns. An object releases its
-  share of the session when Python collects it, a producer, consumer or delivery keeps its session
-  running until it is collected, and a `memoryview` of an event's frame, a batch's stream or a
-  delivery's stream keeps that object alive for as long as the view exists. A host MUST NOT expect
+  share of the session when Python collects it or, for a session, a producer, a consumer and a
+  delivery, when its `with` block ends, after which every call on it raises `ClosedError`. A
+  producer, consumer or delivery keeps its session running until it is released, and a
+  `memoryview` of an event's frame, a batch's stream or a delivery's stream keeps that object
+  alive, and its bytes valid, for as long as the view exists. A host MUST NOT expect releasing or
   collecting a delivery to settle it.
 - **N-2.** A host MAY call the package from any Python thread, and MAY use one object from several
   threads at once, except a `Fields` list or a `BatchBuilder`, which one thread builds at a time.
@@ -1044,7 +1046,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread`, `a_session_reads_every_clock_event_kind_and_bounds_its_wait`, and `a_restoration_failure_names_its_domain_and_carries_no_clock` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Java, and Ruby |
 | B-11 | `a_clock_attached_after_start_is_read_before_its_first_tick`, `every_state_reports_only_the_fields_and_projections_it_carries`, `a_refused_attach_leaves_the_session_following_what_it_followed`, `an_attach_cancelled_after_it_was_sent_is_resolved_by_executing_it_again`, `several_domains_are_read_apart_until_a_detach_or_an_end_withdraws_one`, `an_interrupted_attachment_reads_its_last_clock_without_a_tick_until_it_is_restored`, and `a_domain_clock_outlives_references_released_on_another_thread_and_its_session` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby |
 | B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi` |
-| N-1 to N-5 | The three outlines of `client_conformance.feature` for CPython over the Python package, on one and three nodes, whose probe also checks a retained frame view, a wait cancelled from another thread and Arrow data pyarrow builds and reads; `a_wait_releases_the_gil_and_another_python_thread_cancels_it`, `every_failure_kind_raises_its_exception`, `a_frame_view_keeps_its_event_alive`, `a_producer_outlives_its_session` and `a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds` in `nervix-client-python`; `bolero_host_columns_round_trip_through_the_arrow_c_data_interface` and `bolero_typed_field_descriptions_round_trip` in `nervix-client-host` |
+| N-1 to N-5 | The three outlines of `client_conformance.feature` for CPython over the Python package, on one and three nodes, whose probe also checks a retained frame view, a wait cancelled from another thread and Arrow data pyarrow builds and reads; the package's pytest suite, `tests/client_conformance/python/suite`, whose boundary tier `just test-client-python-api` runs and whose cluster tier is `A <runtime> client's suite passes its cluster tests on <cluster_size> nodes` in `client_suites.feature`, with `with` blocks, collection-driven lifetimes, threads, typed exceptions and Arrow exchange with pyarrow and polars; `a_wait_releases_the_gil_and_another_python_thread_cancels_it`, `every_failure_kind_raises_its_exception`, `a_frame_view_keeps_its_event_alive`, `a_producer_outlives_its_session`, `a_with_block_releases_its_object_and_a_view_outlives_the_release` and `a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds` in `nervix-client-python`; `bolero_host_columns_round_trip_through_the_arrow_c_data_interface` and `bolero_typed_field_descriptions_round_trip` in `nervix-client-host` |
 | J-1 to J-5 | Java 21's three one-/three-node conformance outlines; `BoundaryTests` checks columns, Cleaner release and cancellation from another Java thread; `nervix-client-jvm` embeds the JVM to check every host failure kind, restoration messages/waits, and registered complete JNI field/column properties. The Java row probe checks native Cleaner release and derived-buffer retention after its session closes. |
 | W-1 to W-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`; `Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference` in `cli_session.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 
@@ -1058,7 +1060,12 @@ bounds and then sends a valid completion and command on the same session.
 ### Executable Examples
 
 The conformance probes are complete, runnable clients, and each prints the same report as every
-other probe. They are qualification clients rather than supported SDKs. The Go and TypeScript probes
+other probe. They are qualification clients rather than supported SDKs. A host binding's
+language-level suite is the other instrument: it holds one package to the behaviour its guide
+documents, in that host's own test framework, and every code block of the guide is one of its
+tests. The Python package's suite is `tests/client_conformance/python/suite`, and its guide is the
+[Python Client Library](client-library-python.md); `tests/client-suites-inventory.toml` registers
+every suite test. The Go and TypeScript probes
 each keep one request in flight. They use a harness-supplied UUIDv7 reference for the leader-only
 schema creation that proves redirect handling, and a separate reference for each later read or
 deliberately malformed request.

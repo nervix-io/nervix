@@ -22,7 +22,9 @@ pyo3 = { workspace = true, features = ["abi3-py312"] }
 url = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
 tonic = { workspace = true }
+uuid = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

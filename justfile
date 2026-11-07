@@ -309,6 +309,7 @@ test: tests-deps build-client-jvm-tests
     cargo test --all-targets --features native --package nervix-primitives
     just test-capability-docs
     just test-turmoil
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api
 
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
@@ -1217,20 +1218,52 @@ update-client-wire-corpus:
         tests::conformance
 
 # Build the Python package `nervix_client` with maturin into a wheel under the conformance
-# artifacts, and install it with pyarrow, the probe's test dependency, into the CPython 3.12
-# virtual environment the Python probe runs in. CPython 3.12 is the oldest the abi3 wheel supports.
+# artifacts, and install it into two CPython 3.12 virtual environments: `python`, beside pyarrow,
+# polars, pytest and mypy, which the probe and the package's suite run in, and `python-bare`, which
+# holds the package and nothing else, for the boundary tier's packaging test. CPython 3.12 is the
+# oldest the abi3 wheel supports.
 build-client-python:
     #!/usr/bin/env bash
     set -euo pipefail
     artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
     environment="${artifacts}/python"
-    rm -rf "${environment}" "${artifacts}/wheels"
+    bare="${artifacts}/python-bare"
+    rm -rf "${environment}" "${bare}" "${artifacts}/wheels"
     uv venv --quiet --python 3.12 "${environment}"
+    uv venv --quiet --python 3.12 "${bare}"
     CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} uvx --from maturin==1.16.0 maturin build \
         --manifest-path crates/client-python/Cargo.toml --interpreter "${environment}/bin/python" \
         --out "${artifacts}/wheels"
-    uv pip install --quiet --python "${environment}/bin/python" pyarrow==26.0.0 \
-        "${artifacts}"/wheels/nervix_client-*.whl
+    uv pip install --quiet --python "${environment}/bin/python" pyarrow==26.0.0 polars==2.1.0 \
+        pytest==9.2.0 mypy==2.4.1 "${artifacts}"/wheels/nervix_client-*.whl
+    uv pip install --quiet --python "${bare}/bin/python" "${artifacts}"/wheels/nervix_client-*.whl
+
+# Run the Python package's suite on its boundary tier, which needs no cluster, and hold its
+# results to the boundary tests `tests/client-suites-inventory.toml` registers. `just test` runs it.
+# The tier's packaging test loads the package from `python-bare`.
+test-client-python-api: build-client-python
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-python-api-run
+
+# Run the boundary tier from the environment `build-client-python` built, compiling nothing.
+test-client-python-api-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
+    results="${artifacts}/python-boundary-results.txt"
+    status=0
+    (cd tests/client_conformance/python/suite && PYTHONDONTWRITEBYTECODE=1 \
+        NERVIX_SUITE_BARE_PYTHON="${artifacts}/python-bare/bin/python" \
+        "${artifacts}/python/bin/python" -m pytest boundary) | tee "${results}" || status=$?
+    uv run --locked python -m scripts.client_suites check-run --host python --tier boundary \
+        "${results}"
+    exit "${status}"
+
+# Run one host's cluster tier on one- and three-node clusters, building only what that host's
+# suite starts: its artifacts and the scenario suite. `just test-client-conformance` runs every
+# host's rows beside the probes.
+test-client-python-cluster *args: tests-deps build-client-python
+    cargo test --no-run --package nervix-scenarios --test scenarios
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-conformance-run '@client_suite_python' {{ args }}
 
 # Package the Java 21 API and this target's JNI library into one self-loading jar.
 build-client-jvm:
@@ -1342,7 +1375,9 @@ build-client-conformance-tests: tests-deps build-client-conformance
 test-client-conformance tags="@client_conformance_toolchain" *args: build-client-conformance-tests
     just test-client-conformance-run {{ quote(tags) }} {{ args }}
 
-# Run the conformance scenarios from what `build-client-conformance-tests` built.
+# Run the conformance scenarios from what `build-client-conformance-tests` built. The input is an
+# absolute pattern because the scenario binary walks a relative one from the working directory, the
+# whole build directory included, before it starts a scenario.
 test-client-conformance-run tags="@client_conformance_toolchain" *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1350,7 +1385,7 @@ test-client-conformance-run tags="@client_conformance_toolchain" *args:
     export NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
     cargo test --package nervix-scenarios --test scenarios -- \
-        --input tests/features/runtime/client_conformance.feature \
+        --input {{ quote(justfile_directory() / "tests/features/runtime/client_{conformance,suites}.feature") }} \
         --tags {{ quote(tags) }} {{ args }}
 
 test-runtime-state-capabilities: tests-deps
@@ -3011,7 +3046,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap tes
 validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
+validate-targets: fmt lint-targets validate-skill validate-client-suites validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -3138,7 +3173,7 @@ validate-ci-shard-1: validate-ci-shard-1-checks
 validate-ci-shard-2: validate-ci-shard-2-checks ratchet validate-deloxide-applicability
 
 [private, parallel]
-validate-ci-shard-1-checks: fmt-check validate-ci-shard-1-lints validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies test-go-ci-tool
+validate-ci-shard-1-checks: fmt-check validate-ci-shard-1-lints validate-skill validate-client-suites validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies test-go-ci-tool
 
 [private, parallel]
 validate-ci-shard-2-checks: validate-ci-shard-2-lints typed-ratchet-build typed-ratchet-source-build install-cargo-crap
@@ -3391,6 +3426,19 @@ book version="0.1.0-dev": test-docs docs-screenshots
 
 validate-skill:
     env GH_PROMPT_DISABLED=1 gh skill publish .agents/skills --dry-run
+
+# Hold every host binding to its language-level suite: each public member referenced by a test, as
+# mypy types the suite, the inventory to the suite's tests, the typed stub to the binding's source,
+# and the guide to the shared section list with every code block an anchored suite test. The same
+# mypy run checks the suite and the paced simulation driver with `--strict`.
+validate-client-suites:
+    uv run --locked python -m scripts.client_suites validate
+
+# Collect the line coverage of the client suite check and its tests.
+coverage-client-suites-runner:
+    mkdir -p target/client-suites
+    COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage run --branch --source=scripts.client_suites,scripts.client_suites_mypy_plugin -m unittest scripts.tests.test_client_suites
+    COVERAGE_FILE=target/client-suites/.coverage uv run --locked --with coverage==7.11.0 coverage report -m
 
 book-pdf version="0.1.0-dev" output="":
     #!/usr/bin/env bash
