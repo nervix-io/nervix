@@ -10,8 +10,9 @@ use std::{ptr, slice};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
-    DomainClockAttachDisposition, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
-    DomainClockObservation, DomainClockObserved, DomainClockObservedState, wire::SessionLimits,
+    DomainClockAttachDisposition, DomainClockAttachRefusal, DomainClockAttachmentEndReason,
+    DomainClockAttachmentEnded, DomainClockObservation, DomainClockObserved,
+    DomainClockObservedState, wire::SessionLimits,
 };
 use nervix_primitives::thread;
 
@@ -526,7 +527,10 @@ fn a_refused_attach_leaves_the_session_following_what_it_followed() {
     );
     assert!(session.domain_clock("sim").is_none());
 
-    let refused = exchange.answer_attach(&sim, DomainClockAttachDisposition::Failed);
+    let refused = exchange.answer_attach(
+        &sim,
+        DomainClockAttachDisposition::Refused(DomainClockAttachRefusal::InTransaction),
+    );
     assert_eq!(
         execute_answered(&server, session, "ATTACH DOMAIN CLOCK;", refused),
         Disposition::Failed

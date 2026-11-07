@@ -300,7 +300,7 @@ pub(in crate::application) fn load_web_console_tls_server_config(
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<StdArc<ServerConfig>, Report<AppError>> {
-    nervix_interconnect::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let cert_chain = load_certificates_from_pem_file(cert_path, TlsFileKind::Certificate)
         .change_context(AppError::LoadWebConsoleTls)?;
     let private_key =
@@ -318,7 +318,7 @@ pub(in crate::application) async fn load_grpc_tls_server_config(
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<ServerTlsConfig, Report<AppError>> {
-    nervix_interconnect::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let cert_pem = tokio::fs::read(cert_path)
         .await
         .change_context(TlsMaterialError::ReadFile {
@@ -502,7 +502,7 @@ impl ListenerVhosts {
         if self.vhosts.is_empty() {
             return Ok(None);
         }
-        nervix_interconnect::install_rustls_crypto_provider();
+        nervix_crypto::tls::install_default_provider();
         let mut resolver = ResolvesServerCertUsingSni::new();
         for (key, presented) in &self.vhosts {
             nervix_primitives::task::consume_budget().await;

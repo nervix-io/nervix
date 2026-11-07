@@ -106,6 +106,30 @@ host_enum! {
 }
 
 host_enum! {
+    /// Why a subscription's generation ended: the server ended it, or a new session refused for
+    /// good to open it again.
+    EndReason from EndReason {
+        RelayRemoved = 1 as "RELAY_REMOVED",
+        RelayChanged = 2 as "RELAY_CHANGED",
+    }
+}
+
+host_enum! {
+    /// Why a session refused for now to open an interrupted subscription again, or to attach an
+    /// interrupted clock again. A clock's restoration reports only `IN_TRANSACTION`, `REJECTED`
+    /// or `FAILED`.
+    RestorationCause from RestorationCause {
+        InTransaction = 1 as "IN_TRANSACTION",
+        InvalidStatement = 2 as "INVALID_STATEMENT",
+        NameInUse = 3 as "NAME_IN_USE",
+        InvalidFilter = 4 as "INVALID_FILTER",
+        Unavailable = 5 as "UNAVAILABLE",
+        Rejected = 6 as "REJECTED",
+        Failed = 7 as "FAILED",
+    }
+}
+
+host_enum! {
     /// What a cell holds: a value, a null, or a value the server withheld.
     CellState from CellState {
         Value = 1 as "VALUE",
@@ -338,6 +362,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Disposition>()?;
     module.add_class::<UploadFailure>()?;
     module.add_class::<EventKind>()?;
+    module.add_class::<EndReason>()?;
+    module.add_class::<RestorationCause>()?;
     module.add_class::<CellState>()?;
     module.add_class::<FieldType>()?;
     module.add_class::<Part>()?;

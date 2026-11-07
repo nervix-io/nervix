@@ -507,7 +507,7 @@ fn ensure_dev_tls_assets() -> io::Result<()> {
 
 pub(crate) fn dev_tls_ca_pem() -> io::Result<Vec<u8>> {
     ensure_dev_tls_assets()?;
-    nervix_interconnect::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     std::fs::read(dev_tls_ca_path()?).map_err(io::Error::other)
 }
 
@@ -7698,9 +7698,7 @@ pub(crate) async fn observe_kafka_through(
                             values
                         })
                         .unwrap_or_default();
-                    let key = message
-                        .key()
-                        .map(|key| String::from_utf8_lossy(key).to_string());
+                    let key = message.key().map(<[u8]>::to_vec);
                     let time = match message.timestamp() {
                         KafkaTimestamp::CreateTime(unix_millis) => {
                             Some(BrokerRecordTime::Created { unix_millis })
@@ -7712,6 +7710,7 @@ pub(crate) async fn observe_kafka_through(
                     };
                     let observed = BrokerMessage::from_bytes(bytes, headers)
                         .with_key(key)
+                        .with_partition(Some(message.partition()))
                         .with_time(time);
                     let _ = payload_tx.send(observed).await;
                 }
@@ -7723,10 +7722,41 @@ pub(crate) async fn observe_kafka_through(
     Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
+/// The broker's ordered partition-topic names, as the maintained SDK discovers them. A plain
+/// topic is its sole destination and needs no second lookup after the consumer opens it.
+async fn pulsar_partition_ordinals(
+    pulsar: &Pulsar<TokioExecutor>,
+    consumer: &pulsar::Consumer<Vec<u8>, TokioExecutor>,
+    topic: &str,
+) -> io::Result<BTreeMap<String, i32>> {
+    let topics = consumer.topics();
+    let topics = if topics.as_slice() == [topic] {
+        topics
+    } else {
+        pulsar
+            .lookup_partitioned_topic(topic)
+            .await
+            .map_err(io::Error::other)?
+            .into_iter()
+            .map(|(topic, _address)| topic)
+            .collect()
+    };
+    topics
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, topic)| {
+            i32::try_from(ordinal)
+                .map(|ordinal| (topic, ordinal))
+                .map_err(io::Error::other)
+        })
+        .collect()
+}
+
 /// An observer of what `consumer` reads, which it acknowledges. Dropping the observer drops the
 /// consumer, and the driver closes a consumer it drops.
 fn forward_pulsar_messages(
     mut consumer: pulsar::Consumer<Vec<u8>, TokioExecutor>,
+    partitions: BTreeMap<String, i32>,
 ) -> BrokerObserver {
     let (payload_tx, payload_rx) = mpsc::channel(16);
 
@@ -7753,8 +7783,12 @@ fn forward_pulsar_messages(
                 .map(|property| (property.key.clone(), property.value.clone()))
                 .collect::<Vec<_>>();
             properties.sort();
+            let key = message
+                .key_bytes()
+                .assured("the broker sends a valid partition key");
             let observed = BrokerMessage::from_bytes(&message.payload.data, properties)
-                .with_key(message.key())
+                .with_key(key)
+                .with_partition(partitions.get(&message.topic).copied())
                 .with_pulsar_times(times);
             let _ = consumer.ack(&message).await;
             if payload_tx.send(observed).await.is_err() {
@@ -7801,7 +7835,8 @@ async fn hold_pulsar_consumer(
         .build::<Vec<u8>>()
         .await
         .map_err(io::Error::other)?;
-    Ok(forward_pulsar_messages(held))
+    let partitions = pulsar_partition_ordinals(&pulsar, &held, &topic).await?;
+    Ok(forward_pulsar_messages(held, partitions))
 }
 
 async fn observe_pulsar(
@@ -7908,7 +7943,8 @@ async fn observe_pulsar_with_addr(
                 .build::<Vec<u8>>()
                 .await
                 .map_err(io::Error::other)?;
-            Ok(forward_pulsar_messages(consumer))
+            let partitions = pulsar_partition_ordinals(&pulsar, &consumer, &topic).await?;
+            Ok(forward_pulsar_messages(consumer, partitions))
         }
         .await;
 

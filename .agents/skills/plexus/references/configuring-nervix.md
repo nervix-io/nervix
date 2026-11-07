@@ -39,6 +39,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
+| Processor and emitter input attachment, its body-clause position and default | `Runtime Nodes` → `Shared input and branch contracts`, and `Emitters` → `Statement heads and external names` |
 | Timed generation from materialized state | `Plexus Overview` and `Examples` |
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
@@ -328,8 +329,8 @@ current connection, retry and deadline limits.
   response, is retried with the same bytes and records rather than prepared again. A batching
   Sentry emitter places its members inside one event in one envelope, and a `SYSLOG` codec places
   complete member messages in one frame's JSON-array `MSG`.
-  SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
-  only with branched input.
+  Check SQS `.fifo` queue and group-expression requirements against the
+  [SQS emitter contract](../../../../docs/src/emitters.md#sqs), including branch-field scope.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above
   that range is rejected through `ON MESSAGE ERROR` instead of being written or used as an
   `ON CONFLICT` target, so map such a column to `STRING` when the full unsigned range must reach

@@ -149,6 +149,16 @@ func schemaLines(frame []byte) (*session.SubscriptionOpened, []field, []field, [
 	if schema == nil {
 		return nil, nil, nil, nil, errors.New("the opened subscription has no schema")
 	}
+	fields, keys, lines, err := rowSchemaLines(schema)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return opened, fields, keys, lines, nil
+}
+
+// rowSchemaLines renders a row schema: a FIELD line per field, then the branch and a KEY line per
+// branch key field when the relay is branched.
+func rowSchemaLines(schema *session.RowSchema) ([]field, []field, []string, error) {
 	var fields, keys []field
 	var lines []string
 	for index := 0; index < schema.FieldsLength(); index++ {
@@ -156,7 +166,7 @@ func schemaLines(frame []byte) (*session.SubscriptionOpened, []field, []field, [
 		schema.Fields(row, index)
 		parsed, err := readField(row)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, err
 		}
 		fields = append(fields, parsed)
 		lines = append(lines, parsed.line("FIELD"))
@@ -168,13 +178,22 @@ func schemaLines(frame []byte) (*session.SubscriptionOpened, []field, []field, [
 			branch.Fields(row, index)
 			parsed, err := readField(row)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, err
 			}
 			keys = append(keys, parsed)
 			lines = append(lines, parsed.line("KEY"))
 		}
 	}
-	return opened, fields, keys, lines, nil
+	return fields, keys, lines, nil
+}
+
+// diagnosticLine renders one diagnostic and its span, or none when it names no position.
+func diagnosticLine(diagnostic *session.Diagnostic) string {
+	span := "none"
+	if location := diagnostic.Span(nil); location != nil {
+		span = fmt.Sprintf("%d..%d", location.Start(), location.End())
+	}
+	return fmt.Sprintf("DIAGNOSTIC span=%s message=%s", span, text(diagnostic.Message()))
 }
 
 // commandLines renders one command outcome, its first line after head.
@@ -192,11 +211,7 @@ func commandLines(head string, outcome *session.CommandOutcome) ([]string, error
 	for index := 0; index < outcome.DiagnosticsLength(); index++ {
 		diagnostic := new(session.Diagnostic)
 		outcome.Diagnostics(diagnostic, index)
-		span := "none"
-		if location := diagnostic.Span(nil); location != nil {
-			span = fmt.Sprintf("%d..%d", location.Start(), location.End())
-		}
-		lines = append(lines, fmt.Sprintf("DIAGNOSTIC span=%s message=%s", span, text(diagnostic.Message())))
+		lines = append(lines, diagnosticLine(diagnostic))
 	}
 	switch outcome.DispositionType() {
 	case session.CommandDispositionLeaderRedirect:
@@ -663,6 +678,28 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 				session.EnumNamesRequestRejection[*rejection], orNone(rejected.Field()),
 				text(rejected.Message()))}, nil
 		case session.ReplyBodySubscribeOutcome:
+			outcome := new(session.SubscribeOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			if outcome.DispositionType() == session.SubscribeDispositionSubscriptionRefused {
+				refused := new(session.SubscriptionRefused)
+				if err := union(outcome.Disposition, refused); err != nil {
+					return nil, err
+				}
+				refusal := refused.Refusal()
+				if refusal == nil {
+					return nil, errors.New("a subscription refusal has no reason")
+				}
+				lines := []string{fmt.Sprintf("REPLY %d SUBSCRIBE_REFUSED refusal=%s message=%s", id,
+					session.EnumNamesSubscriptionRefusal[*refusal], text(outcome.Message()))}
+				for index := 0; index < outcome.DiagnosticsLength(); index++ {
+					diagnostic := new(session.Diagnostic)
+					outcome.Diagnostics(diagnostic, index)
+					lines = append(lines, diagnosticLine(diagnostic))
+				}
+				return lines, nil
+			}
 			opened, _, _, lines, err := schemaLines(frame)
 			if err != nil {
 				return nil, err
@@ -772,8 +809,17 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 				}
 				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH domain_not_found domain=%s message=%s",
 					id, notFound.Domain(), message)}, nil
-			case session.DomainClockAttachDispositionRequestFailed:
-				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH failed message=%s", id, message)}, nil
+			case session.DomainClockAttachDispositionDomainClockAttachRefused:
+				refused := new(session.DomainClockAttachRefused)
+				if err := union(outcome.Disposition, refused); err != nil {
+					return nil, err
+				}
+				refusal := refused.Refusal()
+				if refusal == nil {
+					return nil, errors.New("a clock attach refusal has no reason")
+				}
+				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH refused refusal=%s message=%s", id,
+					session.EnumNamesDomainClockAttachRefusal[*refusal], message)}, nil
 			}
 			return nil, fmt.Errorf("undeclared attach disposition %d", outcome.DispositionType())
 		case session.ReplyBodyDomainClockDetachOutcome:
@@ -1100,8 +1146,17 @@ func clientLines(frame []byte) ([]string, error) {
 		if kind == nil {
 			return nil, errors.New("a subscribe request has no type")
 		}
-		return []string{fmt.Sprintf("REQUEST %d SUBSCRIBE domain=%s statement=%s type=%s", id,
-			subscribe.Domain(), text(subscribe.Statement()), session.EnumNamesSubscriptionType[*kind])}, nil
+		lines := []string{fmt.Sprintf("REQUEST %d SUBSCRIBE domain=%s statement=%s type=%s", id,
+			subscribe.Domain(), text(subscribe.Statement()), session.EnumNamesSubscriptionType[*kind])}
+		if expected := subscribe.ExpectedSchema(nil); expected != nil {
+			_, _, schema, err := rowSchemaLines(expected)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, "EXPECTED_SCHEMA")
+			lines = append(lines, schema...)
+		}
+		return lines, nil
 	case session.ClientRequestSuggestRequest:
 		suggest := new(session.SuggestRequest)
 		suggest.Init(table.Bytes, table.Pos)

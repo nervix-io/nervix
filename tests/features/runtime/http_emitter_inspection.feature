@@ -281,7 +281,8 @@ Feature: HTTP REQUEST emitter inspection, errors and metrics
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE

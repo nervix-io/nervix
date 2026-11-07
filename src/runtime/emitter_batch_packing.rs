@@ -24,7 +24,7 @@ use std::num::NonZeroUsize;
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_connector::{EmitterRecordPosition, RecordEnvelope};
+use nervix_connector::{EmitterRecordPosition, RecordDestination, RecordEnvelope};
 use nervix_models::{EmitterBatchPolicy, RelayName};
 use nervix_primitives::sync::Arc;
 
@@ -39,7 +39,7 @@ use crate::runtime_schema::{
 /// in any of them never share a batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BatchEnvelope {
-    pub(super) key: Option<String>,
+    pub(super) destination: Option<Arc<RecordDestination>>,
     pub(super) headers: EmitterHeaders,
     pub(super) message_group: Option<String>,
     /// What the emitter's envelope clauses and properties set on the record, absent where the
@@ -415,7 +415,7 @@ mod tests {
                     row_index: 0,
                 },
                 envelope: BatchEnvelope {
-                    key: None,
+                    destination: None,
                     headers: EmitterHeaders::Text(Vec::new()),
                     message_group: Some(group.to_string()),
                     clauses: None,
@@ -1107,24 +1107,54 @@ mod tests {
         rows: Vec<GeneratedRow>,
     }
 
-    fn envelopes() -> [BatchEnvelope; 3] {
+    fn envelopes() -> [BatchEnvelope; 6] {
         [
             BatchEnvelope {
-                key: None,
+                destination: None,
                 headers: EmitterHeaders::Text(Vec::new()),
                 message_group: None,
                 clauses: None,
             },
             BatchEnvelope {
-                key: Some("key".to_string()),
+                destination: Some(Arc::new(RecordDestination {
+                    key: Some(nervix_connector::RecordKey::String("key".to_string())),
+                    source_partition: None,
+                })),
                 headers: EmitterHeaders::Text(vec![("trace".to_string(), "1".to_string())]),
                 message_group: None,
                 clauses: None,
             },
             BatchEnvelope {
-                key: None,
+                destination: None,
                 headers: EmitterHeaders::Text(Vec::new()),
                 message_group: Some("group".to_string()),
+                clauses: None,
+            },
+            BatchEnvelope {
+                destination: Some(Arc::new(RecordDestination {
+                    key: Some(nervix_connector::RecordKey::Bytes(vec![0, 255, 16])),
+                    source_partition: Some(3),
+                })),
+                headers: EmitterHeaders::Text(Vec::new()),
+                message_group: None,
+                clauses: None,
+            },
+            BatchEnvelope {
+                destination: Some(Arc::new(RecordDestination {
+                    key: Some(nervix_connector::RecordKey::String(String::new())),
+                    source_partition: Some(0),
+                })),
+                headers: EmitterHeaders::Text(Vec::new()),
+                message_group: None,
+                clauses: None,
+            },
+            BatchEnvelope {
+                destination: Some(Arc::new(RecordDestination {
+                    key: None,
+                    source_partition: Some(1),
+                })),
+                headers: EmitterHeaders::Text(Vec::new()),
+                message_group: None,
                 clauses: None,
             },
         ]

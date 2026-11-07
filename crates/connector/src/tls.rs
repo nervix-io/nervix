@@ -19,7 +19,6 @@
 
 use error_stack::{Report, ResultExt as _};
 use nervix_primitives::sync::StdArc;
-use nervix_recovery::Discarded as _;
 use rustls::{
     CertificateError, ClientConfig as RustlsClientConfig, DigitallySignedStruct,
     Error as RustlsError, RootCertStore, SignatureScheme,
@@ -139,15 +138,6 @@ enum CaPlacement {
     ReplaceDefaults,
 }
 
-/// Installs the rustls provider connector transports use unless the host already chose one.
-pub fn install_rustls_crypto_provider() {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .discarded(
-            "a provider the host installed first is the one this connector would have installed",
-        );
-}
-
 impl<'a> RustlsClientConfigProvider<'a> {
     pub fn new(entries: &'a [nervix_models::ClientConfigEntry]) -> Self {
         Self { entries }
@@ -205,7 +195,7 @@ impl<'a> RustlsClientConfigProvider<'a> {
         ca_placement: CaPlacement,
         trust: ServerCertificateTrust,
     ) -> Result<StdArc<RustlsClientConfig>, Report<TlsClientConfigError>> {
-        install_rustls_crypto_provider();
+        nervix_crypto::tls::install_default_provider();
 
         let mut roots = match (ca_placement, tls.ca_file.as_ref()) {
             (CaPlacement::ReplaceDefaults, Some(_)) => RootCertStore::empty(),
@@ -336,7 +326,7 @@ mod tests {
 
     impl TlsFixture {
         fn generate() -> Self {
-            install_rustls_crypto_provider();
+            nervix_crypto::tls::install_default_provider();
             let authority_key = KeyPair::generate().assured("the key generator has entropy");
             let mut authority = CertificateParams::new(Vec::new())
                 .assured("a certificate without names has no invalid name");

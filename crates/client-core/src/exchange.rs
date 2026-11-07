@@ -1000,9 +1000,13 @@ impl ExchangeReader {
         if let ReplyBody::Subscribe(outcome) = &reply.body
             && let SubscribeDisposition::Opened(opened) = &outcome.disposition
         {
+            // The stream reads rows against the announced schema, and the desired subscription
+            // expects it when it is restored, so both share one copy of it.
+            let schema = Arc::new(opened.schema.clone());
             self.emitters
                 .desired
-                .acknowledge(&opened.subscription, &self.generation);
+                .acknowledge(&opened.subscription, &schema, &self.generation);
+            self.subscriptions.open(opened, schema);
         }
         self.subscriptions.track(&reply.body);
         match &reply.body {
@@ -1171,31 +1175,24 @@ struct SubscriptionStream {
 }
 
 impl SubscriptionRegistry {
-    /// Follows the subscriptions a reply opens or deletes.
+    /// Follows the subscriptions a reply deletes.
+    fn track(&mut self, body: &ReplyBody) {
+        if let ReplyBody::Unsubscribe(outcome) = body
+            && let UnsubscribeDisposition::Deleted(subscription) = &outcome.disposition
+        {
+            self.close(subscription);
+        }
+    }
+
+    /// Follows a subscription a reply opened, whose rows follow `schema`.
     ///
     /// The reader calls this before the reply reaches its waiter and before it routes any later
     /// frame, and the server sends a subscription's opening reply before any of its rows, so the
     /// rows of an opened subscription always find it here.
-    fn track(&mut self, body: &ReplyBody) {
-        match body {
-            ReplyBody::Subscribe(outcome) => {
-                if let SubscribeDisposition::Opened(opened) = &outcome.disposition {
-                    self.open(opened);
-                }
-            }
-            ReplyBody::Unsubscribe(outcome) => {
-                if let UnsubscribeDisposition::Deleted(subscription) = &outcome.disposition {
-                    self.close(subscription);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn open(&mut self, opened: &SubscriptionOpened) {
+    fn open(&mut self, opened: &SubscriptionOpened, schema: Arc<RowSchema>) {
         let stream = SubscriptionStream {
             relay: opened.relay.clone(),
-            schema: Arc::new(opened.schema.clone()),
+            schema,
         };
         self.streams
             .insert(opened.subscription.clone(), stream)

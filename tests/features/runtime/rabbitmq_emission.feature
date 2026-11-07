@@ -116,7 +116,8 @@ Feature: RabbitMQ emission
       CREATE RABBITMQ CLIENT rabbitmq_sink CONFIG {
         'addr' = '{{rabbitmq_stallable_addr}}'
       };
-      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbitmq_boundary FROM notifications
+      CREATE RABBITMQ QUEUE EMITTER rabbitmq_boundary FROM notifications
+        ATTACHED
         TO rabbitmq_sink QUEUE 'rabbitmq_boundary_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms

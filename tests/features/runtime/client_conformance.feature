@@ -309,16 +309,13 @@ Feature: Cross-language client conformance
     When the "<runtime>" client probe subscribes for restoration through the forwarded gRPC endpoint of node "{{leader}}"
     When the TCP forwarder at "127.0.0.1" stops
     Then within "30s" the client probe prints "INTERRUPTED"
-    When these Plexus commands are executed on the leader node
-      """
-      DROP RELAY watched;
-      """
+    When every node refuses the next subscription it is asked to open as unavailable
     And the TCP forwarder at "127.0.0.1" restarts
     Then within "120s" the client probe reports
       """
       SUBSCRIBED
       INTERRUPTED
-      RESTORATION message=stream 'watched' does not exist in domain '{{domain}}' wait=positive
+      RESTORATION message=the serving node could not open the subscription now wait=positive
       CHECKS ok
       PASS
       """

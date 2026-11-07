@@ -10,7 +10,7 @@ sections standard tools can list and extract, and whose records every reader val
 trusts them.
 
 A normal backup pauses each running domain in turn, waits for its intake and acknowledged work to
-drain, then captures its committed configuration, WASM guest checkpoints, Kafka source offsets,
+drain, then captures its committed configuration, WASM guest checkpoints, Kafka ingestor offsets,
 branch lifecycle, fresh materialized relay generations, deduplicator keyspaces and the rows every
 window retains. It resumes that domain before transferring the captured sections into the
 archive. Stopped domains need no pause. `WITHOUT PAUSE` captures the latest published state while
@@ -82,7 +82,7 @@ A `WITHOUT PAUSE` capture holds no lease, and a placement that failover or reloc
 runs can be left out. Send the backup again once the node is back, or once failover has moved its
 placements; with replicas, failover promotes one as soon as the failed cut has released its lease.
 
-The cut captures every kind of runtime state the archive holds: WASM guest saves, Kafka source
+The cut captures every kind of runtime state the archive holds: WASM guest saves, Kafka ingestor
 offsets, branch lifecycle, fresh materialized relay generations, deduplicator keyspaces and the rows
 every window retains. Each owner stages its share one checkpoint at a time, so state larger than the
 node's bulk memory budget is archived within it. [The Quiesced
@@ -341,7 +341,7 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   Omit it to leave the restored domain stopped. It precedes `ON EXISTING USER` and `DRY RUN`.
 - `WITHOUT STATE` restores the configuration and purges state for the target domain.
 - `WITHOUT SOURCE OFFSETS` restores WASM, branch lifecycle, materialized, deduplicator and window
-  state but starts sources without the archived Kafka positions.
+  state but starts ingestors without the archived Kafka positions.
 - A state section whose entity is absent or whose schema fingerprint differs from the published
   schedule is skipped. The restore succeeds and reports a warning naming the skipped state in its
   command diagnostics and CLI output; that entity starts without the skipped checkpoint. A dry run
@@ -396,8 +396,8 @@ complete restored one; nodes without assigned checkpoints publish an empty set. 
 installation gate refuses `START` until every target node has published its complete
 set; it survives failure, lease release and node restart. [State
 Installation](./backup-and-restore-architecture.md#state-installation) describes the staging,
-publication and gate. A source uses its restored next offset when it starts, clamped to the
-partitions its current source assignment contains and clamped to their live low and high
+publication and gate. An ingestor uses its restored next offset when it starts, clamped to the
+partitions its current ingestor assignment contains and clamped to their live low and high
 watermarks. Materialized state binds to the exact restored schema fingerprint and archived start
 generation before a branch or generator starts. Its rows, typed keys, watermarks, revision and
 branch generation are preserved. A new assignment establishes its own ownership fence.
@@ -420,7 +420,7 @@ admission sequences, watermarks and aggregate argument values are preserved exac
 
 Archived Kafka positions follow acknowledged records, and a window acknowledges a row only when it
 steps past it. The positions of a domain that reads Kafka records into a window therefore stand
-before the rows its windows retain at the cut, and a source that resumes from them reads those rows
+before the rows its windows retain at the cut, and an ingestor that resumes from them reads those rows
 again, which the restored window then admits beside the rows it restored. A restart has the same
 effect; see [Shutdown And Recovery](shutdown.md).
 
@@ -431,7 +431,7 @@ admission follows the projected reached windows. A paced archive without its com
 cannot resume and is refused before admission. An unpaced resume needs no clock mapping.
 
 A normal `START` after a default stopped restore, or after `STOP`, advances the start generation
-and clears materialized state. It preserves compatible WASM state, source positions, branch
+and clears materialized state. It preserves compatible WASM state, ingestor positions, branch
 lifecycle, deduplicator keys and windows. To establish a new clock at the saved logical frontier
 instead, leave the domain stopped and use `START AT '<frontier>' TIME RATE <rate>` explicitly.
 
@@ -578,12 +578,12 @@ completes:
       and UDFs prepare. The batch is not bounded by the statement and source-byte limits of a
       transaction. Before recording this step, admit an installation generation bound to the
       leader tenure, restore execution and mutation lease. Stage compatible branch lifecycle,
-      source offsets, WASM saves, materialized generations, deduplicator keyspaces and windows on
+      ingestor offsets, WASM saves, materialized generations, deduplicator keyspaces and windows on
       the newly scheduled owners and replicas, then publish the complete set on every target node.
       Recording completion releases the replicated start gate.
       With `RESUME`, that same effect installs the archived clock mapping and makes the domain
       running; a delayed coordinator cannot republish after activation.
-      `WITHOUT STATE` publishes an empty set, and `WITHOUT SOURCE OFFSETS` omits source positions.
+      `WITHOUT STATE` publishes an empty set, and `WITHOUT SOURCE OFFSETS` omits ingestor positions.
 
 A completed restore reports what it recreated, and each step:
 
@@ -692,7 +692,7 @@ nervix-cli restore cluster --input cluster.nvxb --on-existing-user replace --for
 | `--dry-run` | Verifies the archive and plans the restore, changing nothing. |
 | `--resume` | Makes the complete restored domain running at its archived generation and clock mapping. |
 | `--without-state` | Installs configuration without runtime checkpoints. |
-| `--without-source-offsets` | Installs WASM, branch and materialized state, and leaves Kafka source positions unset. |
+| `--without-source-offsets` | Installs WASM, branch and materialized state, and leaves Kafka ingestor positions unset. |
 | `--format text` or `--format json` | How the report is printed. Text is the default. |
 
 While the archive streams, the command shows how much of it was sent on standard error, when
@@ -1056,7 +1056,7 @@ retry validity of its execution reference ended reports `restore stopped after t
 recorded`. No message includes password hashes or resource bytes.
 
 Ingestor offset and branch-lifecycle records retain their global `Instance(i)` placement. A
-quiesced cut observes and checkpoints each locally owned source unit; restore preserves those
+quiesced cut observes and checkpoints each locally owned ingestor unit; restore preserves those
 identities and lets the current scheduler choose their owners. Canonical Models retain fixed
 counts or `INSTANCES PER PARTITION`. The current major fences this ownership contract before any
 configuration or state is installed.

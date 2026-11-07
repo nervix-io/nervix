@@ -14,7 +14,8 @@ Feature: Emitters name their connector and entity in the Plexus statement head
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE DETACHED KAFKA TOPIC EMITTER outgoing FROM events
+      CREATE KAFKA TOPIC EMITTER outgoing FROM events
+        DETACHED
         TO kafka_main TOPIC 'Orders' MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -22,8 +23,9 @@ Feature: Emitters name their connector and entity in the Plexus statement head
       """
     Then the last command output contains
       """
-      CREATE DETACHED KAFKA TOPIC EMITTER outgoing
+      CREATE KAFKA TOPIC EMITTER outgoing
         FROM events
+        DETACHED
         TO kafka_main TOPIC 'Orders'
           MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
       """
@@ -123,7 +125,7 @@ Feature: Emitters name their connector and entity in the Plexus statement head
       """
     Then the last command output contains
       """
-      CREATE ATTACHED OTEL <entity> EMITTER outgoing
+      CREATE OTEL <entity> EMITTER outgoing
       """
 
     Examples:

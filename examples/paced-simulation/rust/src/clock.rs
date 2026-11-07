@@ -161,9 +161,8 @@ pub(crate) async fn attach(
             };
             Ok(attached.clock().clone())
         }
-        DomainClockAttachDisposition::DomainNotFound(_) | DomainClockAttachDisposition::Failed => {
-            Err(refused(outcome.message))
-        }
+        DomainClockAttachDisposition::DomainNotFound(_)
+        | DomainClockAttachDisposition::Refused(_) => Err(refused(outcome.message)),
     }
 }
 
