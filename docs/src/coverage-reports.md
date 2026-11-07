@@ -82,6 +82,9 @@ separate Python interpreters, so each supervisor retains ownership of its own ch
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
 register it in CI by itself. Focused Backup, Visual Create, client and runtime recipes export local
 ordinary reports for `coverage-patch`, using the same normalization as the workspace merge.
+`just coverage-cli-process` includes transaction outcomes, clock restoration past the retry
+deadline, interrupted-clock cancellation, subscription endings and REPL reconnect output. Its
+public scenarios run the instrumented CLI and keep their one- and three-node topologies.
 `just coverage-ratchet-runner` measures the Rust analysis runner's unit and wrapper process tests
 and the report owner's unit tests, including authored macro provenance,
 in a local tooling report for patch review; it is not a new CI producer or evidence that every
