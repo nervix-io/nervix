@@ -1,5 +1,5 @@
 [package]
-description = "The SQS source and sink connector for Nervix"
+description = "The SQS ingestor and emitter connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-sqs"
@@ -23,6 +23,7 @@ async-trait = { workspace = true }
 aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-sqs = { workspace = true }
+nervix-crypto = { workspace = true }
 # The SDK crates disable their TLS defaults; select AWS-LC on their shared client.
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 error-stack = { workspace = true }

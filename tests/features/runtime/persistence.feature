@@ -89,7 +89,7 @@ Feature: Runtime persistence
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_restart_sensor;
       CREATE VHOST edge http-{{test_id}}-restart-readings.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
@@ -161,7 +161,7 @@ Feature: Runtime persistence
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_flushed_sensor;
       CREATE VHOST edge http-{{test_id}}-flushed-readings.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
@@ -190,7 +190,7 @@ Feature: Runtime persistence
       """
     Then the last command output contains
       """
-      CREATE ATTACHED REINGESTOR sensor_partition
+      CREATE REINGESTOR sensor_partition
       """
     When these Plexus commands are executed on the leader node
       """

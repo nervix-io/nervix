@@ -24,8 +24,8 @@ use crate::{
     IngestorEntityKind,
 };
 
-/// A Pulsar producer sets exactly these two clauses per message, and its emitter declares no
-/// property.
+/// A Pulsar producer declares its key, source partition selection and message times, with no
+/// properties.
 #[test]
 fn the_topic_emitter_declares_the_event_time_and_the_delivery_time_it_writes() {
     let emit = EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic).capabilities();
@@ -33,6 +33,8 @@ fn the_topic_emitter_declares_the_event_time_and_the_delivery_time_it_writes() {
     assert_eq!(
         emit.envelope,
         &[
+            EnvelopeClauseKind::Key,
+            EnvelopeClauseKind::PartitionFromBranch,
             EnvelopeClauseKind::Timestamp,
             EnvelopeClauseKind::DeliverAfter,
         ]
@@ -186,7 +188,7 @@ fn only_the_types_that_read_through_one_consumer_refuse_more_instances(
 ) {
     assert_eq!(kind.reads_through_one_consumer(), one_consumer);
 
-    let mut source = PulsarTopicIngestor {
+    let mut ingestor = PulsarTopicIngestor {
         client: ClientName::parse("broker").assured("the fixture name is valid"),
         topic: PulsarTopicName::parse("orders").assured("the fixture name is valid"),
         subscription: PulsarSubscription {
@@ -194,14 +196,17 @@ fn only_the_types_that_read_through_one_consumer_refuse_more_instances(
             ownership: PulsarSubscriptionOwnership::Provisioned,
             kind,
         },
-        instances: NonZeroU64::MIN,
+        instances: crate::IngestorInstances::Count(NonZeroU64::MIN),
         mode: PulsarIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Suspend,
     };
-    assert!(source.instances_fit_subscription());
+    assert!(ingestor.instances_fit_subscription());
 
-    source.instances = NonZeroU64::new(2).assured("two is greater than zero");
-    assert_eq!(source.instances_fit_subscription(), !one_consumer);
+    ingestor.instances =
+        crate::IngestorInstances::Count(NonZeroU64::new(2).assured("two is greater than zero"));
+    assert_eq!(ingestor.instances_fit_subscription(), !one_consumer);
+    ingestor.instances = crate::IngestorInstances::PerPartition;
+    assert_eq!(ingestor.instances_fit_subscription(), !one_consumer);
 }
 
 #[test]

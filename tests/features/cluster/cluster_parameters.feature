@@ -4,6 +4,21 @@ Feature: Committed cluster parameters
   Nervix commits one parameter record for the cluster. A parameter change is validated against
   the current record and graph, then applied on every node without a process restart.
 
+  @multi_span_cluster_duration
+  Scenario Outline: A multi-span duration commits and applies on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus statements are executed on the leader node
+      """
+      ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 13m 49s;
+      """
+    Then node "node-1" eventually reports status containing "node-unavailability-timeout committed=13m 49s"
+    And node "node-<cluster_size>" eventually reports status containing "node=node-<cluster_size> node-unavailability-timeout running=13m 49s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @cluster_parameter_preview_fence
   Scenario Outline: A parameter change invalidates an inspected transaction preview on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
@@ -216,6 +231,68 @@ Feature: Committed cluster parameters
       """
       ALTER CLUSTER SET STATE_SNAPSHOT_INTERVAL = 0s;
       """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @cluster_parameter_completion
+  Scenario Outline: Completing a parameter change offers only the parameters it has not assigned on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When the active session collects completion pages for "ALTER CLUSTER SET domain_drain_timeout = 13m 49s, Replica_Count = 2, UDF_CODE_BYTES = 1KiB, " at byte 92 with page size 8
+    Then the collected completion candidates are
+      """
+      CLIENT_BATCH_ROWS
+      CLIENT_CONSUMER_SESSION_BYTES
+      CLIENT_PRODUCER_SESSION_BYTES
+      COMMAND_EXECUTION_CAPACITY
+      COMMAND_RETRY_VALIDITY
+      ENTITY_GATE_DEADLINE
+      HTTP_HEADER_BYTES
+      HTTP_HEADER_FIELDS
+      MAX_BATCH_MESSAGES
+      NODE_UNAVAILABILITY_TIMEOUT
+      RESOURCE_MAX_ARCHIVE_BYTES
+      RESOURCE_MAX_EXTRACTED_BYTES
+      RESOURCE_MAX_FILE_COUNT
+      STATE_SNAPSHOT_INTERVAL
+      TRANSACTION_IDLE_TIMEOUT
+      TRANSACTION_MAX_OPEN
+      TRANSACTION_MAX_SOURCE_BYTES
+      TRANSACTION_MAX_STATEMENTS
+      TRANSACTION_TOMBSTONE_RETENTION
+      """
+    When the active session collects completion pages for "ALTER CLUSTER SET HTTP_HEADER_BYTES = 8KiB, http_header_" at byte 56 with page size 8
+    Then the collected completion candidates are
+      """
+      HTTP_HEADER_FIELDS
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @cluster_parameter_completion
+  Scenario Outline: A parameter change refuses a repeated parameter where the repeat is written on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And client "administration" is connected to the leader node
+    When client "administration" submits this Plexus command request
+      """
+      ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s, REPLICA_COUNT = 2, domain_drain_timeout = 100ms;
+      """
+    Then the last client request failed with one diagnostic spanning bytes 70 to 90
+    And the last client request diagnostic underlines "domain_drain_timeout"
+    And the last client request diagnostic message contains "ALTER CLUSTER SET assigns domain-drain-timeout more than once"
 
     Examples:
       | cluster_size |

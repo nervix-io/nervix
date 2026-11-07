@@ -10,6 +10,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use meticulous::ResultExt as _;
 use nervix_models::{
     ClickHouseEmitter, ClickHouseTableEmitter, FlushPolicy, HttpEmitter, HttpRequestEmitter,
     IcebergEmitter, IcebergTableEmitter, KafkaEmitter, MongoDbCollectionEmitter, MongoDbEmitter,
@@ -20,6 +21,104 @@ use nervix_models::{
 
 use super::*;
 use crate::lexer::lex;
+
+#[rstest::rstest]
+#[case("KAFKA")]
+#[case("PULSAR")]
+fn explicit_key_and_partition_clauses_round_trip(#[case] connector: &str) {
+    for clauses in [
+        "KEY branch.tenant",
+        "KEY hex_decode('00ff10') PARTITION FROM BRANCH",
+        "PARTITION FROM BRANCH",
+        "key branch.tenant partition from branch timestamp message.occurred_at",
+    ] {
+        let text = format!(
+            "CREATE {connector} TOPIC EMITTER keyed FROM events TO broker TOPIC 'events' MODE NO \
+             ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec {clauses} INHERIT \
+             ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        );
+        let statement = crate::statement::parse_statement(&text)
+            .assured("the entity declares the explicit key and partition clauses");
+        let rendered = statement
+            .to_canonical_plexus()
+            .assured("the statement renders");
+        assert_eq!(
+            crate::statement::parse_statement(&rendered).assured("canonical Plexus reparses"),
+            statement
+        );
+        for operation in [
+            "SET KEY message.tenant",
+            "DROP KEY",
+            "SET PARTITION FROM BRANCH",
+            "DROP PARTITION FROM BRANCH",
+        ] {
+            let text = format!("ALTER {connector} TOPIC EMITTER keyed {operation};");
+            let statement = crate::statement::parse_statement(&text)
+                .assured("the targeted envelope change parses");
+            let rendered = statement
+                .to_canonical_plexus()
+                .assured("the change renders");
+            assert_eq!(
+                crate::statement::parse_statement(&rendered).assured("the change reparses"),
+                statement
+            );
+        }
+    }
+}
+
+#[rstest::rstest]
+#[case("KAFKA")]
+#[case("PULSAR")]
+fn explicit_key_completion_follows_the_composed_grammar(#[case] connector: &str) {
+    let text = format!(
+        "CREATE {connector} TOPIC EMITTER keyed FROM events TO broker TOPIC 'events' MODE NO ACK \
+         RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec "
+    );
+    let offered = crate::statement::suggest_statement(&text, text.len());
+    assert!(offered.contains(&"KEY".to_owned()), "{offered:?}");
+    assert!(
+        offered.contains(&"PARTITION FROM BRANCH".to_owned()),
+        "{offered:?}"
+    );
+    let after_key = format!("{text}KEY message.tenant ");
+    let offered = crate::statement::suggest_statement(&after_key, after_key.len());
+    assert!(!offered.contains(&"KEY".to_owned()), "{offered:?}");
+    assert!(
+        offered.contains(&"PARTITION FROM BRANCH".to_owned()),
+        "{offered:?}"
+    );
+}
+
+#[test]
+fn explicit_key_clauses_keep_their_entity_and_order() {
+    let base = "CREATE KAFKA TOPIC EMITTER keyed FROM events TO broker TOPIC 'events' MODE NO ACK \
+                RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec";
+    for clauses in ["KEY 'a' KEY 'b'", "PARTITION FROM BRANCH KEY 'a'", "KEY"] {
+        let text = format!(
+            "{base} {clauses} INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
+             LOG;"
+        );
+        assert!(crate::statement::parse_statement(&text).is_err(), "{text}");
+    }
+    let text = "CREATE MQTT TOPIC EMITTER keyed FROM events TO broker TOPIC 'events' QOS 0 MODE \
+                NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec KEY 'a' \
+                INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+    assert!(crate::statement::parse_statement(text).is_err());
+}
+
+#[test]
+fn input_acknowledgement_clause() {
+    crate::conformance_support::assert_input_acknowledgement_clause(
+        "CREATE CLIENT CONSUMER EMITTER tested FROM incoming",
+        "TO SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s \
+         INHERIT ALL BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+         GENERAL ERROR LOG",
+    );
+    crate::conformance_support::assert_offers_exactly(
+        "CREATE CLIENT CONSUMER EMITTER tested FROM incoming DETACHED ",
+        &["USING MATERIALIZED STATE", "TO"],
+    );
+}
 
 #[test]
 fn http_emitter_body_modes_roundtrip_with_qualified_request_fields() {
@@ -80,7 +179,7 @@ fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
     ))
     .expect("a bare mode completes the group before MODE");
     let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-        fifo_group: Some(nervix_models::SqsFifoGroup::Expression(group)),
+        fifo_group: Some(group),
         ..
     })) = parsed.connector.as_ref()
     else {
@@ -642,7 +741,7 @@ fn every_publishing_mode_body_parses_and_canonical_round_trips() {
          POLICY BACKOFF 250ms MAX 30s",
         "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' SEND BATCH MODE ACK RETRY \
          POLICY BACKOFF 250ms MAX 30s",
-        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP FROM BRANCH \
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP branch.tenant \
          SEND BATCH MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
         "SENTRY EVENT EMITTER emit FROM p99 TO broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ] {
@@ -784,26 +883,6 @@ fn direct_emitter_completion_only_offers_where_construction() {
 
 #[test]
 fn parses_sqs_fifo_group_forms() {
-    let from_branch = parse_create_emitter(&complete_codec_emitter(
-        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP FROM BRANCH \
-         SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-    ))
-    .expect("SQS FIFO FROM BRANCH mode should parse");
-    assert!(matches!(
-        from_branch.connector.as_ref(),
-        EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-            queue,
-            fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
-            ..
-        })) if queue.as_str() == "events.fifo"
-    ));
-    let canonical = from_branch
-        .to_canonical_plexus()
-        .expect("SQS FIFO emitter should render canonically");
-    let round_tripped =
-        parse_create_emitter(&canonical).expect("canonical SQS FIFO emitter should parse again");
-    assert_eq!(round_tripped, from_branch);
-
     let expression = parse_create_emitter(&complete_codec_emitter(
         "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP \
          concat(input.tenant, '-', input.region) SEND BATCH MODE ACK RETRY POLICY BACKOFF 250ms \
@@ -813,7 +892,7 @@ fn parses_sqs_fifo_group_forms() {
     assert!(matches!(
         expression.connector.as_ref(),
         EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-            fifo_group: Some(nervix_models::SqsFifoGroup::Expression(_)),
+            fifo_group: Some(_),
             ..
         }))
     ));
@@ -822,7 +901,7 @@ fn parses_sqs_fifo_group_forms() {
 #[test]
 fn rejects_fifo_group_on_non_sqs_emitter() {
     let source = complete_codec_emitter(
-        "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' FIFO GROUP FROM BRANCH MODE \
+        "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' FIFO GROUP branch.tenant MODE \
          NO ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     );
     assert!(parse_create_emitter(&source).is_err());
@@ -1186,8 +1265,9 @@ fn clickhouse_completion_after_values_holding_an_array_offers_the_mode() {
 #[test]
 fn parses_create_emitter_iceberg() {
     let input = r#"
-        CREATE DETACHED ICEBERG TABLE EMITTER to_iceberg
+        CREATE ICEBERG TABLE EMITTER to_iceberg
             FROM notifications
+            DETACHED
             TO s3_client TABLE 'notifications' NAMESPACE 'Analytics.Events'
             LOCATION 's3://nervix-iceberg/tables/notifications'
             CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
@@ -2158,8 +2238,9 @@ fn parses_create_emitter_pulsar() {
 #[test]
 fn parses_create_emitter_detached() {
     let input = r#"
-        CREATE DETACHED KAFKA TOPIC EMITTER emit
+        CREATE KAFKA TOPIC EMITTER emit
             FROM p99
+            DETACHED
             TO broker1 TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2173,14 +2254,14 @@ fn parses_create_emitter_detached() {
 #[test]
 fn fails_without_to_clause() {
     let tokens =
-        to_tokens("CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 ENCODE USING my_codec;");
+        to_tokens("CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED ENCODE USING my_codec;");
     let errs = parse_create_emitter_tokens(&tokens).expect_err("must fail");
     assert!(!errs.is_empty());
 }
 
 #[test]
 fn rejects_pulsar_emitter_without_topic() {
-    let tokens = to_tokens("CREATE ATTACHED PULSAR TOPIC EMITTER emit FROM p99 TO pulsar1;");
+    let tokens = to_tokens("CREATE PULSAR TOPIC EMITTER emit FROM p99 ATTACHED TO pulsar1;");
     let errs = parse_create_emitter_tokens(&tokens).expect_err("must fail");
     assert!(!errs.is_empty());
 }
@@ -2205,30 +2286,21 @@ fn rejects_encoded_emitter_without_codec() {
 }
 
 #[test]
-fn suggests_mode_after_create() {
-    let input = "CREATE ";
-    let suggestions = suggest_create_emitter(input, input.len());
-    assert!(suggestions.contains(&"ATTACHED".to_string()));
-    assert!(suggestions.contains(&"DETACHED".to_string()));
-    assert!(!suggestions.contains(&"FROM".to_string()));
-}
-
-#[test]
 fn suggests_encode_using_as_compound_keyword() {
     // The codec follows the emitter it encodes for, so it is offered once the emitter is named.
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"ENCODE USING".to_string()));
 
-    let before_emitter = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 ";
+    let before_emitter = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED ";
     let suggestions = suggest_create_emitter(before_emitter, before_emitter.len());
     assert!(!suggestions.contains(&"ENCODE USING".to_string()));
 }
 
 #[test]
 fn a_kinded_emitter_completes_its_client_reference() {
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM events TO ";
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM events ATTACHED TO ";
     assert_eq!(
         suggest_create_emitter(input, input.len()),
         vec!["ref:client"]
@@ -2255,7 +2327,7 @@ fn sentry_emitter_completion_context_does_not_leak_transport_qualifiers() {
 
 #[test]
 fn suggests_flush_after_emitter_error_policies() {
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ON MESSAGE ERROR \
                  LOG ON GENERAL ERROR LOG ";
     let suggestions = suggest_create_emitter(input, input.len());
@@ -2268,8 +2340,9 @@ fn suggests_flush_after_emitter_error_policies() {
 #[test]
 fn parses_create_emitter_mqtt() {
     let input = r#"
-        CREATE ATTACHED MQTT TOPIC EMITTER emit
+        CREATE MQTT TOPIC EMITTER emit
             FROM p99
+            ATTACHED
             TO broker1 TOPIC 'topic' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2294,8 +2367,9 @@ fn parses_create_emitter_mqtt() {
 #[test]
 fn parses_create_emitter_nats() {
     let input = r#"
-        CREATE ATTACHED NATS SUBJECT EMITTER emit
+        CREATE NATS SUBJECT EMITTER emit
             FROM p99
+            ATTACHED
             TO nats_main SUBJECT 'notifications' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2320,8 +2394,9 @@ fn parses_create_emitter_nats() {
 #[test]
 fn parses_create_emitter_rabbitmq() {
     let input = r#"
-        CREATE ATTACHED RABBITMQ QUEUE EMITTER emit
+        CREATE RABBITMQ QUEUE EMITTER emit
             FROM p99
+            ATTACHED
             TO broker1 QUEUE 'queue1' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2346,8 +2421,9 @@ fn parses_create_emitter_rabbitmq() {
 #[test]
 fn parses_create_emitter_redis() {
     let input = r#"
-        CREATE ATTACHED REDIS PUBSUB EMITTER emit
+        CREATE REDIS PUBSUB EMITTER emit
             FROM p99
+            ATTACHED
             TO broker1 CHANNEL 'out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2371,8 +2447,9 @@ fn parses_create_emitter_redis() {
 #[test]
 fn parses_create_emitter_zeromq() {
     let input = r#"
-        CREATE ATTACHED ZEROMQ PUSH EMITTER emit
+        CREATE ZEROMQ PUSH EMITTER emit
             FROM p99
+            ATTACHED
             TO zmq_out MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2448,8 +2525,9 @@ fn syslog_completion_stays_on_no_ack_mode() {
 #[test]
 fn parses_create_emitter_sqs() {
     let input = r#"
-        CREATE ATTACHED SQS QUEUE EMITTER emit
+        CREATE SQS QUEUE EMITTER emit
             FROM p99
+            ATTACHED
             TO sqs_main QUEUE 'queue1' SEND SINGLE MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2529,7 +2607,7 @@ fn rejects_invalid_emitter_route_construction() {
 
 #[test]
 fn does_not_leak_emitter_suggestions_inside_filter_map_program() {
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec WHERE ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(!suggestions.contains(&"MQTT".to_string()));
@@ -2538,7 +2616,7 @@ fn does_not_leak_emitter_suggestions_inside_filter_map_program() {
 
 #[test]
 fn emitter_filter_map_context_suggests_invoke_without_emitter_leakage() {
-    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 ATTACHED TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ";
     let suggestions = suggest_create_emitter(input, input.len());
 
@@ -2549,7 +2627,7 @@ fn emitter_filter_map_context_suggests_invoke_without_emitter_leakage() {
 
 #[test]
 fn pulsar_emitter_context_does_not_offer_other_transport_keywords() {
-    let input = "CREATE ATTACHED PULSAR TOPIC EMITTER emit FROM p99 TO pulsar1 ";
+    let input = "CREATE PULSAR TOPIC EMITTER emit FROM p99 ATTACHED TO pulsar1 ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"TOPIC".to_string()));
     assert!(!suggestions.contains(&"QUEUE".to_string()));

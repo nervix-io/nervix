@@ -1,66 +1,22 @@
 //! NATS user identities and nonce authentication.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** NATS seed and credentials decoding, public-key encoding and the driver auth callback.
-//! - **Depends on.** AWS-LC signing, wire encodings, primitive shared ownership and the NATS driver.
+//! - **Owns.** NATS user identity selection and the driver auth callback.
+//! - **Depends on.** The cryptography boundary, maintained NKey/credentials codecs and primitive ownership.
 //! - **Must not know.** Models, graph routing, connector lifecycle or TLS policy.
-//!
-//! AWS-LC signing moves to `nervix-crypto` when that boundary is established (FIPS Prep 02).
 
 #![cfg_attr(
     nervix_lint,
     nervix::layer(engine, reason = "owns the NATS authentication wire boundary")
 )]
 
-use async_nats::{Auth, AuthError, ConnectOptions};
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
-use data_encoding::BASE32_NOPAD;
+use async_nats::{Auth, AuthError, ConnectOptions, auth_utils::UserCredentials};
 use error_stack::{Report, ResultExt as _};
+use meticulous::ResultExt as _;
+use nervix_crypto::ed25519::Ed25519SigningKey;
 use nervix_primitives::sync::StdArc;
+use nkeys_codec::{KeyPairType, error::ErrorKind};
 use thiserror::Error;
-use zeroize::Zeroizing;
-
-// NATS nkeys encode a 32-byte seed with a two-byte user-seed prefix and a little-endian
-// CRC-16/XMODEM. The CRC detects transcription errors; it establishes no authenticity.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(fixed, reason = "NATS nkeys user-seed wire prefix")
-)]
-const USER_SEED_PREFIX: [u8; 2] = [0x95, 0x00];
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(fixed, reason = "NATS nkeys user public-key wire prefix")
-)]
-const USER_PUBLIC_KEY_PREFIX: u8 = 0xa0;
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(fixed, reason = "base32 length of the NATS nkeys seed wire record")
-)]
-const ENCODED_SEED_BYTES: usize = 58;
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "NATS nkeys two-byte prefix, 32-byte seed and two-byte checksum"
-    )
-)]
-const DECODED_SEED_BYTES: usize = 36;
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "NATS nkeys one-byte prefix, 32-byte public key and two-byte checksum"
-    )
-)]
-const PUBLIC_KEY_BYTES: usize = 35;
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "NATS nkeys specifies CRC-16/XMODEM for transcription errors"
-    )
-)]
-const CHECKSUM: crc::Crc<u16> = crc::Crc::<u16>::new(&crc::CRC_16_XMODEM);
 
 #[derive(Debug, Error)]
 pub(super) enum NatsAuthenticationError {
@@ -79,41 +35,34 @@ pub(super) enum NatsAuthenticationError {
 }
 
 struct SigningIdentity {
-    key: Ed25519KeyPair,
+    key: Ed25519SigningKey,
     public: String,
 }
 
 impl SigningIdentity {
     fn from_seed(seed: &str) -> Result<Self, Report<NatsAuthenticationError>> {
-        if seed.len() != ENCODED_SEED_BYTES {
-            return Err(Report::new(NatsAuthenticationError::SeedLength));
-        }
-        let raw = Zeroizing::new(
-            BASE32_NOPAD
-                .decode(seed.as_bytes())
-                .change_context(NatsAuthenticationError::SeedEncoding)?,
-        );
-        let raw: &[u8; DECODED_SEED_BYTES] = raw
-            .as_slice()
-            .try_into()
-            .map_err(|_| Report::new(NatsAuthenticationError::SeedLength))?;
-        if raw[..2] != USER_SEED_PREFIX {
-            return Err(Report::new(NatsAuthenticationError::SeedKind));
-        }
-        if CHECKSUM.checksum(&raw[..34]) != u16::from_le_bytes([raw[34], raw[35]]) {
-            return Err(Report::new(NatsAuthenticationError::SeedChecksum));
-        }
-        let key = Ed25519KeyPair::from_seed_unchecked(&raw[2..34])
+        let raw =
+            nkeys_codec::decode_seed_for(seed, KeyPairType::User).map_err(Self::seed_error)?;
+        let key = Ed25519SigningKey::from_seed(raw.as_ref())
             .change_context(NatsAuthenticationError::SigningKey)?;
-        let mut public = [0u8; PUBLIC_KEY_BYTES];
-        public[0] = USER_PUBLIC_KEY_PREFIX;
-        public[1..33].copy_from_slice(key.public_key().as_ref());
-        let checksum = CHECKSUM.checksum(&public[..33]).to_le_bytes();
-        public[33..].copy_from_slice(&checksum);
-        Ok(Self {
-            key,
-            public: BASE32_NOPAD.encode(&public),
-        })
+        let public = key
+            .public_key()
+            .try_into()
+            .assured("the cryptography boundary returns a 32-byte Ed25519 public key");
+        let public = nkeys_codec::encode(&KeyPairType::User, public);
+        Ok(Self { key, public })
+    }
+
+    fn seed_error(error: nkeys_codec::error::Error) -> Report<NatsAuthenticationError> {
+        let context = match error.kind() {
+            ErrorKind::InvalidKeyLength => NatsAuthenticationError::SeedLength,
+            ErrorKind::InvalidPrefix | ErrorKind::IncorrectKeyType => {
+                NatsAuthenticationError::SeedKind
+            }
+            ErrorKind::ChecksumFailure => NatsAuthenticationError::SeedChecksum,
+            _ => NatsAuthenticationError::SeedEncoding,
+        };
+        Report::new(error).change_context(context)
     }
 }
 
@@ -146,13 +95,13 @@ impl AuthenticationIdentity {
                 (signer, auth)
             }
         };
-        // AuthError is the driver's required callback result. Its opaque AWS-LC cause has no
-        // credential material; decoding and file failures retain their typed reports above it.
+        // AuthError is the driver's required callback result. Preserve the boundary's typed
+        // signing report, which contains no credential material.
         auth.signature = Some(
             signer
                 .key
-                .try_sign(nonce)
-                .map_err(AuthError::new)?
+                .sign(nonce)
+                .map_err(|error| AuthError::new(error.into_error()))?
                 .as_ref()
                 .to_vec(),
         );
@@ -175,25 +124,11 @@ pub(super) fn nkey_options(seed: &str) -> Result<ConnectOptions, Report<NatsAuth
 fn credentials_identity(
     contents: &str,
 ) -> Result<AuthenticationIdentity, Report<NatsAuthenticationError>> {
-    let section = |begin: &str, end: &str| {
-        let mut lines = contents.lines().map(str::trim);
-        lines.find(|line| *line == begin)?;
-        let value = lines.next().filter(|line| !line.is_empty())?;
-        (lines.next()? == end).then_some(value)
-    };
-    let jwt = section(
-        "-----BEGIN NATS USER JWT-----",
-        "------END NATS USER JWT------",
-    )
-    .ok_or_else(|| Report::new(NatsAuthenticationError::Credentials))?;
-    let seed = section(
-        "-----BEGIN USER NKEY SEED-----",
-        "------END USER NKEY SEED------",
-    )
-    .ok_or_else(|| Report::new(NatsAuthenticationError::Credentials))?;
+    let credentials =
+        UserCredentials::parse(contents).change_context(NatsAuthenticationError::Credentials)?;
     Ok(AuthenticationIdentity::Credentials {
-        jwt: jwt.to_owned(),
-        signer: SigningIdentity::from_seed(seed)?,
+        jwt: credentials.jwt().to_owned(),
+        signer: SigningIdentity::from_seed(credentials.seed())?,
     })
 }
 

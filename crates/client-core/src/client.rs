@@ -90,9 +90,13 @@ pub(crate) struct TransactionExpectation {
 pub(crate) const LOCAL_STATEMENT_IN_TRANSACTION: &str =
     "client-local commands are not allowed while a transaction is active";
 
-/// One logical command's identity and inputs. Keep this handle to retry after a cancelled waiter
-/// or an uncertain transport result; every attempt uses the same domain, transaction fence and
-/// durable execution reference.
+/// One prepared statement's identity and inputs. Keep this handle to retry a durable command
+/// after a cancelled waiter or an uncertain transport result: every attempt uses the same domain,
+/// transaction fence and durable execution reference. CREATE SUBSCRIPTION, DELETE SUBSCRIPTION,
+/// ATTACH DOMAIN CLOCK and DETACH DOMAIN CLOCK are session-local requests. Their reference is not
+/// a durable identity. Repeating any of these requests may be refused after the first succeeded;
+/// for example, a repeated DELETE fails when the subscription is already absent. Inspect the
+/// current session state to learn their effect.
 #[derive(Debug, Clone)]
 pub struct ExecutionHandle {
     query: String,
@@ -116,8 +120,9 @@ impl ExecutionHandle {
         &self.upload_identity
     }
 
-    /// The same command under `reference`, the execution reference an earlier run of it was
-    /// given. Running it recovers that run's outcome rather than starting another command.
+    /// The same durable command under `reference`, the execution reference an earlier run of it
+    /// was given. Running a session-local request with this handle does not recover its earlier
+    /// outcome under the reference.
     pub fn with_reference(mut self, reference: CommandExecutionReference) -> Self {
         self.reference = reference;
         self
@@ -326,7 +331,7 @@ impl Client {
         let server = Url::parse(server.as_ref())
             .map_err(|error| Report::new(ClientError::InvalidServerUrl(error)))?;
         const MAX_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
-        if options.seed_servers.len() > 32 {
+        if options.seed_servers.len() > ConnectOptions::MAX_SEED_SERVERS {
             return Err(Report::new(ClientError::TooManySeedServers {
                 count: options.seed_servers.len(),
             }));
@@ -482,8 +487,9 @@ impl Client {
             .await
     }
 
-    /// Captures the exact identity and inputs before a command is awaited. A caller can retain
-    /// the returned handle across cancellation and retry that one logical command explicitly.
+    /// Captures the exact identity and inputs before a statement is awaited. A caller can retain
+    /// the returned handle across cancellation and retry a durable command explicitly. Repeating
+    /// a session-local request does not recover its earlier outcome under this reference.
     pub async fn prepare_execution(&self, query: impl Into<String>) -> ExecutionHandle {
         let query = query.into();
         let route = Self::route(&query);
@@ -536,7 +542,9 @@ impl Client {
         }
     }
 
-    /// Runs a prepared statement under the identity its handle captured.
+    /// Runs a prepared statement under the identity its handle captured. A durable command can
+    /// recover its outcome under that identity; a session-local request may be refused after an
+    /// earlier attempt succeeded.
     ///
     /// The call is the prepared execution itself rather than a future that awaits it, so a host
     /// blocking on it carries no extra frame on its thread's stack.
@@ -1104,15 +1112,7 @@ impl Client {
                     .request_until(request, None, wait, cancellation)
                     .await?
                 {
-                    ReplyBody::Command(outcome) => {
-                        if outcome.execution_reference != execution.reference {
-                            return Err(Report::new(ClientError::ExecutionReferenceMismatch {
-                                expected: execution.reference.clone(),
-                                received: outcome.execution_reference,
-                            }));
-                        }
-                        Ok(CommandOutcome::from(*outcome))
-                    }
+                    ReplyBody::Command(outcome) => Ok(CommandOutcome::from(*outcome)),
                     other => Err(Report::new(ClientError::unexpected_reply(
                         RequestKind::Command,
                         other,
@@ -1159,6 +1159,7 @@ impl Client {
             domain: attempt.contract.domain.clone(),
             statement,
             subscription_type: attempt.contract.subscription_type,
+            expected_schema: None,
         });
         let response = self.request(request, Some(exchange), None).await;
         let outcome = match response {
@@ -1176,8 +1177,8 @@ impl Client {
             }
         };
         let opened = match &outcome.disposition {
-            nervix_client_wire::SubscribeDisposition::Opened(opened) => Some(&opened.subscription),
-            nervix_client_wire::SubscribeDisposition::Failed => None,
+            nervix_client_wire::SubscribeDisposition::Opened(opened) => Some(&**opened),
+            nervix_client_wire::SubscribeDisposition::Refused(_) => None,
         };
         self.inner.events.emitters.desired.created(&attempt, opened);
         let mut outcome = CommandOutcome::from(outcome);
@@ -1355,7 +1356,7 @@ impl Client {
                 timeout.unwrap_or(self.inner.connector.request_timeout()),
                 async {
                     // Register before sending so a prompt reply always finds its waiter.
-                    let Some(mut registered) = exchange.register() else {
+                    let Some(mut registered) = exchange.register_for(&request) else {
                         return Err(Report::new(exchange.pending.lock().failure()));
                     };
                     let message = ClientMessage {
@@ -1388,6 +1389,9 @@ impl Client {
                                     request: kind,
                                 }))
                             }
+                            failure @ (ClientError::ExecutionReferenceMismatch { .. }
+                            | ClientError::ReplyKindMismatch { .. }) => Err(Report::new(failure)
+                                .change_context(ClientError::RequestInterrupted { request: kind })),
                             failure => Err(Report::new(failure)),
                         },
                     }
@@ -1465,10 +1469,15 @@ impl Client {
     ///
     /// The stream outlives the session. When the session ends, it reports
     /// [`SubscriptionEvent::Interrupted`] for every subscription the session held that the server
-    /// had not ended, opens a new session, and opens each of them again as a new generation. An
-    /// opening that session refuses or leaves unanswered is reported as
-    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. A subscription
-    /// the server ended is never opened again, and its [`SubscriptionEvent::Ended`] is reported
+    /// had not ended, opens a new session, and opens each of them again as a new generation that
+    /// expects the schema the generation it replaces announced. An opening that session refuses
+    /// because the relay or its domain no longer exists, or because the relay announces another
+    /// schema, ends the subscription with [`SubscriptionEvent::Ended`] as the server's end would.
+    /// An opening it refuses for another reason while the session stays open is reported as
+    /// [`SubscriptionEvent::RestorationFailed`] with its cause and sent again after a growing wait.
+    /// An opening left unanswered past the request timeout ends that session and wakes the reader
+    /// to open another. A subscription the server ended is never opened again, and its
+    /// [`SubscriptionEvent::Ended`] is reported
     /// once, after the events before it, even when its session ended before it was read. With
     /// nothing to restore it waits for the next session the client opens, and delivers the events
     /// of the subscriptions opened there. A failure to open a session is returned, and the next

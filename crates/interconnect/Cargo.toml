@@ -42,6 +42,7 @@ h2 = { workspace = true }
 http = { workspace = true }
 imbl = { workspace = true }
 meticulous = { workspace = true }
+nervix-crypto = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-models = { workspace = true }

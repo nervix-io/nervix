@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The RabbitMQ client Model, the queue source and emitter Models and the exchange
+//! - **Owns.** The RabbitMQ client Model, the queue ingestor and emitter Models and the exchange
 //!   emitter Model with their delivery modes, the queue and exchange names with the rule AMQP holds
 //!   them to, the routing key an exchange emitter computes for every record, and what each entity
 //!   declares, the metadata a delivery exposes included.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The AMQP driver, or how a queue is consumed or a queue or an exchange is
 //!   published to.
 
@@ -16,7 +16,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::{NonZeroU16, NonZeroU64};
+use std::num::NonZeroU16;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -90,7 +90,7 @@ fn rabbitmq_name_rule(text: &str) -> Result<(), ExternalNameError> {
 pub struct RabbitMqQueueIngestor {
     pub client: ClientName,
     pub queue: RabbitMqQueueName,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: RabbitMqIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -243,6 +243,7 @@ const RABBITMQ_QUEUE_METADATA: IngestorMetadataDeclaration = IngestorMetadataDec
 
 impl IngestorDeclaration for RabbitMqQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         metadata: RABBITMQ_QUEUE_METADATA,
@@ -266,6 +267,10 @@ impl IngestorDeclaration for RabbitMqQueueIngestor {
 }
 
 impl IngestorEntityBody for RabbitMqQueueIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }
@@ -369,11 +374,11 @@ impl crate::IngestorEntityChange for RabbitMqQueueIngestorChange {
 
 connector_ingestors! {
     connector RabbitMq = "RABBITMQ";
-    /// What a RabbitMQ source reads.
+    /// What a RabbitMQ ingestor reads.
     pub enum RabbitMqIngestor;
     /// The alterations of the ingestors that read a RabbitMQ entity.
     pub enum RabbitMqQueueIngestorAlteration;
-    /// The entities a RabbitMQ source reads.
+    /// The entities a RabbitMQ ingestor reads.
     pub enum RabbitMqIngestorEntity {
         Queue(RabbitMqQueueIngestor => RabbitMqQueueIngestorChange) = "QUEUE", "RabbitMQ";
     }

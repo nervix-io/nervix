@@ -456,20 +456,23 @@ mod tests {
             max_messages: NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let mut source = NatsSubjectIngestor::open(&plan, 0)
+        let mut ingestor = NatsSubjectIngestor::open(&plan, 0)
             .await
             .expect("opening a NATS ingestor does not connect");
-        source
+        ingestor
             .resume()
             .await
             .expect("the ingestor subscribes through the stand-in server");
 
         let cancellation = IngestorReadCancellation::new();
         cancellation.cancel();
-        let interrupted = timeout(OBSERVATION_BOUND, source.next_batch(request, &cancellation))
-            .await
-            .expect("a cancelled read ends at once")
-            .expect("a cancelled read is not a failure");
+        let interrupted = timeout(
+            OBSERVATION_BOUND,
+            ingestor.next_batch(request, &cancellation),
+        )
+        .await
+        .expect("a cancelled read ends at once")
+        .expect("a cancelled read is not a failure");
         let IngestorBatch::Interrupted { gathered } = interrupted else {
             panic!("a read the host cancelled ends as interrupted");
         };
@@ -480,7 +483,7 @@ mod tests {
             .expect("the scripted server waits for the delivery to be allowed");
         let batch = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the delivered message reaches the ingestor")
@@ -526,14 +529,14 @@ mod tests {
             max_messages: NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let mut source = NatsSubjectIngestor::open(&plan, 0)
+        let mut ingestor = NatsSubjectIngestor::open(&plan, 0)
             .await
             .expect("opening a NATS ingestor does not connect");
         assert!(
-            source.needs_resume(),
+            ingestor.needs_resume(),
             "an opened ingestor has not subscribed yet"
         );
-        let resumed = source
+        let resumed = ingestor
             .resume()
             .await
             .expect("the ingestor subscribes through the stand-in server");
@@ -541,7 +544,7 @@ mod tests {
 
         let batch = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the delivered message reaches the ingestor")
@@ -558,7 +561,7 @@ mod tests {
 
         let ended = timeout(
             OBSERVATION_BOUND,
-            source.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the lost connection ends the wait for the next message");
@@ -574,11 +577,11 @@ mod tests {
             Some(NatsSubjectIngestorError::ConnectionLost)
         ));
         assert!(
-            source.needs_resume(),
+            ingestor.needs_resume(),
             "the host reconnects an ingestor whose subscription ended through its resume"
         );
 
-        let error = source
+        let error = ingestor
             .resume()
             .await
             .expect_err("the server is down, so the next resume cannot connect");
@@ -794,7 +797,7 @@ mod tests {
                             lost,
                         )
                         .await
-                        .expect("the source selects ordered transport headers");
+                        .expect("the ingestor selects ordered transport headers");
                         let mut subscription = client
                             .subscribe("events")
                             .await

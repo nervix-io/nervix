@@ -72,7 +72,8 @@ impl RuntimeIngestorHost {
         intake_batch: NonZeroUsize,
     ) -> IngestorIntakeResult<bool> {
         if poll.dropped_header_values > 0 {
-            self.header_values_dropped
+            self.interactions
+                .header_values_dropped
                 .inc_by(poll.dropped_header_values.arch_into());
         }
         for failure in poll.failures {

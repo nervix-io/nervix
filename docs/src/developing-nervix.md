@@ -420,6 +420,15 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
+NATS authentication has a focused public entry point,
+`just test-nats-authentication --concurrency 2 --retry 0`, selecting its real-broker one- and
+three-node scenarios and preparing only the tools those scenarios need. The maintained dependency
+forks can be qualified from their source checkouts with `just test-nkeys-codec <checkout>` for the
+format-only graph, `just test-nkeys-signing <checkout>` for the default/XKey APIs, and
+`just test-nats-driver <checkout> auth_utils::tests` for borrowed credentials parsing.
+`just fmt-nkeys-codec <checkout>` formats that dependency without changing this repository's
+package selection. Ordinary Nervix connector tests exercise the immutable dependency pins.
+
 ### CI runners
 
 Each CI job's `runs-on` label picks one of three kinds of machine.
@@ -707,8 +716,8 @@ and exact `value`, `identity` and `state` roles at their semantic owners. The
 [typed-state contracts](./typed-states.md#source-owned-identity-and-installation-contracts) state the
 supported scope. `just test-typed-ratchet-contracts <unittest selector...>` runs focused pass/fail
 compiler fixtures after preparing `just test-typed-ratchet-compiler`. `just test-ratchet-units`
-also qualifies language provenance before resolution; `python3 -m scripts.check_layer_provenance`
-prints current source/manifest violations. Calibration logs and complete matrix/coverage outputs
+also qualifies language provenance before resolution; `just ratchet` prints current
+source/manifest violations. Calibration logs and complete matrix/coverage outputs
 belong on the owning task, not in the source tree. Compilation under a modeled mode qualifies
 recognition and supplies no concurrency execution evidence.
 

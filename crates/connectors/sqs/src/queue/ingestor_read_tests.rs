@@ -26,7 +26,7 @@ use super::{
     SqsQueueIngestorResult,
 };
 use crate::queue::connection_tests::{
-    Fixture, GENEROUS_BUDGET, QUEUE, RefusedEndpoint, batch_request, client_config, open_source,
+    Fixture, GENEROUS_BUDGET, QUEUE, RefusedEndpoint, batch_request, client_config, open_ingestor,
     read_request, silent_service,
 };
 
@@ -91,20 +91,20 @@ fn held_receive(
     })
 }
 
-/// A ingestor instance polling the queue of the stand-in on `listener`, whose URL it already looked
+/// An ingestor instance polling the queue of the stand-in on `listener`, whose URL it already looked
 /// up.
-async fn polling_source(fixture: &Fixture, listener: &TcpListener) -> SqsQueueIngestor {
+async fn polling_ingestor(fixture: &Fixture, listener: &TcpListener) -> SqsQueueIngestor {
     let port = listener
         .local_addr()
         .expect("a bound listener has an address")
         .port();
-    let mut source = open_source(
+    let mut ingestor = open_ingestor(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
     )
     .await;
-    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
-    source
+    ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+    ingestor
 }
 
 /// What the host does once the read's receive reached the stand-in, before the stand-in answers it.
@@ -133,13 +133,13 @@ async fn read_while_the_receive_is_held(
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("a loopback port is available");
-    let mut source = polling_source(fixture, &listener).await;
+    let mut ingestor = polling_ingestor(fixture, &listener).await;
     let (arrived, receive_arrived) = oneshot::channel();
     let (answer_now, answer_held) = oneshot::channel();
     let service = held_receive(listener, answer, arrived, answer_held);
 
     let cancellation = IngestorReadCancellation::new();
-    let read = source.next_batch(batch_request(), &cancellation);
+    let read = ingestor.next_batch(batch_request(), &cancellation);
     let host = async {
         receive_arrived
             .await
@@ -298,14 +298,14 @@ async fn a_receive_that_cannot_reach_the_service_fails_the_read() {
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
     let port = endpoint.port();
-    let mut source = open_source(
+    let mut ingestor = open_ingestor(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
     )
     .await;
-    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+    ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
 
-    let Err(report) = source
+    let Err(report) = ingestor
         .next_batch(batch_request(), &IngestorReadCancellation::new())
         .await
     else {
@@ -341,8 +341,8 @@ async fn a_receive_the_service_never_answers_ends_within_timeout_ms_after_its_lo
         key: "timeout_ms".to_string(),
         value: budget.as_millis().to_string(),
     });
-    let mut source = open_source(&config, fixture.dns()).await;
-    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+    let mut ingestor = open_ingestor(&config, fixture.dns()).await;
+    ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
     // The service takes the receive and never answers it, holding its connection open.
     let service = nervix_primitives::task::spawn(async move {
         let (mut stream, _) = listener
@@ -356,7 +356,7 @@ async fn a_receive_the_service_never_answers_ends_within_timeout_ms_after_its_lo
     let started = Instant::now();
     let read = timeout(
         GENEROUS_BUDGET,
-        source.next_batch(batch_request(), &IngestorReadCancellation::new()),
+        ingestor.next_batch(batch_request(), &IngestorReadCancellation::new()),
     )
     .await
     .expect("a receive the service never answers ends within its long poll and timeout_ms");
@@ -398,16 +398,16 @@ async fn a_receive_the_service_never_answers_ends_within_timeout_ms_after_its_lo
     );
 }
 
-/// A source whose client's `timeout_ms` is its `budget`, addressing a queue on a service that
+/// An ingestor whose client's `timeout_ms` is its `budget`, addressing a queue on a service that
 /// accepts every connection and never answers, with the service and the connections it holds open.
-struct UnansweredSource {
-    source: SqsQueueIngestor,
+struct UnansweredIngestor {
+    ingestor: SqsQueueIngestor,
     budget: Duration,
     _service: JoinHandle<()>,
     _connections: nervix_primitives::sync::mpsc::Receiver<nervix_primitives::net::TcpStream>,
 }
 
-impl UnansweredSource {
+impl UnansweredIngestor {
     async fn start(fixture: &Fixture) -> Self {
         let budget = Duration::from_millis(300);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -424,17 +424,17 @@ impl UnansweredSource {
             key: "timeout_ms".to_string(),
             value: budget.as_millis().to_string(),
         });
-        let mut source = open_source(&config, fixture.dns()).await;
-        source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+        let mut ingestor = open_ingestor(&config, fixture.dns()).await;
+        ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
         Self {
-            source,
+            ingestor,
             budget,
             _service: service,
             _connections: connections,
         }
     }
 
-    /// The position of a message the source received, which a settlement addresses.
+    /// The position of a message the ingestor received, which a settlement addresses.
     fn position() -> SqsQueueIngestorPosition {
         SqsQueueIngestorPosition {
             receipt_handle: "receipt-handle".to_string(),
@@ -445,13 +445,13 @@ impl UnansweredSource {
 #[nervix_primitives::test]
 async fn a_delete_the_service_never_answers_ends_within_timeout_ms() {
     let fixture = Fixture::start().await;
-    let mut unanswered = UnansweredSource::start(&fixture).await;
+    let mut unanswered = UnansweredIngestor::start(&fixture).await;
 
     let acknowledged = timeout(
         GENEROUS_BUDGET,
         unanswered
-            .source
-            .acknowledge(&[UnansweredSource::position()]),
+            .ingestor
+            .acknowledge(&[UnansweredIngestor::position()]),
     )
     .await
     .expect("a delete the service never answers ends within the client's timeout_ms");
@@ -479,10 +479,13 @@ async fn a_delete_the_service_never_answers_ends_within_timeout_ms() {
 #[nervix_primitives::test]
 async fn a_batch_delete_the_service_never_answers_ends_within_timeout_ms() {
     let fixture = Fixture::start().await;
-    let mut unanswered = UnansweredSource::start(&fixture).await;
-    let batch = [UnansweredSource::position(), UnansweredSource::position()];
+    let mut unanswered = UnansweredIngestor::start(&fixture).await;
+    let batch = [
+        UnansweredIngestor::position(),
+        UnansweredIngestor::position(),
+    ];
 
-    let acknowledged = timeout(GENEROUS_BUDGET, unanswered.source.acknowledge(&batch))
+    let acknowledged = timeout(GENEROUS_BUDGET, unanswered.ingestor.acknowledge(&batch))
         .await
         .expect("a batch delete the service never answers ends within the client's timeout_ms");
 
@@ -509,11 +512,13 @@ async fn a_batch_delete_the_service_never_answers_ends_within_timeout_ms() {
 #[nervix_primitives::test]
 async fn a_visibility_change_the_service_never_answers_ends_within_timeout_ms() {
     let fixture = Fixture::start().await;
-    let mut unanswered = UnansweredSource::start(&fixture).await;
+    let mut unanswered = UnansweredIngestor::start(&fixture).await;
 
     let rejected = timeout(
         GENEROUS_BUDGET,
-        unanswered.source.reject(&[UnansweredSource::position()]),
+        unanswered
+            .ingestor
+            .reject(&[UnansweredIngestor::position()]),
     )
     .await
     .expect("a visibility change the service never answers ends within the client's timeout_ms");

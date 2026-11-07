@@ -115,7 +115,7 @@ An operation waiting for a turn holds no place in the class's queue. A place in 
 every byte the class releases until it is satisfied, so a storage operation waiting there would
 hold the class's remaining room for itself until the store's own earlier working set ended. Storage
 operations instead wait for each other at the turn, and the rest of the class stays with its other
-work: a source's control call, a replication frame being encoded and a follower's answer find room
+work: an ingestor's control call, a replication frame being encoded and a follower's answer find room
 beside the working set the store holds. A working set returns its bytes before its turn passes, so
 the next one is admitted without waiting in the class.
 
@@ -358,9 +358,24 @@ older voter's run the same way, without changing the membership.
 [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
 publishes and what a refused node does. Each membership reconciliation gives a blocking learner
 catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
-learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
-learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
-tries again while ordinary replication continues.
+learner caught up; the membership change has its own ten-second bound. A catch-up timeout leaves
+the node a learner. A failed reconciliation records `raft membership reconciliation failed`, and
+the one-second reconciliation loop tries again while ordinary replication continues.
+
+A voter change first commits a joint configuration and then commits its uniform target. The joint
+configuration requires a majority of each constituent voter set; its union is not a uniform quorum.
+If the second step is refused or interrupted, reconciliation finishes the recorded target before
+planning another admission or address update. It preserves existing learners and completes the
+removal of voters excluded by a `DROP NODE`, rather than deriving a replacement target from the
+joint union or from gossip. The maintained OpenRaft completion operation checks the effective
+membership and proposes its continuation in one synchronous Core turn. A read before the request
+is only an observation: another request or a peer update can finish that transition before Core
+handles completion. An already uniform Core returns its effective and committed records without
+proposing an entry. A still-joint Core flattens its current target through the ordinary membership
+commitment, leader and lease gates, preserving independent learners and the existing removed-voter
+policy. Nervix then waits for the returned uniform membership to be committed. A timed wait counts as
+success only when the observed configuration is committed and uniform. Leadership changes and
+retries can continue the same committed joint transition.
 
 When discovery reports a different interconnect endpoint for an existing member, reconciliation
 replaces that member's recorded Raft address. A returning voter keeps its voter role; it is not
@@ -369,9 +384,13 @@ reconciliation passes propose no further address change. The stored address supp
 contact hints; Raft traffic resolves the authenticated node identity through the interconnect.
 
 The consensus event stream and `info` log record `raft add learner`, `raft wait for learner`,
-`raft update address`, `raft promote voters`, and `raft membership updated` transitions.
+`raft update address`, `raft promote voters`, and `raft membership updated` transitions. Every
+report on the consensus event stream reaches the node's sessions as a `Leadership` notice.
 `SHOW CLUSTER STATUS` reports the local `raft.last_log_index`, `raft.last_applied`, and each member's
-learner or voter role and recorded address.
+learner or voter role and recorded address. `raft.membership_joint` says whether the effective
+configuration still requires multiple majorities; `raft.membership_committed` says whether that
+effective configuration is committed. A converged voter list requires `membership_joint: false`
+and `membership_committed: true`, as well as the expected voter identities.
 
 ## Bounded Log Reading
 
@@ -381,10 +400,10 @@ one oversized first entry travels alone. The reader releases the ordered storage
 chunks and retains the chunk's working set, its memory charge and the store's Commands turn, until
 its entries have been handed to the consumer. Handing out the final entry releases the exhausted
 iterator allocation, its charge and its turn before that poll returns. A consumer that parks with
-its final entry therefore holds no empty chunk that could keep another reader or a source control
+its final entry therefore holds no empty chunk that could keep another reader or an ingestor control
 call out of the Commands class. A chunk that still holds entries, such as a replication stream's
 while its follower has not answered, keeps its working set; another reader or storage operation
-then waits for the turn rather than in the Commands class, so a source control call still finds
+then waits for the turn rather than in the Commands class, so an ingestor control call still finds
 room. The reader retains an explicit exhausted boundary, without the allocation, so a subsequent
 chunk still yields before requesting the ordered storage worker.
 
@@ -491,28 +510,33 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_stream_emit_logs`,
-`raft_stream_emit_meta`, `raft_stream_emit_state`, and `raft_stream_emit_snapshots`. Opening it validates
-the complete keyspace namespace before reading any records. This namespace identifies the current
-Model shape, including the separate JSON and CBOR wire type enums, AVRO representation types,
-explicit `BASE64` codec encoding, a Pulsar subscription's required type, an owned Pulsar
-subscription's required start position, a Kafka consumer group's required start position, the
-serialized Sentry platform field, an ingestor's `TIMESTAMP AT metadata.<field>` source, the `NATS
-STREAM` ingestor and emitter entities, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS QUEUE
-ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC ingestor
-writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside its
-publishing mode, a `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, whether a polled
-HTTP request's header holds a literal or names a client secret, and the branch partition count every
-resolved branch declaration of the committed schedule carries. It identifies the current statement
-shape as well, which the statements a transaction keeps are stored in: `ALTER BRANCH` among those
-statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that changes one part of its
-entity's body, an envelope clause or the properties, or one part of a construction where it stands.
-Its state metadata requires the current `ClusterState` encoding, including committed cluster
-parameters, the durable restore installation gate and the unit-keyed committed schedule in which a
-relay of a partitioned branch is scheduled as one unit per partition. Native counts in commands,
-queued transactions, progress, outcomes, and plan, report and topology headers are archived as
-fixed-width 64-bit values with checked native decoding. Log replay, state recovery and snapshot
-installation therefore retain their complete magnitudes. See
+The current emitter Models carry explicit key expressions, source-partition routing and
+expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces: `raft_key_avro_logs`,
+`raft_key_avro_meta`, `raft_key_avro_state`, and
+`raft_key_avro_snapshots`. Opening it validates the complete keyspace namespace before
+reading any records. This namespace identifies the current Model shape, including the separate JSON
+and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
+subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+consumer group's required start position, the serialized Sentry platform field, an ingestor's
+`TIMESTAMP AT metadata.<field>` source, the separate `NATS STREAM` ingestor and emitter entities, an SQS QUEUE emitter's `SEND` request shape, the receive
+count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
+MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
+writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
+whether a polled HTTP request's header holds a literal or names a client secret, and the branch
+partition count every resolved branch declaration of the committed schedule carries. It identifies
+the current statement shape as well, which the statements a transaction keeps are stored in:
+`ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+changes one part of its entity's body, an envelope clause or the properties, or one part of a
+construction where it stands. Its state metadata requires the current `ClusterState` encoding, 14,
+including committed cluster parameters, the durable restore installation gate and the unit-keyed
+committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
+The current shape also requires inferencer state bindings and their initial expressions,
+typed ingestor instancing, exact-unit placement-group members
+and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions,
+progress, outcomes, and plan, report and topology
+headers are archived as fixed-width 64-bit values with checked native decoding. Log replay, state
+recovery and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
 
 The committed domain schedule stores the current unit map on every scheduled node. Each unit owns

@@ -319,30 +319,30 @@ the node restarts.
 The terminating node then stops new intake on **every** one of its ingestors, including endpoint and
 Syslog ingestors that serve on every node and ingestors whose scheduled owner did not move. Its
 generators stop producing. Intake never reopens: there is no resume path out of a shutdown drain.
-If a broker-style source is still resuming, the host cancels that pending resume when shutdown
-arrives, drops its DNS, socket and handshake work, and closes the source before exiting. A quiesce
+If a broker-style ingestor is still resuming, the host cancels that pending resume when shutdown
+arrives, drops its DNS, socket and handshake work, and closes the ingestor before exiting. A quiesce
 change also cancels an in-progress resume so the next loop turn observes the new intake state.
-A broker read in flight when intake stops is cancelled, never dropped: the source returns what it
+A broker read in flight when intake stops is cancelled, never dropped: the ingestor returns what it
 already took from its transport, the host takes that in as a payload already received, which still
-dispatches, and only then suspends the source. A read the ingestor's final stop meets is taken in
-the same way before the source closes. See
-[Interrupted reads](./connector-contract.md#interrupted-reads) for how each source ends a cancelled
+dispatches, and only then suspends the ingestor. A read the ingestor's final stop meets is taken in
+the same way before the ingestor closes. See
+[Interrupted reads](./connector-contract.md#interrupted-reads) for how each ingestor ends a cancelled
 read.
 
-Source-instance readiness retirement is final and names the ending host's exact handle. Shutdown
+Ingestor-instance readiness retirement is final and names the ending host's exact handle. Shutdown
 retires installed readiness before withdrawing the registry. Terminal domain execution teardown
 cancels its relay channel publication after owned tasks stop; retained producer or channel handles
 then reject further dispatch and cannot attach to a restarted execution.
 
-This intake stop ignores `ON QUIESCE`. That clause governs what an external source experiences
+This intake stop ignores `ON QUIESCE`. That clause governs what an external system experiences
 during a resumable hold — a model alteration, a domain pause, or memory-pressure shedding — where
 the ingestor will run again. Shutdown and ownership handoff are not resumable, so polling and
 endpoint admission simply stop, and no `SUSPEND`, `BUFFER`, `DROP`, or `REJECT` policy is applied on
 behalf of the stop. An endpoint refuses new requests outright, without offering a retry delay.
 
-Endpoint source close and terminal table clearing end each exact intake lifetime before withdrawing
+Endpoint ingestor close and terminal table clearing end each exact intake lifetime before withdrawing
 its binding. HTTP requests and WebSocket sessions that retained a route then see absent intake on
-later admission; a replacement source does not reopen that retained lifetime. A request already
+later admission; a replacement ingestor does not reopen that retained lifetime. A request already
 holding an intake lease may finish within the existing shutdown deadline. Endpoint definitions and
 intake leases are volatile publications and are reconstructed from the installed revision on startup.
 
@@ -354,13 +354,13 @@ completed is cancelled at admission stop.
 
 For endpoint `MODE ACK`, intake stopping also resolves held replies as unavailable immediately,
 using the existing client `outcome_unknown` / `interrupted` outcome and the configured retry delay.
-The waiter observes the quiesce publication before source close and also observes exact lifetime
+The waiter observes the quiesce publication before ingestor close and also observes exact lifetime
 ending. This ends the response wait, not admitted graph effects: downstream work may still finish
 during drain. A sender that retries must allow duplicate effects. Unacknowledged endpoint requests
 retain their admission-only response boundary.
 
 Payloads already admitted continue through their routes.
-Each source host retains the quiesce publication it observed before awaiting dispatch. Its next
+Each ingestor host retains the quiesce publication it observed before awaiting dispatch. Its next
 change wait compares against that publication after registering the waiter, so a shutdown or
 ownership-handoff engagement during dispatch is observed on the next loop turn even when the
 notification arrived before the wait began.
@@ -377,7 +377,7 @@ A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode ret
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded
 and counted as dropped when the ingestor stops. A retained payload whose unfolding was still waiting
 for the extension workers stays in the buffer, so the stop ends that wait at once and discards it
-with the rest. A live payload a source handed over without an acknowledgement, such as a paced
+with the rest. A live payload an ingestor handed over without an acknowledgement, such as a paced
 poll, whose unfolding was still waiting for the extension workers is dropped when its ingestor
 stops; the stop ends that wait at once as well. Only work already admitted into the graph is
 drained.
@@ -387,11 +387,11 @@ drained.
 Drain support has two parts that share the drain timeout. Both are also bounded by the shutdown
 deadline.
 
-The stopping node closes its local source intake at the start of drain support, before it asks the
-leader to move any scheduled work. Kafka and other source ingestors stop taking new input, and
+The stopping node closes its local ingestor intake at the start of drain support, before it asks the
+leader to move any scheduled work. Kafka and other ingestors stop taking new input, and
 generators stop producing. A payload already admitted and its acknowledgement chain continue
-through the installed relays and emitters. This prevents a source from admitting a new ACK root
-while a downstream emitter is moving. A destination node can start its replacement source after
+through the installed relays and emitters. This prevents an ingestor from admitting a new ACK root
+while a downstream emitter is moving. A destination node can start its replacement ingestor after
 the handoff; intake on that node remains open. The local intake closure is permanent for the
 stopping process and is reused by the later in-place drain.
 
@@ -436,12 +436,18 @@ remains: no relay batch, no runtime-node work item, no emitter buffer or active 
 admitted acknowledgement root. A stopped or extremely slow domain clock cannot hold rows out of the
 drain, because the force flush does not wait for a logical cadence to come due.
 
+An emitter force flush publishes a partial batch without waiting for either batching limit to be
+filled. Prepared attempts keep their original bytes and source members through the drain. A
+batch-policy change drains that work before activating the replacement policy, and a failed
+pre-commit drain leaves the previous task responsible for it. These buffers and member maps are
+volatile; terminal cancellation never treats an unanswered member as delivered.
+
 Window processors are the one exception to that release. A force flush purges timed-out aggregate
 state but emits only windows that have met their declared `WIDTH`. A partially filled window is not
 emitted early by a shutdown, so its rows do not reach the emitter. A row's acknowledgement completes
 when the window steps past the row; until then its shares are parked, so the drain does not wait
 for them. The branch's final checkpoint keeps the retained rows for the next task of the branch to
-restore, and teardown ends their shares unacknowledged: a source with external acknowledgements
+restore, and teardown ends their shares unacknowledged: an ingestor with external acknowledgements
 redelivers those rows after the restart, and the restored window admits them beside the rows it
 restored.
 
@@ -462,8 +468,8 @@ work, and it requests a separate cluster-wide confirming generation before captu
 Parked `REQUIRED WAIT` messages and the rows windows retain do not hold that cut open, and a failed
 drain resumes the domain. The cut captures retained window rows as window state.
 When a parked message has crossed nodes, remote ACK progress carries its parked state back through
-the source's acknowledgement chain. The drain excludes that chain while the message is parked;
-resuming it reactivates the chain, and only a terminal ACK completes the source attempt.
+the ingestor's acknowledgement chain. The drain excludes that chain while the message is parked;
+resuming it reactivates the chain, and only a terminal ACK completes the ingestor attempt.
 Every flush generation and every state poll re-evaluates a parked message against the state
 present, and a message whose dependency is still absent stays parked throughout that read. Its
 chain never reads as active work while it is re-evaluated, on its own node or at the node that
@@ -572,7 +578,7 @@ Three kinds of work deliberately do not hold the drain open:
 
 - **Pending `REQUIRED WAIT` records.** A message suspended on absent materialized state cannot
   finish, because the dependency is not there. Every force flush retries it against the state that
-  is present; whatever still waits at the end is negatively acknowledged. Its source redelivers it
+  is present; whatever still waits at the end is negatively acknowledged. Its ingestor redelivers it
   after the restart, and the record is processed then against the state that has since arrived.
 - **Rows a window retains.** Only further input steps a window past them, and the window's
   checkpoint keeps them, as described above.
@@ -587,11 +593,11 @@ peer after that peer finished draining is negatively acknowledged.
 ### When The Drain Does Not Finish
 
 A drain that reaches its timeout reports itself abandoned and shutdown continues. Terminal teardown
-then negatively acknowledges the remaining work. A source with external acknowledgements redelivers
-it after a restart; a source in `MODE NO ACK` loses it.
+then negatively acknowledges the remaining work. An ingestor with external acknowledgements redelivers
+it after a restart; an ingestor in `MODE NO ACK` loses it.
 
 This is the behavior an unavailable emitter produces. An emitter whose emitter will not accept records
-holds the drain until the timeout, its source offsets are never committed, and the records are
+holds the drain until the timeout, its ingestor offsets are never committed, and the records are
 redelivered and published after the node restarts and the emitter recovers.
 
 The log distinguishes the two ways a drain runs out of time:
@@ -709,7 +715,7 @@ The scheduler acts on what application health and gossip report, so a forced rec
 work off a node that is still running. That node stops the moved runtime when it applies the
 published schedule. A batch a relay owner routed to it for a moved consumer, and that reaches its
 runtime afterwards, finds no attached consumer and fails its attached acknowledgements, so the
-source redelivers the record to the new owner rather than committing it; see
+ingestor redelivers the record to the new owner rather than committing it; see
 [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver).
 
 Forced recovery is the path that publishes a schedule when the source cannot participate. It stages
@@ -749,7 +755,7 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 | Single node | No replacement exists. Nothing is cordoned, no ownership moves, and all admitted work drains in place before the process exits. |
 | Follower with a reachable leader | The node asks the leader, over the cluster interconnect, to drain it, then completes what remains in place. |
 | Leader | The leader drains itself in process and commits the release of its own cordon before it stops. Leadership is not transferred first. Peers elect a leader when its absence outlasts their election timeout; a quickly restarted leader can instead restore leadership in its persisted term. |
-| Last schedulable node | Same as a single node: no replacement candidate exists, so everything completes in place, including source offset commits. |
+| Last schedulable node | Same as a single node: no replacement candidate exists, so everything completes in place, including ingestor offset commits. |
 | Only peer is itself terminating | A terminating incarnation is not a placement candidate, so the node takes the no-replacement path and completes its work in place. |
 | Every node at once | Each node advertises terminating, finds no eligible destination, and drains locally within its own drain timeout. A leader that has not yet observed a peer's advertisement can still choose that peer for a move; the peer refuses the preparation as a terminating destination, and the work completes in place on its owner. A node that asked for its drain before it saw the others terminating gives the release of its cordon only the one-second grace once it sees them terminating, because only voters that are stopping too could commit it. |
 | Leader unreachable, or no quorum | The node waits for a leader only until its drain budget runs out, reports the drain-support phase abandoned, and still completes its local drain. Nothing is cordoned. |
@@ -784,50 +790,52 @@ within the drain and shutdown deadlines.
 
 ## Connector Contracts
 
-[Connector Crates And The Connector Contract](./connector-contract.md) defines normal source and
+[Connector Crates And The Connector Contract](./connector-contract.md) defines normal ingestor and
 emitter ownership and completion points. This section describes what a node's drain can complete
 before its shared stop deadline.
 
 Shutdown does not change any connector's delivery contract. It changes only whether a connector
 reaches its completion point before the process ends.
 
-A graceful stop completes two things for its connectors. Each source in an acknowledged mode
-confirms on its transport the positions of every batch its graph acknowledged before the source
+A graceful stop completes two things for its connectors. Each ingestor in an acknowledged mode
+confirms on its transport the positions of every batch its graph acknowledged before the ingestor
 closes, within the drain timeout, and each emitter finishes its emitter when it stops, sending what
-the emitter's client still holds by the deadline it is given. [Sources](#sources) and [Emitters](#emitters)
+the emitter's client still holds by the deadline it is given. [Ingestors](#ingestors) and [Emitters](#emitters)
 give each one's deadline and what is left when it passes, and the
 [connector delivery standard](./connector-contract.md#connector-delivery-standard) states the rules
 both follow.
 
-### Sources
+### Ingestors
 
-A Redis Pub/Sub source stops its dedicated reader and joins it before close or suspend returns.
+A Redis Pub/Sub ingestor stops its dedicated reader and joins it before close or suspend returns.
 Its bounded read-ahead queue is volatile, unadmitted input and is discarded when that subscription
 ends. Redis Pub/Sub provides no acknowledgement or replay for those messages; an idle probe does
 not change that delivery contract.
 
 An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
 Removing or changing the declared input retires its external state separately, after its exact
-source tasks stop; a stopped domain still holds the typed plan needed for cleanup. See
+ingestor tasks stop; a stopped domain still holds the typed plan needed for cleanup. See
 [MQTT session retirement](./connector-contract.md#mqtt-session-retirement) for cleanup budgets,
 best-effort failures and replacement preparation. Node shutdown does not retire an unchanged input.
 
-An outbound WebSocket source ending during shutdown or an ownership move sends a Close frame and
+An outbound WebSocket ingestor ending during shutdown or an ownership move sends a Close frame and
 waits for the peer's Close within a one-second send-and-reply budget. A failed or unanswered close
 is reported and the socket is released; the shutdown deadline still bounds the surrounding
 lifecycle. This protocol handshake does not acknowledge payload delivery or add redelivery.
 
-A source acknowledges or commits the work that reached its emitters before its session stops. A batch
-acknowledged through the graph stays outstanding admitted work until its source has confirmed the
+An ingestor acknowledges or commits the work that reached its emitters before its session stops. A batch
+acknowledged through the graph stays outstanding admitted work until its ingestor has confirmed the
 batch's positions on its transport, so the drain waits for that confirmation as it waits for any
-other acknowledgement root, within the drain timeout. What a source's confirmation means is the
+other acknowledgement root, within the drain timeout. What an ingestor's confirmation means is the
 acknowledgement confirmation its entity declares; see
 [Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion,
-a Kafka offset commit and a Pulsar acknowledgement in an `ACK` mode are answered, and a RabbitMQ
-acknowledgement and an MQTT `PUBACK` are written to the connection, before the drain moves on. A
-Pulsar acknowledgement the broker does not answer within the client's 30-second operation timeout
-fails, and the host rejects the positions, so the drain timeout bounds it as well. A Kafka consumer
-group in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
+a Kafka offset commit, a Pulsar acknowledgement and a NATS STREAM acknowledgement in an `ACK` mode
+are answered, and a RabbitMQ acknowledgement and an MQTT `PUBACK` are written to the connection,
+before the drain moves on. A Pulsar acknowledgement the broker does not answer within the client's
+30-second operation timeout fails, and the host rejects the positions, so the drain timeout bounds
+it as well; a NATS STREAM acknowledgement the server does not answer within the client's
+10-second request timeout fails the same way. A Kafka consumer
+group in `MODE NO ACK` acknowledges nothing: when intake stops, its ingestor commits the positions its
 driver delivered since the driver's last commit, and waits for the answer before the consumer
 leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
 
@@ -846,28 +854,28 @@ until they finish; shutdown reports the retained and pending positions as unconf
 lost when the process ends.
 
 Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
-so the source's own redelivery contract applies. A source instance that stops while it still waits
-on such a batch logs `source instance stopped before its transport confirmed positions it read; the
+so the ingestor's own redelivery contract applies. An ingestor instance that stops while it still waits
+on such a batch logs `ingestor instance stopped before its transport confirmed positions it read; the
 transport presents them again` at `info`, with the count of positions. This is why a drain that
 times out leaves Kafka offsets uncommitted rather than advancing them.
 
-What that contract is depends on the source, and three groups differ sharply:
+What that contract is depends on the ingestor, and three groups differ sharply:
 
-| Source | Source acknowledgement | Admitted work when a drain does not finish |
+| Ingestor | Ingestor acknowledgement | Admitted work when a drain does not finish |
 | --- | --- | --- |
-| Kafka, Pulsar, RabbitMQ, SQS, and MQTT in an `ACK` mode | The offset is committed, the broker acknowledged, or the message deleted only after the record is acknowledged through the graph | Redelivered after the restart |
-| HTTP polling, Prometheus | None; the poller re-reads its source each cadence | Read again by a later poll |
-| NATS, Redis Pub/Sub, ZeroMQ, WebSocket clients, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
+| Kafka, Pulsar, RabbitMQ, SQS, MQTT, and NATS STREAM in an `ACK` mode | The offset is committed, the broker acknowledged, or the message deleted only after the record is acknowledged through the graph | Redelivered after the restart |
+| HTTP polling, Prometheus | None; the ingestor polls the external system each cadence | Read again by a later poll |
+| NATS SUBJECT, Redis Pub/Sub, ZeroMQ, WebSocket clients, Syslog | None exists; these ingestors offer no acknowledged mode | Lost, with nothing to redeliver it |
 | HTTP and WebSocket endpoints | `MODE NO ACK` confirms admission; `MODE ACK` holds its reply through the graph root | Held ACK replies report unavailable on intake stop; only the sender can retry, and admitted effects may duplicate |
 | Client ingestors | The producer receives each batch's outcome once its acknowledgement root resolves | Reported to its producer as of unknown outcome, or not at all when the producer's session ended first; the application decides whether to submit it again |
 
-Sources without an acknowledged mode lose a record admitted but not yet emitted when drain runs
+Ingestors without an acknowledged mode lose a record admitted but not yet emitted when drain runs
 out of time or the process is forced to end. Endpoints never redeliver input themselves: an
 application handles a refusal, interrupted reply or broken transport and decides whether to retry.
 
 A general failure handled by `ON GENERAL ERROR IGNORE` acknowledges the record, while
 `ON GENERAL ERROR LOG` negatively acknowledges it. During a drain that choice decides whether an
-acknowledged source redelivers the record after the restart.
+acknowledged ingestor redelivers the record after the restart.
 
 ### Emitters
 
@@ -887,14 +895,14 @@ its bounded Arrow IPC batches, but a waiting consumer read or a batch already se
 does not drain them. Closing public sessions during intake stop detaches their consumers and
 revokes attempts; remaining prepared batches wait for another consumer within the physical drain
 deadline. On deadline expiry terminal teardown cancels the emitter task and discards volatile
-attempt history. An attached upstream source may replay after restart, including a batch whose
+attempt history. An attached upstream ingestor may replay after restart, including a batch whose
 application effect happened but whose ACK was lost. No durable consumer cursor is restored.
 
 An HTTP emitter force-flushes its collected records into one request per eligible record, then
 waits for complete successful final response headers. Each attempt and retry wait remains bounded
 by the remaining physical drain deadline, even in a paced domain. A request still unanswered at
 that deadline is not marked delivered. Its prepared bytes, selected destination, headers, and
-retry state are volatile and disappear when the process ends. An attached acknowledged source can
+retry state are volatile and disappear when the process ends. An attached acknowledged ingestor can
 redeliver the record after restart; an unacknowledged endpoint ingestor cannot. A destination that
 applied a request whose successful response was lost can receive it again after that redelivery.
 Once the graph drain budget ends, terminal teardown cancels an emitter task waiting in an HTTP
@@ -926,7 +934,7 @@ holds nothing once a publish returns, so the publish itself is the
 completion point. [Finishing an emitter](./connector-contract.md#finishing-an-emitter) lists what each emitter
 holds and does.
 
-A emitter that stages what it accepts and publishes it later reaches its completion point at its
+An emitter that stages what it accepts and publishes it later reaches its completion point at its
 commit instead. After the buffered batches are written into such an emitter, the drain calls the emitter
 contract's commit hook and forces it, so the commit runs whatever its commit cadence says and
 without reading the domain clock, which a stopped domain no longer has. Until that commit succeeds
@@ -938,7 +946,7 @@ backoff short fails the drain.
 Iceberg is the emitter that does this. It commits its staged data through its catalog, forced by the
 drain rather than waiting for the `COMMIT EACH` cadence. Staged rows live as local files that only
 a successful commit removes, so a forced ending leaves them behind: the rows are not in the table,
-and a later run does not reclaim or commit them. An attached source redelivers that work; a
+and a later run does not reclaim or commit them. An attached ingestor redelivers that work; a
 detached one loses it.
 
 ### Duplication
@@ -1075,9 +1083,9 @@ serving their streams, so a peer's request the node has not answered fails inste
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.
 
-Runtime teardown stops a Kafka ingestor's instances like any other source's, and a Kafka emitter
-like any other emitter, and each stopped instance hands its consumer, and each emitter's sink its
-producer, to its retirement on the connector storage workers; see
+Runtime teardown stops a Kafka ingestor's instances like any other ingestor's, and a Kafka emitter
+like any other emitter, and each stopped instance hands its consumer, and each emitter its producer,
+to its retirement on the connector storage workers; see
 [Kafka client retirement](./connector-contract.md#kafka-client-retirement). Teardown does not wait
 for those retirements. The process's runtime does, as it stops once the application has returned: a
 retirement already running finishes, within the five seconds a joined consumer's coordinator has to
@@ -1126,8 +1134,8 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Written once more before their domain's stop completes: Kafka domain offsets and materialized relay records once the tasks that change them have ended, and a deduplicator or window branch what it published last, including a branch ended at its stop grace; a materialized relay, and a window whose retained rows exceed one 8 MiB snapshot section, are sealed to quota-owned files and written as segments synchronized before their header | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
-| Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets, branch lifecycle, deduplicator keys and window state | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, source positions, branch incarnations, deduplicator keys and windows, and resets materialized rows |
-| External source offsets and emitter commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
+| Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets, branch lifecycle, deduplicator keys and window state | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, ingestor positions, branch incarnations, deduplicator keys and windows, and resets materialized rows |
+| External ingestor offsets and emitter commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
 | Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process. Every producer another node forwarded here ends there as `owner lost`: its batches that node never cleared for admission are refused as `producer ended`, and only the cleared ones are of unknown outcome. The node's own sessions end, so their clients report every batch they sent without an outcome as of unknown outcome, and the nodes executing the ingestors detach those producers and finish what they admitted |
 
@@ -1168,12 +1176,12 @@ Durability is not uniform across those rows, and the difference is operationally
   checkpoints, those of materialized relays and of windows beyond one snapshot section, synchronize
   their segments and then their header, so a power loss keeps the previous complete checkpoint.
 - A WASM guest-state checkpoint is synchronized, on the branch's owner and on every replica the
-  schedule assigns, before the source acknowledgements it covers are released, so every checkpoint
+  schedule assigns, before the ingestor acknowledgements it covers are released, so every checkpoint
   that released an acknowledgement survives a host power loss. Checkpoints that branches take at the
   same time share one synchronization. See
   [Failure At Each Boundary](wasm-state.md#failure-at-each-boundary) and
   [WASM Processor Guests](wasm-processor-guests.md#recovery-replay-and-duplicates) for what a
-  recovered branch continues from and which inputs its source redelivers.
+  recovered branch continues from and which inputs its ingestor redelivers.
 
 Branch-local processor state survives only to its latest publication. A branch task aborted after
 exceeding its grace period keeps what it had published and loses the changes it made afterwards.
@@ -1419,8 +1427,8 @@ or forced one. The record that the public listeners' connections are cut carries
 admission phase still finishes `Completed` when the cut lets the listeners close before the
 deadline.
 
-A source instance that stops before its transport confirmed positions it read records
-`source instance stopped before its transport confirmed positions it read; the transport presents
+An ingestor instance that stops before its transport confirmed positions it read records
+`ingestor instance stopped before its transport confirmed positions it read; the transport presents
 them again` at `info`, with the `domain`, the `ingestor`, the `instance` and the count of
 `positions`.
 
@@ -1494,7 +1502,7 @@ Start from the outcome on each phase record.
   node takes no new placements, and `UNCORDON NODE <node_id>` clears the cordon, before or after
   the node starts again. See [Releasing The Drain Cordon](#releasing-the-drain-cordon).
 - **Work reappears after a restart.** That is redelivery, not duplication of committed work: the
-  drain ended before those records were acknowledged, so their source offered them again.
+  drain ended before those records were acknowledged, so their ingestor offered them again.
 
 ## Deployment Grace Periods
 
@@ -1520,7 +1528,7 @@ both together.
 
 ## Retained Drain Dependencies
 
-Running source, generator and emitter tasks retain their acknowledgement trackers and confirmation
+Running ingestor, generator and emitter tasks retain their acknowledgement trackers and confirmation
 counters. A drain observes those same registrations. Emitter retry state remains publishing work
 even when its buffer is empty. Idle and already-claimed force-flush participants use a retained
 readiness hint; only an available obligation enters the coordinator to claim its generation. A
@@ -1528,6 +1536,26 @@ released claim becomes available again. Task teardown removes its confirmation/s
 and pooled emitter teardown removes its wait registration; cancellation clears a pending borrow's
 wait through its guard. Handoff watches register before reading their unit's retained freeze
 publication, and release publishes thaw before waking them.
+
+## Stopping Spread Intake
+
+An ingestor instance is stopped under its exact `DomainNodeUnitRef`. Node drain suspends intake for
+the units whose primaries it owns, waits for their admitted ACK roots and transport confirmation,
+and transfers their unit-qualified offsets and branch checkpoints. A sibling whose owner remains
+live retains its host task, readiness and ACK roots. Per-partition intake moves with its exact
+relay partition component. Whole-domain shutdown still selects every current unit, including
+retained work from an ingestor whose live registration has already ended.
+
+Kafka initialization shares cold admission with the exact unit's ownership capture and final
+offset write. Stopping refuses new initialization; the final writer waits for an initialization
+already admitted to finish or reach its deadline before capturing the final state. Pending
+canonical positions survive in the same native checkpoint as the explicit-start generation. A
+plain resume transfers a delayed unit's pending positions before it begins polling.
+
+The ending loop closes its transport before its readiness is retired. MQTT input retirement
+compares the logical input once and selects only the global indices ending on this node. Forced
+node loss retains the transport's declared replay and duplicate limits; instance placement does
+not strengthen broker acknowledgement guarantees.
 
 ## Live Domain Policy
 

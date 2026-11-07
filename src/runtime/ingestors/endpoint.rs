@@ -209,12 +209,12 @@ impl EndpointIntakeStartPlan {
                 .ingestor_capabilities(NonZeroU64::MIN, acknowledgement.support()),
             acknowledgement,
         };
-        let source = C::open(&plan.connector, 0)
+        let connector = C::open(&plan.connector, 0)
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let instance: Box<dyn IngestorInstance> = Box::new(source);
+        let instance: Box<dyn IngestorInstance> = Box::new(connector);
         Ok(IngestorStart {
-            instances: vec![instance],
+            instance,
             companions: Vec::new(),
             // Requests never pass through the ingestor loop's intake: the request path admits
             // them. What the endpoint buffer retained replays one request per ingest group.
@@ -418,7 +418,7 @@ pub(super) mod tests {
         }
 
         let domain = domain("endpoint_reuse");
-        let ingestor = named::<IngestorName>("event_source");
+        let ingestor = named::<IngestorName>("event_ingestor");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
@@ -427,7 +427,7 @@ pub(super) mod tests {
         let routes = route.bindings()[0]
             .intake()
             .as_deref()
-            .assured("the fixture starts its endpoint source")
+            .assured("the fixture starts its endpoint ingestor")
             .output_routes
             .clone();
         let probe = RouteReferences {
@@ -459,7 +459,7 @@ pub(super) mod tests {
     #[ignore = "same-host routing and allocation measurement"]
     async fn endpoint_routing_cost() {
         let domain = domain("endpoint_cost");
-        let ingestor = named::<IngestorName>("event_source");
+        let ingestor = named::<IngestorName>("event_ingestor");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let allocated = tikv_jemalloc_ctl::thread::allocatedp::read()
             .assured("the server test allocator uses jemalloc");
@@ -514,7 +514,7 @@ pub(super) mod tests {
     #[nervix_primitives::test]
     async fn a_body_its_codec_refuses_is_consumed_as_a_decode_rejection() {
         let domain = domain("default");
-        let ingestor = named::<IngestorName>("event_source");
+        let ingestor = named::<IngestorName>("event_ingestor");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let mut events = runtime.events().subscribe();
 
@@ -537,7 +537,7 @@ pub(super) mod tests {
             .await
             .expect("the refused body is reported to the node's observers");
         let described = runtime
-            .describe_local_ingestor(&domain, &ingestor)
+            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .expect("the fixture's ingestor describes itself");
         let rejection = described
             .last_decode_rejection
@@ -545,7 +545,7 @@ pub(super) mod tests {
         assert_eq!(
             message,
             format!(
-                "ingestor 'event_source' general error in domain 'default': decode rejection \
+                "ingestor 'event_ingestor' general error in domain 'default': decode rejection \
                  {rejection}"
             )
         );
@@ -565,7 +565,7 @@ pub(super) mod tests {
     #[nervix_primitives::test]
     async fn undecodable_header_values_count_on_the_bound_ingestor() {
         let domain = domain("default");
-        let ingestor = named::<IngestorName>("event_source");
+        let ingestor = named::<IngestorName>("event_ingestor");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
@@ -575,6 +575,7 @@ pub(super) mod tests {
         let dropped = runtime.inner.metrics.ingestor_header_values_dropped(
             &domain,
             &ingestor,
+            Unit::SINGLE,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
 
@@ -590,7 +591,7 @@ pub(super) mod tests {
     #[nervix_primitives::test]
     async fn a_running_ingestor_refuses_a_second_start() {
         let domain = domain("default");
-        let ingestor = named::<IngestorName>("event_source");
+        let ingestor = named::<IngestorName>("event_ingestor");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let plan = runtime
             .inner
@@ -599,7 +600,7 @@ pub(super) mod tests {
             .expect("the running domain has an execution")
             .revision
             .entrypoints
-            .ingestor(&ingestor)
+            .ingestor(&ingestor, Unit::SINGLE)
             .cloned()
             .expect("the execution plans the endpoint ingestor");
 
@@ -614,15 +615,15 @@ pub(super) mod tests {
         ));
         assert_eq!(
             format!("{report:#}"),
-            "ingestor 'event_source' in domain 'default' is already running"
+            "ingestor 'event_ingestor' in domain 'default' is already running"
         );
         runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
-    async fn endpoint_source_binds_its_routes_while_its_ingestor_runs() {
+    async fn endpoint_ingestor_binds_its_routes_while_it_runs() {
         let domain = domain("default");
-        let ingestor = named::<IngestorName>("event_source");
+        let ingestor = named::<IngestorName>("event_ingestor");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
@@ -640,7 +641,7 @@ pub(super) mod tests {
             .collect::<Vec<_>>();
         assert_eq!(bound, vec![runtime_key]);
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor)
+            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .expect("describe should represent the running ingestor");
         assert!(describe.running);
         assert!(describe.ready);
@@ -662,7 +663,7 @@ pub(super) mod tests {
         let current = runtime
             .resolve_endpoint("edge.example.com", "/events")
             .into_route()
-            .assured("source stop retains the configured endpoint");
+            .assured("ingestor stop retains the configured endpoint");
         assert!(current.bindings().is_empty());
         assert!(route.bindings()[0].intake().is_none());
         let outcome = route
@@ -692,7 +693,7 @@ pub(super) mod tests {
     #[nervix_primitives::test]
     async fn endpoint_rejects_a_body_whose_unfolding_the_node_cannot_take_now() {
         let domain = domain("default");
-        let ingestor = named::<IngestorName>("event_source");
+        let ingestor = named::<IngestorName>("event_ingestor");
         let executor = single_worker_executor();
         let runtime = start_endpoint_ingestor(
             Runtime::with_executor(executor.clone()),
@@ -751,11 +752,11 @@ pub(super) mod tests {
     #[nervix_primitives::test]
     async fn a_retained_body_its_codec_refuses_leaves_the_buffer_as_a_decode_rejection() {
         let domain = domain("default");
-        let ingestor = named::<IngestorName>("event_source");
+        let ingestor = named::<IngestorName>("event_ingestor");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let mut errors = runtime.events().subscribe();
         let quiesce = runtime
-            .ingestor_quiesce_control(&domain, &ingestor)
+            .ingestor_quiesce_control(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .assured("a running ingestor holds its quiesce control");
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
@@ -785,7 +786,7 @@ pub(super) mod tests {
                 .expect("the node keeps its observers while it runs");
         assert!(
             message.starts_with(
-                "ingestor 'event_source' general error in domain 'default': decode rejection "
+                "ingestor 'event_ingestor' general error in domain 'default': decode rejection "
             ),
             "the drain reports a decode rejection: {message}"
         );
@@ -811,7 +812,7 @@ pub(super) mod tests {
     #[nervix_primitives::test]
     async fn a_retained_body_waits_for_the_extension_workers_when_it_drains() {
         let domain = domain("default");
-        let ingestor = named::<IngestorName>("event_source");
+        let ingestor = named::<IngestorName>("event_ingestor");
         let executor = single_worker_executor();
         let runtime = Runtime::with_executor(executor.clone());
         // The fixture places its relay on node-1, so the runtime joins as node-1 to own it and hand
@@ -841,7 +842,7 @@ pub(super) mod tests {
             .expect("the fixture's relay accepts a subscriber that describes its rows");
         let mut errors = runtime.events().subscribe();
         let quiesce = runtime
-            .ingestor_quiesce_control(&domain, &ingestor)
+            .ingestor_quiesce_control(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .assured("a running ingestor holds its quiesce control");
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")

@@ -713,7 +713,17 @@ function openedSchema(reply: wire.Reply): OpenedSchema {
     throw new Error('the subscription did not open');
   }
   const opened = member(outcome.disposition(new wire.SubscriptionOpened()) as wire.SubscriptionOpened | null);
-  const schema = member(opened.schema());
+  return { opened, ...rowSchema(member(opened.schema())) };
+}
+
+interface RowSchemaLines {
+  fields: Field[];
+  keys: Field[];
+  lines: string[];
+}
+
+/** Renders a row schema: a FIELD line per field, then the branch and a KEY line per key field. */
+function rowSchema(schema: wire.RowSchema): RowSchemaLines {
   const fields: Field[] = [];
   const keys: Field[] = [];
   const lines: string[] = [];
@@ -731,7 +741,14 @@ function openedSchema(reply: wire.Reply): OpenedSchema {
       lines.push(fieldLine('KEY', field));
     }
   }
-  return { opened, fields, keys, lines };
+  return { fields, keys, lines };
+}
+
+/** Renders one diagnostic and its span, or `none` when it names no position. */
+function diagnosticLine(diagnostic: wire.Diagnostic): string {
+  const span = diagnostic.span();
+  const location = span === null ? 'none' : `${span.start()}..${span.end()}`;
+  return `DIAGNOSTIC span=${location} message=${text(bytesOf((encoding) => diagnostic.message(encoding)))}`;
 }
 
 /** Renders one command outcome, its first line after `head`. */
@@ -745,10 +762,7 @@ function commandLines(head: string, outcome: wire.CommandOutcome): string[] {
     `${head} ${name} reference=${outcome.executionReference()} origin=${wire.OutcomeOrigin[origin]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`,
   ];
   for (let index = 0; index < outcome.diagnosticsLength(); index += 1) {
-    const diagnostic = member(outcome.diagnostics(index));
-    const span = diagnostic.span();
-    const location = span === null ? 'none' : `${span.start()}..${span.end()}`;
-    lines.push(`DIAGNOSTIC span=${location} message=${text(bytesOf((encoding) => diagnostic.message(encoding)))}`);
+    lines.push(diagnosticLine(member(outcome.diagnostics(index))));
   }
   if (outcome.dispositionType() === wire.CommandDisposition.LeaderRedirect) {
     const redirect = member(outcome.disposition(new wire.LeaderRedirect()) as wire.LeaderRedirect | null);
@@ -1037,6 +1051,19 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
           ];
         }
         case wire.ReplyBody.SubscribeOutcome: {
+          const outcome = member(reply.body(new wire.SubscribeOutcome()) as wire.SubscribeOutcome | null);
+          if (outcome.dispositionType() === wire.SubscribeDisposition.SubscriptionRefused) {
+            const refused = member(
+              outcome.disposition(new wire.SubscriptionRefused()) as wire.SubscriptionRefused | null,
+            );
+            const lines = [
+              `REPLY ${id} SUBSCRIBE_REFUSED refusal=${wire.SubscriptionRefusal[member(refused.refusal())]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`,
+            ];
+            for (let index = 0; index < outcome.diagnosticsLength(); index += 1) {
+              lines.push(diagnosticLine(member(outcome.diagnostics(index))));
+            }
+            return lines;
+          }
           const read = openedSchema(reply);
           const handle = member(read.opened.subscription());
           return [
@@ -1097,8 +1124,14 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
               const notFound = member(outcome.disposition(new wire.DomainNotFound()) as wire.DomainNotFound | null);
               return [`REPLY ${id} DOMAIN_CLOCK_ATTACH domain_not_found domain=${notFound.domain()} message=${message}`];
             }
-            case wire.DomainClockAttachDisposition.RequestFailed:
-              return [`REPLY ${id} DOMAIN_CLOCK_ATTACH failed message=${message}`];
+            case wire.DomainClockAttachDisposition.DomainClockAttachRefused: {
+              const refused = member(
+                outcome.disposition(new wire.DomainClockAttachRefused()) as wire.DomainClockAttachRefused | null,
+              );
+              return [
+                `REPLY ${id} DOMAIN_CLOCK_ATTACH refused refusal=${wire.DomainClockAttachRefusal[member(refused.refusal())]} message=${message}`,
+              ];
+            }
             default:
               throw new Error(`undeclared attach disposition ${outcome.dispositionType()}`);
           }
@@ -1267,6 +1300,12 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
         `EVENT PRODUCER_ENDED producer=${ended.producer()} reason=${wire.ProducerEndReason[member(ended.reason())]} message=${text(bytesOf((encoding) => ended.message(encoding)))}`,
       ];
     }
+    case wire.ServerBody.ServerNotice: {
+      const notice = member(message.body(new wire.ServerNotice()) as wire.ServerNotice | null);
+      return [
+        `EVENT NOTICE level=${wire.NoticeLevel[member(notice.level())]} kind=${wire.NoticeKind[member(notice.kind())]} message=${text(bytesOf((encoding) => notice.message(encoding)))}`,
+      ];
+    }
     default:
       throw new Error(`the corpus holds no ${wire.ServerBody[message.bodyType()]} message`);
   }
@@ -1294,9 +1333,14 @@ function clientLines(frame: Uint8Array): string[] {
     }
     case wire.ClientRequest.SubscribeRequest: {
       const subscribe = member(message.request(new wire.SubscribeRequest()) as wire.SubscribeRequest | null);
-      return [
+      const lines = [
         `REQUEST ${id} SUBSCRIBE domain=${subscribe.domain()} statement=${text(bytesOf((encoding) => subscribe.statement(encoding)))} type=${wire.SubscriptionType[member(subscribe.subscriptionType())]}`,
       ];
+      const expected = subscribe.expectedSchema();
+      if (expected !== null) {
+        lines.push('EXPECTED_SCHEMA', ...rowSchema(expected).lines);
+      }
+      return lines;
     }
     case wire.ClientRequest.SuggestRequest: {
       const suggest = member(message.request(new wire.SuggestRequest()) as wire.SuggestRequest | null);

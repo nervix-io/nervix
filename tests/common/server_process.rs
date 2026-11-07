@@ -1389,20 +1389,6 @@ impl ServerProcess {
         loopback(self.configuration.ports.interconnect)
     }
 
-    pub(crate) fn observability_uri(&self, path: &str) -> String {
-        format!(
-            "http://{}{path}",
-            loopback(self.configuration.ports.observability)
-        )
-    }
-
-    pub(crate) fn web_console_websocket_uri(&self) -> String {
-        format!(
-            "ws://{}/console/ws",
-            loopback(self.configuration.ports.web_console)
-        )
-    }
-
     pub(crate) fn process_id(&self) -> io::Result<u32> {
         self.child
             .id()

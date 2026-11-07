@@ -358,11 +358,14 @@ impl ActiveGraph {
                 .graph
                 .node_weight(index)
                 .verified("this index came from the same graph, which is not modified here");
-            let scheduled = ScheduledNode::new(
+            let mut scheduled = ScheduledNode::new(
                 (*node.config).clone(),
                 self.schema_fingerprint_for_index(index),
             )
             .with_resolved_branching(node.resolved_branching.clone());
+            if let Some(instancing) = &node.ingestor_units {
+                scheduled = scheduled.with_units(&instancing.units());
+            }
             nodes.push(scheduled);
         }
         nodes
@@ -547,9 +550,25 @@ pub(crate) struct ActiveNode {
     pub(crate) kind: ModelKind,
     pub(crate) config: Arc<Model>,
     pub(crate) resolved_branching: Option<ResolvedBranching>,
+    pub(in crate::registry) ingestor_units: Option<super::ingestor_units::IngestorUnits>,
 }
 
 impl ActiveNode {
+    pub(in crate::registry) fn placement_units(&self) -> Vec<nervix_models::Unit> {
+        if let Some(instancing) = &self.ingestor_units {
+            return instancing.units();
+        }
+        if matches!(self.config.as_ref(), Model::Relay(_))
+            && let Some(partitions) = self
+                .resolved_branching
+                .as_ref()
+                .and_then(|branch| branch.partitions())
+        {
+            return partitions.units();
+        }
+        vec![nervix_models::Unit::SINGLE]
+    }
+
     /// How this node is addressed: the kind it is and the name it carries, together.
     pub(in crate::registry) fn node_ref(&self) -> NodeRef {
         NodeRef::new(self.kind, self.identifier.clone())

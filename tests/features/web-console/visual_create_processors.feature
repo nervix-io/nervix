@@ -27,7 +27,7 @@ Feature: Web console visual junction and reingestor creation
     And selector ".create-processor-inherit [data-inherit='all']" is clicked
     And selector ".create-processor-flush [data-flush='immediate']" is clicked
     And selector ".create-processor-message-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE ATTACHED JUNCTION visual_scope_junction"
+    Then selector ".create-preview" contains "CREATE JUNCTION visual_scope_junction"
     When selector ".create-close" is clicked
     And selector ".domain-select" is clicked
     And selector ".domain-menu [data-domain='{{domain}}_other']" is clicked
@@ -74,13 +74,13 @@ Feature: Web console visual junction and reingestor creation
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
-    And selector ".create-preview" contains "CREATE ATTACHED JUNCTION visual_reconnected_junction"
+    And selector ".create-preview" contains "CREATE JUNCTION visual_reconnected_junction"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE JUNCTION visual_reconnected_junction;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE ATTACHED JUNCTION visual_reconnected_junction"
+    Then selector ".terminal" contains "CREATE JUNCTION visual_reconnected_junction"
 
   @visual_processor_staged_order
   Scenario: A junction keeps route order and selects compatible relays staged in its transaction
@@ -184,7 +184,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE RELAY visual_route_output SCHEMA visual_route_event UNBRANCHED;
       CREATE VHOST visual_route_host route-{{test_id}}.example.com;
       CREATE ENDPOINT visual_route_endpoint ON visual_route_host PATH '/route' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR visual_route_source FROM visual_route_endpoint MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR visual_route_ingestor FROM visual_route_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_route_codec
         TO visual_route_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -208,7 +208,7 @@ Feature: Web console visual junction and reingestor creation
     And selector ".create-processor-assignment-expression" is filled with "input.message"
     And selector ".create-processor-flush [data-flush='immediate']" is clicked
     And selector ".create-processor-message-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE ATTACHED JUNCTION visual_route_junction"
+    Then selector ".create-preview" contains "CREATE JUNCTION visual_route_junction"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -247,7 +247,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE RELAY visual_partition_output SCHEMA visual_partition_event BRANCHED BY visual_by_tenant;
       CREATE VHOST visual_partition_host partition-{{test_id}}.example.com;
       CREATE ENDPOINT visual_partition_endpoint ON visual_partition_host PATH '/partition' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR visual_partition_source FROM visual_partition_endpoint MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR visual_partition_ingestor FROM visual_partition_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_partition_codec
         TO visual_partition_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -274,7 +274,7 @@ Feature: Web console visual junction and reingestor creation
     And selector ".create-processor-inherit [data-inherit='all']" is clicked
     And selector ".create-processor-flush [data-flush='immediate']" is clicked
     And selector ".create-processor-message-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE ATTACHED REINGESTOR visual_partition_stage"
+    Then selector ".create-preview" contains "CREATE REINGESTOR visual_partition_stage"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -322,7 +322,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE RELAY visual_sensitive_out SCHEMA visual_sensitive_output UNBRANCHED;
       CREATE VHOST visual_sensitive_host sensitive-{{test_id}}.example.com;
       CREATE ENDPOINT visual_sensitive_endpoint ON visual_sensitive_host PATH '/sensitive' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR visual_sensitive_source FROM visual_sensitive_endpoint MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR visual_sensitive_ingestor FROM visual_sensitive_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_sensitive_codec
         TO visual_sensitive_in INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

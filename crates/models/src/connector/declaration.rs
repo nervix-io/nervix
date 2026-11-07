@@ -156,18 +156,25 @@ pub struct OptionDeclaration {
 }
 
 impl OptionDeclaration {
-    /// `INSTANCES <n>`: how many consumers read the entity together, one where a statement leaves
-    /// it out.
+    /// Independent consumers by count, or one consumer for each constructed branch partition.
     pub const INSTANCES: Self = Self {
         keywords: "INSTANCES",
         presence: OptionPresence::Optional { default: Some("1") },
-        form: OptionForm::Value {
-            value: OptionValue::Count,
-            example: "INSTANCES 2",
-        },
+        form: OptionForm::Choice(&[
+            OptionChoice {
+                name: "<count>",
+                value: Some(OptionValue::Count),
+                example: "INSTANCES 2",
+            },
+            OptionChoice {
+                name: "PER PARTITION",
+                value: None,
+                example: "INSTANCES PER PARTITION",
+            },
+        ]),
     };
 
-    /// `EVERY <duration>`: the domain-time cadence on which a polled source reads.
+    /// `EVERY <duration>`: the domain-time cadence on which a polled ingestor reads.
     pub const EVERY: Self = Self {
         keywords: "EVERY",
         presence: OptionPresence::Required,
@@ -320,6 +327,8 @@ impl Display for WrittenChoice {
     rkyv::Deserialize,
 )]
 pub enum EnvelopeClauseKind {
+    Key,
+    PartitionFromBranch,
     Persistent,
     Mandatory,
     Retain,
@@ -335,6 +344,8 @@ impl EnvelopeClauseKind {
     /// The keywords that open the clause.
     pub const fn keywords(self) -> &'static str {
         match self {
+            Self::Key => "KEY",
+            Self::PartitionFromBranch => "PARTITION FROM BRANCH",
             Self::Persistent => "PERSISTENT",
             Self::Mandatory => "MANDATORY",
             Self::Retain => "RETAIN",
@@ -350,6 +361,8 @@ impl EnvelopeClauseKind {
     /// The clause written in full, as documentation and generated statements write it.
     pub const fn example(self) -> &'static str {
         match self {
+            Self::Key => "KEY 'record-key'",
+            Self::PartitionFromBranch => "PARTITION FROM BRANCH",
             Self::Persistent => "PERSISTENT",
             Self::Mandatory => "MANDATORY",
             Self::Retain => "RETAIN",
@@ -365,11 +378,16 @@ impl EnvelopeClauseKind {
     /// What a statement writes after the clause's keywords.
     pub fn form(self) -> EnvelopeClauseForm {
         match self {
-            Self::Persistent | Self::Mandatory | Self::Retain => EnvelopeClauseForm::Flag,
+            Self::PartitionFromBranch | Self::Persistent | Self::Mandatory | Self::Retain => {
+                EnvelopeClauseForm::Flag
+            }
             Self::DeliverAfter | Self::Delay => EnvelopeClauseForm::Duration,
-            Self::Timestamp => EnvelopeClauseForm::Expression(ParseAsType::Datetime),
+            Self::Key => EnvelopeClauseForm::Expression(EnvelopeValueType::Key),
+            Self::Timestamp => {
+                EnvelopeClauseForm::Expression(EnvelopeValueType::Exact(PropertyType::Datetime))
+            }
             Self::ReplyTo | Self::MessageId | Self::DeduplicationId => {
-                EnvelopeClauseForm::Expression(ParseAsType::String)
+                EnvelopeClauseForm::Expression(EnvelopeValueType::Exact(PropertyType::String))
             }
         }
     }
@@ -382,9 +400,33 @@ pub enum EnvelopeClauseForm {
     Flag,
     /// A duration literal, the same for every record.
     Duration,
-    /// An expression evaluated for every record, whose value is never null and has exactly this
-    /// type.
-    Expression(ParseAsType),
+    /// An expression evaluated for every record, with a non-null, non-sensitive value admitted
+    /// by this constraint.
+    Expression(EnvelopeValueType),
+}
+
+/// The exact scalar type of an envelope value, or the two exact types a record key admits.
+///
+/// A key keeps its inferred STRING or BYTES type; this constraint never requests a conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeValueType {
+    Exact(PropertyType),
+    Key,
+}
+
+impl Display for EnvelopeValueType {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exact(ty) => ty.fmt(formatter),
+            Self::Key => formatter.write_str("STRING or BYTES"),
+        }
+    }
+}
+
+impl From<PropertyType> for EnvelopeValueType {
+    fn from(ty: PropertyType) -> Self {
+        Self::Exact(ty)
+    }
 }
 
 /// One key of an emitter's closed `PROPERTIES { … }` set, and the exact type of its value.

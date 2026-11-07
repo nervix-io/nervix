@@ -1,4 +1,4 @@
-//! Validation of the source and emitter contracts.
+//! Validation of the ingestor and emitter contracts.
 //!
 //! Layer: test harness.
 //!
@@ -15,28 +15,26 @@
 use std::fs;
 
 use nervix_models::{
-    AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry,
-    ClientConfigSchemaError, ClientName, CodecName, CodecWireFormat, CreateClientHttp,
-    CreateClientPrometheus, CreateClientS3, CreateClientSqs, CreateWireSchema, EmitterEntityKind,
-    ErrorPolicies, FlushPolicy, GeneralErrorPolicy, HttpEmitterEntity, HttpEndpointIngestor,
-    HttpIngestor, HttpRequestFieldError, HttpRequestIngestMode, HttpRequestIngestor,
-    IcebergCatalog, IcebergTableEmitter, IngestorEntity, IngestorName, JsonType,
-    KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
-    KafkaTopicEmitter, KafkaTopicIngestor, MaterializedRelayState, MessageErrorPolicy,
-    MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, NatsEmitter,
-    NatsSubjectEmitter, OtelAggregationTemporality, OtelLogsEmitter, OtelMetric, OtelValueMapping,
-    OutputBranch, PostgresEmitter, PostgresTableEmitter, ProcessorInputs, ProcessorOutputs,
-    PrometheusApiRootError, PulsarEmitter, PulsarEmitterEntity, PulsarTopicEmitter,
-    RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqQueueEmitter, RetryPolicy, SentryEmitter,
-    SentryEventEmitter, SignalingProtobufConfig, SqsEmitterEntity, SyslogCollectorEmitter,
-    SyslogEmitter, SyslogListenerIngestor, WireSchemaField, WireSchemaName, ZeroMqEmitter,
-    ZeroMqPushEmitter,
+    AckMode, AckWindow, ClientConfigEntry, ClientConfigSchemaError, ClientName, CodecName,
+    CodecWireFormat, CreateClientHttp, CreateClientPrometheus, CreateClientS3, CreateClientSqs,
+    CreateWireSchema, EmitterEntityKind, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
+    HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor, HttpRequestFieldError,
+    HttpRequestIngestMode, HttpRequestIngestor, IcebergCatalog, IcebergTableEmitter,
+    IngestorEntity, IngestorName, JsonType, KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode,
+    KafkaIngestor, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor, MaterializedRelayState,
+    MessageErrorPolicy, MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor,
+    NatsEmitter, NatsSubjectEmitter, OtelAggregationTemporality, OtelLogsEmitter, OtelMetric,
+    OtelValueMapping, OutputBranch, PostgresEmitter, PostgresTableEmitter, ProcessorInputs,
+    ProcessorOutputs, PrometheusApiRootError, PulsarEmitter, PulsarEmitterEntity,
+    PulsarTopicEmitter, RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqQueueEmitter, RetryPolicy,
+    SentryEmitter, SentryEventEmitter, SignalingProtobufConfig, SqsEmitterEntity,
+    SyslogCollectorEmitter, SyslogEmitter, SyslogListenerIngestor, WireSchemaField, WireSchemaName,
+    ZeroMqEmitter, ZeroMqPushEmitter,
 };
 use nonzero_ext::nonzero;
 
 use super::*;
 use crate::registry::{
-    mutation::RegistryMutation,
     storage::Registry,
     test_fixtures::{
         TOO_LONG_DURATION_TEXT, branch, branch_for_relay, branch_schema, branch_schema_with_types,
@@ -286,8 +284,8 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
         client: named("sqs_main"),
         send: nervix_models::SqsSend::Single,
         queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
-        fifo_group: Some(SqsFifoGroup::Expression(Expression::Literal(
-            nervix_models::Literal::String("group".to_string()),
+        fifo_group: Some(Expression::Literal(nervix_models::Literal::String(
+            "group".to_string(),
         ))),
     }));
     *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Ack {
@@ -891,7 +889,7 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     else {
         unreachable!("emitter helper must build an emitter model")
     };
-    valid.connector = Box::new(EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+    *valid.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
         mode: nervix_models::SqsQueuePublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -901,10 +899,10 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
         client: named("sqs_main"),
         send: nervix_models::SqsSend::Single,
         queue: nervix_models::SqsQueueName::parse("events.fifo").expect("valid queue"),
-        fifo_group: Some(SqsFifoGroup::Expression(
+        fifo_group: Some(
             nervix_plexus::parse_expression("input.value").expect("valid FIFO group expression"),
-        )),
-    })));
+        ),
+    }));
 
     registry
         .apply_batch(&domain, vec![Model::Emitter(valid.clone())])
@@ -915,66 +913,12 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     if let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
         wrong_type.connector.as_mut()
     {
-        *fifo_group = Some(SqsFifoGroup::Expression(Expression::Literal(
-            nervix_models::Literal::I64(42),
-        )));
+        *fifo_group = Some(Expression::Literal(nervix_models::Literal::I64(42)));
     }
     let error = registry
         .apply_batch(&domain, vec![Model::Emitter(wrong_type)])
         .expect_err("non-STRING FIFO expressions must be rejected");
     assert!(format!("{error:#}").contains("requires an exact non-sensitive STRING value"));
-
-    let mut branch_fifo = valid.clone();
-    branch_fifo.name = named("branch_fifo");
-    branch_fifo.from = ProcessorInputs::single(named("tenant_events"));
-    if let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
-        branch_fifo.connector.as_mut()
-    {
-        *fifo_group = Some(SqsFifoGroup::FromBranch);
-    }
-    registry
-        .apply_batch(&domain, vec![Model::Emitter(branch_fifo)])
-        .expect("FIFO GROUP FROM BRANCH should accept a wholly branched input set");
-
-    let mut mixed_inputs = valid.clone();
-    mixed_inputs.name = named("mixed_fifo_inputs");
-    mixed_inputs.from.from = vec![named("tenant_events"), named("events")];
-    if let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
-        mixed_inputs.connector.as_mut()
-    {
-        *fifo_group = Some(SqsFifoGroup::FromBranch);
-    }
-    let error = registry
-        .apply_batch(&domain, vec![Model::Emitter(mixed_inputs)])
-        .expect_err("every FIFO FROM BRANCH input must be branched");
-    assert!(format!("{error:#}").contains("FROM BRANCH requires branched input"));
-
-    let error = registry
-        .apply_mutation_batch(
-            &domain,
-            vec![RegistryMutation::AlterEmitter(AlterEmitter {
-                kind: EmitterEntityKind::Sqs(nervix_models::SqsEmitterEntity::Queue),
-                emitter: named("branch_fifo"),
-                operations: vec![AlterEmitterOperation::AddFrom {
-                    relay: named("events"),
-                    where_clause: None,
-                }],
-            })],
-        )
-        .expect_err("ALTER ADD FROM must not add an unbranched FIFO input");
-    assert!(format!("{error:#}").contains("FROM BRANCH requires branched input"));
-
-    let mut from_branch = valid;
-    from_branch.name = named("unbranched_fifo");
-    if let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
-        from_branch.connector.as_mut()
-    {
-        *fifo_group = Some(SqsFifoGroup::FromBranch);
-    }
-    let error = registry
-        .apply_batch(&domain, vec![Model::Emitter(from_branch)])
-        .expect_err("FROM BRANCH on unbranched input must be rejected");
-    assert!(format!("{error:#}").contains("FROM BRANCH requires branched input"));
 
     let _ = fs::remove_dir_all(path);
 }
@@ -1075,7 +1019,7 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
     .expect("Kafka emitters must accept write_header");
 }
 
-/// A emitter that keeps one value per header name refuses an `INVOKE` clause that writes one literal
+/// An emitter that keeps one value per header name refuses an `INVOKE` clause that writes one literal
 /// name twice, naming the header as the emitter records it and both calls, because the later write
 /// would replace the earlier one on every record. Names compare as the emitter's header model records
 /// them, an emitter that keeps every value accepts the repeat, and a name an expression computes is
@@ -1235,7 +1179,7 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     }));
     validate(&emitter).expect("X-Route and x-route are two Pulsar property names");
 
-    // A emitter that keeps every value of a name publishes both writes.
+    // An emitter that keeps every value of a name publishes both writes.
     emitter.construction = nervix_plexus::parse_route_construction(
         "INHERIT ALL INVOKE write_header('route', 'a'), write_header('route', 'b')",
     )
@@ -1311,7 +1255,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
                             client: ClientName::parse("mqtt_main").expect("valid identifier"),
                             topic: nervix_models::MqttTopicFilter::parse("notifications")
                                 .expect("valid topic filter"),
-                            instances: nonzero!(2u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(2u64)),
                             session: MqttSession::Clean,
                             qos: MqttQos::Qos0,
                             mode: MqttIngestMode::NoAck,
@@ -1391,7 +1335,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                                     .expect("valid consumer group"),
                                 start_at: nervix_models::IngestStartPosition::Earliest,
                             },
-                            instances: nonzero!(1u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
@@ -1670,7 +1614,7 @@ fn mqtt_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> Inge
     IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
         client: ClientName::parse("mqtt_main").expect("valid identifier"),
         topic: nervix_models::MqttTopicFilter::parse("notifications").expect("valid topic filter"),
-        instances: nonzero!(1u64),
+        instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
         session,
         qos,
         mode,
@@ -1897,7 +1841,9 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                                             .expect("valid consumer group"),
                                         start_at: nervix_models::IngestStartPosition::Earliest,
                                     },
-                                    instances: nonzero!(1u64),
+                                    instances: nervix_models::IngestorInstances::Count(nonzero!(
+                                        1u64
+                                    )),
                                     mode: KafkaIngestMode::NoAck,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
@@ -1982,7 +1928,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                                     .expect("valid consumer group"),
                                 start_at: nervix_models::IngestStartPosition::Earliest,
                             },
-                            instances: nonzero!(1u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
@@ -2078,7 +2024,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                                     .expect("valid consumer group"),
                                 start_at: nervix_models::IngestStartPosition::Earliest,
                             },
-                            instances: nonzero!(1u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
@@ -2777,8 +2723,8 @@ fn sqs_emitter(queue: &str) -> CreateEmitter {
     let mut emitter = kafka_emitter();
     let queue = nervix_models::SqsQueueName::parse(queue).expect("the fixture queue is valid");
     let fifo_group = if queue.is_fifo() {
-        Some(SqsFifoGroup::Expression(Expression::Literal(
-            nervix_models::Literal::String("group".to_string()),
+        Some(Expression::Literal(nervix_models::Literal::String(
+            "group".to_string(),
         )))
     } else {
         None
@@ -2901,7 +2847,7 @@ fn an_envelope_value_is_an_exact_non_null_non_sensitive_value_of_its_clause_type
         refused_as(&wrong_type),
         ConnectorDeclarationIssue::EnvelopeValue {
             site: EnvelopeValueSite::Clause(nervix_models::EnvelopeClauseKind::Timestamp),
-            expected: ParseAsType::Datetime,
+            expected: nervix_models::PropertyType::Datetime.into(),
         }
     );
 
@@ -2911,7 +2857,7 @@ fn an_envelope_value_is_an_exact_non_null_non_sensitive_value_of_its_clause_type
         refused_as(&sensitive),
         ConnectorDeclarationIssue::EnvelopeValue {
             site: EnvelopeValueSite::Clause(nervix_models::EnvelopeClauseKind::MessageId),
-            expected: ParseAsType::String,
+            expected: nervix_models::PropertyType::String.into(),
         }
     );
 
@@ -2987,7 +2933,7 @@ fn a_routing_key_is_an_exact_non_null_non_sensitive_string() {
             issue,
             &ConnectorDeclarationIssue::EnvelopeValue {
                 site: EnvelopeValueSite::RoutingKey,
-                expected: ParseAsType::String,
+                expected: nervix_models::PropertyType::String.into(),
             }
         );
         assert_eq!(

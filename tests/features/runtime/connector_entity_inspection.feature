@@ -31,80 +31,80 @@ Feature: Every connector entity uses the shared inspection rows
       CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' };
       CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
-      CREATE HTTP REQUEST INGESTOR http_request_source
+      CREATE HTTP REQUEST INGESTOR http_request_ingestor
         FROM http_main METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR http_endpoint_source
+      CREATE HTTP ENDPOINT INGESTOR http_endpoint_ingestor
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_source
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor
         FROM ws_ingress MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_source
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_ingestor
         FROM ws_main HEADERS { 'x-trace' = 'stream' } MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR kafka_source
+      CREATE KAFKA TOPIC INGESTOR kafka_ingestor
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE PULSAR TOPIC INGESTOR pulsar_source
+      CREATE PULSAR TOPIC INGESTOR pulsar_ingestor
         FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_source
+      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_ingestor
         FROM rabbit_main QUEUE 'Orders'
         MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE REDIS PUBSUB INGESTOR redis_source
+      CREATE REDIS PUBSUB INGESTOR redis_ingestor
         FROM redis_main CHANNEL 'Orders' MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE MQTT TOPIC INGESTOR mqtt_source
+      CREATE MQTT TOPIC INGESTOR mqtt_ingestor
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE NATS SUBJECT INGESTOR nats_source
+      CREATE NATS SUBJECT INGESTOR nats_ingestor
         FROM nats_main SUBJECT 'orders.*' QUEUE GROUP 'Readers' INSTANCES 1
         MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE NATS STREAM INGESTOR nats_stream_source
+      CREATE NATS STREAM INGESTOR nats_stream_ingestor
         FROM nats_main STREAM 'Orders' CONSUMER 'Readers'
         MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SQS QUEUE INGESTOR sqs_source
+      CREATE SQS QUEUE INGESTOR sqs_ingestor
         FROM sqs_main QUEUE 'Orders.fifo'
         MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ZEROMQ PULL INGESTOR zeromq_source
+      CREATE ZEROMQ PULL INGESTOR zeromq_ingestor
         FROM zmq_main MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SYSLOG LISTENER INGESTOR syslog_source
+      CREATE SYSLOG LISTENER INGESTOR syslog_ingestor
         FROM syslog_main MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE PROMETHEUS QUERY INGESTOR prometheus_source
+      CREATE PROMETHEUS QUERY INGESTOR prometheus_ingestor
         FROM prom_main QUERY 'up' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT PRODUCER INGESTOR client_source
+      CREATE CLIENT PRODUCER INGESTOR client_ingestor
         FROM SCHEMA event MODE ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -144,39 +144,39 @@ Feature: Every connector entity uses the shared inspection rows
       """
 
     Examples:
-      | cluster_size | name                 | phrase                | reference                                              | options                                                                            | mode                                                                  | quiesce               |
-      | 1            | http_request_source  | HTTP REQUEST          | http_main                                              | METHOD 'GET' MAX BODY SIZE 16MiB EVERY 1s                                          | NO ACK                                                                | SUSPEND               |
-      | 3            | http_request_source  | HTTP REQUEST          | http_main                                              | METHOD 'GET' MAX BODY SIZE 16MiB EVERY 1s                                          | NO ACK                                                                | SUSPEND               |
-      | 1            | http_endpoint_source | HTTP ENDPOINT         | http_ingress                                           | none                                                                               | NO ACK                                                                | BUFFER MAX SIZE 1MiB  |
-      | 3            | http_endpoint_source | HTTP ENDPOINT         | http_ingress                                           | none                                                                               | NO ACK                                                                | BUFFER MAX SIZE 1MiB  |
-      | 1            | ws_endpoint_source   | WEBSOCKETS ENDPOINT   | ws_ingress                                             | none                                                                               | NO ACK                                                                | REJECT RETRY AFTER 5s |
-      | 3            | ws_endpoint_source   | WEBSOCKETS ENDPOINT   | ws_ingress                                             | none                                                                               | NO ACK                                                                | REJECT RETRY AFTER 5s |
-      | 1            | ws_connection_source | WEBSOCKETS CONNECTION | ws_main                                                | HEADERS { 'x-trace' = 'stream' }                                                   | NO ACK                                                                | DROP                  |
-      | 3            | ws_connection_source | WEBSOCKETS CONNECTION | ws_main                                                | HEADERS { 'x-trace' = 'stream' }                                                   | NO ACK                                                                | DROP                  |
-      | 1            | kafka_source         | KAFKA TOPIC           | kafka_main TOPIC 'Orders'                              | OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1                     | NO ACK                                                                | SUSPEND               |
-      | 3            | kafka_source         | KAFKA TOPIC           | kafka_main TOPIC 'Orders'                              | OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1                     | NO ACK                                                                | SUSPEND               |
-      | 1            | pulsar_source        | PULSAR TOPIC          | pulsar_main TOPIC 'persistent://public/default/Orders' | SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED INSTANCES 1 | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s      | SUSPEND               |
-      | 3            | pulsar_source        | PULSAR TOPIC          | pulsar_main TOPIC 'persistent://public/default/Orders' | SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED INSTANCES 1 | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s      | SUSPEND               |
-      | 1            | rabbitmq_source      | RABBITMQ QUEUE        | rabbit_main QUEUE 'Orders'                             | INSTANCES 1                                                                        | ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s        | SUSPEND               |
-      | 3            | rabbitmq_source      | RABBITMQ QUEUE        | rabbit_main QUEUE 'Orders'                             | INSTANCES 1                                                                        | ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s        | SUSPEND               |
-      | 1            | redis_source         | REDIS PUBSUB          | redis_main CHANNEL 'Orders'                            | none                                                                               | NO ACK                                                                | DROP                  |
-      | 3            | redis_source         | REDIS PUBSUB          | redis_main CHANNEL 'Orders'                            | none                                                                               | NO ACK                                                                | DROP                  |
-      | 1            | mqtt_source          | MQTT TOPIC            | mqtt_main TOPIC 'devices/+/Orders'                     | INSTANCES 1 SESSION PERSISTENT QOS 1                                               | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s       | SUSPEND               |
-      | 3            | mqtt_source          | MQTT TOPIC            | mqtt_main TOPIC 'devices/+/Orders'                     | INSTANCES 1 SESSION PERSISTENT QOS 1                                               | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s       | SUSPEND               |
-      | 1            | nats_source          | NATS SUBJECT          | nats_main SUBJECT 'orders.*'                           | QUEUE GROUP 'Readers' INSTANCES 1                                                  | NO ACK                                                                | DROP                  |
-      | 3            | nats_source          | NATS SUBJECT          | nats_main SUBJECT 'orders.*'                           | QUEUE GROUP 'Readers' INSTANCES 1                                                  | NO ACK                                                                | DROP                  |
-      | 1            | nats_stream_source   | NATS STREAM           | nats_main STREAM 'Orders'                              | CONSUMER 'Readers'                                                                 | ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s      | SUSPEND               |
-      | 3            | nats_stream_source   | NATS STREAM           | nats_main STREAM 'Orders'                              | CONSUMER 'Readers'                                                                 | ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s      | SUSPEND               |
-      | 1            | sqs_source           | SQS QUEUE             | sqs_main QUEUE 'Orders.fifo'                           | INSTANCES 1                                                                        | ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m         | SUSPEND               |
-      | 3            | sqs_source           | SQS QUEUE             | sqs_main QUEUE 'Orders.fifo'                           | INSTANCES 1                                                                        | ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m         | SUSPEND               |
-      | 1            | zeromq_source        | ZEROMQ PULL           | zmq_main                                               | none                                                                               | NO ACK                                                                | SUSPEND               |
-      | 3            | zeromq_source        | ZEROMQ PULL           | zmq_main                                               | none                                                                               | NO ACK                                                                | SUSPEND               |
-      | 1            | syslog_source        | SYSLOG LISTENER       | syslog_main                                            | none                                                                               | NO ACK                                                                | DROP                  |
-      | 3            | syslog_source        | SYSLOG LISTENER       | syslog_main                                            | none                                                                               | NO ACK                                                                | DROP                  |
-      | 1            | prometheus_source    | PROMETHEUS QUERY      | prom_main                                              | QUERY 'up' MAX BODY SIZE 16MiB EVERY 15s                                           | NO ACK                                                                | SUSPEND               |
-      | 3            | prometheus_source    | PROMETHEUS QUERY      | prom_main                                              | QUERY 'up' MAX BODY SIZE 16MiB EVERY 15s                                           | NO ACK                                                                | SUSPEND               |
-      | 1            | client_source        | CLIENT PRODUCER       | SCHEMA event                                           | none                                                                               | ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s | SUSPEND               |
-      | 3            | client_source        | CLIENT PRODUCER       | SCHEMA event                                           | none                                                                               | ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s | SUSPEND               |
+      | cluster_size | name                   | phrase                | reference                                              | options                                                                            | mode                                                                  | quiesce               |
+      | 1            | http_request_ingestor  | HTTP REQUEST          | http_main                                              | METHOD 'GET' MAX BODY SIZE 16MiB EVERY 1s                                          | NO ACK                                                                | SUSPEND               |
+      | 3            | http_request_ingestor  | HTTP REQUEST          | http_main                                              | METHOD 'GET' MAX BODY SIZE 16MiB EVERY 1s                                          | NO ACK                                                                | SUSPEND               |
+      | 1            | http_endpoint_ingestor | HTTP ENDPOINT         | http_ingress                                           | none                                                                               | NO ACK                                                                | BUFFER MAX SIZE 1MiB  |
+      | 3            | http_endpoint_ingestor | HTTP ENDPOINT         | http_ingress                                           | none                                                                               | NO ACK                                                                | BUFFER MAX SIZE 1MiB  |
+      | 1            | ws_endpoint_ingestor   | WEBSOCKETS ENDPOINT   | ws_ingress                                             | none                                                                               | NO ACK                                                                | REJECT RETRY AFTER 5s |
+      | 3            | ws_endpoint_ingestor   | WEBSOCKETS ENDPOINT   | ws_ingress                                             | none                                                                               | NO ACK                                                                | REJECT RETRY AFTER 5s |
+      | 1            | ws_connection_ingestor | WEBSOCKETS CONNECTION | ws_main                                                | HEADERS { 'x-trace' = 'stream' }                                                   | NO ACK                                                                | DROP                  |
+      | 3            | ws_connection_ingestor | WEBSOCKETS CONNECTION | ws_main                                                | HEADERS { 'x-trace' = 'stream' }                                                   | NO ACK                                                                | DROP                  |
+      | 1            | kafka_ingestor         | KAFKA TOPIC           | kafka_main TOPIC 'Orders'                              | OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1                     | NO ACK                                                                | SUSPEND               |
+      | 3            | kafka_ingestor         | KAFKA TOPIC           | kafka_main TOPIC 'Orders'                              | OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1                     | NO ACK                                                                | SUSPEND               |
+      | 1            | pulsar_ingestor        | PULSAR TOPIC          | pulsar_main TOPIC 'persistent://public/default/Orders' | SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED INSTANCES 1 | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s      | SUSPEND               |
+      | 3            | pulsar_ingestor        | PULSAR TOPIC          | pulsar_main TOPIC 'persistent://public/default/Orders' | SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED INSTANCES 1 | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s      | SUSPEND               |
+      | 1            | rabbitmq_ingestor      | RABBITMQ QUEUE        | rabbit_main QUEUE 'Orders'                             | INSTANCES 1                                                                        | ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s        | SUSPEND               |
+      | 3            | rabbitmq_ingestor      | RABBITMQ QUEUE        | rabbit_main QUEUE 'Orders'                             | INSTANCES 1                                                                        | ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s        | SUSPEND               |
+      | 1            | redis_ingestor         | REDIS PUBSUB          | redis_main CHANNEL 'Orders'                            | none                                                                               | NO ACK                                                                | DROP                  |
+      | 3            | redis_ingestor         | REDIS PUBSUB          | redis_main CHANNEL 'Orders'                            | none                                                                               | NO ACK                                                                | DROP                  |
+      | 1            | mqtt_ingestor          | MQTT TOPIC            | mqtt_main TOPIC 'devices/+/Orders'                     | INSTANCES 1 SESSION PERSISTENT QOS 1                                               | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s       | SUSPEND               |
+      | 3            | mqtt_ingestor          | MQTT TOPIC            | mqtt_main TOPIC 'devices/+/Orders'                     | INSTANCES 1 SESSION PERSISTENT QOS 1                                               | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s       | SUSPEND               |
+      | 1            | nats_ingestor          | NATS SUBJECT          | nats_main SUBJECT 'orders.*'                           | QUEUE GROUP 'Readers' INSTANCES 1                                                  | NO ACK                                                                | DROP                  |
+      | 3            | nats_ingestor          | NATS SUBJECT          | nats_main SUBJECT 'orders.*'                           | QUEUE GROUP 'Readers' INSTANCES 1                                                  | NO ACK                                                                | DROP                  |
+      | 1            | nats_stream_ingestor   | NATS STREAM           | nats_main STREAM 'Orders'                              | CONSUMER 'Readers'                                                                 | ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s      | SUSPEND               |
+      | 3            | nats_stream_ingestor   | NATS STREAM           | nats_main STREAM 'Orders'                              | CONSUMER 'Readers'                                                                 | ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s      | SUSPEND               |
+      | 1            | sqs_ingestor           | SQS QUEUE             | sqs_main QUEUE 'Orders.fifo'                           | INSTANCES 1                                                                        | ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m         | SUSPEND               |
+      | 3            | sqs_ingestor           | SQS QUEUE             | sqs_main QUEUE 'Orders.fifo'                           | INSTANCES 1                                                                        | ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m         | SUSPEND               |
+      | 1            | zeromq_ingestor        | ZEROMQ PULL           | zmq_main                                               | none                                                                               | NO ACK                                                                | SUSPEND               |
+      | 3            | zeromq_ingestor        | ZEROMQ PULL           | zmq_main                                               | none                                                                               | NO ACK                                                                | SUSPEND               |
+      | 1            | syslog_ingestor        | SYSLOG LISTENER       | syslog_main                                            | none                                                                               | NO ACK                                                                | DROP                  |
+      | 3            | syslog_ingestor        | SYSLOG LISTENER       | syslog_main                                            | none                                                                               | NO ACK                                                                | DROP                  |
+      | 1            | prometheus_ingestor    | PROMETHEUS QUERY      | prom_main                                              | QUERY 'up' MAX BODY SIZE 16MiB EVERY 15s                                           | NO ACK                                                                | SUSPEND               |
+      | 3            | prometheus_ingestor    | PROMETHEUS QUERY      | prom_main                                              | QUERY 'up' MAX BODY SIZE 16MiB EVERY 15s                                           | NO ACK                                                                | SUSPEND               |
+      | 1            | client_ingestor        | CLIENT PRODUCER       | SCHEMA event                                           | none                                                                               | ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s | SUSPEND               |
+      | 3            | client_ingestor        | CLIENT PRODUCER       | SCHEMA event                                           | none                                                                               | ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s | SUSPEND               |
 
   @connector_entity_inspection
   Scenario Outline: A stopped emitter exposes its declared entity through the session
@@ -209,74 +209,74 @@ Feature: Every connector entity uses the shared inspection rows
       CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' };
       CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
-      CREATE HTTP REQUEST INGESTOR http_request_source
+      CREATE HTTP REQUEST INGESTOR http_request_ingestor
         FROM http_main METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR http_endpoint_source
+      CREATE HTTP ENDPOINT INGESTOR http_endpoint_ingestor
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_source
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor
         FROM ws_ingress MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_source
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_ingestor
         FROM ws_main HEADERS { 'x-trace' = 'stream' } MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR kafka_source
+      CREATE KAFKA TOPIC INGESTOR kafka_ingestor
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE PULSAR TOPIC INGESTOR pulsar_source
+      CREATE PULSAR TOPIC INGESTOR pulsar_ingestor
         FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_source
+      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_ingestor
         FROM rabbit_main QUEUE 'Orders'
         MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE REDIS PUBSUB INGESTOR redis_source
+      CREATE REDIS PUBSUB INGESTOR redis_ingestor
         FROM redis_main CHANNEL 'Orders' MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE MQTT TOPIC INGESTOR mqtt_source
+      CREATE MQTT TOPIC INGESTOR mqtt_ingestor
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE NATS SUBJECT INGESTOR nats_source
+      CREATE NATS SUBJECT INGESTOR nats_ingestor
         FROM nats_main SUBJECT 'orders.*' QUEUE GROUP 'Readers' INSTANCES 1
         MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SQS QUEUE INGESTOR sqs_source
+      CREATE SQS QUEUE INGESTOR sqs_ingestor
         FROM sqs_main QUEUE 'Orders.fifo'
         MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ZEROMQ PULL INGESTOR zeromq_source
+      CREATE ZEROMQ PULL INGESTOR zeromq_ingestor
         FROM zmq_main MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SYSLOG LISTENER INGESTOR syslog_source
+      CREATE SYSLOG LISTENER INGESTOR syslog_ingestor
         FROM syslog_main MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE PROMETHEUS QUERY INGESTOR prometheus_source
+      CREATE PROMETHEUS QUERY INGESTOR prometheus_ingestor
         FROM prom_main QUERY 'up' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT PRODUCER INGESTOR client_source
+      CREATE CLIENT PRODUCER INGESTOR client_ingestor
         FROM SCHEMA event MODE ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -321,7 +321,7 @@ Feature: Every connector entity uses the shared inspection rows
       """
     Then the last command output contains
       """
-      CREATE ATTACHED <phrase> EMITTER outgoing
+      CREATE <phrase> EMITTER outgoing
       """
 
     Examples:

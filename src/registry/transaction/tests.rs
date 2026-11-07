@@ -499,7 +499,7 @@ fn ownership_moves_raise_a_running_step_to_entity_pause() {
             schedule: current.cloned(),
             ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
                 node: nervix_models::ImpactNodeCoverage::all_executions(moved.clone()),
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 source: source.clone(),
                 destination: destination.clone(),
                 attribution: attribution.clone(),
@@ -551,7 +551,7 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
             }),
             ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
                 node: ImpactNodeCoverage::all_executions(moved.clone()),
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 source: source.clone(),
                 destination: destination.clone(),
                 attribution: attribution.clone(),

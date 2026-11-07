@@ -33,7 +33,8 @@ use nervix_interconnect::{
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, IngestorEntity, IngestorName, KafkaIngestor,
     KafkaOffsetMode, KafkaPartitionSchedule, KafkaTopicIngestor, Model, ModelKind, ModelName,
-    NodeRef, PlacementGroupSchedule, PlacementPolicy, QuiesceLevel, ScheduledNode, Unit,
+    NodeRef, NodeUnitRef, PlacementGroupSchedule, PlacementPolicy, QuiesceLevel, ScheduledNode,
+    Unit,
 };
 use nervix_primitives::{
     sync::CancellationToken,
@@ -45,7 +46,7 @@ use super::{
     AppError,
     background_task::BackgroundTask,
     command_result::CommandResult,
-    describe_output::{format_placement_runtime_nodes, placement_group_members_equal},
+    describe_output::{format_placement_unit_nodes, placement_unit_members_equal},
     model_mutation::{command_error, command_ok, quiesce_level_message},
     ownership_handoff::{
         AssignmentRelocation, DrainMove, PlannedOwnershipHandoff, format_planned_ownership_move,
@@ -62,6 +63,29 @@ use crate::{
 
 mod settings;
 pub use settings::{ReplicaCount, SchedulingSettings};
+
+/// A retained exact-unit component stays put only while every member still agrees on a live owner.
+fn common_live_group_primary(
+    members: &[NodeUnitRef],
+    nodes: &[&ScheduledNode],
+    live_nodes: &BTreeSet<ClusterNodeName>,
+) -> Option<ClusterNodeName> {
+    let units = members
+        .iter()
+        .zip(nodes)
+        .map(|(member, node)| node.unit(member.unit))
+        .collect::<Option<Vec<_>>>()?;
+    let primary = units.first()?.primary_node.as_ref()?;
+    if live_nodes.contains(primary)
+        && units.iter().all(|unit| {
+            unit.primary_node.as_ref() == Some(primary) && unit.assigned_nodes.contains(primary)
+        })
+    {
+        Some(primary.clone())
+    } else {
+        None
+    }
+}
 
 /// How long automatic scheduling waits, after this process's reconciliation starts, to observe
 /// every voter live before treating an unobserved voter as failed.
@@ -1142,7 +1166,7 @@ impl SessionServiceImpl {
         deadline: ShutdownDeadline,
     ) -> ShutdownPhaseOutcome {
         let budget = ShutdownDrainBudget::start(drain_timeout, deadline);
-        // Stop source admission before the leader begins moving downstream nodes. A Kafka poll
+        // Stop ingestor admission before the leader begins moving downstream nodes. A Kafka poll
         // admitted while an emitter moves can otherwise leave its source ACK root waiting on that
         // move until the entire drain budget expires.
         self.inner.runtime.close_local_intake();
@@ -1533,28 +1557,35 @@ impl SessionServiceImpl {
         groups.sort_by(|left, right| {
             left.members
                 .first()
-                .map(|member| (member.kind.as_ref(), &member.identifier))
-                .cmp(
-                    &right
-                        .members
-                        .first()
-                        .map(|member| (member.kind.as_ref(), &member.identifier)),
-                )
+                .map(|member| {
+                    (
+                        member.node.kind.as_ref(),
+                        &member.node.identifier,
+                        member.unit,
+                    )
+                })
+                .cmp(&right.members.first().map(|member| {
+                    (
+                        member.node.kind.as_ref(),
+                        &member.node.identifier,
+                        member.unit,
+                    )
+                }))
                 .then_with(|| left.members.len().cmp(&right.members.len()))
         });
         for group in groups {
             let label = format!(
                 "placement group [{}]",
-                format_placement_runtime_nodes(&group.members)
+                format_placement_unit_nodes(&group.members)
             );
             if excluded.contains(&label) {
                 continue;
             }
             let needs_relocation = group.members.iter().any(|member| {
-                schedule
-                    .nodes
-                    .get(member)
-                    .is_some_and(|node| !node.units_executing_on(node_id).is_empty())
+                schedule.nodes.get(&member.node).is_some_and(|node| {
+                    node.unit(member.unit)
+                        .is_some_and(|unit| unit.is_assigned_to(node_id))
+                })
             });
             if needs_relocation {
                 return Self::relocate_placement_group_assignment(
@@ -1585,14 +1616,14 @@ impl SessionServiceImpl {
         });
         for node_index in node_indices {
             let node = &schedule.nodes[node_index];
-            if grouped_members.contains(&node.identity()) {
-                continue;
-            }
             let Some(desired_node) = desired.nodes.get(&node.identity()) else {
                 continue;
             };
             // Each unit the drained node runs moves on its own, in unit order.
             for unit in node.units_executing_on(node_id) {
+                if grouped_members.contains(&NodeUnitRef::new(node.identity(), unit)) {
+                    continue;
+                }
                 let label = Self::scheduled_unit_label(node, unit);
                 if excluded.contains(&label) {
                     continue;
@@ -1647,166 +1678,136 @@ impl SessionServiceImpl {
         let current_nodes = group
             .members
             .iter()
-            .map(|member| schedule.nodes.get(member).cloned())
+            .map(|member| schedule.nodes.get(&member.node).cloned())
             .collect::<Option<Vec<_>>>()?;
         let desired_nodes = group
             .members
             .iter()
-            .map(|member| desired.nodes.get(member).cloned())
+            .map(|member| desired.nodes.get(&member.node).cloned())
             .collect::<Option<Vec<_>>>()?;
-        let current_group = schedule
-            .placement_groups
+        let current_units = group
+            .members
             .iter()
-            .find(|candidate| placement_group_members_equal(&candidate.members, &group.members));
-        let current_group_primary = if let Some(current_group) = current_group {
-            current_group.primary_node.clone()
+            .zip(&current_nodes)
+            .map(|(member, node)| node.unit(member.unit))
+            .collect::<Option<Vec<_>>>()?;
+        let desired_units = group
+            .members
+            .iter()
+            .zip(&desired_nodes)
+            .map(|(member, node)| node.unit(member.unit))
+            .collect::<Option<Vec<_>>>()?;
+        let current_primary = current_units.first()?.primary_node.clone();
+        let preserved = current_primary
+            .as_ref()
+            .filter(|primary| {
+                *primary != unavailable_node_id
+                    && live_nodes.contains(*primary)
+                    && current_units.iter().all(|unit| {
+                        unit.primary_node.as_ref() == Some(*primary)
+                            && unit.assigned_nodes.contains(*primary)
+                    })
+            })
+            .cloned();
+        let desired_target = group
+            .primary_node
+            .as_ref()
+            .filter(|node| target_nodes.contains(*node))
+            .cloned()
+            .or_else(|| {
+                desired_units
+                    .iter()
+                    .flat_map(|unit| &unit.assigned_nodes)
+                    .find(|node| target_nodes.contains(*node))
+                    .cloned()
+            });
+        // Stateless relays have no replicas. They share the primary with stateful members,
+        // but must not disqualify a source's existing state replica from promotion.
+        let stateful_units = current_nodes
+            .iter()
+            .zip(&current_units)
+            .filter(|(node, _)| !node.ownership_state_components().is_empty())
+            .map(|(_, unit)| *unit)
+            .collect::<Vec<_>>();
+        let replicated = if stateful_units.is_empty() {
+            &current_units
         } else {
-            None
+            &stateful_units
         };
-        let old_primary = if let Some(current_group_primary) = current_group_primary {
-            Some(current_group_primary)
-        } else if let Some(node) = current_nodes.first() {
-            node.first_unit().primary_node.clone()
-        } else {
-            None
+        let common_replica = target_nodes
+            .iter()
+            .find(|candidate| {
+                *candidate != unavailable_node_id
+                    && replicated
+                        .iter()
+                        .all(|unit| unit.assigned_nodes.contains(*candidate))
+            })
+            .cloned();
+        let target = match preserved {
+            Some(target) => target,
+            None => match relocation.preferred_target(desired_target, common_replica) {
+                Some(target) => target,
+                None => target_nodes.first()?.clone(),
+            },
         };
-
-        let mut preserved_live_primary = None;
-        if let Some(primary) = old_primary.as_ref() {
-            let primary_is_available =
-                primary != unavailable_node_id && live_nodes.contains(primary);
-            if primary_is_available {
-                let primary_owns_every_member = current_nodes.iter().all(|node| {
-                    node.first_unit().primary_node.as_ref() == Some(primary)
-                        && node.first_unit().assigned_nodes.contains(primary)
-                });
-                if primary_owns_every_member {
-                    preserved_live_primary = Some(primary.clone());
-                }
-            }
-        }
-
-        let mut desired_target = None;
-        if let Some(candidate) = group.primary_node.as_ref() {
-            let candidate_is_eligible = target_nodes.contains(candidate);
-            if candidate_is_eligible {
-                desired_target = Some(candidate.clone());
-            }
-        }
-        if desired_target.is_none()
-            && let Some(desired_node) = desired_nodes.first()
-            && let Some(candidate) = desired_node.first_unit().primary_node.as_ref()
-        {
-            let candidate_is_eligible = target_nodes.contains(candidate);
-            if candidate_is_eligible {
-                desired_target = Some(candidate.clone());
-            }
-        }
-        if desired_target.is_none()
-            && let Some(desired_node) = desired_nodes.first()
-        {
-            for candidate in &desired_node.first_unit().assigned_nodes {
-                let candidate_is_eligible = target_nodes.contains(candidate);
-                if candidate_is_eligible {
-                    desired_target = Some(candidate.clone());
-                    break;
-                }
-            }
-        }
-
-        let first_current_node = current_nodes.first()?;
-        let mut common_replicas = Vec::new();
-        for candidate in &first_current_node.first_unit().assigned_nodes {
-            if candidate == unavailable_node_id {
-                continue;
-            }
-            let candidate_is_target_eligible = target_nodes.contains(candidate);
-            if !candidate_is_target_eligible {
-                continue;
-            }
-
-            let candidate_is_assigned_to_every_member = current_nodes
+        let primary_changed = current_primary.as_ref() != Some(&target);
+        let promoted_replica = (primary_changed
+            && replicated
                 .iter()
-                .all(|node| node.first_unit().assigned_nodes.contains(candidate));
-            if candidate_is_assigned_to_every_member {
-                common_replicas.push(candidate.clone());
-            }
-        }
-
-        let target = if let Some(primary) = preserved_live_primary {
-            primary
-        } else {
-            let existing_common_replica = common_replicas.first().cloned();
-            let preferred_target =
-                relocation.preferred_target(desired_target, existing_common_replica);
-            if let Some(preferred_target) = preferred_target {
-                preferred_target
-            } else {
-                target_nodes.first()?.clone()
-            }
-        };
-        let primary_changed = old_primary.as_ref() != Some(&target);
-        let promoted_replica = if primary_changed {
-            let target_was_assigned_to_every_member = current_nodes
-                .iter()
-                .all(|node| node.first_unit().assigned_nodes.contains(&target));
-            if target_was_assigned_to_every_member {
-                Some(target.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        for ((member, current_node), desired_node) in
-            group.members.iter().zip(current_nodes).zip(desired_nodes)
+                .all(|unit| unit.assigned_nodes.contains(&target)))
+        .then(|| target.clone());
+        for (((member, current_node), current_unit), desired_unit) in group
+            .members
+            .iter()
+            .zip(&current_nodes)
+            .zip(&current_units)
+            .zip(&desired_units)
         {
-            let current_assignment_slots = current_node.first_unit().assigned_nodes.len();
-            let desired_assignment_slots = desired_node.first_unit().assigned_nodes.len();
-            let assignment_slots = current_assignment_slots
-                .max(desired_assignment_slots)
-                .max(1);
-            let ordered_candidates = desired_node
-                .first_unit()
+            let slots = current_unit
                 .assigned_nodes
-                .iter()
-                .chain(&current_node.first_unit().assigned_nodes)
-                .chain(target_nodes);
+                .len()
+                .max(desired_unit.assigned_nodes.len())
+                .max(1);
             let assigned_nodes = relocation.ordered_assignment(
                 &target,
                 unavailable_node_id,
                 live_nodes,
                 target_nodes,
-                assignment_slots,
-                ordered_candidates,
+                slots,
+                desired_unit
+                    .assigned_nodes
+                    .iter()
+                    .chain(&current_unit.assigned_nodes)
+                    .chain(target_nodes),
             );
-            let mut ownership_transition = None;
-            if primary_changed && let Some(former_owner) = old_primary.as_ref() {
-                ownership_transition = Some(relocation.ownership_transition(
-                    former_owner.clone(),
+            let transition = match current_unit.primary_node.as_ref() {
+                Some(former) if former != &target => Some(relocation.ownership_transition(
+                    former.clone(),
                     target.clone(),
-                    &current_node,
-                    promoted_replica.is_some(),
-                ));
-            }
-
-            let node = schedule.nodes.get_mut(member).verified(
-                "the early return above required every group member to resolve in this same \
-                 schedule",
-            );
-            if let Some(ownership_transition) = ownership_transition {
-                node.record_ownership_transition_of_every_unit(&ownership_transition);
+                    current_node,
+                    current_unit.assigned_nodes.contains(&target),
+                )),
+                _ => None,
+            };
+            let node = schedule
+                .nodes
+                .get_mut(&member.node)
+                .verified("every group member was resolved above");
+            if let Some(transition) = transition {
+                node.units
+                    .get_mut(&member.unit)
+                    .verified("the group unit was resolved above")
+                    .ownership_transition = Some(transition);
                 if relocation.replaces_owner_state() {
                     node.begin_wasm_state_generation();
                 }
             }
-            node.place_every_unit(Some(target.clone()), assigned_nodes);
+            node.place_unit(member.unit, Some(target.clone()), assigned_nodes);
         }
         if let Some(current_group) = schedule
             .placement_groups
             .iter_mut()
-            .find(|candidate| placement_group_members_equal(&candidate.members, &group.members))
+            .find(|candidate| placement_unit_members_equal(&candidate.members, &group.members))
         {
             current_group.primary_node = Some(target.clone());
         }
@@ -1819,7 +1820,7 @@ impl SessionServiceImpl {
         Some(DrainMove {
             label: format!(
                 "placement group [{}]",
-                format_placement_runtime_nodes(&group.members)
+                format_placement_unit_nodes(&group.members)
             ),
             promoted_replica,
             fallback_node,
@@ -1844,8 +1845,8 @@ impl SessionServiceImpl {
         let desired_unit = desired_node.unit(unit);
 
         let label = Self::scheduled_unit_label(node, unit);
-        let old_primary = current.primary_node.clone();
-        let preserved_live_primary = if let Some(primary) = old_primary.as_ref() {
+        let current_primary = current.primary_node.clone();
+        let preserved_live_primary = if let Some(primary) = current_primary.as_ref() {
             let primary_is_available =
                 primary != unavailable_node_id && live_nodes.contains(primary);
             if primary_is_available {
@@ -1919,7 +1920,7 @@ impl SessionServiceImpl {
             assignment_slots,
             ordered_candidates,
         );
-        let primary_changed = old_primary.as_ref() != Some(&target);
+        let primary_changed = current_primary.as_ref() != Some(&target);
         let target_was_already_assigned = current.assigned_nodes.contains(&target);
         let promotes_existing_replica = primary_changed && target_was_already_assigned;
         let promoted_replica = if promotes_existing_replica {
@@ -1928,7 +1929,7 @@ impl SessionServiceImpl {
             None
         };
         let mut ownership_transition = None;
-        if primary_changed && let Some(former_owner) = old_primary {
+        if primary_changed && let Some(former_owner) = current_primary {
             ownership_transition = Some(relocation.ownership_transition(
                 former_owner,
                 target.clone(),
@@ -1999,17 +2000,23 @@ impl SessionServiceImpl {
             let current_nodes = group
                 .members
                 .iter()
-                .map(|member| schedule.nodes.get(member).cloned())
+                .map(|member| schedule.nodes.get(&member.node).cloned())
                 .collect::<Option<Vec<_>>>();
             let Some(current_nodes) = current_nodes else {
                 continue;
             };
-            let has_unavailable_assignment = current_nodes.iter().any(|node| {
-                node.first_unit()
-                    .assigned_nodes
+            let has_unavailable_assignment =
+                group
+                    .members
                     .iter()
-                    .any(|node_id| !live_nodes.contains(node_id))
-            });
+                    .zip(&current_nodes)
+                    .any(|(member, node)| {
+                        node.unit(member.unit)
+                            .verified("the placement group names a scheduled unit")
+                            .assigned_nodes
+                            .iter()
+                            .any(|node_id| !live_nodes.contains(node_id))
+                    });
             if !has_unavailable_assignment {
                 continue;
             }
@@ -2018,9 +2025,15 @@ impl SessionServiceImpl {
             {
                 Some(node_id.clone())
             } else {
-                current_nodes
+                group
+                    .members
                     .iter()
-                    .flat_map(|node| node.first_unit().assigned_nodes.iter())
+                    .zip(&current_nodes)
+                    .flat_map(|(member, node)| {
+                        node.unit(member.unit)
+                            .into_iter()
+                            .flat_map(|unit| &unit.assigned_nodes)
+                    })
                     .find(|node_id| !live_nodes.contains(*node_id))
                     .cloned()
             };
@@ -2030,7 +2043,7 @@ impl SessionServiceImpl {
             let desired_group = desired
                 .placement_groups
                 .iter()
-                .find(|candidate| placement_group_members_equal(&candidate.members, &group.members))
+                .find(|candidate| placement_unit_members_equal(&candidate.members, &group.members))
                 .unwrap_or(&group);
             if let Some(failover_move) = Self::relocate_placement_group_assignment(
                 schedule,
@@ -2046,15 +2059,15 @@ impl SessionServiceImpl {
         }
 
         for node in schedule.nodes.values_mut() {
-            if grouped_members.contains(&node.identity()) {
-                continue;
-            }
             let Some(desired_node) = desired.nodes.get(&node.identity()) else {
                 continue;
             };
             // Each unit fails over on its own: only the units an unavailable node held move.
             let units = node.units.keys().copied().collect::<Vec<_>>();
             for unit in units {
+                if grouped_members.contains(&NodeUnitRef::new(node.identity(), unit)) {
+                    continue;
+                }
                 let unavailable_node_ids = match node.unit(unit) {
                     Some(scheduled) => scheduled
                         .assigned_nodes
@@ -2097,6 +2110,22 @@ impl SessionServiceImpl {
         for node in schedule.nodes.values_mut() {
             if let Some(existing_node) = existing.nodes.get(&node.identity()) {
                 node.kafka_partition_schedule = existing_node.kafka_partition_schedule.clone();
+                if node.units.keys().ne(existing_node.units.keys())
+                    && let Some(previous) = &node.kafka_partition_schedule
+                {
+                    let count = NonZeroU64::new(
+                        u64::try_from(node.units.len()).assured("unit counts fit u64"),
+                    )
+                    .verified("a scheduled intake has at least one unit");
+                    node.kafka_partition_schedule = Some(KafkaPartitionSchedule::new(
+                        count,
+                        previous.observed_partitions.clone(),
+                        previous
+                            .rebalance_epoch
+                            .checked_add(1)
+                            .assured("a cluster cannot publish 2^64 partition rebalances"),
+                    ));
+                }
                 node.continue_wasm_state_generations_of(existing_node);
             }
         }
@@ -2107,62 +2136,55 @@ impl SessionServiceImpl {
             grouped_members.extend(members.iter().cloned());
             let existing_nodes = members
                 .iter()
-                .map(|member| existing.nodes.get(member))
+                .map(|member| existing.nodes.get(&member.node))
                 .collect::<Option<Vec<_>>>();
-            let common_primary = if let Some(nodes) = existing_nodes.as_ref()
-                && let Some(first) = nodes.first()
-                && let Some(primary) = first.first_unit().primary_node.as_ref()
-                && live_node_ids.contains(primary)
-                && nodes.iter().all(|node| {
-                    node.first_unit().primary_node.as_ref() == Some(primary)
-                        && node.first_unit().assigned_nodes.contains(primary)
-                }) {
-                Some(primary.clone())
-            } else {
-                None
+            let common_primary = match existing_nodes.as_ref() {
+                Some(nodes) => common_live_group_primary(&members, nodes, &live_node_ids),
+                None => None,
             };
-
             if let (Some(existing_nodes), Some(primary)) = (existing_nodes, common_primary) {
                 for (member, existing_node) in members.iter().zip(existing_nodes) {
-                    let Some(node) = schedule.nodes.get_mut(member) else {
+                    let Some(existing_unit) = existing_node.unit(member.unit) else {
                         continue;
                     };
-                    let desired_assigned_nodes = node.first_unit().assigned_nodes.clone();
-                    let replica_slots = existing_node
-                        .first_unit()
+                    let Some(node) = schedule.nodes.get_mut(&member.node) else {
+                        continue;
+                    };
+                    let Some(desired_unit) = node.unit(member.unit) else {
+                        continue;
+                    };
+                    let slots = existing_unit
                         .assigned_nodes
                         .len()
-                        .max(desired_assigned_nodes.len())
+                        .max(desired_unit.assigned_nodes.len())
                         .max(1);
                     let mut assigned_nodes = vec![primary.clone()];
-                    for assigned in existing_node
-                        .first_unit()
+                    for assigned in existing_unit
                         .assigned_nodes
                         .iter()
-                        .chain(&desired_assigned_nodes)
+                        .chain(&desired_unit.assigned_nodes)
                     {
                         if live_node_ids.contains(assigned) && !assigned_nodes.contains(assigned) {
                             assigned_nodes.push(assigned.clone());
                         }
                     }
-                    assigned_nodes.truncate(replica_slots);
-                    node.place_every_unit(Some(primary.clone()), assigned_nodes);
+                    assigned_nodes.truncate(slots);
+                    node.place_unit(member.unit, Some(primary.clone()), assigned_nodes);
                 }
             }
-            schedule.placement_groups[group_index].primary_node = if let Some(member) =
-                members.first()
-                && let Some(node) = schedule.nodes.get(member)
-            {
-                node.first_unit().primary_node.clone()
-            } else {
-                None
+            schedule.placement_groups[group_index].primary_node = match members.first() {
+                Some(member) => {
+                    let placement = schedule
+                        .nodes
+                        .get(&member.node)
+                        .and_then(|node| node.unit(member.unit));
+                    placement.and_then(|unit| unit.primary_node.clone())
+                }
+                None => None,
             };
         }
 
         for node in schedule.nodes.values_mut() {
-            if grouped_members.contains(&node.identity()) {
-                continue;
-            }
             let Some(existing_node) = existing.nodes.get(&node.identity()) else {
                 continue;
             };
@@ -2172,6 +2194,9 @@ impl SessionServiceImpl {
             let desired_node = node.clone();
             let units = node.units.keys().copied().collect::<Vec<_>>();
             for unit in units {
+                if grouped_members.contains(&NodeUnitRef::new(node.identity(), unit)) {
+                    continue;
+                }
                 Self::keep_existing_unit_assignment(
                     node,
                     unit,
@@ -2285,7 +2310,6 @@ impl SessionServiceImpl {
                     client,
                     topic,
                     offset_mode: KafkaOffsetMode::Domain,
-                    instances,
                     ..
                 }))) = ingestor.input.transport_entity()
                 else {
@@ -2304,7 +2328,10 @@ impl SessionServiceImpl {
                     domain: domain_schedule.domain.clone(),
                     ingestor: ingestor.name.clone(),
                     topic: topic.as_str().to_string(),
-                    instances: *instances,
+                    instances: NonZeroU64::new(
+                        u64::try_from(node.units.len()).assured("a unit count fits u64"),
+                    )
+                    .assured("an ingestor has units"),
                     client: client_model.clone(),
                 });
             }
@@ -2347,18 +2374,19 @@ impl SessionServiceImpl {
         let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
             topic: scheduled_topic,
             offset_mode: KafkaOffsetMode::Domain,
-            instances: scheduled_instances,
             ..
         }))) = ingestor_model.input.transport_entity()
         else {
             return Ok(());
         };
-        if scheduled_topic.as_str() != topic || *scheduled_instances != instances {
+        if scheduled_topic.as_str() != topic
+            || u64::try_from(ingestor_node.units.len()).assured("unit counts fit u64")
+                != instances.get()
+        {
             return Ok(());
         }
 
-        let mut next_schedule =
-            KafkaPartitionSchedule::new(*scheduled_instances, observed_partitions, 0);
+        let mut next_schedule = KafkaPartitionSchedule::new(instances, observed_partitions, 0);
         if let Some(existing_schedule) = ingestor_node.kafka_partition_schedule.as_ref() {
             if existing_schedule.observed_partitions == next_schedule.observed_partitions
                 && existing_schedule.instance_assignments == next_schedule.instance_assignments
@@ -2472,7 +2500,7 @@ impl SessionServiceImpl {
                     let mut partitions =
                         match inspector.partitions(spec_for_task.topic.as_str()).await {
                             Ok(partitions) => partitions,
-                            // The ingestor's own source reports a topic the broker does not have,
+                            // The ingestor's connector reports a topic the broker does not have,
                             // so the watcher records it as a topic without partitions and
                             // publishes the real schedule once the topic is provisioned.
                             Err(error) if error.current_context().is_missing_topic() => Vec::new(),

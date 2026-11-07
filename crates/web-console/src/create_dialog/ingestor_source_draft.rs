@@ -1,4 +1,4 @@
-//! Incomplete source settings for a visual ingestor.
+//! Incomplete entity settings for a visual ingestor.
 //!
 //! Layer: edges.
 //!
@@ -236,6 +236,13 @@ impl IngestorEntityDraft {
 
     pub(super) fn chosen_option(&self, keywords: &str) -> Option<&'static str> {
         let selected = match keywords {
+            "INSTANCES" => Some(
+                if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") {
+                    "PER PARTITION"
+                } else {
+                    "<count>"
+                },
+            ),
             "SESSION" => self.mqtt_session.map(|session| session.keyword()),
             "QOS" => self.mqtt_qos.map(|qos| qos.spelling()),
             "SUBSCRIPTION" => self
@@ -250,6 +257,13 @@ impl IngestorEntityDraft {
 
     pub(super) fn choose_option(&mut self, keywords: &str, choice: &str) {
         match keywords {
+            "INSTANCES" => match choice {
+                "PER PARTITION" => self.instances = "PER PARTITION".to_owned(),
+                "<count>" if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") => {
+                    self.instances.clear()
+                }
+                _ => {}
+            },
             "SESSION" => {
                 self.mqtt_session = MqttSession::iter().find(|value| value.keyword() == choice)
             }
@@ -315,7 +329,7 @@ impl IngestorEntityDraft {
         let kind = self
             .kind
             .ok_or_else(|| Report::new(IngestorEntityDraftError::Kind))?;
-        // The form offers transport sources only; a client source names no client or endpoint.
+        // The form offers transport ingestors only; a client input names no client or endpoint.
         if let IngestorEntityKind::Client(ClientIngestorEntity::Producer) = kind {
             return Err(Report::new(IngestorEntityDraftError::ClientInput));
         }
@@ -539,15 +553,21 @@ impl IngestorEntityDraft {
         Ok(value.trim().to_string())
     }
 
-    fn instances(&self) -> error_stack::Result<NonZeroU64, IngestorEntityDraftError> {
+    fn instances(
+        &self,
+    ) -> error_stack::Result<nervix_models::IngestorInstances, IngestorEntityDraftError> {
         let value = if self.instances.trim().is_empty() {
             self.option_default("INSTANCES").unwrap_or("")
         } else {
             self.instances.trim()
         };
-        value
-            .parse::<NonZeroU64>()
-            .map_err(|cause| Report::new(cause).change_context(IngestorEntityDraftError::Instances))
+        if value.eq_ignore_ascii_case("PER PARTITION") {
+            return Ok(nervix_models::IngestorInstances::PerPartition);
+        }
+        let count = value.parse::<NonZeroU64>().map_err(|cause| {
+            Report::new(cause).change_context(IngestorEntityDraftError::Instances)
+        })?;
+        Ok(nervix_models::IngestorInstances::Count(count))
     }
 
     fn every(&self) -> error_stack::Result<DomainClockPeriod, IngestorEntityDraftError> {
@@ -557,7 +577,7 @@ impl IngestorEntityDraft {
             .map_err(|_| Report::new(IngestorEntityDraftError::Every))
     }
 
-    /// The subscription a Pulsar source reads through, who the draft says owns it, and the type it
+    /// The subscription a Pulsar ingestor reads through, who the draft says owns it, and the type it
     /// reads it as, which every statement declares.
     fn pulsar_subscription(
         &self,
@@ -870,13 +890,13 @@ pub(super) enum IngestorEntityDraftError {
     UpgradeHeaders,
     #[error("EVERY must be a positive domain-clock duration")]
     Every,
-    #[error("INSTANCES must be a positive integer")]
+    #[error("INSTANCES must be a positive 64-bit count or PER PARTITION")]
     Instances,
     #[error("Choose Kafka offset ownership")]
     Offset,
     #[error("Enter a valid consumer group")]
     ConsumerGroup,
-    #[error("Choose a supported source delivery mode")]
+    #[error("Choose a supported ingestor delivery mode")]
     Mode,
     #[error("ACK MAX must be a positive integer")]
     AckMax,
@@ -896,7 +916,7 @@ pub(super) enum IngestorEntityDraftError {
     OptionRequirement { requirement: ChoiceRequirement },
     #[error("Choose an ON QUIESCE mode")]
     Quiesce,
-    #[error("This source cannot use the selected ON QUIESCE mode")]
+    #[error("This ingestor cannot use the selected ON QUIESCE mode")]
     UnsupportedQuiesce,
     #[error("BUFFER MAX SIZE must be positive")]
     BufferSize,
@@ -912,6 +932,8 @@ pub(super) enum IngestorEntityDraftError {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::num::NonZeroU64;
+
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, HttpRequestHeader,
@@ -1173,6 +1195,26 @@ mod tests {
             error.current_context(),
             &super::IngestorEntityDraftError::ChannelAndPattern
         );
+    }
+
+    #[test]
+    fn an_instance_draft_preserves_the_full_positive_64_bit_count() {
+        for count in [1, 65_536, u64::from(u32::MAX) + 1, u64::MAX] {
+            let mut draft = complete(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic));
+            draft.instances = count.to_string();
+            assert_eq!(
+                draft
+                    .instances()
+                    .assured("the complete positive count is accepted"),
+                nervix_models::IngestorInstances::Count(
+                    NonZeroU64::new(count).assured("each boundary is positive")
+                )
+            );
+            let entity = draft
+                .build()
+                .assured("the complete form preserves the count");
+            assert_eq!(filled_from(&entity).instances, count.to_string());
+        }
     }
 
     fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {

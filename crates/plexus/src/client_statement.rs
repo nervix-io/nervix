@@ -17,10 +17,10 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_mode, completion_context,
-        completion_tokens, domain_ref, filter_by_prefix, if_not_exists_clause, into_parse_error,
-        junction_name, kw, kw_phrase3, lex_input, relay_ref, schema_name, suggestions_from_errors,
-        tok, wire_schema_name,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
+        domain_ref, filter_by_prefix, if_not_exists_clause, into_parse_error, junction_name, kw,
+        kw_phrase3, lex_input, relay_ref, schema_name, suggestions_from_errors, tok,
+        wire_schema_name,
     },
 };
 
@@ -295,29 +295,15 @@ impl CompletionExpectation {
     }
 }
 
+/// The completion expectations at `cursor` in `input`, with a grammar built for this call; see
+/// [`ClientStatementGrammar::suggest_expectations`].
 pub fn suggest_client_expectations(input: &str, cursor: usize) -> Vec<CompletionExpectation> {
-    let (labels, tokens) = client_completion(input, cursor);
-    let schema = alter_schema_context(&tokens);
-    let expression = expression_completion::ExpressionCompletion::new(&tokens);
-    let source = expression.ingestor_reference();
-    let mut expectations = Vec::new();
-    for label in labels {
-        if let Some(offers) = expression.expectations(&label) {
-            expectations.extend(offers);
-            continue;
-        }
-        if let Some(expectation) = CompletionExpectation::from_label(label, schema.as_ref(), source)
-        {
-            expectations.push(expectation);
-        }
-    }
-    expectations
+    ClientStatementGrammar::new().suggest_expectations(input, cursor)
 }
 
 fn junction_input_relay(tokens: &[Token]) -> Option<RelayName> {
     kw(Keyword::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Keyword::Junction))
         .then_ignore(junction_name())
         .then_ignore(kw(Keyword::From))
@@ -363,7 +349,6 @@ fn ingestor_source_kind(tokens: &[Token]) -> Option<IngestorEntityKind> {
 fn emitter_connector_kind(tokens: &[Token]) -> Option<EmitterEntityKind> {
     let create = kw(Keyword::Create)
         .ignore_then(if_not_exists_clause())
-        .ignore_then(ack_mode().or_not())
         .ignore_then(crate::emitter::head_kind());
     let alter = kw(Keyword::Alter).ignore_then(crate::emitter::head_kind());
     choice((create, alter))
@@ -428,11 +413,13 @@ pub fn parse_upload_resource_query(
     crate::upload_resource::parse_upload_resource(input)
 }
 
-/// The client statement grammar, built once and reused for every statement parsed with it.
+/// The client statement grammar, built once and reused for every statement parsed and every
+/// completion read with it.
 ///
 /// Building the grammar constructs the parser of every statement Plexus defines, which costs far
-/// more than parsing a short statement with it. A caller that parses repeatedly holds one grammar
-/// and parses with it; [`parse_client_statement`] and [`parse_client_statement_sources`] build a
+/// more than parsing a short statement with it. A caller that parses or completes repeatedly holds
+/// one grammar and reads with it; [`parse_client_statement`], [`parse_client_statement_sources`],
+/// [`suggest_client_expectations`], [`suggest_client_statement`] and [`local_path_fragment`] build a
 /// grammar for each call instead.
 ///
 /// A grammar is not `Send`: its parsers share their parts through non-atomic reference counts, so
@@ -514,6 +501,82 @@ impl ClientStatementGrammar {
         Ok(statements)
     }
 
+    /// What completion expects at `cursor` in `input`: the literal words the grammar can continue
+    /// with, and the semantic references a caller resolves against what it knows.
+    ///
+    /// Completion parses the statement up to the cursor with this grammar and reads what it expected
+    /// where that statement ends. Only the few parsers that read the statement's head, for the scope
+    /// of its expressions and fields, are built for each completion.
+    pub fn suggest_expectations(&self, input: &str, cursor: usize) -> Vec<CompletionExpectation> {
+        let (labels, tokens) = self.completion(input, cursor);
+        let schema = alter_schema_context(&tokens);
+        let expression = expression_completion::ExpressionCompletion::new(&tokens);
+        let source = expression.ingestor_reference();
+        let mut expectations = Vec::new();
+        for label in labels {
+            if let Some(offers) = expression.expectations(&label) {
+                expectations.extend(offers);
+                continue;
+            }
+            if let Some(expectation) =
+                CompletionExpectation::from_label(label, schema.as_ref(), source)
+            {
+                expectations.push(expectation);
+            }
+        }
+        expectations
+    }
+
+    /// The grammar labels completion offers at `cursor` in `input`.
+    pub fn suggest_statement(&self, input: &str, cursor: usize) -> Vec<String> {
+        self.completion(input, cursor).0
+    }
+
+    /// Finds the local path being written at `cursor`, if this grammar expects one there.
+    ///
+    /// A client-local statement names a file it reads or writes as a quoted `local_path`. Inside an
+    /// unterminated quote the source no longer lexes, so the grammar is asked what it expects where
+    /// the quote opens; outside a quote it is asked at the cursor itself. Only a position that
+    /// expects a `local_path` answers, which is what keeps a path lookup out of every other string
+    /// literal.
+    pub fn local_path_fragment<'input>(
+        &self,
+        input: &'input str,
+        cursor: usize,
+    ) -> Option<LocalPathFragment<'input>> {
+        let cursor = input.floor_char_boundary(cursor.min(input.len()));
+        let head = &input[..cursor];
+        let opening = head
+            .char_indices()
+            .rev()
+            .find(|(_, character)| matches!(character, '\'' | '"'));
+        if let Some((quote_at, quote)) = opening {
+            let fragment_start = quote_at
+                .checked_add(quote.len_utf8())
+                .verified("a quote found in the head is followed by at least the cursor");
+            let fragment = &head[fragment_start..];
+            if !fragment.contains('\n') && self.expects_local_path(&head[..quote_at]) {
+                let rest = &input[cursor..];
+                let line_end = rest.find('\n').unwrap_or(rest.len());
+                let closing = rest[..line_end].find(quote).unwrap_or(line_end);
+                let end = cursor
+                    .checked_add(closing)
+                    .verified("the closing quote is found within the input after the cursor");
+                return Some(LocalPathFragment {
+                    fragment,
+                    range: fragment_start..end,
+                });
+            }
+        }
+        if self.expects_local_path(head) {
+            return Some(LocalPathFragment {
+                fragment: "",
+                range: cursor..cursor,
+            });
+        }
+        None
+    }
+
     /// Parses the one statement that `tokens` of `lexed` hold.
     ///
     /// The tokens keep the spans they have in the lexed source, so a rejection is located in that
@@ -539,6 +602,45 @@ impl ClientStatementGrammar {
         Ok(out
             .into_output()
             .verified("has_errors returned false above, so this parse produced output"))
+    }
+
+    /// The labels completion offers at `cursor` in `input`, with the tokens of the statement up to
+    /// the cursor that they were read from.
+    fn completion(&self, input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
+        let (source, prefix) = completion_context(input, cursor);
+
+        let Some(tokens) = completion_tokens(&source) else {
+            return (Vec::new(), Vec::new());
+        };
+
+        let out = self.parser.get().parse(tokens.as_slice());
+        let labels = if out.has_errors() {
+            suggestions_from_errors(out.into_errors(), &prefix)
+        } else {
+            match out.into_output() {
+                Some(ClientStatement::Server(Statement::Backup(backup))) => {
+                    backup_tail(&backup, &source, &prefix)
+                }
+                Some(ClientStatement::Server(Statement::Restore(restore))) => {
+                    restore_tail(&restore, &tokens, &source, &prefix)
+                }
+                Some(ClientStatement::Server(statement)) => {
+                    crate::statement::statement_tail(&statement, &tokens, &source, &prefix)
+                }
+                Some(ClientStatement::DescribeBackup(describe)) => {
+                    describe_backup_tail(&describe, &tokens, &source, &prefix)
+                }
+                _ => Vec::new(),
+            }
+        };
+        (labels, tokens)
+    }
+
+    /// Whether this grammar expects a `local_path` right after `head`.
+    fn expects_local_path(&self, head: &str) -> bool {
+        self.suggest_statement(head, head.len())
+            .iter()
+            .any(|label| label == "local_path")
     }
 }
 
@@ -590,40 +692,10 @@ pub fn parse_client_statement_sources(
     ClientStatementGrammar::new().parse_sources(input)
 }
 
+/// The grammar labels completion offers at `cursor` in `input`, with a grammar built for this call;
+/// see [`ClientStatementGrammar::suggest_statement`].
 pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
-    client_completion(input, cursor).0
-}
-
-fn client_completion(input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
-    let (source, prefix) = completion_context(input, cursor);
-
-    let Some(tokens) = completion_tokens(&source) else {
-        return (Vec::new(), Vec::new());
-    };
-
-    let out = client_statement_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    let labels = if out.has_errors() {
-        suggestions_from_errors(out.into_errors(), &prefix)
-    } else {
-        match out.into_output() {
-            Some(ClientStatement::Server(Statement::Backup(backup))) => {
-                backup_tail(&backup, &source, &prefix)
-            }
-            Some(ClientStatement::Server(Statement::Restore(restore))) => {
-                restore_tail(&restore, &tokens, &source, &prefix)
-            }
-            Some(ClientStatement::Server(statement)) => {
-                crate::statement::statement_tail(&statement, &tokens, &source, &prefix)
-            }
-            Some(ClientStatement::DescribeBackup(describe)) => {
-                describe_backup_tail(&describe, &tokens, &source, &prefix)
-            }
-            _ => Vec::new(),
-        }
-    };
-    (labels, tokens)
+    ClientStatementGrammar::new().suggest_statement(input, cursor)
 }
 
 /// The optional clause completion offers after a complete `BACKUP`.
@@ -684,51 +756,10 @@ pub struct LocalPathFragment<'input> {
     pub range: Range<usize>,
 }
 
-/// Finds the local path being written at `cursor`, if the grammar expects one there.
-///
-/// A client-local statement names a file it reads or writes as a quoted `local_path`. Inside an
-/// unterminated quote the source no longer lexes, so the grammar is asked what it expects where the
-/// quote opens; outside a quote it is asked at the cursor itself. Only a position that expects a
-/// `local_path` answers, which is what keeps a path lookup out of every other string literal.
+/// Finds the local path being written at `cursor`, if the grammar expects one there, with a grammar
+/// built for this call; see [`ClientStatementGrammar::local_path_fragment`].
 pub fn local_path_fragment(input: &str, cursor: usize) -> Option<LocalPathFragment<'_>> {
-    let cursor = input.floor_char_boundary(cursor.min(input.len()));
-    let head = &input[..cursor];
-    let opening = head
-        .char_indices()
-        .rev()
-        .find(|(_, character)| matches!(character, '\'' | '"'));
-    if let Some((quote_at, quote)) = opening {
-        let fragment_start = quote_at
-            .checked_add(quote.len_utf8())
-            .verified("a quote found in the head is followed by at least the cursor");
-        let fragment = &head[fragment_start..];
-        if !fragment.contains('\n') && expects_local_path(&head[..quote_at]) {
-            let rest = &input[cursor..];
-            let line_end = rest.find('\n').unwrap_or(rest.len());
-            let closing = rest[..line_end].find(quote).unwrap_or(line_end);
-            let end = cursor
-                .checked_add(closing)
-                .verified("the closing quote is found within the input after the cursor");
-            return Some(LocalPathFragment {
-                fragment,
-                range: fragment_start..end,
-            });
-        }
-    }
-    if expects_local_path(head) {
-        return Some(LocalPathFragment {
-            fragment: "",
-            range: cursor..cursor,
-        });
-    }
-    None
-}
-
-/// Whether the client grammar expects a `local_path` right after `head`.
-fn expects_local_path(head: &str) -> bool {
-    suggest_client_statement(head, head.len())
-        .iter()
-        .any(|label| label == "local_path")
+    ClientStatementGrammar::new().local_path_fragment(input, cursor)
 }
 
 #[cfg(test)]
@@ -1161,6 +1192,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A held grammar completes every input as a grammar built for that input does: after
+    /// completions read from rejections, from the tail of a complete statement and from a local
+    /// path, and between parses, so a completion leaves nothing behind for the next read.
+    #[test]
+    fn held_grammar_completes_as_a_grammar_built_for_each_input() {
+        let inputs = [
+            "",
+            "CREATE SCHE",
+            "CREATE JUNCTION normalizer FROM incoming UNBRANCHED TO outgoing SET value = co",
+            "ALTER SCHEMA event ADD ",
+            "CREATE RELAY events SCHEMA event UNBRANCHED ",
+            "BACKUP DOMAIN TO '/tmp/c.nvxb' WI",
+            "RESTORE DOMAIN prod FROM 'p.nvxb' ",
+            "DESCRIBE BACKUP '/tmp/c.nvxb' ",
+            "UPLOAD RESOURCE proto VERSION '/tmp/pro",
+            "UPLOAD RESOURCE proto VERSION ",
+            "CREATE DOMAIN 'never closed",
+            "CREATE SCHEMA broken ( id STRING @",
+            "USE analytics; CREATE RE",
+        ];
+        let held = ClientStatementGrammar::new();
+        for input in inputs {
+            for cursor in [input.len(), input.floor_char_boundary(input.len() / 2)] {
+                let built = ClientStatementGrammar::new();
+                assert_eq!(
+                    held.suggest_expectations(input, cursor),
+                    built.suggest_expectations(input, cursor),
+                    "{input:?} at {cursor}"
+                );
+                assert_eq!(
+                    held.suggest_statement(input, cursor),
+                    built.suggest_statement(input, cursor),
+                    "{input:?} at {cursor}"
+                );
+                assert_eq!(
+                    held.local_path_fragment(input, cursor),
+                    built.local_path_fragment(input, cursor),
+                    "{input:?} at {cursor}"
+                );
+                assert_eq!(
+                    held.parse_sources(input).ok(),
+                    built.parse_sources(input).ok(),
+                    "{input:?}"
+                );
+            }
+        }
+        let relay = "CREATE RELAY events SCHEMA ";
+        assert!(
+            held.suggest_expectations(relay, relay.len()).contains(
+                &CompletionExpectation::Semantic(SemanticReference::Model(ModelKind::Schema))
+            ),
+            "{relay:?} expects a schema"
+        );
+        let upload = "UPLOAD RESOURCE proto VERSION '/tmp/pro";
+        let Some(local_path) = held.local_path_fragment(upload, upload.len()) else {
+            panic!("{upload:?} writes a local path");
+        };
+        assert_eq!(local_path.fragment, "/tmp/pro");
     }
 
     #[test]

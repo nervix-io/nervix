@@ -28,11 +28,7 @@ use nervix_models::{
     RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName, Setting,
     SubscriptionBinding, Timestamp, Unit, WasmStateResetScope,
 };
-use nervix_primitives::{
-    sync::{mpsc, watch},
-    unmodeled::sync::OnceLock,
-};
-use nervix_recovery::Discarded as _;
+use nervix_primitives::sync::{mpsc, watch};
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::IntoStaticStr;
 use thiserror::Error;
@@ -42,6 +38,7 @@ pub mod backup;
 mod connection;
 mod entropy;
 mod identity;
+mod kafka_start;
 mod node_drain;
 mod observation;
 mod operation;
@@ -65,6 +62,7 @@ pub use connection::{
 };
 pub use entropy::TransportEntropy;
 pub use identity::{JoinTerms, TlsConfigBundle, TransportIdentity};
+pub use kafka_start::{KafkaStartAction, KafkaStartRequest, KafkaStartResponse};
 pub use node_drain::{
     StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
 };
@@ -82,7 +80,8 @@ pub use pool::PoolClass;
 pub use request::RkyvMessage;
 pub use request::{
     ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse, ApplicationHealthProbe,
-    ApplicationRevisionRequest, ApplicationRevisionResponse, HandlerRegistrationError,
+    ApplicationProgress, ApplicationProgressPhase, ApplicationProgressReceipt,
+    ApplicationProgressReport, ApplicationRevisionRequest, HandlerRegistrationError,
     HttpsListenerInstallation, HttpsListenerInstallationRequest, HttpsListenerInstallationResponse,
     InterconnectDuplexRequest, InterconnectRequest, InterconnectStreamRequest,
     RemoteRequestFailure, RequestContext, RequestError, RequestSubquota, StreamHandlerError,
@@ -442,7 +441,7 @@ pub struct DomainClockProgressRequest {
     pub progress: DomainClockProgress,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct CaptureOwnershipHandoffStateRequest {
     pub coordination: CoordinationIdentity,
     pub operation_id: String,
@@ -452,6 +451,45 @@ pub struct CaptureOwnershipHandoffStateRequest {
     pub entity: NodeRef,
     pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
+    pub selection: OwnershipHandoffSelection,
+}
+
+/// The part of a frozen intake's state that belongs to one published instance layout.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestorUnitSelection {
+    pub unit: Unit,
+    pub count: std::num::NonZeroU64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub enum OwnershipHandoffSelection {
+    Unit,
+    IngestorUnits {
+        selection: IngestorUnitSelection,
+        checkpoints: Vec<OwnershipHandoffCheckpoint>,
+    },
+}
+
+/// One frozen source unit, before the coordinator publishes a replacement intake layout.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct OwnershipHandoffSource {
+    pub node: ClusterNodeName,
+    pub incarnation: ClusterNodeIncarnation,
+    pub unit: Unit,
+    pub checkpoints: Vec<OwnershipHandoffCheckpoint>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub enum OwnershipHandoffInput {
+    Unit(Vec<OwnershipHandoffCheckpoint>),
+    IngestorUnits {
+        selection: IngestorUnitSelection,
+        schema_fingerprint: nervix_models::SchemaFingerprint,
+        kafka_offsets: bool,
+        recipient: ClusterNodeName,
+        recipient_incarnation: ClusterNodeIncarnation,
+        sources: Vec<OwnershipHandoffSource>,
+    },
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -467,7 +505,30 @@ pub struct PrepareOwnershipHandoffStateRequest {
     pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
     pub target_schedule_fingerprint: [u8; 32],
-    pub checkpoints: Vec<OwnershipHandoffCheckpoint>,
+    pub input: OwnershipHandoffInput,
+}
+
+impl PrepareOwnershipHandoffStateRequest {
+    pub fn recipient(&self) -> (&ClusterNodeName, ClusterNodeIncarnation) {
+        match &self.input {
+            OwnershipHandoffInput::Unit(_) => (&self.destination, self.destination_incarnation),
+            OwnershipHandoffInput::IngestorUnits {
+                recipient,
+                recipient_incarnation,
+                ..
+            } => (recipient, *recipient_incarnation),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OwnershipHandoffParticipant {
+    Source {
+        node: ClusterNodeName,
+        incarnation: ClusterNodeIncarnation,
+        units: Vec<Unit>,
+    },
+    Destination,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -483,6 +544,7 @@ pub struct ConfirmOwnershipHandoffStateRequest {
     pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
     pub target_schedule_fingerprint: [u8; 32],
+    pub participant: OwnershipHandoffParticipant,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -716,7 +778,7 @@ pub struct EntityGateRequest {
     pub coordination: CoordinationIdentity,
     pub domain: DomainName,
     pub relays: Vec<RelayName>,
-    pub affected_entities: Vec<NodeRef>,
+    pub targets: nervix_models::EntityGateTargets,
     pub purpose: EntityGatePurpose,
     pub deadline_millis: u64,
     pub reason: String,
@@ -740,7 +802,7 @@ pub struct EntityDrainStatusRequest {
     pub coordination: CoordinationIdentity,
     pub domain: DomainName,
     pub relays: Vec<RelayName>,
-    pub affected_entities: Vec<NodeRef>,
+    pub targets: nervix_models::EntityGateTargets,
     pub purpose: EntityGatePurpose,
 }
 
@@ -782,6 +844,7 @@ pub struct DescribeMetricsEnvelope {
 pub struct DescribeIngestorRequest {
     pub domain: DomainName,
     pub name: IngestorName,
+    pub unit: Unit,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -1366,6 +1429,8 @@ pub enum TlsPemFailureKind {
 
 #[derive(Debug, Error)]
 pub enum TlsConfigError {
+    #[error("interconnect TLS algorithm policy is invalid")]
+    AlgorithmPolicy,
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("tls error: {0}")]
@@ -1408,18 +1473,6 @@ pub enum TlsConfigError {
     ClockUnavailable,
     #[error("the certificate clock reads outside the representable certificate time range")]
     ClockOutOfRange,
-}
-
-pub fn install_rustls_crypto_provider() {
-    static PROVIDER: OnceLock<()> = OnceLock::new();
-    PROVIDER.get_or_init(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .discarded(
-                "a provider the host installed first is the one this transport would have \
-                 installed",
-            );
-    });
 }
 
 #[cfg(test)]

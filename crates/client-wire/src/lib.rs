@@ -84,12 +84,13 @@ pub use domain::{
     DomainsObserved,
 };
 pub use domain_clock::{
-    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
-    DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockObserved, DomainClockTicked,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachRefusal,
+    DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
 };
 pub use event::{
-    Leadership, LeadershipObserved, NoticeLevel, ServerNotice, SessionEndReason, SessionEnding,
+    Leadership, LeadershipObserved, NoticeKind, NoticeLevel, ServerNotice, SessionEndReason,
+    SessionEnding,
 };
 pub use frame::{
     BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, FrameError,
@@ -105,8 +106,8 @@ pub use producer::{
 pub use reply::{
     CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,
     RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,
-    SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnsubscribeDisposition,
-    UnsubscribeOutcome,
+    SubscriptionRefusal, SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    UnsubscribeDisposition, UnsubscribeOutcome,
 };
 pub use request::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelRequest, ClientMessage,
@@ -122,7 +123,7 @@ pub use row::{
     CellView, CellWriter, CellsView, EmptyBranchKey, RowBatchView, RowBranch, RowConformanceError,
     RowLocation, RowSchema,
 };
-pub use server::{Reply, ReplyBody, ReplyDelivery, ServerEvent, ServerMessage};
+pub use server::{Reply, ReplyBody, ReplyBodyKind, ReplyDelivery, ServerEvent, ServerMessage};
 pub use subscription::{
     RowsSkippedCause, SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded,
     SubscriptionHandle, SubscriptionRows, SubscriptionRowsEncoder, SubscriptionRowsSkipped,

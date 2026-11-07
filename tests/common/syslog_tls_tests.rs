@@ -38,7 +38,7 @@ struct TlsPeer {
 
 impl TlsPeer {
     async fn start() -> Self {
-        nervix_interconnect::install_rustls_crypto_provider();
+        nervix_crypto::tls::install_default_provider();
         let key = KeyPair::generate().assured("the test key algorithm is supported");
         let certificate = CertificateParams::new(vec!["127.0.0.1".to_string()])
             .assured("a loopback IP is a valid certificate name")

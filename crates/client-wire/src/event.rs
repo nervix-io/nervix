@@ -22,10 +22,35 @@ pub enum NoticeLevel {
 
 wire_enum!(ALL_NOTICE_LEVELS: NoticeLevel => wire::NoticeLevel { Info, Warning, Error });
 
-/// A server condition worth an operator's attention that belongs to no request.
+/// What a notice reports, so a reader routes it without reading its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NoticeKind {
+    /// A node of the serving node's live set joined, left, or became a new incarnation.
+    Membership,
+    /// A Raft transition of the serving node, or a membership operation it proposes as leader.
+    Leadership,
+    /// A committed cluster-parameter revision the serving node installed.
+    ClusterParameters,
+    /// A failure the runtime of the serving node, or of another node, recovered from.
+    Runtime,
+    /// A control-plane failure the serving node recovered from.
+    ControlPlane,
+}
+
+wire_enum!(ALL_NOTICE_KINDS: NoticeKind => wire::NoticeKind {
+    Membership,
+    Leadership,
+    ClusterParameters,
+    Runtime,
+    ControlPlane,
+});
+
+/// A server condition worth an operator's attention that belongs to no request: display text, with
+/// the level it is shown at and the kind of event it reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerNotice {
     pub level: NoticeLevel,
+    pub kind: NoticeKind,
     pub message: String,
 }
 
@@ -40,6 +65,7 @@ impl ServerNotice {
             encoder.fbb(),
             &wire::ServerNoticeArgs {
                 level: Some(self.level.into()),
+                kind: Some(self.kind.into()),
                 message: Some(message),
             },
         );
@@ -54,8 +80,13 @@ impl ServerNotice {
         notice: wire::ServerNotice<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
         let level = decoder.required_enumeration("ServerNotice.level", notice.level())?;
+        let kind = decoder.required_enumeration("ServerNotice.kind", notice.kind())?;
         let message = decoder.text("ServerNotice.message", notice.message())?;
-        Ok(Self { level, message })
+        Ok(Self {
+            level,
+            kind,
+            message,
+        })
     }
 }
 

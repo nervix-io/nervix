@@ -18,6 +18,12 @@ FROM <relay> [WHERE <expr>], ...
 COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]
 ```
 
+The optional `ATTACHED | DETACHED` clause follows the complete input list and its optional
+`COLLECT FOR`, before the node filter, resource binding, branch selection or output routes. On a
+correlator it follows the complete `RIGHT FROM` list and its collection policy. Omitting the clause
+selects `ATTACHED`; canonical Plexus and `SHOW CREATE` always write it explicitly in that body
+position. The supported `ALTER ... SET ATTACHED | SET DETACHED` operations change the same mode.
+
 Without `COLLECT FOR`, each relay batch is executed immediately and Nervix creates no additional
 input buffer. With it, the duration starts when data enters an empty input collector. The node
 executes the accumulated batch when that timer expires or the optional maximum size is reached.
@@ -410,6 +416,56 @@ Every required route-output field is explicit. The source input is not implicitl
 `USING RESOURCE` requires `VERSION <n>` or `VERSION LATEST`. The inferencer loads the model file
 from the one version it stores, so a later upload of the resource does not change the scoring
 model; see [Versioning](resources.md#versioning).
+
+### State tensors
+
+A model can carry state between rows of one concrete branch. Declare each state input and its
+successor output between `INPUTS` and `OUTPUT SCHEMA`:
+
+```plexus
+CREATE INFERENCER running_total
+  FROM features
+  USING RESOURCE scoring VERSION 1
+  FILE 'running_sum.onnx'
+  INPUTS { 'features' DENSE TENSOR<F32>[2] = input.features }
+  STATE {
+    'state_in' FROM 'state_out' DENSE TENSOR<F32>[2] INITIAL ZEROS
+  }
+  OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] }
+  BRANCHED BY by_tenant
+  TO scores SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+```
+
+`INITIAL ZEROS` initializes every element to zero. `INITIAL [1 AS F32, 10 AS F32]` supplies a
+constant two-element tensor instead. The expression must have exactly the declared non-null type
+and shape, use deterministic functions, read no fields and perform no side effects. An uncast
+floating-point literal is `F64`, so cast each element to `F32` explicitly.
+
+State tensors require fixed axes and dense `F32` elements. A stateful inferencer cannot declare
+`BATCH` in any input, output or state tensor. Port names are distinct across the declaration, and
+every ONNX input and output must be bound exactly once, including both sides of every state pair.
+Both model state ports must match the declared shape; a dynamic ONNX axis may be instantiated with
+the fixed size the declaration supplies.
+
+Each branch invokes the model once for each admitted row, in arrival order. All state successors
+advance together after a successful invocation. A failed `INPUTS` expression or model invocation
+uses `ON MESSAGE ERROR` and leaves the preceding state intact; `FILTER WHERE` runs before the
+model, so a filtered row changes no state. Materialized dependencies resolve before admission.
+Every output route receives the same generated result, and its `FLUSH` controls dispatch without
+invoking the model again. Acknowledgements wait for dispatch. Without `STATE`, inference keeps its
+flush-time execution and supports the existing per-message and batched tensor declarations.
+
+State is held in memory. A restart, owner change or branch eviction starts that branch again from
+`INITIAL`. Use this contract when deciding whether a stateful model suits a workflow that must
+survive those events. `UNBRANCHED` owns one state sequence; `BRANCHED BY` owns one per concrete key.
+State ports are internal model inputs and outputs, not fields available to route construction.
+`SHOW CREATE INFERENCER` preserves the state declaration and its initial expression.
+
+The fixed state bytes per branch must fit one configured runtime snapshot section. Nervix checks
+that derived bound while preparing INITIAL before publishing the processor plan. Native row
+execution uses the bounded extension workers; mapped input and public output conversion also
+respect the configured relay operation limit. The state is retained once per active branch;
+use the branch's `MAX INSTANCES` to bound the number of live copies.
 
 ## WASM processor
 

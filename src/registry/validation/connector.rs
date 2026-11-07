@@ -2,7 +2,7 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** The source and emitter contracts: the client an ingestor or emitter may use, the
+//! - **Owns.** The ingestor and emitter contracts: the client an ingestor or emitter may use, the
 //!   publishing and mapping rules of each emitter, the headers each side supports, the timestamp
 //!   source an ingestor declares, and the hostnames and paths a listener claims.
 //! - **Depends on.** The connector Models and the schema rules.
@@ -21,14 +21,14 @@ use nervix_models::{
     Assignment, AssignmentTarget, ClientConfigEntry, ClientDeadline, ClientIngestMode,
     CodecBatchContainer, CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor,
     CreateSchema, CreateSignalingProtocol, DomainName, EmitterEntity, EmitterEntityModel,
-    EmitterEnvelope, EndpointName, EnvelopeClauseForm, Expression, FieldName, HttpBodyMode,
-    HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestEmitter,
-    IcebergCatalogProperties, IcebergStorageBackend, IcebergTableEmitter, IngestTimestampSource,
-    IngestorInput, IngestorMetadataType, LiteralHeaderWrite, Model, ModelIndex, ModelKind,
-    ModelName, NodeRef, OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType,
-    ProcessorOutput, RelayName, RouteConstruction, SQS_DELAY_MAXIMUM, SchemaField, SchemaName,
-    SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter, SqsQueueName, VhostName,
-    parse_duration_text,
+    EmitterEnvelope, EndpointName, EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType,
+    Expression, FieldName, HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod,
+    HttpOrigin, HttpRequestEmitter, IcebergCatalogProperties, IcebergStorageBackend,
+    IcebergTableEmitter, IngestTimestampSource, IngestorInput, IngestorMetadataType,
+    LiteralHeaderWrite, Model, ModelIndex, ModelKind, ModelName, NodeRef, OtelEmitter,
+    OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType, ProcessorOutput, PropertyType,
+    RelayName, RouteConstruction, SQS_DELAY_MAXIMUM, SchemaField, SchemaName, SignalingWireFormat,
+    SqsEmitter, SqsQueueEmitter, SqsQueueName, VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -47,16 +47,13 @@ use crate::{
             OtelMappingIssue, OtelMappingSection, OtelMappingSignal, RegistryError,
         },
         validation::{
-            branching::relay_declared_branch,
+            branching::relay_declared_branch_schema,
             expression::{
                 LookupHashMapRewriteResult, collect_program_field_refs, lookup_hash_map_bindings,
                 program_uses_header_reads, rewrite_lookup_hash_map_program,
             },
             materialized_state::referenced_materialized_stream_bindings,
-            processor::{
-                ModelValidationContext, processor_first_input_relay,
-                validate_where_program_for_internal_schemas,
-            },
+            processor::{ModelValidationContext, validate_where_program_for_internal_schemas},
             schema::{
                 arrow_schema_for_internal_schema, readonly_binding_for_internal_schema,
                 schema_sensitivity_for_internal_schema, writable_binding_for_internal_schema,
@@ -244,7 +241,7 @@ fn validate_transport_delivery(
     Ok(())
 }
 
-/// A client source's ACK timeout and retry policy are positive durations, and its retry ceiling
+/// A client ingestor's ACK timeout and retry policy are positive durations, and its retry ceiling
 /// is at least its first backoff, so the plan and every producer read one valid policy.
 fn validate_client_ingest_mode(
     mode: &ClientIngestMode,
@@ -279,7 +276,7 @@ fn validate_client_ingest_mode(
 pub(in crate::registry) fn validate_emitter_publishing_contract(
     domain: &DomainName,
     identifier: &ModelName,
-    models: &ModelIndex,
+    _models: &ModelIndex,
     emitter: &CreateEmitter,
 ) -> Result<(), Report<RegistryError>> {
     let invalid = |reason: String| {
@@ -372,23 +369,6 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
                 )));
             }
             validate_sqs_queue_envelope(domain, identifier, queue, &emitter.envelope)?;
-            if let Some(SqsFifoGroup::FromBranch) = fifo_group {
-                processor_first_input_relay(
-                    domain,
-                    identifier,
-                    &emitter.from,
-                    "SQS FIFO emitter input",
-                )?;
-                for input_relay in emitter.from.relays() {
-                    if relay_declared_branch(domain, identifier, models, input_relay)?.is_none() {
-                        return Err(invalid(format!(
-                            "SQS FIFO GROUP FROM BRANCH requires branched input; relay '{}' is \
-                             unbranched",
-                            input_relay.as_str()
-                        )));
-                    }
-                }
-            }
         }
         EmitterEntity::Otel(connector) => {
             validate_otel_mapping_contract(domain, identifier, connector)?;
@@ -760,13 +740,45 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
     input_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
     let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-        fifo_group: Some(SqsFifoGroup::Expression(expression)),
+        fifo_group: Some(expression),
         ..
     })) = emitter.connector.as_ref()
     else {
         return Ok(());
     };
 
+    if !expression.reads_branch_fields() {
+        return validate_sqs_fifo_group_value(
+            domain,
+            identifier,
+            models,
+            expression,
+            input_schema,
+            None,
+        );
+    }
+    for relay in emitter.from.relays() {
+        let branch = relay_declared_branch_schema(domain, identifier, models, relay)?;
+        validate_sqs_fifo_group_value(
+            domain,
+            identifier,
+            models,
+            expression,
+            input_schema,
+            branch,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_sqs_fifo_group_value(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    expression: &Expression,
+    input_schema: &CreateSchema,
+    branch: Option<&CreateSchema>,
+) -> Result<(), Report<RegistryError>> {
     let target = FieldName::parse("fifo_group").map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -818,7 +830,13 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
         readonly_binding_for_internal_schema("input", input_schema),
         writable_binding_for_internal_schema("output", &output_schema),
     ];
-    let local_namespaces = HashSet::from_iter(["input".to_string(), "output".to_string()]);
+    if let Some(schema) = branch {
+        bindings.push(readonly_binding_for_internal_schema("branch", schema));
+    }
+    let mut local_namespaces = HashSet::from_iter(["input".to_string(), "output".to_string()]);
+    if expression.reads_branch_fields() {
+        local_namespaces.insert("branch".to_string());
+    }
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
         identifier,
@@ -1055,10 +1073,11 @@ fn validate_sqs_queue_envelope(
 
 /// One value an emitter's envelope computes for every record: where it is written, the
 /// expression that computes it and the exact type it has.
+#[derive(Clone)]
 struct EnvelopeValue<'a> {
     site: EnvelopeValueSite,
     expression: &'a Expression,
-    expected: ParseAsType,
+    expected: EnvelopeValueType,
 }
 
 /// The values an emitter computes for every record beside its payload, in the order its statement
@@ -1072,7 +1091,7 @@ fn envelope_values(emitter: &CreateEmitter) -> Vec<EnvelopeValue<'_>> {
         values.push(EnvelopeValue {
             site: EnvelopeValueSite::RoutingKey,
             expression,
-            expected: ParseAsType::String,
+            expected: PropertyType::String.into(),
         });
     }
     for clause in emitter.envelope.clauses() {
@@ -1117,15 +1136,37 @@ pub(in crate::registry) fn validate_emitter_envelope_expressions(
     output_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
     let values = envelope_values(emitter);
-    if values.is_empty() {
+    if emitter.envelope.key.is_none() && !emitter.envelope.partition_from_branch {
+        let scopes = EnvelopeScopes {
+            input: input_schema,
+            output: EmitterExecutionPlan::constructs_output(emitter).then_some(output_schema),
+            branch: None,
+        };
+        for value in values {
+            validate_envelope_value(domain, identifier, models, &scopes, value)?;
+        }
         return Ok(());
     }
-    let scopes = EnvelopeScopes {
-        input: input_schema,
-        output: EmitterExecutionPlan::constructs_output(emitter).then_some(output_schema),
-    };
-    for value in values {
-        validate_envelope_value(domain, identifier, models, &scopes, value)?;
+
+    for relay in emitter.from.relays() {
+        let branch = relay_declared_branch_schema(domain, identifier, models, relay)?;
+        if emitter.envelope.partition_from_branch && branch.is_none() {
+            return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+                domain: domain.clone(),
+                node: NodeRef::new(ModelKind::Emitter, identifier.clone()),
+                issue: ConnectorDeclarationIssue::PartitionRequiresBranch {
+                    relay: relay.clone(),
+                },
+            }));
+        }
+        let scopes = EnvelopeScopes {
+            input: input_schema,
+            output: EmitterExecutionPlan::constructs_output(emitter).then_some(output_schema),
+            branch,
+        };
+        for value in &values {
+            validate_envelope_value(domain, identifier, models, &scopes, value.clone())?;
+        }
     }
     Ok(())
 }
@@ -1134,6 +1175,7 @@ pub(in crate::registry) fn validate_emitter_envelope_expressions(
 struct EnvelopeScopes<'a> {
     /// The source record, read as `input`.
     input: &'a CreateSchema,
+    branch: Option<&'a CreateSchema>,
     /// The output a route constructs, read as `output` and `message`. Without one, `message` is
     /// the source record.
     output: Option<&'a CreateSchema>,
@@ -1154,21 +1196,14 @@ fn validate_envelope_value(
         node: NodeRef::new(ModelKind::Emitter, identifier.clone()),
         issue: ConnectorDeclarationIssue::EnvelopeValue {
             site: value.site.clone(),
-            expected: value.expected.clone(),
+            expected: value.expected,
         },
     };
     let target = FieldName::parse("value").assured("value is a valid field literal");
-    let output_schema = CreateSchema {
-        name: SchemaName::parse(ENVELOPE_NAMESPACE)
-            .assured("the envelope namespace is a valid schema name"),
-        fields: vec![SchemaField {
-            name: target.clone(),
-            ty: value.expected.clone(),
-            optional: false,
-            sensitive: false,
-        }],
+    let exact_schema = match value.expected {
+        EnvelopeValueType::Exact(ty) => Some(EnvelopeValue::schema(ty.into())),
+        EnvelopeValueType::Key => None,
     };
-    let output_arrow_schema = arrow_schema_for_internal_schema(&output_schema);
     let parsed = lower_route_construction(
         &RouteConstruction {
             assignments: vec![Assignment {
@@ -1185,10 +1220,13 @@ fn validate_envelope_value(
         program: parsed,
         fields: lookup_fields,
     } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
-    let mut bindings = vec![
-        readonly_binding_for_internal_schema("input", scopes.input),
-        writable_binding_for_internal_schema(ENVELOPE_NAMESPACE, &output_schema),
-    ];
+    let mut bindings = match &exact_schema {
+        Some(schema) => vec![
+            readonly_binding_for_internal_schema("input", scopes.input),
+            writable_binding_for_internal_schema(ENVELOPE_NAMESPACE, schema),
+        ],
+        None => vec![readonly_binding_for_internal_schema("input", scopes.input)],
+    };
     let message = match scopes.output {
         Some(output) => {
             bindings.push(readonly_binding_for_internal_schema("output", output));
@@ -1197,12 +1235,22 @@ fn validate_envelope_value(
         None => scopes.input,
     };
     bindings.push(readonly_binding_for_internal_schema("message", message));
-    let local_namespaces = HashSet::from_iter([
+    if matches!(
+        value.site,
+        EnvelopeValueSite::Clause(EnvelopeClauseKind::Key)
+    ) && let Some(branch) = scopes.branch
+    {
+        bindings.push(readonly_binding_for_internal_schema("branch", branch));
+    }
+    let mut local_namespaces = HashSet::from_iter([
         "input".to_string(),
         "message".to_string(),
         "output".to_string(),
         ENVELOPE_NAMESPACE.to_string(),
     ]);
+    if exact_schema.is_none() {
+        local_namespaces.insert("branch".to_string());
+    }
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
         identifier,
@@ -1212,6 +1260,42 @@ fn validate_envelope_value(
         "emitter envelope",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
+    let needs_inference = exact_schema.is_none();
+    let output_schema = match exact_schema {
+        Some(schema) => schema,
+        None => {
+            let mut inference_bindings = bindings.clone();
+            inference_bindings.push(CompileBinding::writeonly(
+                ENVELOPE_NAMESPACE,
+                StdArc::new(arrow_schema::Schema::empty()),
+            ));
+            let inferred = infer_set_expr_types_for_bindings_with_udfs(
+                &parsed,
+                inference_bindings,
+                udf_compile_options(models, CompileOptions::default()).udf_signatures,
+            )
+            .change_context_lazy(refused)?;
+            let field = inferred
+                .first()
+                .assured("one key assignment infers one field");
+            if field.nullable || field.sensitive {
+                return Err(Report::new(refused()));
+            }
+            let expected = match field.data_type {
+                arrow_schema::DataType::Utf8 => ParseAsType::String,
+                arrow_schema::DataType::Binary => ParseAsType::Bytes,
+                _ => return Err(Report::new(refused())),
+            };
+            EnvelopeValue::schema(expected)
+        }
+    };
+    let output_arrow_schema = arrow_schema_for_internal_schema(&output_schema);
+    if needs_inference {
+        bindings.push(writable_binding_for_internal_schema(
+            ENVELOPE_NAMESPACE,
+            &output_schema,
+        ));
+    }
     compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_arrow_schema,
@@ -1228,6 +1312,20 @@ fn validate_envelope_value(
     )
     .change_context_lazy(refused)?;
     Ok(())
+}
+
+impl EnvelopeValue<'_> {
+    fn schema(ty: ParseAsType) -> CreateSchema {
+        CreateSchema {
+            name: SchemaName::parse(ENVELOPE_NAMESPACE).assured("the namespace is a schema name"),
+            fields: vec![SchemaField {
+                name: FieldName::parse("value").assured("value is a field name"),
+                ty,
+                optional: false,
+                sensitive: false,
+            }],
+        }
+    }
 }
 
 /// The origin accepted by an HTTP emitter, once its client has an explicit, usable request timeout

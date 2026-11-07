@@ -70,11 +70,16 @@ pub(super) fn envelope_section<'src>(
 enum ClauseWords {
     One(Identifier),
     Two(Identifier, Identifier),
+    Three(Identifier, Identifier, Identifier),
 }
 
 /// The words that open the clause `kind`.
 fn clause_words(kind: EnvelopeClauseKind) -> ClauseWords {
     match kind {
+        EnvelopeClauseKind::Key => ClauseWords::One(Identifier::Key),
+        EnvelopeClauseKind::PartitionFromBranch => {
+            ClauseWords::Three(Identifier::Partition, Identifier::From, Identifier::Branch)
+        }
         EnvelopeClauseKind::Persistent => ClauseWords::One(Identifier::Persistent),
         EnvelopeClauseKind::Mandatory => ClauseWords::One(Identifier::Mandatory),
         EnvelopeClauseKind::Retain => ClauseWords::One(Identifier::Retain),
@@ -98,6 +103,7 @@ fn clause_keywords<'src>(
     match clause_words(kind) {
         ClauseWords::One(word) => kw(word).boxed(),
         ClauseWords::Two(first, second) => kw_phrase2(first, second).boxed(),
+        ClauseWords::Three(first, second, third) => kw_phrase3(first, second, third).boxed(),
     }
 }
 
@@ -110,6 +116,7 @@ fn operation_keywords<'src>(
     match clause_words(kind) {
         ClauseWords::One(word) => kw_phrase2(head, word).boxed(),
         ClauseWords::Two(first, second) => kw_phrase3(head, first, second).boxed(),
+        ClauseWords::Three(first, second, third) => kw_phrase([head, first, second, third]).boxed(),
     }
 }
 
@@ -118,6 +125,12 @@ fn clause_tail<'src>(
     kind: EnvelopeClauseKind,
 ) -> Boxed<'src, 'src, &'src [Token], EnvelopeClauseValue, extra::Err<ParseError<'src>>> {
     match kind {
+        EnvelopeClauseKind::Key => embedded_expression("key_expression")
+            .map(EnvelopeClauseValue::Key)
+            .boxed(),
+        EnvelopeClauseKind::PartitionFromBranch => {
+            empty().to(EnvelopeClauseValue::PartitionFromBranch).boxed()
+        }
         EnvelopeClauseKind::Persistent => empty().to(EnvelopeClauseValue::Persistent).boxed(),
         EnvelopeClauseKind::Mandatory => empty().to(EnvelopeClauseValue::Mandatory).boxed(),
         EnvelopeClauseKind::Retain => empty().to(EnvelopeClauseValue::Retain).boxed(),

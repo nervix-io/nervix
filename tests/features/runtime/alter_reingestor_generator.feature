@@ -17,7 +17,7 @@ Feature: Altering reingestors and generators
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reingestor.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -57,8 +57,9 @@ Feature: Altering reingestors and generators
       """
     Then the last command output contains
       """
-      CREATE DETACHED REINGESTOR repartition
+      CREATE REINGESTOR repartition
         FROM incoming COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        DETACHED
         FILTER WHERE input.key > 0
       """
     When http payload is posted to host "http-{{test_id}}-alter-reingestor.example.com" path "/events"
@@ -98,7 +99,7 @@ Feature: Altering reingestors and generators
       CREATE RELAY generated SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-generator.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP NOW

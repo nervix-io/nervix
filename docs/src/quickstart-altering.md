@@ -1,7 +1,7 @@
 # Altering A Running Graph
 
 Nothing built so far required tearing anything down — every step added nodes. `ALTER` statements
-change what already exists: junction logic, relay properties, schemas, ingestor sources, emitter
+change what already exists: junction logic, relay properties, schemas, ingestor inputs, emitter
 emitters, stateful processor behavior, reingestor wiring, and generator cadence or routes. Nervix
 classifies each validated change and pauses as little as possible — the statement result reports
 the executed level

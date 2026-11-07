@@ -88,6 +88,18 @@ mutually authenticated TLS 1.3 and HTTP/2. The listener is independent of Raft l
 placement, so every live node can receive every class of interconnect operation. TLS provides
 confidentiality and integrity as well as peer authentication.
 
+The provider comes from `nervix-crypto`, independently of the outward TLS process default. Its
+fixed set is TLS 1.3 AES-256-GCM/SHA-384 and AES-128-GCM/SHA-256, with P-256, P-384 and
+X25519MLKEM768 key exchange, in the pinned AWS-LC provider's relative preference order. Each
+client/server bundle checks this membership at construction; a policy failure retains its typed
+cause beneath the TLS configuration error. A peer offering only ChaCha20 or standalone X25519
+fails the rustls handshake. [Cryptography](cryptography.md#algorithm-policy) owns the algorithm
+classification and distinguishes this preparation from a validated FIPS build.
+
+This TLS restriction permits a rolling restart with the preceding full AWS-LC algorithm set:
+both sides offer AES-GCM and P-256. The independent interconnect wire fingerprint and cluster join
+requirements still apply. Outward session and connector TLS keep their existing algorithms.
+
 Cluster discovery supplies the current node identity, incarnation, and advertised endpoint for each
 peer. A bootstrap seed, configured or recovered, is the exception: the initiating node knows the
 endpoint before it knows the remote node identifier, then obtains and authenticates that identifier
@@ -476,6 +488,15 @@ and WASM inspection results. These fields use the vocabulary's `CountAsU64` adap
 native decoding; an unrepresentable count fails decoding. Window processor state has current
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
+
+Emitter statements exchanged through the control plane use explicit `KEY` expressions and
+`PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
+`WIRE_CONTRACT` fingerprint identifies that archived Model layout; peers must match it exactly.
+
+Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
+partition relay grants retain that bounded footprint when other entities declare external
+instances. Grant admission charges the exact encoded metadata size, body, decoded batch and
+scratch; the unit representation does not add alignment padding to unrelated relay traffic.
 
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
@@ -874,19 +895,19 @@ For an attached acknowledgement, progress also carries a monotonic sequence and 
 remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that retains their rows. Each upstream node parks or reactivates its
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
-source or persist an acknowledgement. Admission progress carries no parked state.
+ingestor or persist an acknowledgement. Admission progress carries no parked state.
 
 Before admission the receiver reports nothing about a delivery's records: their acknowledgement
 watches start only once it has admitted them. Until then the sending node holds the records on their
-sources' behalf, so it reports them alive to their sources itself, every 100 milliseconds the
+ingestors' behalf, so it reports them alive to their ingestors itself, every 100 milliseconds the
 delivery is still under way, whether it waits for the relay's dispatch gate, its channel, the
 storage of its records, a grant or the receiver's admission. This applies to a delivery to the
 relay's owner and to one from the owner to a consumer on another node. A delivery admitted within
-its first 100 milliseconds reports nothing. A source's `ACK TIMEOUT` therefore measures how long its
+its first 100 milliseconds reports nothing. An ingestor's `ACK TIMEOUT` therefore measures how long its
 records make no progress, not how long their delivery takes to reach the next node. A record still
 on its way when that timeout would have passed is not read again and emitted twice. The bounds
 above still end a delivery: five seconds without progress, or five minutes from storing its records
-to its admission, fails it, and the source's retry takes over.
+to its admission, fails it, and the ingestor's retry takes over.
 
 Progress and terminal acknowledgements share the bounded application receive queue. The application
 keeps consuming progress while terminal delivery waits for queue capacity. The one-slot transport
@@ -913,8 +934,8 @@ registered after that run ended: a record acknowledgement whose downstream work 
 sending node restarted is the common case. Such an outcome is rejected and logged at `debug`. It
 never resolves the admission or record acknowledgement the current run holds under the same number,
 so a success reported for an earlier run can never acknowledge a record, and so commit it at its
-source, before its own delivery completed. The earlier run's entries ended with its process, and
-its sources redeliver the records they had not committed.
+ingestor, before its own delivery completed. The earlier run's entries ended with its process, and
+its ingestors redeliver the records they had not committed.
 
 A receiver issues a grant only when the admission registration names the authenticated sending
 node. Admission bookkeeping on both ends is keyed by the peer and the whole registration, so a
@@ -939,7 +960,7 @@ under load does, is neither reported to nor given up while it is missing. The re
 acknowledgement, including a terminal outcome reached meanwhile, and reports it as soon as the run
 is back. It stops only when the run has stayed missing for the registering node's fifteen-second
 silence bound and one more sweep, because by then a registering node whose run goes on has failed
-the acknowledgement itself. A shorter gap in the live view therefore costs the source neither the
+the acknowledgement itself. A shorter gap in the live view therefore costs the ingestor neither the
 acknowledgement nor a resend.
 
 The registering node therefore waits for an acknowledgement only while the receiver keeps reporting
@@ -955,17 +976,17 @@ does not fail acknowledgements whose reports it could not receive meanwhile.
 A failed acknowledgement resolves negatively exactly once. The sweep and report transitions use
 the exact delivery generation's guard, so a report that arrives first keeps the acknowledgement
 pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
-sweep nothing to fail. The source attempt fails with it and redelivers the record along the current
+sweep nothing to fail. The ingestor attempt fails with it and redelivers the record along the current
 routes, so an emitter that already completed the record can receive it again. A report or outcome that
 arrives after its acknowledgement failed finds no entry and is rejected at `debug`.
 
 Every node on a record's path applies the same bound. A relay owner that routed a record to the
-node of an attached consumer reports the record alive to the source's node for as long as the
+node of an attached consumer reports the record alive to the ingestor's node for as long as the
 record's acknowledgement tree is unresolved. Without the bound, a terminal outcome lost between the
-consumer's node and the relay owner would keep the source's acknowledgement alive, and its
+consumer's node and the relay owner would keep the ingestor's acknowledgement alive, and its
 `ACK TIMEOUT` from ever passing, for the rest of the relay owner's run. With it, the relay owner
 fails the acknowledgement fifteen seconds after the consumer's node fell silent, stops reporting
-the record, and the source's retry takes over. Each sweep that failed acknowledgements logs, at
+the record, and the ingestor's retry takes over. Each sweep that failed acknowledgements logs, at
 `warn`, one line per receiver with the number it failed.
 
 ### Bounded Correlation And Peer Owners
@@ -989,7 +1010,7 @@ task; a wide frame therefore does not allocate one task per acknowledgement. Pen
 progress every 100 milliseconds, below the registrar's fifteen-second silence bound even when two
 reports each exhaust their dispatch deadline. The same cadence keeps local emitter and
 message-error acknowledgements alive while a connector request is pending, giving a one-second
-source `ACK TIMEOUT` multiple chances to observe progress. Record storage waits for room before the
+ingestor `ACK TIMEOUT` multiple chances to observe progress. Record storage waits for room before the
 delivery's body is encoded, as [Held Deliveries](#held-deliveries) describes; refusing it is typed
 and occurs before the delivery is sent. Cancellation before admission resolves every held share
 negatively and returns its position. Completion of the last record returns the delivery storage and
@@ -1000,7 +1021,7 @@ While the relay budget has no room for them, typically because the watches of ea
 still reporting their rows, the receiver holds the batch back instead of refusing it. The batch
 stays unadmitted, so the transport keeps reporting it alive and its sender keeps waiting within the
 five-second progress and five-minute total admission bounds; the sender's channel carries nothing
-else meanwhile, which pushes back on the source that fills it. The held batch keeps the reservation
+else meanwhile, which pushes back on the ingestor that fills it. The held batch keeps the reservation
 of its grant. Every 10 milliseconds the receiver reads the budget and takes the charge once it
 fits. It never waits in the budget's queue, because a place there takes every byte the class
 releases until it is satisfied, which would keep the node's other relay work, including forwarding
@@ -1106,10 +1127,10 @@ larger than the whole budget, or one still without room when the delivery's boun
 refused, as `CorrelationMemory` with the budget's typed `AdmissionError` beneath it.
 
 One five-minute bound covers the whole delivery: storing its records, holding its grant, and
-waiting for its admission. A delivery still held when the bound passes fails as before: a source in
-`MODE NO ACK` loses its rows and an acknowledged source delivers them again.
-[Source loops while a delivery is held](./connector-contract.md#source-loops-while-a-delivery-is-held)
-describes what a held delivery means for the source that produced it.
+waiting for its admission. A delivery still held when the bound passes fails as before: an ingestor in
+`MODE NO ACK` loses its rows and an acknowledged ingestor delivers them again.
+[Ingestor loops while a delivery is held](./connector-contract.md#ingestor-loops-while-a-delivery-is-held)
+describes what a held delivery means for the ingestor that produced it.
 
 A receiver keeps a granted delivery's reservation until the runtime has taken the batch in, and a
 relay owner's runtime takes a batch in only once its buffer has room. Two relay owners that fan out
@@ -1173,7 +1194,7 @@ it is still unadmitted finds the channel busy, and one that skips a position rem
 Relay attempts, grants, watermarks, admission state, and record-acknowledgement owners are in-memory
 hot-path state. A receiver process-epoch change therefore makes an unresolved delivery
 indeterminate. The transport does not replay it automatically against the new process. If the
-source's policy calls for another attempt, that attempt opens a new channel incarnation and is a new
+ingestor's policy calls for another attempt, that attempt opens a new channel incarnation and is a new
 delivery identity.
 
 ### Cancellation And Branch Changes
@@ -1202,7 +1223,7 @@ A committed forced ownership change also retires changing relay routes' precedin
 generation before the local graph installer waits for dispatch quiescence. The sender interrupts
 its admission wait and uses the same cancellation operation and five-second reconciliation budget.
 It need not wait for the fenced former owner to resume. An admitted result keeps the receiver's
-record-ACK obligation; an unconfirmed or cancelled delivery fails its held record ACKs for source
+record-ACK obligation; an unconfirmed or cancelled delivery fails its held record ACKs for ingestor
 retry, with possible replay duplicates. No transport message or automatic replay contract changes.
 The installer publishes successor routes only after completing the local swap, so another dispatch
 cannot open a fresh channel toward a preceding consumer while that fence is held.
@@ -1214,7 +1235,7 @@ swap. It acquires a dispatch permit before reading the local and remote consumer
 that permit through fan-out, attachment of the consumer ACK shares, and resolution of the owner's
 share. A swap closes the gate
 and waits for existing permits before changing those sets. If the gate is already closed when a
-buffered batch starts fan-out, the owner fails its record acknowledgements and the source retries
+buffered batch starts fan-out, the owner fails its record acknowledgements and the ingestor retries
 after the schedule changes. It cannot wait for the gate while holding that buffered batch: the
 swap's drain counts the batch, so such a wait would prevent the swap from finishing. In particular,
 an attached sibling on the old destination cannot acknowledge a batch while another attached
@@ -1232,10 +1253,10 @@ owner is unreachable.
 
 A routed batch that carries record acknowledgements and finds no attached consumer of its relay on
 the receiving node fails those acknowledgements. Its admission stands, so the transport does not
-send it again, but the owner receives a failed record acknowledgement and fails its source attempt.
-The source then redelivers the record along the owner's current routes. The receiver never reports
+send it again, but the owner receives a failed record acknowledgement and fails its ingestor attempt.
+The ingestor then redelivers the record along the owner's current routes. The receiver never reports
 an attached record acknowledged when no attached consumer took the batch, so an attached record
-cannot be committed at its source without a consumer having completed it. A batch without record
+cannot be committed at its ingestor without a consumer having completed it. A batch without record
 acknowledgements, such as a detached send, completes at admission as before.
 
 ## Membership, Consensus, And Bulk Transfer
@@ -1254,6 +1275,17 @@ retries. Closing the transport cancels queued work and exchanges in flight.
 Each node's Chitchat live set is its own failure-detector estimate. An isolated peer can remain
 listed live until its missing heartbeats are observed, even after its links stop carrying requests;
 application probes provide the separate signal that eventually makes its work eligible for failover.
+
+Chitchat wakes the node's membership task whenever any live member's state changes, including every
+key a member publishes. The task republishes subscription interest, prerequisites and routes from
+each value it receives, and compares the value's live set with the one it saw before. It keeps that
+set as its own state, keyed by node name with the highest incarnation listed live for it, so an old
+and a new incarnation that are briefly both live count as one member. Only a node that joined, left,
+or became a new incarnation produces an event: the task logs it at `info` with the node and its
+incarnation, and offers it to the sessions attached to the node as a `Membership` notice, such as
+`node 'node-3' left` or `node 'node-3' restarted (incarnation 1793845627114630656)`. A value that
+only changes published keys, such as subscription interest, offers nothing. The node's own run is
+its first member, so it never reports itself joining.
 
 Chitchat continues to select known dead peers for exchanges during its 24-hour dead-node retention
 period. When application health has retired one of those peers from the outbound pool, a gossip
@@ -1277,6 +1309,13 @@ when its advertised endpoint changes. A returning voter remains a voter, while a
 waits to catch up before promotion. The recorded address is a startup contact hint; live Raft
 traffic uses authenticated discovery by node identity. A node removed from membership stays out
 until it returns with a newer incarnation.
+
+Discovery does not flatten a joint Raft configuration into its voter union. Membership
+reconciliation first finishes the recorded uniform target, including an interrupted removal,
+before considering further discoveries. `SHOW CLUSTER STATUS` exposes whether the effective
+membership is joint and whether it is committed; the
+[consensus chapter](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion)
+defines those observations and their quorum meaning.
 
 A redirect to the leader names only the advertised endpoints discovery has established. A client
 redirected during an election that has not yet observed the new leader's client endpoint receives
@@ -1582,7 +1621,7 @@ and the branch lifecycle that names the branches — only after it has written t
 own stable storage and synchronized it, never on receipt. A replica that already holds the announced
 revision, or a newer one, synchronizes and acknowledges what it holds again, so an acknowledgement
 lost in transit is replaced by the next announcement instead of stranding the owner. A node without
-stable storage acknowledges nothing. The owner of a WASM processor branch releases the source
+stable storage acknowledges nothing. The owner of a WASM processor branch releases the ingestor
 acknowledgements a guest checkpoint covers only once every replica the committed schedule assigns
 has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
 install stops those acknowledgements from being released rather than letting them through, and the
@@ -1611,6 +1650,26 @@ round trips rather than 640. Each side admits the whole captured or received all
 `restore_metadata`, up to a 256 MiB checkpoint transfer bound. The replica checks the stream's
 declared length, received length and digest before the checkpoint can reach its assignment-fenced
 installation and stable-storage acknowledgement.
+An ingestor layout handoff captures each preceding unit once. Later projection requests carry
+that frozen cut's descriptors; the source verifies their scope, revision, length and digest before
+describing the target slice. Receivers fetch the slice through the same bounded bulk path.
+
+Kafka start coordination uses a Commands request bounded to sixty seconds. It carries the
+source's node incarnation, lifecycle generation and complete ownership fingerprint, with a
+descriptor for a retained candidate. The handler binds the source node to the authenticated
+connection before admitting any read, proposal or acknowledgement; runtime admission separately
+checks its live membership incarnation. The current local run is checked against its installed
+incarnation directly, including before membership is first published; remote runs use the
+membership publication. Candidate revisions belong to the offered body. Candidate
+and pending-seed bytes travel through the Snapshot bulk subquota under the existing transfer
+limit and memory admission. Instance zero selects and persists one canonical start before
+answering another unit. A recipient persists and replicates its slice before acknowledging it.
+Pending seed descriptions carry the coordinator's conservative native revision and explicit-start
+generation. An unchanged slice remains readable across newer commits to the coordinator's own
+partitions; its generation, length and digest must still match. Admission checks the current unit
+layout and originating assignment before and after capture. An ended offer, changed generation,
+changed body or superseded assignment fails the transfer.
+
 Debug events name the placement, revision and declared length when streaming and after verification,
 without logging checkpoint bytes. A branch checkpoint listing request names the entity's branch
 lifecycle placement and the cursor the replica's previous listing
@@ -1995,39 +2054,75 @@ been observed live keeps scheduling in that bounded wait even when Chitchat list
 current voters have been observed or the grace expires, ordinary effective availability governs
 automatic failover. See [Whole-Cluster Restart Keeps Ownership](./shutdown.md#whole-cluster-restart-keeps-ownership).
 
-Command completion reads the leader's effective availability view through the
-`application_completion_peers` management progress request. The response names the leader's
-incarnation, Raft term, and required process incarnations. A follower uses it only while its own
-Raft leader and term still match, and includes its own incarnation in the barrier. Failure to reach
-the leader leaves the command pending. This avoids conflicting completion sets when application
-health is asymmetric: a connected follower may still probe an unreachable peer successfully after
-the leader has retired that peer. Revision and HTTPS listener progress requests remain bound to the
-reported incarnation.
-
-An `application_revision` progress query samples the answering incarnation's authoritative,
-runtime-prepared and runtime-ready revisions. These direct observations supplement gossip. A
-completion barrier keeps observing published progress and availability while its query batch is
-pending; a reply is unnecessary once valid publications satisfy the barrier. The batch is retained
-across state changes, rather than restarted on each publication. Its owned runtime task keeps
-polling queries while the barrier reads the leader's participant view, so a probe granted an
-executor permit keeps progressing while that view request waits. Ending the barrier aborts its
-probe task. Queries retain their transport deadlines, and the barrier retains its command deadline
-and leader-tenure and incarnation checks.
-
-The public gossip-completion qualification holds the two followers' revision replies after
-sampling and a peer's health reply. One client connects before those faults, then creates a user,
-creates a relay and reads cluster status in order within one twenty-second harness budget. That
-budget includes margin over the measured multi-stage gossip propagation under parallel bulk load;
-it is not a product deadline. The retained client status must name the new relay's owner before
-releasing any reply. A separate direct status request to node-1 checks that node-3 is connected
-while the replies remain held, so a client redirect cannot substitute another node's peer table.
-A controlled leader-transfer case checks that a probe redirected to node-3 identifies node-3 and
-reports its connected node-1 peer. The adjacent health-only qualification keeps its nine-second
-sequential probe.
-
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
 probe is healthy, rather than merely that a transport pool exists.
+
+## Application Progress
+
+Command completion reads the leader's effective availability view through the
+`application_completion_peers` management progress request. The response names the leader's
+incarnation, Raft term, the required process incarnations, and the application progress the leader
+holds for them: its own record and the latest report each other required incarnation sent it. A
+follower uses the response only while its own Raft leader and term still match, and includes its own
+incarnation, with its own record, in the barrier. Failure to reach the leader leaves the command
+pending. This avoids conflicting completion sets when application health is asymmetric: a
+connected follower may still probe an unreachable peer successfully after the leader has retired
+that peer. Revision and HTTPS listener progress requests remain bound to the reported incarnation.
+
+Application progress is one record per process incarnation: the authoritative revision it applied,
+the runtime revisions it prepared and made ready, and the runtime revision through which its
+domain clocks match the committed ones. A phase is absent until the incarnation reaches a revision
+in it and only advances, and a new incarnation starts with every phase absent. The consensus
+applied revision, the runtime applicator and the domain clock installer are the record's only
+writers, and no gossip key carries it. Domain clock delivery still selects its targets from the
+installed-clock gossip advertisement; the record's clock phase is not read for it.
+
+Each node reports its record to the Raft leader it observes in an `application_progress`
+management progress request whenever a phase advances or the leadership it observes changes. The
+report carries the record and the leader and term it addressed. One report is in flight at a time
+and carries the newest record, so a burst of advances costs one report per round trip. The leader
+holds a report only when the connection's authenticated node is the node the report names and the
+leader leads the addressed term, and answers `Accepted`, `NotLeader` or `ForeignReporter`. It keeps
+the latest report of each incarnation, merges a late report without moving a phase back, and keeps
+reports only from the incarnations its availability view holds live, besides the reporter. A
+barrier reads a report only for an incarnation its leader view names, so a late report from an
+earlier incarnation of that node completes nothing. A
+report the leader did not hold, or one that failed, is logged at debug level and not repeated,
+because a barrier queries a node whose report it lacks. A held report wakes the leader's barriers
+at once.
+
+An `application_revision` progress query answers the answering incarnation's record, with every
+phase it has not reached absent. A completion barrier queries the required incarnations whose
+progress it has not received. It keeps observing reports and availability while its query batch is
+pending; a reply is unnecessary once received reports satisfy the barrier. A follower's barrier
+reads the reports the leader holds through its participant view and reads that view again every
+250 milliseconds while it waits, so it completes a revision whose other followers' query replies
+are held as long as their reports reach the leader. The batch is retained across state changes,
+rather than restarted on each report. Its owned runtime task keeps polling queries while the
+barrier reads the leader's participant view, so a probe granted an executor permit keeps
+progressing while that view request waits. Ending the barrier aborts its probe task. Queries and
+reports retain their transport deadlines, and the barrier retains its command deadline and
+leader-tenure and incarnation checks.
+
+These progress shapes are part of the [wire contract](#wire-contract-and-payloads). A node of
+another wire contract is refused at join, so a cluster moves to them through a coordinated stop and
+start with every node on the same version, never a rolling restart.
+
+The public progress-report qualification holds the two followers' revision replies after sampling
+and a peer's health reply. One client connects before those faults, then creates a user, creates a
+relay and reads cluster status in order within one twenty-second harness budget, through the
+reports the followers send the leader. The budget includes margin over the measured multi-stage
+completion under parallel bulk load; it is not a product deadline. The retained client status must
+name the new relay's owner before releasing any reply. A separate direct status request to node-1
+checks that node-3 is connected while the replies remain held, so a client redirect cannot
+substitute another node's peer table. A controlled leader-transfer case checks that a probe
+redirected to node-3 identifies node-3 and reports its connected node-1 peer. The adjacent
+health-only qualification keeps its nine-second sequential probe.
+
+A second qualification holds both the followers' reports and their revision replies: a relay
+creation waits, and completes once either path is released, measured from the release rather than
+inferred from silence.
 
 ## Connection And Credential Lifecycle
 
@@ -2097,7 +2192,7 @@ admitted in place, so these consumers remain available until the node's own grap
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested
-record acknowledgement resolve; this includes roots created for sources in `MODE NO ACK`. Ownership
+record acknowledgement resolve; this includes roots created for ingestors in `MODE NO ACK`. Ownership
 handoff does not complete until its replication acknowledgement and committed activation have been
 observed. These owners keep admitted work visible while the supporting interconnect consumers are
 still running.
@@ -2216,6 +2311,20 @@ undelivered batch and branch field values stay out of that diagnostic.
 Per-batch and payload-bearing logs use debug or trace levels and do not expose sensitive field
 values. See [Metrics And Observability](./metrics-and-observability.md) for the metric and logging
 contract.
+
+## Ingestor Instance Observation And Intake Gates
+
+An ingestor describe request carries its exact `Unit`. The receiver resolves the current owner
+for that unit and reports only its ingestor lifetime, readiness and transient state. The control
+plane composes the logical description from all scheduled unit owners.
+
+Entity-gate engagement and drain-status requests carry `EntityGateTargets`: complete logical
+entities for model changes, or exact `NodeUnitRef` units for ownership transfer. Lease identity
+includes the normalized selection form. Handoff authorization checks both selection membership and
+the freeze of that same unit. A sibling instance's control or ACK count cannot authorize or hold
+back the selected handoff. The current wire fingerprint identifies this required request shape;
+peers must use the same current contract. Its fingerprint also includes the required committed
+cluster-parameter publication.
 
 ## Cluster Parameter Observations
 

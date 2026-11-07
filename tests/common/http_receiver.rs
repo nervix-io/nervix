@@ -87,11 +87,7 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
-use rustls::{
-    RootCertStore, ServerConfig,
-    crypto::{CryptoProvider, aws_lc_rs},
-    server::WebPkiClientVerifier,
-};
+use rustls::{RootCertStore, ServerConfig, crypto::CryptoProvider, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
 use tempfile::TempDir;
 use thiserror::Error;
@@ -932,7 +928,7 @@ impl ReceiverTlsIdentity {
         )?;
         write(ReceiverTlsFiles::CLIENT_KEY, client_key.serialize_pem())?;
 
-        let provider = StdArc::new(aws_lc_rs::default_provider());
+        let provider = StdArc::new(nervix_crypto::tls::outward_tls_provider().rustls());
         let builder = ServerConfig::builder_with_provider(StdArc::clone(&provider))
             .with_safe_default_protocol_versions()
             .map_err(ReceiverStartError::TlsConfiguration)?;

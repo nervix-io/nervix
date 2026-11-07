@@ -66,6 +66,22 @@ process that recovers what an earlier one left uncertain builds the handle again
 reference or identity, with `ExecutionHandle::with_reference` or
 `ExecutionHandle::with_upload_identity`.
 
+A command reply naming another execution reference ends its session as a protocol violation.
+Every request still waiting on that session is interrupted, and the client repeats the original
+command through normal session recovery, preserving its reference, query, domain, transaction
+position and preview. If recovery cannot finish, the call reports `UncertainCommand` under the
+original reference. It never returns the foreign outcome or adopts its transaction or redirect.
+
+A reply of a kind that cannot answer its request, such as a domain listing under a command's
+request identity, ends its session the same way, before the client applies anything it carries.
+Every request still waiting on that session ends as interrupted and is recovered as after any
+other lost session: a command is repeated under its original reference. When recovery cannot
+finish, a command reports `UncertainCommand` under that reference and a read such as
+`list_domains` reports `RequestInterrupted`, each above the typed `ReplyKindMismatch` that names
+the request and the reply's kind. The client adopts no subscription, clock attachment, producer, transaction or
+redirect from such a reply. A late reply, whose call stopped waiting, completes nothing and is
+followed as before.
+
 `execute_prepared_with_cancellation` takes a `CancellationToken` its caller may cancel. While a
 command, `BACKUP` included, waits for its reply, cancelling the token sends `CancelRequest` for it,
 and the call keeps waiting for the reply that ends the command. A command the server cancelled
@@ -82,7 +98,7 @@ completed is not stopped.
 The client classifies a command's statements before it sends them, with the Plexus statement
 grammar. It builds the grammar once on each thread that prepares a command and keeps it for the
 life of that thread: the first command a thread prepares pays for building it, and each such thread
-holds about a megabyte and a half for it.
+holds about 1.7 MB for it.
 
 Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection attempt (10
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
@@ -170,14 +186,27 @@ instead. See [Sessions](sessions.md#subscription-lifecycle).
 
 A subscription the server acknowledged, and did not end, outlives its session. When the session
 ends, `next_subscription()` reports `Interrupted`, the gap before the subscription opens again, and
-the client opens it again as a new generation on its next session. When that session refuses it, for
-example because its relay no longer exists, `next_subscription()` reports `RestorationFailed` with
-the server's message and the wait before the next attempt; the client keeps trying on that session,
-after a wait that starts at one second and doubles up to thirty seconds, until the subscription
-opens, the session ends, or the subscription is deleted. `Client::subscription_lifecycle(&name)`
-reads the state a subscription is in. `subscribe` and `unsubscribe` reopen a closed session like
-every other call. Deleting a subscription that no open session holds, because its session ended or
-the current session refused to open it again, completes without a request and releases the name.
+the client opens it again as a new generation on its next session, expecting the schema the
+generation it replaces announced. When that session refuses it because its relay or the relay's
+domain no longer exists, or because the relay was redefined so that it announces another schema, the
+subscription ends: `next_subscription()` reports `Ended` with `RelayRemoved` or `RelayChanged` and
+the server's message, exactly as when the server ends a generation, and the client never opens it
+again on its own. When the session refuses it for any other reason, `next_subscription()` reports
+`RestorationFailed` with its `SubscriptionRestorationCause`, the server's message and the wait
+before the next attempt: the session holds a transaction, the statement, name or filter was refused,
+the serving node could not open it now, the session rejected the request without serving it, or the
+attempt failed in the client. The client keeps trying on that session, after a wait that starts at
+one second and doubles up to thirty seconds, until the subscription opens, the session ends, or the
+subscription is deleted. `Client::subscription_lifecycle(&name)` reads the state a subscription is
+in. `subscribe` and `unsubscribe` reopen a closed session like every other call. Deleting a
+subscription that no open session holds, because its session ended or the current session refused to
+open it again, completes without a request and releases the name.
+
+An unanswered reopening ends its session at `request_timeout`. The exchange reader then stops
+routing frames and wakes the subscription reader, which opens the next session even when the
+preceding transport is still connected. The client reports no `RestorationFailed` event for an
+unanswered request. The subscription stays desired and resumes at the new session's live edge;
+records published during its gap are not replayed.
 
 ## Backing Up
 
@@ -230,10 +259,37 @@ change resumes a restore instead of repeating it. An error that may hide an admi
 `ClientError::UncertainCommand` with the restore's execution reference, and running the restore
 again under that reference recovers its outcome.
 
+A restore reply naming another execution reference ends the session used for its attempt and
+returns `UncertainCommand` under the restore's own reference, above
+`ExecutionReferenceMismatch`. The outcome remains unknown even if the foreign reply reports a
+failure. Repeat with `restore_with_reference` and the original reference, statement and archive to
+learn the restore's own outcome.
+
+An unreadable restore reply, including a malformed frame, a message above the receive limit,
+a verified reply that cannot be decoded or one naming another transport request, leaves that
+original execution uncertain. The client ends the session selected for the stream and interrupts
+its pending requests, preserving any replacement installed while its reply was outstanding. Keep
+the exact statement and archive and pass their original reference to `restore_with_reference` to
+recover the outcome. The report retains the typed validation cause or tonic's bounded receive
+failure. Missing or empty local archives, authentication refusals and valid declared stream
+refusals remain definitive if no earlier attempt could have been admitted. The shared bindings
+classify uncertainty as `NX_ERROR_UNCERTAIN`; the CLI exits with status 3 and prints the execution
+reference.
+
+Uncertainty survives a later attempt. After the client handed over a whole archive without
+learning its outcome, or received `OutcomeUnknown`, a later archive-open/read error, refusal
+before admission, or expired execution reference cannot establish what that earlier attempt did.
+The client returns `UncertainCommand` with the original reference and retains the typed later
+cause beneath it. Restore the original file if needed and repeat the same statement and archive
+under that reference to recover the outcome. An outcome recovered from the command record, or a
+failure carrying the restore's report, still establishes the result, including any steps applied
+before a recorded failure.
+
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.
-A stream the leader refused before the restore ran is a failed outcome whose message names the
-typed failure. The C binding runs `RESTORE` through `nx_session_execute` and reports the report's
+With no earlier uncertain attempt, a stream the leader refused before the restore ran is a failed
+outcome whose message names the typed failure. The C binding runs `RESTORE` through
+`nx_session_execute` and reports the report's
 counts, whether it was a dry run, and whether a step failed through `nx_outcome_restore`.
 
 ## Uploading A Resource
@@ -332,8 +388,10 @@ newer tick. A new session
 that answers the attach with the domain not found ends the attachment with `Ended`, as the server
 would. A node that is still starting answers that attach only once it has installed the cluster's
 committed domains, so a restart never ends an attachment. When the new session refuses that attach
-for any other reason, the event is `RestorationFailed` with the server's message and the wait
-before the client sends the attach again on the same session; the wait starts at one second on
+for any other reason, the event is `RestorationFailed` with its `DomainClockRestorationCause`, the
+server's message and the wait before the client sends the attach again on the same session: the
+session holds a transaction, it rejected the request without serving it, or the attempt failed in
+the client. The wait starts at one second on
 each new session and doubles up to thirty seconds. An attach the session leaves unanswered past
 `request_timeout` ends that session, and the next one attaches the clock again. Waiting for the
 next event reopens a closed session when a followed clock waits for it, including a call already
@@ -363,8 +421,10 @@ attempt, and the next call tries again. The events are the Rust client's, coales
   `NX_CLOCK_EVENT_ENDED`, `NX_CLOCK_EVENT_INTERRUPTED` or `NX_CLOCK_EVENT_RESTORATION_FAILED` event
   apart, and `nx_clock_event_domain` borrows the name of the domain it concerns. A restoration
   failure reports that the session refused to attach an interrupted clock again, which it tries
-  again after the growing wait the Rust client reports. The event carries only its kind and domain:
-  the binding exposes neither the server's message nor the wait.
+  again after the growing wait the Rust client reports. `nx_clock_event_restoration_cause` reads its
+  cause, `NX_RESTORATION_IN_TRANSACTION`, `NX_RESTORATION_REJECTED` or `NX_RESTORATION_FAILED`. The
+  event also carries the refusal message as borrowed UTF-8 bytes and that wait in nanoseconds, read
+  with `nx_clock_event_restoration_message` and `nx_clock_event_restoration_retry_after`.
 - `nx_clock_event_generation` reads the `START` generation of a state or tick event,
   `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
   skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
@@ -376,6 +436,15 @@ attempt, and the next call tries again. The events are the Rust client's, coales
   reading an event allocates nothing on the host's side.
 - `nx_clock_event_retain` and `nx_clock_event_release` count references the way `nx_event_retain`
   and `nx_event_release` do, and a reference may be released on any thread.
+
+For C and C++ hosts, `nx_connect_options_new` starts with the Rust client's defaults. The host
+may set basic credentials, a TLS requirement, a copied CA certificate, seed URLs and the four
+deadlines before it calls `nx_session_connect`. The session copies the options, so the host may
+release them after the call. The Rust client validates endpoint origins and the 1 ms to 24 hour
+deadline bounds when connecting, and an HTTPS initial endpoint requires HTTPS for every later
+server. A subscription's `NX_EVENT_RESTORATION_FAILED` carries its refusal message and retry wait
+through `nx_event_restoration_message` and `nx_event_restoration_retry_after`, with the same
+borrowed-byte and nanosecond rules as the clock event. A wrong event kind returns `NX_ERROR_TYPE`.
 
 `nx_session_domain_clock` reads `domain_clock` for a domain the session follows as an
 `nx_domain_clock` reference, and writes NULL for a domain whose clock the session does not follow.
@@ -407,8 +476,9 @@ An attach the server refuses completes as failed with the server's reason, and
 `nx_session_domain_clock` still reads the earlier attachment's clock when the refusal is that the
 session already follows it. An attach whose session was lost is sent again on the next session the
 client opens. An attach cancelled or expired after its request was sent can still attach the
-session: executing the same prepared execution again is answered after the earlier attempt, and
-`nx_session_domain_clock` then tells whether the session follows the clock.
+session: executing the same prepared execution again sends another session-local request, which
+may be refused as already attached even when the first succeeded. `nx_session_domain_clock` tells
+whether the session follows the clock.
 
 ### Through The JVM Library
 
@@ -433,7 +503,9 @@ belong to the client rather than to one session, so a reader keeps calling them 
   as described above.
 - `next_server_event()` never opens a session itself. Notices end with the session that delivered
   them, including the ones not read yet, and the stream continues with the notices of the next
-  session.
+  session. Each `ServerEvent` carries the notice's `level`, its `kind` (`NoticeKind::Membership`,
+  `Leadership`, `ClusterParameters`, `Runtime` or `ControlPlane`) and its display text; a reader
+  routes notices by `kind` and never by their text.
 
 A failed read leaves its stream open. `ClientError::EventOverflow` from `next_server_event()` means
 notices arrived faster than they were read: the client dropped the ones it held, and the next read

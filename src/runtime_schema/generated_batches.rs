@@ -64,22 +64,22 @@ pub(crate) enum GeneratedDomain {
     /// Every value an Arrow batch of the current schema types holds: Arrow IPC bodies, producer
     /// batches and remote relay payloads.
     Arrow,
-    /// The values the schemaful `JSON` and `CBOR` codecs promise to preserve. A non-finite float
-    /// has no JSON spelling, and the CBOR reader reads values through the same JSON model.
+    /// The values the schemaful `JSON` codec promises to preserve. A non-finite float
+    /// has no JSON spelling.
     Json,
-    /// The values the schemaful `AVRO` codec promises to preserve. A top-level field holds only a
-    /// type an Avro wire type binds, a field name is an Avro name, and an unsigned element is
-    /// written as an Avro `long`, which holds at most `i64::MAX`.
+    /// The values the schemaful `AVRO` codec promises to preserve. A field holds only a type an
+    /// Avro wire type binds, at every list depth, and a field name is an Avro name.
     Avro,
 }
 
 impl GeneratedDomain {
-    /// Whether a schema field in this domain may declare `ty` at its top level.
+    /// Whether a schema field in this domain may declare `ty`. An Avro item binds an element as a
+    /// field of its type would, so the Avro domain admits a list only of what a field may hold.
     fn admits_field_type(self, ty: &ParseAsType) -> bool {
         match self {
             Self::Arrow | Self::Json => true,
             Self::Avro => matches!(
-                ty,
+                ty.innermost_element(),
                 ParseAsType::Bool
                     | ParseAsType::I32
                     | ParseAsType::I64
@@ -88,8 +88,6 @@ impl GeneratedDomain {
                     | ParseAsType::String
                     | ParseAsType::Datetime
                     | ParseAsType::Bytes
-                    | ParseAsType::Array { .. }
-                    | ParseAsType::Vec { .. }
             ),
         }
     }
@@ -99,14 +97,6 @@ impl GeneratedDomain {
         match self {
             Self::Arrow | Self::Avro => true,
             Self::Json => false,
-        }
-    }
-
-    /// The largest `U64` value this domain holds.
-    fn largest_u64(self) -> u64 {
-        match self {
-            Self::Arrow | Self::Json => u64::MAX,
-            Self::Avro => u64::try_from(i64::MAX).assured("i64::MAX is positive"),
         }
     }
 
@@ -160,13 +150,25 @@ impl GeneratedDomain {
         if self.admits_field_type(&ty) {
             return ty;
         }
-        // An Avro schema declares no narrow or unsigned top-level integer: the draw becomes the
-        // signed integer an Avro `int` or `long` binds.
+        Self::avro_bound(ty)
+    }
+
+    /// `ty` with its innermost element replaced by the signed integer an Avro `int` or `long`
+    /// binds, since Avro declares no narrow or unsigned integer at any depth.
+    fn avro_bound(ty: ParseAsType) -> ParseAsType {
         match ty {
+            ParseAsType::Array { element, len } => ParseAsType::Array {
+                element: Box::new(Self::avro_bound(*element)),
+                len,
+            },
+            ParseAsType::Vec { element } => ParseAsType::Vec {
+                element: Box::new(Self::avro_bound(*element)),
+            },
             ParseAsType::U8 | ParseAsType::I8 | ParseAsType::U16 | ParseAsType::I16 => {
                 ParseAsType::I32
             }
-            _ => ParseAsType::I64,
+            ParseAsType::U32 | ParseAsType::U64 => ParseAsType::I64,
+            bound => bound,
         }
     }
 
@@ -229,7 +231,7 @@ impl GeneratedDomain {
             ParseAsType::U32 => primitive!(UInt32Array, unsigned::<u32>(arbitrary.entropy())),
             ParseAsType::U64 => primitive!(
                 UInt64Array,
-                arbitrary.entropy().boundary_biased(0..=self.largest_u64())
+                arbitrary.entropy().boundary_biased(0..=u64::MAX)
             ),
             ParseAsType::I8 => primitive!(Int8Array, signed::<i8>(arbitrary.entropy())),
             ParseAsType::I16 => primitive!(Int16Array, signed::<i16>(arbitrary.entropy())),

@@ -43,7 +43,8 @@ use crate::{
     DescribeTransaction, DomainPace, DomainStartPoint, EmitterBatchPolicy, EmitterBody,
     EmitterEntity, EmitterEnvelope, EmitterPublishing, EnvelopeClause, ExistingUserPolicy,
     Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
+    InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorMapping, InferencerTensorSchema,
     IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
     Invocation, JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy,
     MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
@@ -2054,12 +2055,20 @@ fn general_error_policy_to_plexus(policy: &GeneralErrorPolicy) -> &'static str {
     }
 }
 
+/// The input list and its acknowledgement mode, in their shared body order.
+fn processor_input_clauses(
+    inputs: &ProcessorInputs,
+    mode: crate::AckMode,
+) -> error_stack::Result<Vec<Clause>, CanonicalPlexusError> {
+    Ok(vec![
+        Clause::line(format!("FROM {}", processor_inputs_to_plexus(inputs)?)),
+        Clause::line(mode.as_ref()),
+    ])
+}
+
 impl CreateJunction {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.extend(processor_tail_clauses(
             &self.branched_by,
@@ -2068,11 +2077,7 @@ impl CreateJunction {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} JUNCTION {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE JUNCTION {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2080,10 +2085,7 @@ impl CreateJunction {
 
 impl CreateDeduplicator {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "DEDUPLICATE ON {}",
@@ -2101,11 +2103,7 @@ impl CreateDeduplicator {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} DEDUPLICATOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE DEDUPLICATOR {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2116,6 +2114,7 @@ impl CreateCorrelator {
         let mut clauses = vec![
             Clause::line(prefixed_processor_inputs_to_plexus("LEFT", &self.left)?),
             Clause::line(prefixed_processor_inputs_to_plexus("RIGHT", &self.right)?),
+            Clause::line(self.mode.as_ref()),
             Clause::line(format!(
                 "CORRELATE WHERE {}",
                 expression_to_plexus(&self.correlate_where)?
@@ -2135,11 +2134,7 @@ impl CreateCorrelator {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} CORRELATOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE CORRELATOR {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2154,10 +2149,7 @@ fn correlation_timeout_action_to_plexus(action: &CorrelationTimeoutAction) -> St
 
 impl CreateReorderer {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "BY {}",
@@ -2175,11 +2167,7 @@ impl CreateReorderer {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} REORDERER {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE REORDERER {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2187,10 +2175,7 @@ impl CreateReorderer {
 
 impl CreateWindowProcessor {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "WIDTH {}",
@@ -2210,11 +2195,7 @@ impl CreateWindowProcessor {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} WINDOW PROCESSOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE WINDOW PROCESSOR {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2222,10 +2203,7 @@ impl CreateWindowProcessor {
 
 impl CreateEmitter {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
         let (reference, body) =
             emitter_destination_parts(&self.connector, &self.body, &self.envelope, None)?;
@@ -2248,8 +2226,7 @@ impl CreateEmitter {
         )));
         Ok(clause_statement(
             format!(
-                "CREATE {} {} EMITTER {}",
-                self.mode.as_ref(),
+                "CREATE {} EMITTER {}",
                 self.connector.kind().phrase(),
                 self.name.as_str()
             ),
@@ -2276,20 +2253,13 @@ fn window_bound_to_plexus(bound: &WindowBound) -> String {
 
 impl CreateReingestor {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
         clauses.extend(processor_outputs_clauses(&self.output_routes)?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} REINGESTOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE REINGESTOR {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2297,10 +2267,7 @@ impl CreateReingestor {
 
 impl<Version: Display> CreateInferencer<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "USING RESOURCE {} VERSION {}",
@@ -2312,6 +2279,9 @@ impl<Version: Display> CreateInferencer<Version> {
             "INPUTS",
             inference_mapping_items(&self.inputs)?,
         ));
+        if !self.state.is_empty() {
+            clauses.push(Clause::braced("STATE", inference_state_items(&self.state)?));
+        }
         clauses.push(Clause::braced(
             "OUTPUT SCHEMA",
             inference_output_schema_items(&self.output_schema)?,
@@ -2323,11 +2293,7 @@ impl<Version: Display> CreateInferencer<Version> {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} INFERENCER {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE INFERENCER {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2335,10 +2301,7 @@ impl<Version: Display> CreateInferencer<Version> {
 
 impl<Version: Display> CreateWasmProcessor<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "USING RESOURCE {} VERSION {}",
@@ -2365,14 +2328,28 @@ impl<Version: Display> CreateWasmProcessor<Version> {
         ));
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} WASM PROCESSOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE WASM PROCESSOR {}", self.name.as_str()),
             clauses,
         ))
     }
+}
+
+fn inference_tensor_schema(schema: &InferencerTensorSchema) -> String {
+    let dimensions = schema
+        .dimensions
+        .iter()
+        .map(|dimension| match dimension {
+            InferencerTensorDimension::Fixed(size) => size.to_string(),
+            InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
+            InferencerTensorDimension::Batch => "BATCH".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} TENSOR<{}>[{dimensions}]",
+        schema.representation.as_ref(),
+        schema.element_type.as_ref()
+    )
 }
 
 fn inference_mapping_items(
@@ -2382,22 +2359,10 @@ fn inference_mapping_items(
         .iter()
         .map(|mapping| {
             Ok(format!(
-                "{} {} TENSOR<{}>[{}] = {}",
+                "{} {} = {}",
                 string_literal(&mapping.tensor),
-                mapping.schema.representation.as_ref(),
-                mapping.schema.element_type.as_ref(),
-                mapping
-                    .schema
-                    .dimensions
-                    .iter()
-                    .map(|dimension| match dimension {
-                        InferencerTensorDimension::Fixed(size) => size.to_string(),
-                        InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
-                        InferencerTensorDimension::Batch => "BATCH".to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                expression_to_plexus(&mapping.expression)?
+                inference_tensor_schema(&mapping.schema),
+                expression_to_plexus(&mapping.expression)?,
             ))
         })
         .collect()
@@ -2406,25 +2371,35 @@ fn inference_mapping_items(
 fn inference_output_schema_items(
     declarations: &[InferencerTensorDeclaration],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
-    declarations
+    Ok(declarations
         .iter()
         .map(|declaration| {
-            Ok(format!(
-                "{} {} TENSOR<{}>[{}]",
+            format!(
+                "{} {}",
                 string_literal(&declaration.tensor),
-                declaration.schema.representation.as_ref(),
-                declaration.schema.element_type.as_ref(),
-                declaration
-                    .schema
-                    .dimensions
-                    .iter()
-                    .map(|dimension| match dimension {
-                        InferencerTensorDimension::Fixed(size) => size.to_string(),
-                        InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
-                        InferencerTensorDimension::Batch => "BATCH".to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                inference_tensor_schema(&declaration.schema),
+            )
+        })
+        .collect())
+}
+
+fn inference_state_items(
+    bindings: &[InferencerStateBinding],
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
+    bindings
+        .iter()
+        .map(|binding| {
+            let initial = match &binding.initial {
+                InferencerStateInitial::Zeros => "ZEROS".to_string(),
+                InferencerStateInitial::Constant(expression) => {
+                    format!("({})", expression_to_plexus(expression)?)
+                }
+            };
+            Ok(format!(
+                "{} FROM {} {} INITIAL {initial}",
+                string_literal(&binding.input),
+                string_literal(&binding.output),
+                inference_tensor_schema(&binding.schema),
             ))
         })
         .collect()
@@ -3029,7 +3004,7 @@ pub fn ingest_quiesce_to_plexus(quiesce: &crate::IngestQuiesceMode) -> String {
 }
 
 impl ClientIngestMode {
-    /// The mode clause of a client source, after its `MODE` keyword.
+    /// The mode clause of a client ingestor, after its `MODE` keyword.
     pub fn to_canonical_plexus(&self) -> String {
         let Self {
             window,
@@ -3163,13 +3138,15 @@ fn envelope_clause_to_plexus(
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     let keywords = clause.kind().keywords();
     let text = match clause {
-        EnvelopeClause::Persistent | EnvelopeClause::Mandatory | EnvelopeClause::Retain => {
-            keywords.to_string()
-        }
+        EnvelopeClause::PartitionFromBranch
+        | EnvelopeClause::Persistent
+        | EnvelopeClause::Mandatory
+        | EnvelopeClause::Retain => keywords.to_string(),
         EnvelopeClause::DeliverAfter(duration) | EnvelopeClause::Delay(duration) => {
             format!("{keywords} {duration}")
         }
-        EnvelopeClause::Timestamp(expression)
+        EnvelopeClause::Key(expression)
+        | EnvelopeClause::Timestamp(expression)
         | EnvelopeClause::ReplyTo(expression)
         | EnvelopeClause::MessageId(expression)
         | EnvelopeClause::DeduplicationId(expression) => {
@@ -3435,16 +3412,28 @@ pub fn string_literal(value: &str) -> String {
     }
 }
 
+/// A wire schema field type as canonical Plexus writes it: its keywords in uppercase.
 trait NativeTypeToPlexus {
     fn to_plexus_keyword(&self) -> String;
 }
 
-impl<T> NativeTypeToPlexus for T
-where
-    T: AsRef<str>,
-{
+impl NativeTypeToPlexus for JsonType {
     fn to_plexus_keyword(&self) -> String {
         self.as_ref().to_ascii_uppercase()
+    }
+}
+
+impl NativeTypeToPlexus for CborType {
+    fn to_plexus_keyword(&self) -> String {
+        self.as_ref().to_ascii_uppercase()
+    }
+}
+
+/// An AVRO type's keywords are the names of its Avro schema, so an array writes its item type at
+/// every depth, `ARRAY<ARRAY<DOUBLE>>`.
+impl NativeTypeToPlexus for AvroType {
+    fn to_plexus_keyword(&self) -> String {
+        self.to_string().to_ascii_uppercase()
     }
 }
 
@@ -3616,6 +3605,43 @@ mod tests {
         assert_eq!(
             plexus,
             "CREATE WIRE AVRO SCHEMA latency MODE STRICT (\n  p99 DOUBLE,\n  created_at STRING\n);"
+        );
+    }
+
+    #[test]
+    fn renders_avro_array_items_at_every_depth() {
+        let schema: Model = Model::WireAvroSchema(CreateWireSchema {
+            name: named("lists"),
+            strictness: Default::default(),
+            fields: vec![
+                WireSchemaField {
+                    name: named("totals"),
+                    ty: AvroType::array_of(AvroType::Long),
+                    optional: true,
+                },
+                WireSchemaField {
+                    name: named("matrix"),
+                    ty: AvroType::array_of(AvroType::array_of(AvroType::Double)),
+                    optional: false,
+                },
+            ],
+        });
+        assert_eq!(
+            schema.to_canonical_plexus().expect("must render"),
+            "CREATE WIRE AVRO SCHEMA lists MODE STRICT (\n  totals ARRAY<LONG> OPTIONAL,\n  \
+             matrix ARRAY<ARRAY<DOUBLE>>\n);"
+        );
+
+        let alter = crate::AlterWireSchema {
+            schema: named("lists"),
+            operations: vec![crate::AlterWireSchemaOperation::SetFieldType {
+                field: named("totals"),
+                ty: AvroType::array_of(AvroType::Int),
+            }],
+        };
+        assert_eq!(
+            super::alter_avro_wire_schema_to_canonical_plexus(&alter).expect("must render"),
+            "ALTER WIRE AVRO SCHEMA lists ALTER FIELD totals SET TYPE ARRAY<INT>;"
         );
     }
 
@@ -4269,9 +4295,9 @@ mod tests {
         };
         assert_eq!(
             junction.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED JUNCTION orders_junction\n  FROM orders_a, orders_b COLLECT FOR 25ms \
-             MAX BATCH SIZE 2MiB\n  BRANCHED BY by_tenant_branch\n  TO orders_all\n    FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
+            "CREATE JUNCTION orders_junction\n  FROM orders_a, orders_b COLLECT FOR 25ms MAX \
+             BATCH SIZE 2MiB\n  ATTACHED\n  BRANCHED BY by_tenant_branch\n  TO orders_all\n    \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
         );
 
         let deduplicator = CreateDeduplicator {
@@ -4287,7 +4313,7 @@ mod tests {
         };
         assert_eq!(
             deduplicator.to_canonical_plexus().expect("must render"),
-            "CREATE DETACHED DEDUPLICATOR orders_dedup\n  FROM orders_in\n  DEDUPLICATE ON \
+            "CREATE DEDUPLICATOR orders_dedup\n  FROM orders_in\n  DETACHED\n  DEDUPLICATE ON \
              input.transaction_id\n  MAX TIME 10m\n  BRANCHED BY by_tenant_branch\n  TO \
              orders_out\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
         );
@@ -4325,10 +4351,10 @@ mod tests {
         };
         assert_eq!(
             correlator.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED CORRELATOR orders_correlator\n  LEFT FROM orders_left, \
-             orders_left_archive COLLECT FOR 10ms\n  RIGHT FROM orders_right COLLECT FOR 20ms MAX \
-             BATCH SIZE 1MiB\n  CORRELATE WHERE left.id = right.id\n  MATCH EARLIEST\n  MAX TIME \
-             5s\n  ON CORRELATION TIMEOUT DROP, DROP\n  BRANCHED BY by_tenant_branch\n  TO \
+            "CREATE CORRELATOR orders_correlator\n  LEFT FROM orders_left, orders_left_archive \
+             COLLECT FOR 10ms\n  RIGHT FROM orders_right COLLECT FOR 20ms MAX BATCH SIZE 1MiB\n  \
+             ATTACHED\n  CORRELATE WHERE left.id = right.id\n  MATCH EARLIEST\n  MAX TIME 5s\n  \
+             ON CORRELATION TIMEOUT DROP, DROP\n  BRANCHED BY by_tenant_branch\n  TO \
              orders_matched\n    SET id = left.id\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    \
              ON MESSAGE ERROR LOG;"
         );
@@ -4372,7 +4398,7 @@ mod tests {
         };
         assert_eq!(
             window_processor.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED WINDOW PROCESSOR latency_window\n  FROM orders_in\n  WIDTH 100 \
+            "CREATE WINDOW PROCESSOR latency_window\n  FROM orders_in\n  ATTACHED\n  WIDTH 100 \
              MESSAGES 10s DURATION\n  STEP 10 MESSAGES 1s DURATION\n  BRANCHED BY \
              by_tenant_branch\n  TO orders_p99\n    SET latency_p99 = \
              percentile_linear_histogram(input.latency, 99, 2048, 0, 10000, '2s')\n    ON MESSAGE \
@@ -4389,7 +4415,9 @@ mod tests {
         };
         assert_eq!(
             reingestor.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED REINGESTOR orders_repartition\n  FROM orders_in\n  TO orders_out\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
+            "CREATE REINGESTOR orders_repartition\n  FROM orders_in\n  ATTACHED\n  TO \
+             orders_out\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE \
+             ERROR LOG;"
         );
 
         let route_reingestor = CreateReingestor {
@@ -4420,7 +4448,7 @@ mod tests {
         };
         assert_eq!(
             route_reingestor.to_canonical_plexus().expect("must render"),
-            "CREATE DETACHED REINGESTOR orders_splitter\n  FROM orders_in\n  FILTER WHERE \
+            "CREATE REINGESTOR orders_splitter\n  FROM orders_in\n  DETACHED\n  FILTER WHERE \
              active\n  TO orders_errors\n    WHERE level = 'error'\n    UNBRANCHED\n    FLUSH \
              EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  TO orders_warn\n    SET \
              severity = 'warning'\n    WHERE level = 'warn'\n    UNBRANCHED\n    FLUSH EACH 100ms \
@@ -4605,8 +4633,8 @@ mod tests {
             assert_eq!(
                 emitter.to_canonical_plexus().expect("must render"),
                 format!(
-                    "CREATE ATTACHED {rendered_kind} EMITTER emit_orders\n  FROM orders_stream \
-                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_emitter}\n    MODE \
+                    "CREATE {rendered_kind} EMITTER emit_orders\n  FROM orders_stream COLLECT FOR \
+                     50ms MAX BATCH SIZE 4MiB\n  ATTACHED\n  TO {rendered_emitter}\n    MODE \
                      {rendered_mode}\n    ENCODE USING orders_codec\n  FLUSH EACH 100ms MAX BATCH \
                      SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
                 )
@@ -4619,8 +4647,8 @@ mod tests {
             assert_eq!(
                 batching.to_canonical_plexus().expect("must render"),
                 format!(
-                    "CREATE ATTACHED {rendered_kind} EMITTER emit_orders\n  FROM orders_stream \
-                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_emitter}\n    MODE \
+                    "CREATE {rendered_kind} EMITTER emit_orders\n  FROM orders_stream COLLECT FOR \
+                     50ms MAX BATCH SIZE 4MiB\n  ATTACHED\n  TO {rendered_emitter}\n    MODE \
                      {rendered_mode}\n    ENCODE USING orders_codec\n  BATCH MAX MESSAGES 500 MAX \
                      SIZE 1MiB\n  FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  \
                      ON GENERAL ERROR LOG;"
@@ -4662,20 +4690,10 @@ mod tests {
             }))
         };
         assert_eq!(
-            sqs(Some(crate::SqsFifoGroup::FromBranch))
+            sqs(Some(scoped_field(FieldScope::Input, "tenant")))
                 .entity_presentation()
-                .assured("the branch group has no fallible expression")
+                .assured("the scoped field has a canonical representation")
                 .reference_to_plexus(),
-            "sqs_main QUEUE 'orders_queue' FIFO GROUP FROM BRANCH SEND BATCH"
-        );
-        assert_eq!(
-            sqs(Some(crate::SqsFifoGroup::Expression(scoped_field(
-                FieldScope::Input,
-                "tenant"
-            ))))
-            .entity_presentation()
-            .assured("the scoped field has a canonical representation")
-            .reference_to_plexus(),
             "sqs_main QUEUE 'orders_queue' FIFO GROUP input.tenant SEND BATCH"
         );
 
@@ -4783,7 +4801,7 @@ mod tests {
 
         assert_eq!(
             emitter.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED POSTGRES TABLE EMITTER emit_notifications\n  FROM notifications\n  \
+            "CREATE POSTGRES TABLE EMITTER emit_notifications\n  FROM notifications\n  ATTACHED\n  \
              TO postgres_main TABLE 'notification_rows'\n    MODE ACK RETRY POLICY BACKOFF 250ms \
              MAX 30s\n    VALUES {\n      'postgres_user_id' = input.user_id,\n      \
              'postgres_action' = lower(input.action)\n    }\n    ON CONFLICT ('postgres_user_id') \
@@ -4839,8 +4857,8 @@ mod tests {
 
         assert_eq!(
             emitter.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED MYSQL TABLE EMITTER emit_notifications\n  FROM notifications\n  TO \
-             mysql_main TABLE 'notification_rows'\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX \
+            "CREATE MYSQL TABLE EMITTER emit_notifications\n  FROM notifications\n  ATTACHED\n  \
+             TO mysql_main TABLE 'notification_rows'\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX \
              30s\n    VALUES {\n      'mysql_user_id' = input.user_id,\n      'mysql_action' = \
              lower(input.action)\n    }\n    ON CONFLICT DO NOTHING\n  BATCH MAX MESSAGES 500 MAX \
              SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON \
@@ -4897,8 +4915,8 @@ mod tests {
 
         assert_eq!(
             emitter.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED MONGODB COLLECTION EMITTER emit_notifications\n  FROM \
-             notifications\n  TO mongodb_main COLLECTION 'notification_rows'\n    MODE ACK RETRY \
+            "CREATE MONGODB COLLECTION EMITTER emit_notifications\n  FROM notifications\n  \
+             ATTACHED\n  TO mongodb_main COLLECTION 'notification_rows'\n    MODE ACK RETRY \
              POLICY BACKOFF 250ms MAX 30s\n    VALUES {\n      'mongodb_user_id' = \
              input.user_id,\n      'mongodb_action' = lower(input.action)\n    }\n    ON CONFLICT \
              ('mongodb_user_id') DO UPDATE\n  BATCH MAX MESSAGES 500 MAX SIZE 8MiB\n  FLUSH EACH \
@@ -4979,7 +4997,7 @@ mod tests {
                             group: named("Orders Group"),
                             start_at: crate::IngestStartPosition::Earliest,
                         },
-                        instances: nonzero!(3u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(3u64)),
                         mode: KafkaIngestMode::AckParallel {
                             max: nonzero!(8u64),
                             batch_timeout: "100ms".to_string(),
@@ -5005,7 +5023,7 @@ mod tests {
                             ownership: PulsarSubscriptionOwnership::Provisioned,
                             kind: PulsarSubscriptionType::KeyShared,
                         },
-                        instances: nonzero!(1u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(1u64)),
                         mode: PulsarIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
@@ -5020,7 +5038,7 @@ mod tests {
                     decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/+/Orders"),
-                        instances: nonzero!(2u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(2u64)),
                         session: MqttSession::Clean,
                         qos: MqttQos::Qos0,
                         mode: MqttIngestMode::NoAck,
@@ -5036,7 +5054,7 @@ mod tests {
                     decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/#"),
-                        instances: nonzero!(1u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(1u64)),
                         session: MqttSession::Persistent,
                         qos: MqttQos::Qos2,
                         mode: MqttIngestMode::NoAck,
@@ -5053,7 +5071,7 @@ mod tests {
                         client: named("nats_main"),
                         subject: named("orders.*.created"),
                         queue_group: named("Orders-Workers"),
-                        instances: nonzero!(2u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(2u64)),
                         mode: NatsIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
@@ -5068,7 +5086,7 @@ mod tests {
                     decoded(RabbitMqQueueIngestor {
                         client: named("rmq_main"),
                         queue: named("Orders Queue"),
-                        instances: nonzero!(1u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(1u64)),
                         mode: RabbitMqIngestMode::AckSequential {
                             timeout: "20s".to_string(),
                             retry_policy: retry.clone(),
@@ -5145,7 +5163,7 @@ mod tests {
                     decoded(SqsQueueIngestor {
                         client: named("sqs_main"),
                         queue: named("Orders.fifo"),
-                        instances: nonzero!(4u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(4u64)),
                         mode: SqsIngestMode::AckSequential {
                             timeout: "45s".to_string(),
                             retry_policy: retry.clone(),

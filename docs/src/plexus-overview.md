@@ -38,6 +38,19 @@ transition checks and bootstrap seed rules.
 
 Core create statements:
 
+The `<json_type>` in a declared JSON wire schema is one of `string`, `number`, `integer`, `boolean`,
+or `array`. `DATETIME` uses `string` with an `RFC3339` codec rule, and `BYTES` uses `string` with a
+`BASE64` codec rule.
+
+The `<avro_type>` in a declared AVRO wire schema is one of `boolean`, `int`, `long`, `float`,
+`double`, `string`, `bytes`, or `array<avro_type>`, which names its item type at every depth. A JSON
+or CBOR `array` is bare; the codec's `ENCODE <field> AS ...` rule on a list field governs its
+innermost elements.
+
+The `<cbor_type>` in a declared CBOR wire schema is one of `integer`, `float`, `boolean`, `text`,
+`bytes`, or `array`. `DATETIME` uses `text` with an `RFC3339` codec rule, and `BYTES` uses native
+CBOR byte strings.
+
 ```plexus,ignore
 CREATE [IF NOT EXISTS] USER <name> WITH PASSWORD '<password>';
 
@@ -283,6 +296,10 @@ kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`.
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 
+`CREATE INFERENCER` may declare model-carried `STATE` between `INPUTS` and `OUTPUT SCHEMA`.
+The [Inferencer](processors.md#state-tensors) section defines its port pairs, fixed tensor shapes,
+initial expressions, per-branch invocation order and reset behavior.
+
 Domain creation may declare a placement default, and named placement rules may overlay paths in
 the active domain. Omission means `NEUTRAL`, which preserves ordinary scheduler heuristics. See
 [Placement Policies](placement.md) for the four policy levels and lifecycle commands.
@@ -397,6 +414,7 @@ source-level filter to `FROM`:
 ```plexus,ignore
 FROM <relay> [WHERE <expr>], ...
 [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
+[ATTACHED | DETACHED]
 [FILTER WHERE <expr>]
 TO <relay>
   [INHERIT ...]
@@ -408,7 +426,7 @@ TO <relay>
 ```
 
 `COLLECT FOR` is optional on graph nodes that consume relay input through `FROM`. It is unavailable
-to ingestors, which read external sources rather than relays. When omitted, each incoming Arrow
+to ingestors, which read external systems rather than relays. When omitted, each incoming Arrow
 batch proceeds directly to node execution. When present, Nervix maintains an input batch
 independently for each source relay and concrete branch, then executes the node when the duration
 expires or the optional size boundary is reached. Correlators configure the clause independently
@@ -418,6 +436,13 @@ they may belong to differently named branches; collection remains independent fo
 relay and concrete branch. Generators do not read a `FROM` relay and therefore have no input
 collection clause. The duration is measured on the domain clock and starts when the source and
 branch collector changes from empty to non-empty. A paced domain's `TIME RATE` scales that wait.
+
+Relay-consuming processors and emitters may write `ATTACHED | DETACHED` after their complete
+input list and optional `COLLECT FOR`; correlators place it after `RIGHT FROM` and that side's
+collection policy. The default is `ATTACHED`. Canonical rendering writes the mode explicitly as
+its own body clause, including through `SHOW CREATE`, the formatter and configuration backups.
+See [Processors](processors.md#shared-input-and-branch-contracts) and
+[Emitters](emitters.md#statement-heads-and-external-names) for the complete clause order.
 
 `FROM ... WHERE` runs first. `FILTER WHERE` runs next, before the node accepts rows into its state,
 buffer, inferencer, or guest. Every route then creates a new empty output, performs its own ordered
@@ -470,7 +495,7 @@ illustrative, not recommended defaults. Two measured facts decide what a `FLUSH`
 `MAX BATCH SIZE` only clamps a batch; it never grows one. The batch a route emits is roughly its
 arrival rate multiplied by the `FLUSH EACH` interval, cut off at the byte cap, so raising a cap
 that never fires changes nothing and the only way to grow batches is a longer interval, paid in
-latency. Upstream of every route, ingestors build their first Arrow batches from source groups that
+latency. Upstream of every route, ingestors build their first Arrow batches from ingest groups that
 close at 1,024 messages, or earlier after a 5 ms idle gap, independent of any `FLUSH` policy; a
 payload a JAQ-backed codec unfolds is never split, so its group may close above 1,024. Larger
 batches downstream come only from route buffering across an interval. Read actual batch sizes
@@ -598,7 +623,7 @@ General expression rules:
 - generated routes allow bare reads from immutable generated state until the same-named output is
   initialized; `message` and `input` are unavailable
 - `branch.field` must be explicit and is unavailable in successful emitter expressions
-- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; each source
+- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; each ingestor
   entity declares its typed, optional `metadata.<field>` set, such as Kafka's `metadata.topic`,
   `metadata.partition`, and `metadata.offset` or Syslog's `metadata.peer_addr`, and a route may read
   only a declared field
@@ -685,14 +710,14 @@ SET error_reference = error.reference,
     attempted_total = partial_output.total
 ```
 
-An ingestor additionally declares its node-level general policy after the source configuration:
+An ingestor additionally declares its node-level general policy after the ingestor configuration:
 
 ```plexus,ignore
 ON GENERAL ERROR IGNORE | LOG
 ```
 
 An ingestor's general policy also reports the decode rejection that replaces every payload its
-codec refuses. Either form consumes the payload rather than having its source present it again:
+codec refuses. Either form consumes the payload rather than having its ingestor present it again:
 `LOG` reports the rejection and `IGNORE` does not. See
 [When The Codec Refuses A Payload](ingestors.md#when-the-codec-refuses-a-payload).
 

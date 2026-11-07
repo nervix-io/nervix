@@ -160,8 +160,9 @@ Feature: Typed error qualification through public streams
       """
     Then the last command output contains
       """
-      CREATE ATTACHED JUNCTION route_orders
+      CREATE JUNCTION route_orders
         FROM orders
+        ATTACHED
         UNBRANCHED
         TO accepted_orders
           INHERIT ALL
@@ -252,7 +253,7 @@ Feature: Typed error qualification through public streams
       CREATE RELAY calculation_errors SCHEMA calculation_error BRANCHED BY by_tenant;
       CREATE VHOST edge typed-errors-{{test_id}}.example.com;
       CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR calculation_source
+      CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations

@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn http_source_reads_endpoint_configuration() {
+    fn http_ingestor_reads_endpoint_configuration() {
         let config = vec![ClientConfigEntry {
             key: "endpoint".to_string(),
             value: "https://example.com/api".to_string(),

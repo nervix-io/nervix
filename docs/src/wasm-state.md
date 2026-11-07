@@ -12,7 +12,7 @@ identity fences out every earlier lifetime, how a lifetime is replaced, and what
 failure leaves behind.
 
 The central rule is that guest state and message delivery are separate guarantees. A checkpoint
-makes the guest's computation state durable before the source acknowledgements it covers are
+makes the guest's computation state durable before the ingestor acknowledgements it covers are
 released. It does not make the guest, its output, and external emitters one transaction, so a path
 through a WASM processor is at least once.
 
@@ -296,10 +296,10 @@ it would save is the state the reset discards.
    callback held back are released. Only then does the branch run its next callback.
 
 The whole checkpoint, from the guest's save to the last replica's confirmation, has ninety seconds.
-While it is under way, the branch reports every input the callback holds back alive to its source
+While it is under way, the branch reports every input the callback holds back alive to its ingestor
 every 100 milliseconds, as a remote receiver reports an acknowledgement it holds. A checkpoint is
-progress of those inputs: a source whose `ACK TIMEOUT` is shorter than the checkpoint does not time
-them out and send them again while the checkpoint can still commit them, whether the source runs on
+progress of those inputs: an ingestor whose `ACK TIMEOUT` is shorter than the checkpoint does not time
+them out and send them again while the checkpoint can still commit them, whether the ingestor runs on
 the owner's node or on another. Input the guest keeps undecided past its callback is not held for a
 checkpoint and is not reported alive.
 The replica first receives a small revision, length, and digest description, then fetches that
@@ -326,6 +326,13 @@ checkpoint before a synchronization starts therefore share it, and those that ch
 runs share the next one, instead of queuing one each. No lock is held across the wait; see
 [Bounded Synchronization Outside The Open
 Path](./data-plane-concurrency.md#bounded-synchronization-outside-the-open-path).
+
+Each guest checkpoint replaces the branch's previous one: the state store writes it inline, removes
+the revision-index entry of the checkpoint it supersedes and adds its own in the same batch, so a
+branch's stored state stays one checkpoint and one index entry however many callbacks it has
+checkpointed. A replica installs the checkpoints it receives through the same write. [Generation
+Storage](./backup-and-restore-architecture.md#generation-storage) describes the index the store
+keeps.
 
 A failed synchronization is not retried. The operating system may have dropped the writes it failed
 to flush, and the database refuses every later synchronization, so from then on no write on that
@@ -365,8 +372,10 @@ owns it for the length of the checkpoint. The input succeeds once every delivery
 for it succeeded and that share is released. `nacked` inputs are negatively acknowledged at once.
 See [Checkpoints And Acknowledgements](./wasm-processor-guests.md#checkpoints-and-acknowledgements).
 
-The holds gate the source only on an `ATTACHED` processor, which is the default. A `DETACHED`
-processor receives its input after relay fan-out has already acknowledged it upstream, so no source
+The processor's optional `ATTACHED | DETACHED` body clause follows its complete relay inputs and
+collection policy, before its resource binding. The holds gate the ingestor only on an `ATTACHED`
+processor, which is the default. A `DETACHED`
+processor receives its input after relay fan-out has already acknowledged it upstream, so no ingestor
 acknowledgement waits for its checkpoints, although its guest state is checkpointed the same way.
 
 ### When A Checkpoint Fails
@@ -403,7 +412,7 @@ Where an owner stops relative to them decides which state survives.
 | After the acknowledgements were released | The new checkpoint | The new checkpoint | The new checkpoint | The new checkpoint |
 
 In every row but the last, the callback's output may already have left the node and its inputs were
-not acknowledged, so a source with acknowledgements redelivers them. Without replicas, only the
+not acknowledged, so an ingestor with acknowledgements redelivers them. Without replicas, only the
 owner's storage holds a branch's checkpoints, so recovering without that node resets the branch.
 [Replay, Duplicates, And Exactly-Once](#replay-duplicates-and-exactly-once) describes what a
 redelivered input does.
@@ -574,7 +583,7 @@ request reference with a different scope or reason is rejected.
    scope is still gated, and the gate is released.
 
 From `Publishing` until `Ready`, the owner negatively acknowledges every input of the selected
-scope, so a source with acknowledgements redelivers it into the new lifetime; sibling branches run.
+scope, so an ingestor with acknowledgements redelivers it into the new lifetime; sibling branches run.
 A restart, a leader change, or an owner recovery reads the published phase and keeps the scope
 fenced. A reset does not touch the domain clock: it changes no lifecycle generation, mapping,
 authority, or frontier, and no deadline armed by the replaced instance fires in the new lifetime.
@@ -704,7 +713,7 @@ See [What Survives](./shutdown.md#what-survives) for the kinds of ending and the
 
 ## Replay, Duplicates, And Exactly-Once
 
-Snapshot recovery guarantees one thing: once a source has received a successful acknowledgement for
+Snapshot recovery guarantees one thing: once an ingestor has received a successful acknowledgement for
 an input, the guest state that reflects the input is on the stable storage of the branch's owner and
 of every replica the checkpoint was confirmed by. It is not an exactly-once guarantee for the guest
 or for external delivery:
@@ -714,9 +723,9 @@ or for external delivery:
 - the state a branch continues from can already reflect a redelivered input: a guest counts buffered
   input as it accepts it, a checkpoint that failed at its replicas stays on the owner's storage, and
   a replica can hold a checkpoint whose acknowledgement arrived too late;
-- a source that keeps redelivering while no owner accepts the input can deliver it to the recovered
+- an ingestor that keeps redelivering while no owner accepts the input can deliver it to the recovered
   branch more than once;
-- a source without acknowledgements redelivers nothing, and loses the input in every window before
+- an ingestor without acknowledgements redelivers nothing, and loses the input in every window before
   local durability.
 
 A guest therefore applies a redelivered input again unless it recognizes the input itself, and
@@ -796,7 +805,7 @@ Nervix does not provide, and these limits apply:
 - **A schema that returns to an earlier fingerprint** can make a checkpoint kept by a node that
   missed the intermediate schedule current again; see [Why State Does Not
   Resurrect](#why-state-does-not-resurrect).
-- **A `DETACHED` processor gates no source acknowledgement** on its checkpoints.
+- **A `DETACHED` processor gates no ingestor acknowledgement** on its checkpoints.
 - **Guest requests and recovery raises are volatile**, and are raised again by the next callback or
   refusal.
 
@@ -810,7 +819,7 @@ branches.
 | --- | --- |
 | Crash windows and replay | `wasm_state_qualification.feature`: the four checkpoint windows on a single-node restart, owner loss at the windows it can tell apart, a cluster stopped while its owner holds a checkpoint, and a reset committed but not usable across a cluster restart |
 | No acknowledgement before durability | `wasm_checkpoint_durability.feature`, and the Shuttle checks of `ReplicatedWasmProcessorState`, `WasmCheckpointHolds`, and `DurabilityBarrier` under random, PCT, and DFS schedules |
-| No replay while a checkpoint is under way | `wasm_checkpoint_durability.feature`: a checkpoint held past its source's `ACK TIMEOUT` on one node and on three nodes with one replica commits its input without the source sending it again, and the `WasmCheckpointHolds` Shuttle checks race its keepalive with the input's delivery |
+| No replay while a checkpoint is under way | `wasm_checkpoint_durability.feature`: a checkpoint held past its ingestor's `ACK TIMEOUT` on one node and on three nodes with one replica commits its input without the ingestor sending it again, and the `WasmCheckpointHolds` Shuttle checks race its keepalive with the input's delivery |
 | No resurrection, no double reset | `wasm_state_reset.feature`: failover, retry, a lost reply across a leader change, an expired identity, and rebinding |
 | Recovery budget | `wasm_state_recovery.feature`: preserve, recover once, and a failed fresh initialization that spends the attempt across a restart |
 | Restart | `wasm_processor.feature`: guest state restored after a cluster restart and not resurrected by a returning former owner |

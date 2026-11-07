@@ -62,7 +62,8 @@ suite_reserve="$(sed -n 's/^teardown_reserve_minutes=\([0-9][0-9]*\)$/\1/p' "${c
 # shellcheck source=../verifier-self-check.sh
 source "${chaos_dir}/verifier-self-check.sh"
 preparation_minutes=$(((chaos_verifier_self_check_seconds + 59) / 60))
-for suite in smoke soak; do
+mapfile -t suites < <(jq -r '.suites | keys[]' "${chaos_dir}/suites.json")
+for suite in "${suites[@]}"; do
     "${chaos_dir}/suite.sh" shards "${suite}" >"${tmp_dir}/${suite}-shards.json"
     jq -e --slurpfile suites "${chaos_dir}/suites.json" --arg suite "${suite}" --argjson reserve "${suite_reserve}" \
         --argjson preparation "${preparation_minutes}" '

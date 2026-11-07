@@ -21,7 +21,7 @@ Feature: Remote relay senders held back while relay memory is full
       CREATE KAFKA CLIENT grant_hold_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR grant_hold_source
+      CREATE KAFKA TOPIC INGESTOR grant_hold_ingestor
         FROM grant_hold_kafka TOPIC 'grant_hold_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'grant_hold_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
@@ -30,7 +30,7 @@ Feature: Remote relay senders held back while relay memory is full
         TO grant_hold_records INHERIT ALL UNBRANCHED
           FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER grant_hold_sink
+      CREATE KAFKA TOPIC EMITTER grant_hold_emitter
         FROM grant_hold_records
         TO grant_hold_kafka TOPIC 'grant_hold_out_{{test_id}}'
           MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING grant_hold_codec
@@ -39,14 +39,14 @@ Feature: Remote relay senders held back while relay memory is full
       """
     And these Plexus statements are executed on the leader node
       """
-      RELOCATE INGESTOR grant_hold_source ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR grant_hold_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY grant_hold_records ONTO NODE node-2 IGNORE PREFERENCES;
-      RELOCATE EMITTER grant_hold_sink ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE EMITTER grant_hold_emitter ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=grant_hold_source owner=node-1
+      - domain={{domain}} kind=ingestor name=grant_hold_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -54,7 +54,7 @@ Feature: Remote relay senders held back while relay memory is full
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=emitter name=grant_hold_sink owner=node-2
+      - domain={{domain}} kind=emitter name=grant_hold_emitter owner=node-2
       """
     When node "node-2" fills its relay memory, leaving room for no relay grant
     And these Kafka messages are rapidly published to topic "grant_hold_in_{{test_id}}"
@@ -118,7 +118,7 @@ Feature: Remote relay senders held back while relay memory is full
       CREATE KAFKA CLIENT storage_hold_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR storage_hold_source
+      CREATE KAFKA TOPIC INGESTOR storage_hold_ingestor
         FROM storage_hold_kafka TOPIC 'storage_hold_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'storage_hold_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
@@ -127,7 +127,7 @@ Feature: Remote relay senders held back while relay memory is full
         TO storage_hold_records INHERIT ALL UNBRANCHED
           FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER storage_hold_sink
+      CREATE KAFKA TOPIC EMITTER storage_hold_emitter
         FROM storage_hold_records
         TO storage_hold_kafka TOPIC 'storage_hold_out_{{test_id}}'
           MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING storage_hold_codec
@@ -136,14 +136,14 @@ Feature: Remote relay senders held back while relay memory is full
       """
     And these Plexus statements are executed on the leader node
       """
-      RELOCATE INGESTOR storage_hold_source ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR storage_hold_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY storage_hold_records ONTO NODE node-2 IGNORE PREFERENCES;
-      RELOCATE EMITTER storage_hold_sink ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE EMITTER storage_hold_emitter ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=storage_hold_source owner=node-1
+      - domain={{domain}} kind=ingestor name=storage_hold_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -151,7 +151,7 @@ Feature: Remote relay senders held back while relay memory is full
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=emitter name=storage_hold_sink owner=node-2
+      - domain={{domain}} kind=emitter name=storage_hold_emitter owner=node-2
       """
     When node "node-1" fills its relay memory before it stores the records of its next delivery
     And these Kafka messages are rapidly published to topic "storage_hold_in_{{test_id}}"

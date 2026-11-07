@@ -191,10 +191,10 @@ Operationally that means:
   local runtime consumer on a node shares that node's delivery, and a session subscription on a node
   that also hosts a runtime consumer piggybacks on it
 - a delivery that reaches a node after its attached consumer moved away fails its attached
-  acknowledgements, so the source redelivers the record along the owner's current routes; see
+  acknowledgements, so the ingestor redelivers the record along the owner's current routes; see
   [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver)
 - an owner batch that starts fan-out while a schedule swap fences its consumer routes fails its
-  record acknowledgements and is retried by its source after the swap; fan-out already holding a
+  record acknowledgements and is retried by its ingestor after the swap; fan-out already holding a
   dispatch permit finishes before those routes change
 - an acknowledgement a receiver returns after the sending node restarted names that node's earlier
   run, so the restarted node rejects it and its own records stay pending until their own
@@ -266,6 +266,7 @@ TTL controls:
 - concrete relay-branch presence on the owner
 - materialized-state cleanup when the relay is materialized
 - downstream processor state cleanup for the same concrete branch
+- cleanup of an emitter's held work for each concrete source branch
 
 Expiration semantics:
 
@@ -274,15 +275,15 @@ Expiration semantics:
 - a branch's idle time is measured from the time at which its last input was accepted. A relay
   owner or processor that spends a long time waiting for input does not spend that wait out of the
   branch's TTL, so every branch receives its complete declared lifetime from its own last record
-- idle time counts every reason a branch receives no input. When a stalled source or a stalled
+- idle time counts every reason a branch receives no input. When a stalled ingestor or a stalled
   upstream delivery holds a branch's input back for longer than the TTL, every relay owner and
   processor that holds the branch releases it at its next scan, and a window processor drops the
   rows it retained for that branch
-- every relay owner, processor, ingestor and reingestor using the branch applies that branch's TTL
+- every relay owner, processor, ingestor, reingestor and emitter using the branch applies its TTL
   to its own branch-local runtime state. Releasing the branch ends only that entity's branch-local
-  state and the relay delivery channels it owns or publishes through for the branch. Another relay
-  or processor that holds a branch with the same key, under this branch or another branch of the
-  same schema, keeps its branch and the deliveries in flight on it
+  state and the relay delivery channels it owns or publishes through for the branch. Other
+  entities and an emitter's other sources keep their own branches and deliveries in flight, even
+  when their branch keys and schemas are equal
 - relay TTL and `MAX INSTANCES ... EVICT LRU` are enforced once by the relay owner across all
   producers in the cluster. A partitioned relay enforces them in each partition owner on the keys
   of that partition, so `MAX INSTANCES` caps each partition

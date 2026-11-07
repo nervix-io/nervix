@@ -2,13 +2,13 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The NATS client Model, the subject and stream source and emitter Models with their delivery
-//!   mode, the subject and queue group names a source subscribes with and the rules NATS holds
-//!   them to, the stream source Model with the stream and durable consumer names it reads and
-//!   Nervix's one implementation of nats-server 2.11's rule for a JetStream stream or consumer
-//!   name, and what each entity declares.
+//! - **Owns.** The NATS client Model, subject and stream ingestor and emitter Models with their
+//!   delivery modes, validated subject and queue group names, stream and durable consumer names,
+//!   and each entity's declarations. The subject rule owns NATS 2.11 token syntax and Nervix's
+//!   stricter limits; the JetStream name rule owns Nervix's implementation of nats-server 2.11's
+//!   stream and consumer name rules.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The NATS driver, or how a subject is subscribed or
 //!   published to.
 
@@ -21,6 +21,8 @@ use std::num::NonZeroU64;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
+
+mod subject;
 
 use super::{
     bounds::{
@@ -66,8 +68,6 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     .with_mutually_exclusive(&["credentials_file", "nkey_seed", "token"])
 };
 
-/// The longest subject Nervix subscribes to, in bytes.
-const NATS_SUBJECT_MAX: usize = 1024;
 /// The longest queue group Nervix joins, in bytes.
 const NATS_QUEUE_GROUP_MAX: usize = 255;
 /// The longest stream or consumer name a JetStream server admits, in bytes.
@@ -115,23 +115,7 @@ fn refuse_whitespace(text: &str) -> Result<(), ExternalNameError> {
 }
 
 fn nats_subject_rule(text: &str) -> Result<(), ExternalNameError> {
-    require_length(text, NATS_SUBJECT_MAX)?;
-    refuse_whitespace(text)?;
-    let mut tokens = text.split('.').peekable();
-    while let Some(token) = tokens.next() {
-        if token.is_empty() {
-            return Err(ExternalNameError::EmptyLevel { separator: '.' });
-        }
-        if token.len() > 1
-            && let Some(wildcard) = token.chars().find(|ch| matches!(ch, '*' | '>'))
-        {
-            return Err(ExternalNameError::WildcardInsideLevel { wildcard });
-        }
-        if token == ">" && tokens.peek().is_some() {
-            return Err(ExternalNameError::WildcardBeforeLastLevel { wildcard: '>' });
-        }
-    }
-    Ok(())
+    subject::SubscriptionPattern::parse(text).map(|_| ())
 }
 
 fn nats_queue_group_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -168,7 +152,7 @@ pub struct NatsSubjectIngestor {
     pub client: ClientName,
     pub subject: NatsSubjectName,
     pub queue_group: NatsQueueGroupName,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: NatsIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -275,6 +259,7 @@ const NATS_STREAM_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsSubjectIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),
@@ -310,6 +295,10 @@ impl IngestorDeclaration for NatsSubjectIngestor {
 }
 
 impl IngestorEntityBody for NatsSubjectIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }
@@ -443,6 +432,7 @@ const NATS_STREAM_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsStreamIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),
@@ -464,8 +454,8 @@ impl IngestorDeclaration for NatsStreamIngestor {
             DeclaredDelivery::ACK_SEQUENTIAL,
             DeclaredDelivery::ACK_PARALLEL,
         ],
-        // The stream keeps every message the consumer has not delivered, so a suspended source
-        // loses nothing. A source that buffers or drops while quiesced keeps pulling and
+        // The stream keeps every message the consumer has not delivered, so a suspended ingestor
+        // loses nothing. An ingestor that buffers or drops while quiesced keeps pulling and
         // acknowledges each delivery once the host buffered or dropped it.
         quiesce: &[
             DeclaredQuiesce::SUSPEND,
@@ -510,7 +500,7 @@ impl IngestorEntityBody for NatsStreamIngestor {
     }
 }
 
-/// How a NATS STREAM source settles each delivery with its consumer.
+/// How a NATS STREAM ingestor settles each delivery with its consumer.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -598,11 +588,11 @@ impl crate::IngestorEntityChange for NatsStreamIngestorChange {
 
 connector_ingestors! {
     connector Nats = "NATS";
-    /// What a NATS source reads.
+    /// What a NATS ingestor reads.
     pub enum NatsIngestor;
     /// The alterations of the ingestors that read a NATS entity.
     pub enum NatsSubjectIngestorAlteration;
-    /// The entities a NATS source reads.
+    /// The entities a NATS ingestor reads.
     pub enum NatsIngestorEntity {
         Subject(NatsSubjectIngestor => NatsSubjectIngestorChange) = "SUBJECT", "NATS";
         Stream(NatsStreamIngestor => NatsStreamIngestorChange) = "STREAM", "NATS JetStream";
@@ -812,11 +802,7 @@ super::external_name::external_names! {
 }
 
 fn nats_publication_subject(text: &str) -> Result<(), ExternalNameError> {
-    nats_subject_rule(text)?;
-    if let Some(ch) = text.chars().find(|ch| matches!(ch, '*' | '>')) {
-        return Err(ExternalNameError::InvalidChar { ch });
-    }
-    Ok(())
+    subject::SubscriptionPattern::parse(text)?.require_literal()
 }
 
 #[cfg(test)]

@@ -746,14 +746,14 @@ table PartitionUnit {
 
 /// One instance of a node that runs several instances.
 table InstanceUnit {
-  instance: uint;
+  instance: ulong;
 }
 
 /// The placement unit of a scheduled node that an owner places and moves.
 union PlacementUnit {
   SingleUnit,
   PartitionUnit,
-  InstanceUnit
+  InstanceUnit = 4
 }
 
 table OwnershipMoveImpact {
@@ -1504,6 +1504,10 @@ table SubscribeRequest {
   statement: string (required);
   /// Required. A value the server does not support is rejected rather than replaced.
   subscription_type: SubscriptionType = null;
+  /// Present when the request restores a subscription on a new session: the schema the generation
+  /// it replaces announced. The server opens it only while the relay announces exactly this schema,
+  /// and refuses it as RelayChanged otherwise. Absent on a first subscribe.
+  expected_schema: RowSchema;
 }
 
 /// Closes a subscription of this session.
@@ -1897,9 +1901,36 @@ table SubscriptionOpened {
   schema: RowSchema (required);
 }
 
+/// Why a subscribe request opened nothing. The session holds nothing for the request after any
+/// of them.
+enum SubscriptionRefusal : ubyte {
+  /// The session holds a transaction. A subscription belongs to the session, not to a transaction.
+  InTransaction,
+  /// The request does not carry exactly one valid CREATE SUBSCRIPTION statement.
+  InvalidStatement,
+  /// The session already holds a subscription of that name.
+  NameInUse,
+  /// The committed state the serving node installed holds no such domain.
+  DomainNotFound,
+  /// The committed state the serving node installed holds no such relay in the domain.
+  RelayNotFound,
+  /// The relay's current definition announces another schema than the request's expected_schema.
+  RelayChanged,
+  /// The WHERE predicate does not compile against the relay's definition.
+  InvalidFilter,
+  /// The serving node could not open the subscription now. Opening it again may succeed.
+  Unavailable
+}
+
+/// The subscription was not opened.
+table SubscriptionRefused {
+  /// Required.
+  refusal: SubscriptionRefusal = null;
+}
+
 union SubscribeDisposition {
   SubscriptionOpened,
-  RequestFailed
+  SubscriptionRefused
 }
 
 table SubscribeOutcome {
@@ -2002,11 +2033,23 @@ table DomainClockAlreadyAttached {
   domain: string (required);
 }
 
+/// Why an attach request attached nothing, other than a domain the serving node does not have.
+enum DomainClockAttachRefusal : ubyte {
+  /// The session holds a transaction, which refuses every session-local request until it ends.
+  InTransaction
+}
+
+/// The session was not attached.
+table DomainClockAttachRefused {
+  /// Required.
+  refusal: DomainClockAttachRefusal = null;
+}
+
 union DomainClockAttachDisposition {
   DomainClockAttached,
   DomainClockAlreadyAttached,
   DomainNotFound,
-  RequestFailed
+  DomainClockAttachRefused
 }
 
 table DomainClockAttachOutcome {
@@ -2330,9 +2373,25 @@ enum NoticeLevel : ubyte {
   Error
 }
 
+/// What a notice reports, so a reader routes it without reading its text.
+enum NoticeKind : ubyte {
+  /// A node of the serving node's live set joined, left, or became a new incarnation.
+  Membership,
+  /// A Raft transition of the serving node, or a membership operation it proposes as leader.
+  Leadership,
+  /// A committed cluster-parameter revision the serving node installed.
+  ClusterParameters,
+  /// A failure the runtime of the serving node, or of another node, recovered from.
+  Runtime,
+  /// A control-plane failure the serving node recovered from.
+  ControlPlane
+}
+
 table ServerNotice {
   /// Required.
   level: NoticeLevel = null;
+  /// Required.
+  kind: NoticeKind = null;
   message: string (required);
 }
 

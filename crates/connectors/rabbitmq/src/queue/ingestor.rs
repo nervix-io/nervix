@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn failed_connections_keep_their_typed_cause_and_leave_the_source_to_resume() {
+    async fn failed_connections_keep_their_typed_cause_and_leave_the_ingestor_to_resume() {
         let (_files, dns) = literal_address_resolver().await;
         let refusing = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -719,10 +719,10 @@ mod tests {
                     prefetch: NonZeroU16::MIN,
                 },
             );
-            let mut source = RabbitMqQueueIngestor::open(&plan, 0)
+            let mut ingestor = RabbitMqQueueIngestor::open(&plan, 0)
                 .await
                 .expect("opening a RabbitMQ ingestor connects nothing");
-            let error = source
+            let error = ingestor
                 .resume()
                 .await
                 .expect_err("a broker that cannot be reached fails the resume");
@@ -740,7 +740,7 @@ mod tests {
                 .downcast_ref::<crate::RabbitMqConnectError>()
                 .expect("the connection failure stays beneath the ingestor failure");
             assert_eq!(cause.is_configuration(), configuration, "{addr}");
-            assert!(source.needs_resume(), "{addr}");
+            assert!(ingestor.needs_resume(), "{addr}");
         }
     }
 
@@ -754,18 +754,18 @@ mod tests {
             "orders".into(),
             RabbitMqConsumerMode::NoAck,
         );
-        let mut source = RabbitMqQueueIngestor::open(&plan, 0)
+        let mut ingestor = RabbitMqQueueIngestor::open(&plan, 0)
             .await
             .expect("opening connects nothing");
         let delivery = Delivery::mock(1, "".into(), "orders".into(), false, vec![1]);
         let position = RabbitMqQueueIngestorPosition {
             acker: delivery.acker,
         };
-        source
+        ingestor
             .acknowledge(std::slice::from_ref(&position))
             .await
             .expect("an automatic delivery has no acknowledgement to send");
-        source
+        ingestor
             .reject(std::slice::from_ref(&position))
             .await
             .expect("an automatic delivery has no rejection to send");

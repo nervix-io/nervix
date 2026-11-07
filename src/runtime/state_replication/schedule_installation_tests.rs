@@ -87,7 +87,7 @@ impl InstallationFixture {
             destination: named("node-2"),
             destination_incarnation: ClusterNodeIncarnation::new(42),
             domain: self.domain.clone(),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             entity: self.node.clone(),
             base_schedule_fingerprint: self.fingerprint,
             target_schedule_fingerprint: self.fingerprint,

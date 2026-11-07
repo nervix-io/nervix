@@ -125,7 +125,8 @@ Feature: MQTT emission
         'addr' = '{{mqtt_stallable_addr}}',
         'client_id' = 'nervix-mqtt-boundary-{{test_id}}'
       };
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+        ATTACHED
         TO mqtt_sink TOPIC 'mqtt_boundary_out_{{test_id}}'
           <qos> MODE <mode>
           ENCODE USING notification_codec
@@ -209,7 +210,8 @@ Feature: MQTT emission
         'addr' = '{{mqtt_filtered_addr}}',
         'client_id' = 'nervix-pubcomp-{{test_id}}'
       };
-      CREATE ATTACHED MQTT TOPIC EMITTER pubcomp_out FROM notifications
+      CREATE MQTT TOPIC EMITTER pubcomp_out FROM notifications
+        ATTACHED
         TO mqtt_sink TOPIC 'pubcomp_out_{{test_id}}'
           QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 1s
             RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -429,7 +431,7 @@ Feature: MQTT emission
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge mqtt-held-{{test_id}}.example.com;
       CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_codec
         TIMESTAMP NOW

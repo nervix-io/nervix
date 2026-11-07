@@ -127,7 +127,7 @@ pub enum BufferOverflow {
     /// A response that exceeds the bound fails the poll that read it: the ingestor reports the
     /// failure as its transient error, and the next poll reads again.
     FailPoll,
-    /// An incoming message or frame above the bound fails the source read and ends its
+    /// An incoming message or frame above the bound fails the ingestor read and ends its
     /// connection. The host reconnects on its declared retry policy.
     FailRead,
 }

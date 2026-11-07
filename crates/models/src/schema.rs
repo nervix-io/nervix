@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter};
@@ -369,6 +370,7 @@ impl WireSchemaStrictness {
     RkyvDeserialize,
     AsRefStr,
     EnumIter,
+    strum::Display,
 )]
 #[strum(serialize_all = "lowercase")]
 pub enum JsonType {
@@ -392,45 +394,29 @@ pub enum JsonType {
     RkyvDeserialize,
     AsRefStr,
     EnumIter,
+    strum::Display,
 )]
 #[strum(serialize_all = "lowercase")]
 pub enum CborType {
-    String,
-    Number,
     Integer,
-    Object,
-    Array,
+    Float,
     Boolean,
-    Null,
-    U8,
-    I8,
-    U16,
-    I16,
-    U32,
-    I32,
-    U64,
-    I64,
-    Datetime,
-    F32,
-    F64,
+    Text,
     Bytes,
+    Array,
 }
 
+/// A type of an AVRO wire schema field: one of Avro's primitive types, or an array whose `items`
+/// schema is another of these types, arrays included.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    AsRefStr,
-    EnumIter,
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-#[strum(serialize_all = "lowercase")]
+#[rkyv(serialize_bounds(
+    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+    __S::Error: rkyv::rancor::Source,
+))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
+#[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
 pub enum AvroType {
     Boolean,
     Int,
@@ -439,7 +425,67 @@ pub enum AvroType {
     Double,
     Bytes,
     String,
-    Array,
+    /// An Avro `array` whose items are of the boxed type.
+    Array(#[rkyv(omit_bounds)] Box<AvroType>),
+}
+
+impl AvroType {
+    /// The item choices of a structured wire schema editor. An array is built around one of these
+    /// by wrapping it, one level at a time, so every level keeps its declared item type.
+    pub fn scalar_variants() -> &'static [Self] {
+        &[
+            Self::Boolean,
+            Self::Int,
+            Self::Long,
+            Self::Float,
+            Self::Double,
+            Self::String,
+            Self::Bytes,
+        ]
+    }
+
+    /// An array whose items are `item`.
+    pub fn array_of(item: Self) -> Self {
+        Self::Array(Box::new(item))
+    }
+
+    /// The type beneath every array level: the type itself when it is no array.
+    pub fn innermost(&self) -> &Self {
+        let mut ty = self;
+        while let Self::Array(item) = ty {
+            ty = item;
+        }
+        ty
+    }
+
+    /// How many arrays nest around [`AvroType::innermost`].
+    pub fn array_depth(&self) -> usize {
+        let mut depth = 0_usize;
+        let mut ty = self;
+        while let Self::Array(item) = ty {
+            depth = depth
+                .checked_add(1)
+                .assured("one finite value nests far fewer than usize::MAX boxed arrays");
+            ty = item;
+        }
+        depth
+    }
+}
+
+/// The type as an Avro schema names it: a primitive type's name, or `array<item>`.
+impl std::fmt::Display for AvroType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Boolean => formatter.write_str("boolean"),
+            Self::Int => formatter.write_str("int"),
+            Self::Long => formatter.write_str("long"),
+            Self::Float => formatter.write_str("float"),
+            Self::Double => formatter.write_str("double"),
+            Self::Bytes => formatter.write_str("bytes"),
+            Self::String => formatter.write_str("string"),
+            Self::Array(item) => write!(formatter, "array<{item}>"),
+        }
+    }
 }
 
 #[derive(
@@ -505,6 +551,28 @@ impl ParseAsType {
             Self::Array { element, .. } | Self::Vec { element } => element.contains_bytes(),
             _ => false,
         }
+    }
+
+    /// The scalar type beneath every `ARRAY` and `VEC` level: the type itself when it is a scalar.
+    pub fn innermost_element(&self) -> &Self {
+        let mut ty = self;
+        while let Self::Array { element, .. } | Self::Vec { element } = ty {
+            ty = element;
+        }
+        ty
+    }
+
+    /// How many `ARRAY` and `VEC` levels nest around [`ParseAsType::innermost_element`].
+    pub fn list_depth(&self) -> usize {
+        let mut depth = 0_usize;
+        let mut ty = self;
+        while let Self::Array { element, .. } | Self::Vec { element } = ty {
+            depth = depth
+                .checked_add(1)
+                .assured("one finite value nests far fewer than usize::MAX boxed lists");
+            ty = element;
+        }
+        depth
     }
 }
 

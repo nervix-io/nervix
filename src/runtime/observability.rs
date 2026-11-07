@@ -81,14 +81,14 @@ pub(crate) struct IngestorDescribe {
     pub(crate) ready: bool,
     pub(crate) quiesce_state: Option<String>,
     pub(crate) quiesce_counters: IngestorQuiesceCounters,
-    /// Pending acknowledgements and rejections this node's source hosts discarded after a
+    /// Pending acknowledgements and rejections this node's ingestor hosts discarded after a
     /// reconnect, because the broker redelivers them.
     pub(crate) transport_redeliveries_total: u64,
     /// Payloads this node's intake of the ingestor consumed because its codec refused them.
     pub(crate) decode_rejections_total: u64,
     /// The latest of those payloads' decode rejections on this node.
     pub(crate) last_decode_rejection: Option<DecodeRejection>,
-    /// Payloads this node's source hosts of the ingestor dropped because they exceed their
+    /// Payloads this node's ingestor hosts of the ingestor dropped because they exceed their
     /// client's message size bound.
     pub(crate) oversized_payloads_total: u64,
     pub(crate) memory_backpressure_paused: bool,
@@ -263,6 +263,19 @@ impl Runtime {
         kind: ModelKind,
         identifier: impl Into<ModelName>,
     ) -> BranchMetricsMark {
+        self.unit_branch_metrics_mark(
+            domain,
+            &NodeUnitRef::new(NodeRef::new(kind, identifier), Unit::SINGLE),
+        )
+    }
+
+    pub(super) fn unit_branch_metrics_mark(
+        &self,
+        domain: &DomainName,
+        member: &NodeUnitRef,
+    ) -> BranchMetricsMark {
+        let kind = member.node.kind;
+        let identifier = member.node.identifier.clone();
         if kind == ModelKind::Relay {
             return BranchMetricsMark::default();
         }
@@ -270,8 +283,8 @@ impl Runtime {
             domain: domain.clone(),
             state: RuntimeState::BranchAggregated,
             kind,
-            identifier: identifier.into(),
-            unit: nervix_models::Unit::Single,
+            identifier,
+            unit: member.unit,
             branch_key: None,
         };
         BranchMetricsMark(
@@ -325,11 +338,42 @@ impl Runtime {
             .describe_global_target(domain, kind, identifier.clone());
         if kind.eq_ignore_ascii_case(ModelKind::Emitter.as_str()) {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
+            let mut destination = self.inner.metrics.describe_emitter_interactions(&key);
+            destination.append(&mut lines);
+            lines = destination;
             if let Some(endpoint) = self.inner.client_emitters.get(&key) {
                 lines.extend(endpoint.metric_lines());
             }
         }
         lines
+    }
+
+    pub(crate) fn describe_ingestor_unit_metrics(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        unit: Unit,
+    ) -> Vec<String> {
+        let identifier = ModelName::from(ingestor);
+        let placement = RuntimeStatePlacement {
+            domain: domain.clone(),
+            state: RuntimeState::BranchAggregated,
+            kind: ModelKind::Ingestor,
+            identifier: identifier.clone(),
+            unit,
+            branch_key: None,
+        };
+        let units = match self.refresh_branch_aggregated_metrics_for_unit(&placement) {
+            Ok(units) => units,
+            Err(error) => {
+                warn!(domain = domain.as_str(), ingestor = ingestor.as_str(), ?unit, error = %format_args!("{error:#}"),
+                    "failed to refresh ingestor unit metrics before describe");
+                BTreeSet::from([unit])
+            }
+        };
+        self.inner
+            .metrics
+            .describe_global_units(domain, "INGESTOR", &identifier, &units)
     }
 
     /// Read the current generation's checkpoints without taking ownership or advancing their
@@ -452,7 +496,7 @@ impl Runtime {
                 .fault_injection
                 .ingestor_is_failed(&IngestorName::from(&identifier))
             {
-                Some("ingestor fault injector failed source".to_string())
+                Some("ingestor fault injector failed intake".to_string())
             } else {
                 None
             }
@@ -516,12 +560,13 @@ impl Runtime {
     ) -> DataflowNodeTransientState {
         let identifier = identifier.into();
         if kind.eq_ignore_ascii_case("INGESTOR") {
-            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, identifier);
+            let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, identifier);
             let failures = self
                 .inner
                 .ingestor_statuses
-                .get(&key)
-                .and_then(|status| status.connection.failures());
+                .iter()
+                .filter(|entry| entry.key().entity == entity)
+                .find_map(|entry| entry.connection.failures());
             DataflowNodeTransientState::from_failures(failures, |retry| retry)
         } else if kind.eq_ignore_ascii_case("EMITTER") {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
@@ -552,50 +597,70 @@ impl Runtime {
         let Some(store) = &self.inner.state_store else {
             return Ok(());
         };
-        let mut placements = Vec::new();
-        for entry in self.inner.replicated_branch_aggregated_states.iter() {
-            let placement = entry.key();
-            if &placement.domain == domain
-                && placement.kind == kind
-                && placement.identifier == identifier
-            {
-                placements.push(placement.clone());
-            }
-        }
-        for placement in placements {
-            let Some(state) = self
-                .inner
-                .replicated_branch_aggregated_states
-                .get(&placement)
-            else {
-                continue;
-            };
-            if let Some(snapshot) = store.latest_snapshot(&placement)? {
-                state.restore_persisted_snapshot(&self.inner.metrics, snapshot)?;
-            }
-        }
-        let placement = RuntimeStatePlacement {
-            domain: domain.clone(),
-            state: RuntimeState::BranchAggregated,
+        for unit in store.stored_units(
+            domain,
+            RuntimeStateKind::BranchAggregated,
             kind,
-            identifier: identifier.clone(),
-            unit: nervix_models::Unit::Single,
-            branch_key: None,
-        };
-        if !self
-            .inner
-            .metrics
-            .has_global_target_measurements(domain, kind, identifier)
-            && let Some(snapshot) = store.latest_snapshot(&placement)?
-        {
-            let decoded = decode_branch_aggregated_snapshot(&snapshot.payload)?;
-            self.inner.metrics.apply_global_snapshot(decoded.metrics);
+            &identifier,
+        )? {
+            let placement = RuntimeStatePlacement {
+                domain: domain.clone(),
+                state: RuntimeState::BranchAggregated,
+                kind,
+                identifier: identifier.clone(),
+                unit,
+                branch_key: None,
+            };
+            self.refresh_branch_aggregated_metrics_for_unit(&placement)?;
         }
         Ok(())
     }
 
+    fn refresh_branch_aggregated_metrics_for_unit(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> error_stack::Result<BTreeSet<Unit>, RuntimePersistenceError> {
+        let state = self
+            .inner
+            .replicated_branch_aggregated_states
+            .get(placement)
+            .map(|state| state.value().clone());
+        let mut units = match &state {
+            Some(state) => state.metric_units(),
+            None => BTreeSet::from([placement.unit]),
+        };
+        let Some(store) = &self.inner.state_store else {
+            return Ok(units);
+        };
+        let Some(snapshot) = store.latest_snapshot(placement)? else {
+            return Ok(units);
+        };
+        if let Some(state) = state {
+            state.restore_persisted_snapshot(&self.inner.metrics, snapshot)?;
+            units.extend(state.metric_units());
+        } else {
+            let decoded = decode_branch_aggregated_snapshot(&snapshot.payload)?;
+            units.extend(decoded.metrics.units());
+            if !self.inner.metrics.has_global_unit_measurements(
+                &placement.domain,
+                placement.kind,
+                &placement.identifier,
+                placement.unit,
+            ) {
+                self.inner.metrics.apply_global_unit_snapshot(
+                    &placement.domain,
+                    placement.kind,
+                    &placement.identifier,
+                    placement.unit,
+                    decoded.metrics,
+                );
+            }
+        }
+        Ok(units)
+    }
+
     /// The latest decode rejection the ingestor `key` names published on this node.
-    fn last_decode_rejection(&self, key: &DomainNodeRef) -> Option<DecodeRejection> {
+    fn last_decode_rejection(&self, key: &DomainNodeUnitRef) -> Option<DecodeRejection> {
         let status = self.inner.ingestor_statuses.get(key)?;
         let rejection = status.last_decode_rejection()?;
         Some(DecodeRejection::clone(&rejection))
@@ -605,10 +670,21 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
     ) -> error_stack::Result<IngestorDescribe, RuntimeObservationError> {
-        let transient = self.dataflow_node_transient_state(domain, "INGESTOR", ingestor);
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor),
+            unit,
+        );
+        let transient = DataflowNodeTransientState::from_failures(
+            self.inner
+                .ingestor_statuses
+                .get(&key)
+                .and_then(|status| status.connection.failures()),
+            |retry| retry,
+        );
         let memory_backpressure_paused = self.ingestors_paused_for_memory_pressure();
-        let quiesce_control = self.ingestor_quiesce_control(domain, ingestor);
+        let quiesce_control = self.ingestor_quiesce_control(domain, ingestor, unit);
         let quiesce_state = match quiesce_control.as_ref() {
             Some(control) => control.cause().map(|cause| cause.as_str().to_string()),
             None => None,
@@ -624,6 +700,7 @@ impl Runtime {
             .ingestor_transport_redeliveries(
                 domain,
                 ingestor,
+                unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             )
             .get();
@@ -633,6 +710,7 @@ impl Runtime {
             .ingestor_decode_rejections(
                 domain,
                 ingestor,
+                unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             )
             .get();
@@ -642,10 +720,10 @@ impl Runtime {
             .ingestor_oversized_payloads(
                 domain,
                 ingestor,
+                unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             )
             .get();
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         let last_decode_rejection = self.last_decode_rejection(&key);
         if !self.inner.executions.contains_key(domain) || !self.inner.ingestors.contains_key(&key) {
             // An ingestor that did not start describes its own start report. One that recorded no
@@ -679,7 +757,7 @@ impl Runtime {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Ok(IngestorDescribe {
                 running: true,
-                ready: self.ingestor_ready(domain, ingestor),
+                ready: self.ingestor_ready(domain, ingestor, unit),
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
                 transport_redeliveries_total,
@@ -695,7 +773,7 @@ impl Runtime {
             });
         };
         let kafka_domain_offsets = if let Some(plan) =
-            execution.revision.entrypoints.ingestor(ingestor)
+            execution.revision.entrypoints.ingestor(ingestor, unit)
             && let IngestorInputPlan::Transport(TransportInputPlan {
                 source:
                     IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(
@@ -724,7 +802,7 @@ impl Runtime {
         };
         Ok(IngestorDescribe {
             running: true,
-            ready: self.ingestor_ready(domain, ingestor),
+            ready: self.ingestor_ready(domain, ingestor, unit),
             quiesce_state,
             quiesce_counters,
             transport_redeliveries_total,
@@ -896,7 +974,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         {
@@ -912,6 +990,7 @@ mod tests {
             let metrics = RuntimeMetrics::default();
             metrics
                 .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                    unit: Unit::SINGLE,
                     domain: &domain,
                     kind: ModelKind::Ingestor,
                     node: &ModelName::from(&ingestor),
@@ -922,11 +1001,11 @@ mod tests {
                 })
                 .observe(19, 1900, None);
             let snapshot = BranchAggregatedRuntimeStateSnapshot {
-                metrics: metrics.snapshot_global_target(
+                metrics: metrics.snapshot_global_unit(
                     &domain,
                     ModelKind::Ingestor,
                     &ModelName::from(&ingestor),
-                    &ClusterNodeName::parse("node-3").expect("valid name"),
+                    Unit::SINGLE,
                 ),
             };
             let payload = encode_branch_aggregated_snapshot(&snapshot)
@@ -967,7 +1046,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let db = Database::builder(dir.path())
@@ -982,6 +1061,7 @@ mod tests {
         let persisted_metrics = RuntimeMetrics::default();
         persisted_metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                unit: Unit::SINGLE,
                 domain: &domain,
                 kind: ModelKind::Ingestor,
                 node: &ModelName::from(&ingestor),
@@ -992,11 +1072,11 @@ mod tests {
             })
             .observe(19, 1900, None);
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
-            metrics: persisted_metrics.snapshot_global_target(
+            metrics: persisted_metrics.snapshot_global_unit(
                 &domain,
                 ModelKind::Ingestor,
                 &ModelName::from(&ingestor),
-                &ClusterNodeName::parse("node-3").expect("valid name"),
+                Unit::SINGLE,
             ),
         };
         let payload = encode_branch_aggregated_snapshot(&snapshot)
@@ -1011,7 +1091,6 @@ mod tests {
             ReplicatedBranchAggregatedState::new(
                 placement.clone(),
                 Some(ClusterNodeName::parse("node-3").expect("valid name")),
-                ClusterNodeName::parse("node-3").expect("valid name"),
                 &RuntimeMetrics::default(),
                 store
                     .latest_snapshot(&placement)
@@ -1051,7 +1130,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let db = Database::builder(dir.path())
@@ -1066,6 +1145,7 @@ mod tests {
         let persisted_metrics = RuntimeMetrics::default();
         persisted_metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                unit: Unit::SINGLE,
                 domain: &domain,
                 kind: ModelKind::Ingestor,
                 node: &ModelName::from(&ingestor),
@@ -1076,11 +1156,11 @@ mod tests {
             })
             .observe(19, 1900, None);
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
-            metrics: persisted_metrics.snapshot_global_target(
+            metrics: persisted_metrics.snapshot_global_unit(
                 &domain,
                 ModelKind::Ingestor,
                 &ModelName::from(&ingestor),
-                &ClusterNodeName::parse("node-3").expect("valid name"),
+                Unit::SINGLE,
             ),
         };
         let payload = encode_branch_aggregated_snapshot(&snapshot)
@@ -1095,7 +1175,6 @@ mod tests {
             ReplicatedBranchAggregatedState::new(
                 placement.clone(),
                 Some(ClusterNodeName::parse("node-3").expect("valid name")),
-                ClusterNodeName::parse("node-3").expect("valid name"),
                 &RuntimeMetrics::default(),
                 store
                     .latest_snapshot(&placement)
@@ -1111,6 +1190,7 @@ mod tests {
             .inner
             .metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                unit: Unit::SINGLE,
                 domain: &domain,
                 kind: ModelKind::Ingestor,
                 node: &ModelName::from(&ingestor),
@@ -1286,7 +1366,7 @@ mod tests {
         );
 
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor)
+            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .expect("describe should succeed");
 
         assert!(!describe.running);

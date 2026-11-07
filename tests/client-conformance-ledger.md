@@ -98,6 +98,25 @@ runtime and held to one expected report:
   the final transport as well as the transport's scalar encoding.
 - A closure: deleting the subscription completes.
 
+The C ABI in process, C and C++ also run `A <runtime> C binding connects to an HTTPS seed and
+distinguishes session-local repeats from durable recovery` against one- and three-node HTTPS
+clusters with the fixture's private CA supplied through `nx_connect_options`. Those examples
+start at an unavailable HTTPS address and reach a live HTTPS seed. The probes set connect,
+request and retry deadlines, check that an empty subscription event stream waits to its call
+deadline rather than closing, and repeat the same prepared ATTACH, CREATE SUBSCRIPTION and DELETE
+SUBSCRIPTION executions. ATTACH and CREATE are refused on repeat; DELETE confirms the already
+absent subscription. None uses its reference for durable outcome recovery. The binding's owner
+tests also check both restoration event kinds' borrowed messages and nanosecond waits, wrong-kind
+and missing-output failures, and copied options buffers.
+
+`A <runtime> C binding exposes a refused subscription restoration's message and retry wait`
+opens a subscription through a forwarded gRPC endpoint on one and three nodes, cuts that
+connection, arms every node to refuse the next subscription opening as unavailable while it is
+down, and restores the connection. The C ABI in process, C and C++ each report the interruption,
+then read the refusal message and positive retry wait from the `NX_EVENT_RESTORATION_FAILED` event.
+A removed relay ends the subscription instead (S-7), so only a refusal for now reports a failure. The owner tests cover the matching clock-event accessors
+because no domain-removal request is available to make a live clock restoration fail on demand.
+
 `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its
 generations apart` runs every binding host, the C ABI in process, C, C++, Python, Java and Ruby,
 against a one- and a three-node cluster. The scenario starts a paced domain at a logical origin with
@@ -216,18 +235,22 @@ and that decoding them prints exactly the report; `just update-client-wire-corpu
 for review. The corpus covers what the live relay does not: fixed and variable lists, nested lists,
 a NaN with a payload, infinity, a nullable and a sensitive branch key field, command outcomes with
 diagnostics, a leader redirect with and without a known leader, an unknown outcome, a rejection, a
-subscription ending, and client requests with a present-zero and an absent optional position, a
-preview fingerprint, and the largest request identity. It also covers the domain clock attachment:
-the attach and detach requests, a paced clock attached at the largest generation with the extreme
-signed timestamps and a time rate read by its bits, clock frames in the stopped, uninstalled and
-unpaced states, every refusal of an attach, a detach of a clock the session does not follow, and
-the end of an attachment with its typed reason.
+subscription refused with its typed refusal and diagnostic, a subscription ending, and client
+requests with a present-zero and an absent optional position, a preview fingerprint, a subscribe
+that restores a subscription under the branched schema it expects, and the largest request identity.
+It also covers the domain clock attachment: the attach and detach requests, a paced clock attached
+at the largest generation with the extreme signed timestamps and a time rate read by its bits, clock
+frames in the stopped, uninstalled and unpaced states, every refusal of an attach with its typed
+refusal, a detach of a clock the session does not follow, and the end of an attachment with its
+typed reason.
 A tick frame carries its generation, id, boundary, authority UTC observation, and
 serving node logical reading through the Rust, Go, and TypeScript readers. Producers are covered by
 the open, submit, and close requests with a batch carried as opaque bytes, an opened producer with
 its description under a parallel window, a refused open, a closed producer, a submission of
 each of the four outcome classes with a typed cause, and the admission-change and end frames of a
-producer.
+producer. Server notices are covered by one frame of each kind (membership, leadership, cluster
+parameters, runtime and control plane) across the three levels, whose reports print the level and
+the kind beside the text.
 
 `A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote` holds the Go
 reader and the TypeScript reader on Node.js and Bun to the same report. Together with the live
@@ -283,9 +306,14 @@ for the outstanding-outcome deadline or a producer close that cannot drain that 
   binding host inherits the Rust client's recovery.
 - An attach refusal reaches a binding host as a failed disposition and the server's message, not
   as a typed refusal; `nx_session_domain_clock` tells whether the session follows the clock after
-  it.
+  it. A refused restoration of a subscription or a clock reaches it with the typed cause
+  `nx_event_restoration_cause` or `nx_clock_event_restoration_cause` reads.
 - The Go and TypeScript clients read the attach reply and the clock frames only from the corpus;
   no live probe of theirs follows a domain clock.
+- The Go and TypeScript clients decode server notices, with their level and kind, only from the
+  corpus: a live probe skips the notices its session receives, which arrive whenever its node sees
+  a cluster event rather than at a point the report could fix. Binding hosts receive no notices,
+  because the shared binding does not expose them.
 
 
 Historical run results and audit findings are retained on [Client Wire 14](https://app.clickup.com/t/86bc1ahyr).

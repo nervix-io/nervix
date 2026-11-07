@@ -103,7 +103,7 @@ Engaging any entity gate also requests a force flush of the full current executi
 on both sides of the change. [Data Plane](./data-plane.md) explains the runtime work these gates
 protect; [Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) lists the model
 changes that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its
-external-source behavior under a hold; it is distinct from the step's quiesce level.
+external system's behavior under a hold; it is distinct from the step's quiesce level.
 
 A [client ingestor](./ingestors.md#client-ingestors) under a hold suspends admission: its producers
 are told admission is suspended, batches that were queued but not admitted are refused as
@@ -136,6 +136,12 @@ writes belongs to its destination, so a changed envelope is a destination change
 scope. A complete Plexus `SET TO` can change its payload selection, envelope and explicitly written
 construction as part of the same atomic alteration; its head and replacement must retain the stored
 connector/entity kind.
+
+Adding, changing or removing an emitter's batching limits contributes `EMITTER_BATCH_POLICY` to
+the same impact report and requires entity pause. The old task drains its partial buffers and
+unanswered prepared output under the policy that admitted them before the replacement starts.
+A failed pre-commit drain keeps the previous policy and its owning task. A flush-only alteration
+continues to change the running task's cadence dynamically.
 
 A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
 emitter work. Force flush releases rows into that same wait; a read or network delivery does not
@@ -293,7 +299,7 @@ receiver-owned identity, adds no pause attempt and extends no lease. Preparation
 participant.
 
 The step changes from `UNATTEMPTED` to `APPLYING` when its authoritative effect transition is
-recorded. It becomes `APPLIED` only after required activation, source readiness, handoff, and
+recorded. It becomes `APPLIED` only after required activation, ingestor readiness, handoff, and
 gate release complete. A failure records a diagnostic and the transaction's completed prefix;
 it does not erase a pause already observed. A committed model effect can remain visible despite a
 later activation failure. The special case is a model step that took no pause and whose HTTPS
@@ -440,3 +446,17 @@ without carrying sensitive payload values. Per-record details and hot-path buffe
 this inspection contract. Ingestor quiesce buffer metrics and current live observations remain in
 [Metrics And Observability](./metrics-and-observability.md); retained impact is the source for
 what this transaction required and actually engaged.
+
+## Unit-Qualified Intake Scope
+
+Persisted gate plans retain `EntityGateTargets`. A model mutation selects complete entities and
+expands every current instance, including retained work during publication. A schedule handoff
+selects the exact moved units and expands their exact placement component. Ingestor instance `p`
+and relay partition `p` can therefore share one gate without selecting a sibling instance.
+Engagement, drain counters, ACK roots, capture authorization and release all preserve that unit
+selection. Logical entity names remain the inspection projection; they do not replace the stored
+selection or widen an ownership handoff. A change to an ingestor's declared unit set selects the
+union of preceding and target units. Its state transition consumes every preceding unit's cut,
+so an unchanged physical owner participates in that capture and receives a prepared target cut.
+Source confirmation checks the units the source actually owned; a newly introduced target
+instance is never treated as an existing source instance.

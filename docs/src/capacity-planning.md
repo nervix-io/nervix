@@ -75,9 +75,9 @@ Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that
 the work that submitted it reports the refusal as its own failure. The one exception is work the
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
-paced ingestor handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
-acknowledgement, and an Iceberg commit's read of the staged rows its emitter already accepted.
-Holding one of those source loops pushes back into its transport, so a node whose
+paced ingestor handed over, and of a payload a NATS SUBJECT, ZeroMQ or Syslog ingestor read without
+an acknowledgement, and an Iceberg commit's read of the staged rows its emitter already accepted.
+Holding one of those ingestor loops pushes back into its transport, so a node whose
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
@@ -101,7 +101,7 @@ beside the 56 MiB its grant reserves for its body and decoding until the body is
 keeps only its body and decoded columns. When rows arrive faster than the owner reports
 them, their watches fill the budget and the owner holds further deliveries back until reported
 rows return their share. Sustained remote delivery with acknowledgements is then bounded by how
-fast acknowledgements return to the sending node, not by the budget's size, and a source that sends
+fast acknowledgements return to the sending node, not by the budget's size, and an ingestor that sends
 there waits instead of failing. A grant reserves the largest decoded batch and the scratch room
 whatever the body's size, so the budget grants about three deliveries at once; a sender whose grant
 is refused for that room, and a sender whose own budget has no room to store the acknowledgements
@@ -117,7 +117,7 @@ count in the startup memory total.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
 Consensus storage operations that need that working set queue at the store rather than in the
-budget, so the rest of it stays with command and replication traffic and with source control calls
+budget, so the rest of it stays with command and replication traffic and with ingestor control calls
 while they wait; see
 [Storage Working Sets](./consensus-storage-and-replication.md#storage-working-sets).
 The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
@@ -206,7 +206,7 @@ memory limit, its budgets, the size of its volumes and the restore-staging quota
   Branches that end and return open new channels, so size branch turnover between two nodes
   against that budget: beyond it the least recently used watermarks are forgotten first rather
   than new channels refused. A branch whose channel was forgotten while it was still in use fails
-  its next delivery as indeterminate and opens a new channel; a source that waits for
+  its next delivery as indeterminate and opens a new channel; an ingestor that waits for
   acknowledgements redelivers the batch, and one in `NO ACK` mode loses it as it loses any failed
   delivery. Keep the branches that are active at once between two nodes below the budget, and read
   `nervix_interconnect_relay_channel_watermarks_evicted_total` to see when turnover exceeds it. Management subquotas independently reserve streams for discovery, liveness,
@@ -228,7 +228,7 @@ memory limit, its budgets, the size of its volumes and the restore-staging quota
   series to size against.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained
   entries, open windows, and buffered rows.
-- Source `INSTANCES` trades source parallelism against concurrent admission pressure. It does not
+- Ingestor `INSTANCES` trades ingestor parallelism against concurrent admission pressure. It does not
   reduce the cost of any branch instance that becomes live.
 
 See the existing [FLUSH tuning guidance](plexus-overview.md) instead of treating example values as

@@ -30,7 +30,7 @@ Feature: Remote acknowledgements across a producer restart
       CREATE KAFKA CLIENT restart_ack_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR restart_ack_before_source
+      CREATE KAFKA TOPIC INGESTOR restart_ack_before_ingestor
         FROM restart_ack_kafka TOPIC 'restart_ack_before_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'restart_ack_before_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
@@ -39,7 +39,7 @@ Feature: Remote acknowledgements across a producer restart
           BRANCHED BY restart_ack_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR restart_ack_after_source
+      CREATE KAFKA TOPIC INGESTOR restart_ack_after_ingestor
         FROM restart_ack_kafka TOPIC 'restart_ack_after_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'restart_ack_after_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
@@ -48,14 +48,16 @@ Feature: Remote acknowledgements across a producer restart
           BRANCHED BY restart_ack_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER restart_ack_before_sink
+      CREATE KAFKA TOPIC EMITTER restart_ack_before_emitter
         FROM restart_ack_before_records
+        ATTACHED
         TO restart_ack_kafka TOPIC 'restart_ack_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING restart_ack_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER restart_ack_after_sink
+      CREATE KAFKA TOPIC EMITTER restart_ack_after_emitter
         FROM restart_ack_after_records
+        ATTACHED
         TO restart_ack_kafka TOPIC 'restart_ack_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING restart_ack_codec
@@ -64,21 +66,21 @@ Feature: Remote acknowledgements across a producer restart
       """
     And these Plexus commands are executed on the leader node
       """
-      RELOCATE INGESTOR restart_ack_before_source ONTO NODE node-2 IGNORE PREFERENCES;
-      RELOCATE INGESTOR restart_ack_after_source ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR restart_ack_before_ingestor ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE INGESTOR restart_ack_after_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY restart_ack_before_records ONTO NODE node-3 IGNORE PREFERENCES;
       RELOCATE RELAY restart_ack_after_records ONTO NODE node-3 IGNORE PREFERENCES;
-      RELOCATE EMITTER restart_ack_before_sink ONTO NODE node-3 IGNORE PREFERENCES;
-      RELOCATE EMITTER restart_ack_after_sink ONTO NODE node-3 IGNORE PREFERENCES;
+      RELOCATE EMITTER restart_ack_before_emitter ONTO NODE node-3 IGNORE PREFERENCES;
+      RELOCATE EMITTER restart_ack_after_emitter ONTO NODE node-3 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=restart_ack_before_source owner=node-2
+      - domain={{domain}} kind=ingestor name=restart_ack_before_ingestor unit=instance:0 owner=node-2
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=restart_ack_after_source owner=node-1
+      - domain={{domain}} kind=ingestor name=restart_ack_after_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -90,13 +92,13 @@ Feature: Remote acknowledgements across a producer restart
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=emitter name=restart_ack_before_sink owner=node-3
+      - domain={{domain}} kind=emitter name=restart_ack_before_emitter owner=node-3
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=emitter name=restart_ack_after_sink owner=node-3
+      - domain={{domain}} kind=emitter name=restart_ack_after_emitter owner=node-3
       """
-    And the last cluster status owner for scheduled "ingestor" "restart_ack_before_source" is saved as placeholder "before_source_owner"
+    And the last cluster status owner for scheduled "ingestor" "restart_ack_before_ingestor" is saved as placeholder "before_source_owner"
     Given admitted remote relay dispatch for domain "{{domain}}" is paused
     When Kafka message is published to topic "restart_ack_before_in_{{test_id}}"
       """
@@ -104,7 +106,7 @@ Feature: Remote acknowledgements across a producer restart
       """
     Then the admitted remote relay dispatch pause for domain "{{domain}}" is reached
     When node "node-2" is stopped
-    Then within "60s" node "node-1" eventually reports scheduled "ingestor" "restart_ack_before_source" owner different from placeholder "before_source_owner"
+    Then within "60s" node "node-1" eventually reports scheduled "ingestor" "restart_ack_before_ingestor" owner different from placeholder "before_source_owner"
     When node "node-2" is started
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-3" eventually reports interconnect to "node-2" as "connected"
@@ -113,15 +115,15 @@ Feature: Remote acknowledgements across a producer restart
       """
     When these Plexus commands are executed on the leader node
       """
-      RELOCATE INGESTOR restart_ack_after_source ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE INGESTOR restart_ack_after_ingestor ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=restart_ack_after_source owner=node-2
+      - domain={{domain}} kind=ingestor name=restart_ack_after_ingestor unit=instance:0 owner=node-2
       """
     Given remote relay admission for branch '{"branch_name":"b"}' in domain "{{domain}}" is paused
-    When emitter "restart_ack_after_sink" enters stall mode
+    When emitter "restart_ack_after_emitter" enters stall mode
     And Kafka message is published to topic "restart_ack_after_in_{{test_id}}"
       """
       {"event_id":"after-restart","branch_name":"b","sequence":2}
@@ -134,7 +136,7 @@ Feature: Remote acknowledgements across a producer restart
       """
     When the remote relay admission pause for branch '{"branch_name":"b"}' in domain "{{domain}}" is released
     Then within "10s" Kafka consumer group "restart_ack_after_group_{{test_id}}" next offset for topic "restart_ack_after_in_{{test_id}}" partition 0 is "below 1"
-    When emitter "restart_ack_after_sink" leaves fault mode
+    When emitter "restart_ack_after_emitter" leaves fault mode
     Then within "30s" the observed broker receives payloads
       """
       "event_id":"after-restart","branch_name":"b","sequence":2

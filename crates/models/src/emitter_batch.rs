@@ -193,7 +193,7 @@ impl ByteSizeUnit {
 }
 
 /// A size limit in bytes: the exact encoded size a batch payload may reach, or the most of a
-/// response body a polled source reads. It is a positive whole number of bytes, kept with the unit
+/// response body a polled ingestor reads. It is a positive whole number of bytes, kept with the unit
 /// it was written in.
 ///
 /// It is written as a whole number and a unit, such as `1MiB`, and rendered exactly as written, so

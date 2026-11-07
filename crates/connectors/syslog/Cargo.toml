@@ -1,5 +1,5 @@
 [package]
-description = "The Syslog source and sink transports and their shared client configuration for Nervix"
+description = "The Syslog ingestor and emitter transports and their shared client configuration for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-syslog"
@@ -29,6 +29,7 @@ error-stack = { workspace = true }
 memchr = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
+nervix-crypto = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }

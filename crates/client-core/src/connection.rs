@@ -1,8 +1,10 @@
 //! Reaching a server: TLS selection, credentials, and the servers a client has learned about.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** The connect options, the channel a server is reached over, the `authorization`
 //!   metadata every call carries, and the directory of servers a lost session reconnects to.
-//! - **Depends on.** tonic's transport, rustls, and the native DNS resolver.
+//! - **Depends on.** tonic's transport, the cryptography boundary and the native DNS resolver.
 //! - **Must not know.** What the calls on a channel carry.
 
 use std::{str::FromStr as _, time::Duration};
@@ -14,7 +16,6 @@ use indexmap::IndexSet;
 use meticulous::OptionExt as _;
 use nervix_dns::{DnsConfiguration, DnsResolver};
 use nervix_recovery::Discarded as _;
-use rustls::crypto::aws_lc_rs;
 use tonic::{
     Request,
     metadata::{AsciiMetadataValue, errors::InvalidMetadataValue},
@@ -94,6 +95,9 @@ pub enum ConnectDns {
 }
 
 impl ConnectOptions {
+    /// The per-list bound for configured seeds and learned endpoints in a client's directory.
+    pub const MAX_SEED_SERVERS: usize = 32;
+
     pub fn with_basic_auth(
         mut self,
         username: impl Into<String>,
@@ -154,10 +158,7 @@ impl GrpcConnector {
             .map_err(|error| Report::new(ClientError::InvalidServerUri(error)))?;
         endpoint = endpoint.connect_timeout(self.options.connect_timeout);
         if is_https {
-            aws_lc_rs::default_provider().install_default().discarded(
-                "a provider another client installed first is the one this client would have \
-                 installed",
-            );
+            nervix_crypto::tls::install_default_provider();
             let mut tls = ClientTlsConfig::new();
             if let Some(pem) = self.options.ca_certificate_pem.clone() {
                 tls = tls.ca_certificate(Certificate::from_pem(pem));
@@ -246,8 +247,6 @@ pub(crate) struct ServerDirectory {
 }
 
 impl ServerDirectory {
-    const MAX_DISCOVERED_ENDPOINTS: usize = 32;
-
     /// A directory whose only server is the one the first exchange runs on, when it is known.
     pub(crate) fn connected_to(server: Option<Url>) -> Self {
         let mut directory = Self::default();
@@ -271,7 +270,7 @@ impl ServerDirectory {
         if self.seeds.contains(server) || self.discovered.contains(server) {
             return;
         }
-        if self.discovered.len() == Self::MAX_DISCOVERED_ENDPOINTS {
+        if self.discovered.len() == ConnectOptions::MAX_SEED_SERVERS {
             self.discovered
                 .shift_remove_index(0)
                 .discarded("the oldest discovered endpoint gives way to a fresh one");

@@ -29,8 +29,9 @@ Feature: Altering junctions
       """
     Then the last command output contains
       """
-      CREATE DETACHED JUNCTION route_events
+      CREATE JUNCTION route_events
         FROM incoming_a, incoming_b COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        DETACHED
         FILTER WHERE input.seq > 0
         UNBRANCHED
         TO outgoing
@@ -65,7 +66,7 @@ Feature: Altering junctions
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-junction-filter.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -131,7 +132,7 @@ Feature: Altering junctions
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-junction-structural.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED

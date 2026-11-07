@@ -20,6 +20,7 @@ Comparative measurements and raw reports belong to [Client Wire 16](https://app.
 | Acknowledged subscriptions restore across reconnect | [12](https://app.clickup.com/t/86bc1ahwj) | `A reconnected native client restores acknowledged subscriptions` (`@client_wire_subscription_restore`, three nodes and concrete `acme`/`beta` branches) |
 | Unsolicited console events cannot consume a request waiter | [13](https://app.clickup.com/t/86bc1ahym); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `tests::untracked_domain_push_cannot_discard_a_pending_websocket_request` in the `nervix-web-console` binary |
 | A committed batch keeps its one outcome across leader movement | [Return a committed transaction batch's recorded outcome](https://app.clickup.com/t/86bckvkt6) | `A committed transaction batch keeps its one outcome when leadership moves while each attempt records it` (`@client_wire_transaction_batch_finalization_recovery`, three nodes); `transaction::tests::a_finished_transaction_answers_each_accepted_append_with_its_recorded_admission` in `nervix-consensus` |
+| A restoration the server refuses for good ends its subscription once, and one refused for now is retried with its typed cause | [40](https://app.clickup.com/t/86bc97654) | `A native client ends the restoration of a subscription whose relay was <change> while it was disconnected` (dropped and redefined, one and three nodes; the dropped examples carry `@client_wire_restoration_end`) and `A native client opens again a subscription whose restoration the server refused for now` (`@client_wire_subscription_restore`, one and three nodes); `The CLI reports the end of a subscription whose relay was dropped while it reconnected` in `cli_session.feature`; `tests::restoration::a_restoration_refused_because_its_relay_is_gone_ends_the_subscription_as_removed` and `tests::restoration::a_restoration_refused_because_its_relay_changed_ends_the_subscription_as_changed` in `nervix-client-core` |
 | A backup's redirects and reconnects share its one wait deadline | [55](https://app.clickup.com/t/86bcwyq99) | `A native backup waits through an outage longer than its retry budget` (`@client_wire_backup_outage`, one and three nodes); `tests::session::backup_reconnects_with_the_same_reference_within_its_wait_budget` and `tests::session::backup_redirected_to_an_unreachable_leader_recovers_within_its_wait_budget` in `nervix-client-core` |
 
 The schema and verified codec belong to [02](https://app.clickup.com/t/86bc1ahm4); persisted domain
@@ -62,36 +63,30 @@ Scenario teardown releases every armed command pause. Fault controls are compile
 | Crash/restart | One real `nervix-server` process; `SIGKILL`; same durable store and listening addresses |
 
 
-## Performance baseline
+## Performance evidence and current probes
 
-`just client-wire-baseline` builds the web console and a normal release server binary, launches
-that binary from the debug-only scenario harness, configures a fixed two-branch graph, warms the
-command path, and writes raw evidence beneath `target/client-wire-baseline/`:
+[Client Wire 01](https://app.clickup.com/t/86bc1ahkw) retains the original measurements,
+budgets and conclusions. [Client Wire 16](https://app.clickup.com/t/86bc1ahz3) retains the
+comparative report and raw evidence, including the former repository performance report.
+[Client Wire 18](https://app.clickup.com/t/86bc8cx3h) retains the completed command-preparation
+and paired HTTP/TLS study, raw samples, tested revisions, host identity, regression alarms and
+reproduction instructions.
+
+The broad baseline instrument used for those studies was retired after Client Wire 18 completed.
+Commands in those archived reports describe their recorded revisions; they are historical
+reproduction instructions, not commands for the current checkout. The measurements qualify only
+their recorded workload, build profile and host.
+
+The focused instruments remain runnable:
 
 ```console
-just client-wire-baseline
-just client-wire-baseline 100 5 1024 target/client-wire-baseline
+just client-wire-command-cost
+just client-wire-cost
+just client-wire-binding-cost
+just client-wire-binding-host-cost
+just client-wire-tls-cost
 ```
 
-The positional settings are command/subscription/snapshot samples, upload samples, payload bytes,
-and output directory. Their defaults are `100`, `5`, `1024`, and
-`target/client-wire-baseline`. The runner rejects zero samples, more than 10,000 samples, and a
-payload above 16 MiB.
-
-The fixed workload contains:
-
-* `DESCRIBE DOMAIN` over one native gRPC bidirectional session;
-* strict typed JSON HTTP input and native gRPC Row subscription delivery, alternating concrete
-  branch keys `acme` and `beta` and validating each row's `key=<json> payload=<json>` display text;
-* domain-selection graph snapshots over an authenticated console WebSocket;
-* deterministic one-file resource archives over the native gRPC client-streaming upload;
-* one MiB ingestor quiesce capacity and the current client/server/WebSocket queue capacities.
-
-`client-wire-baseline.json` records every raw observation plus p50/p90/p99/min/max/total
-latency, the exact frame or public request and response bytes, client and server user/system CPU
-ticks, per-workload process counter snapshots, client jemalloc and server-exported jemalloc phase
-snapshots, `/proc` resident and peak resident bytes, per-workload relay queue occupancy series,
-workload parameters, queue limits, git revision and worktree state, release/debug profile, complete
-`rustc -Vv`, kernel, architecture, CPU model/count, physical memory, and clock-tick rate. The raw
-final Prometheus scrape is retained as `metrics.prom` beside it. Raw frame and WebSocket access
-exist only in this benchmark harness.
+These measure command preparation, Arrow-to-Row encoding, C ABI access, Python host costs and
+paired plaintext/TLS sessions respectively. Protocol correctness remains covered independently by
+the current regressions above and `just test-client-conformance`.

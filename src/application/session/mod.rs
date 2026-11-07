@@ -65,22 +65,21 @@ use nervix_client_wire::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
     CloseEmitterRequest, CommandDisposition, CommandRequest, DetachDomainClockRequest,
-    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
-    DomainClockDetachOutcome, DomainList, DomainSelection, EncodedFrame, InspectTransactionRequest,
-    InspectionOutcome, MAX_IN_FLIGHT_REQUESTS, OpenEmitterRequest, OpenIngestorRequest,
-    ReadEmitterBatchRequest, Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId,
-    RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason,
-    SessionEnding, SessionLimits, SettleEmitterBatchRequest, SubscribeDisposition,
-    SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachRefusal,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList, DomainSelection,
+    EncodedFrame, InspectTransactionRequest, InspectionOutcome, MAX_IN_FLIGHT_REQUESTS,
+    OpenEmitterRequest, OpenIngestorRequest, ReadEmitterBatchRequest, Reply, ReplyBody,
+    ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
+    SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
+    SettleEmitterBatchRequest, SubscribeDisposition, SubscribeOutcome, SubscribeRequest,
+    SubscriptionRefusal, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
     UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,
 };
-use nervix_plexus::client_statement::{
-    ClientStatement, ParsedClientStatement, parse_client_statement_sources,
-};
+use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -104,7 +103,10 @@ use super::{
     command_result::CommandResult,
     model_mutation::command_error,
     session_service::{SessionServiceImpl, rejected_source_response},
-    subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
+    statement_grammar::with_statement_grammar,
+    subscription::{
+        OpenedSubscription, RefusedSubscription, SessionDelivery, SessionSubscriptions, SessionView,
+    },
     transaction::TransactionInspectionOutcome,
 };
 
@@ -1061,7 +1063,9 @@ async fn serve_ordered(
             }
             if subscriptions.transaction_active() {
                 let outcome = DomainClockAttachOutcome {
-                    disposition: DomainClockAttachDisposition::Failed,
+                    disposition: DomainClockAttachDisposition::Refused(
+                        DomainClockAttachRefusal::InTransaction,
+                    ),
                     message: SESSION_LOCAL_IN_TRANSACTION.to_string(),
                 };
                 shared
@@ -1137,25 +1141,25 @@ async fn serve_command(
         return None;
     };
     let outcome = command_outcome(execution_reference, response);
+    #[cfg(not(feature = "testing"))]
+    let body = ReplyBody::Command(Box::new(outcome));
     #[cfg(feature = "testing")]
-    let outcome = {
-        let mut outcome = outcome;
-        shared
-            .service
-            .inner
-            .runtime
-            .fault_injection()
-            .substitute_command_reply(&reply_script_request, &mut outcome);
-        outcome
-    };
-    let disposition = if tracing::enabled!(tracing::Level::DEBUG) {
+    let body = shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .script_command_reply(&reply_script_request, outcome);
+    // Only a testing script answers a command with a reply of another kind, which has no
+    // command disposition.
+    let disposition = if tracing::enabled!(tracing::Level::DEBUG)
+        && let ReplyBody::Command(outcome) = &body
+    {
         Some(outcome.disposition.clone())
     } else {
         None
     };
-    let queued = shared
-        .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
-        .await;
+    let queued = shared.finish_with(request_id, body).await;
     if queued == QueuedReply::Reply {
         disposition
     } else {
@@ -1169,6 +1173,23 @@ async fn serve_subscribe(
     subscribe: SubscribeRequest,
     subscriptions: &mut SessionSubscriptions,
 ) {
+    #[cfg(feature = "testing")]
+    if shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .take_subscription_opening_refusal(shared.service.inner.consensus.local_node_id())
+    {
+        let refused = RefusedSubscription::new(
+            SubscriptionRefusal::Unavailable,
+            "the serving node could not open the subscription now".to_string(),
+        );
+        shared
+            .finish_with(request_id, ReplyBody::Subscribe(refused_outcome(*refused)))
+            .await;
+        return;
+    }
     let opened = open_subscription(shared, subscribe, subscriptions).await;
     let OpenedSubscription {
         opened,
@@ -1176,14 +1197,9 @@ async fn serve_subscribe(
         pending,
     } = match opened {
         Ok(opened) => opened,
-        Err(result) => {
-            let outcome = SubscribeOutcome {
-                disposition: SubscribeDisposition::Failed,
-                message: result.message,
-                diagnostics: wire_diagnostics(result.diagnostics),
-            };
+        Err(refused) => {
             shared
-                .finish_with(request_id, ReplyBody::Subscribe(outcome))
+                .finish_with(request_id, ReplyBody::Subscribe(refused_outcome(*refused)))
                 .await;
             return;
         }
@@ -1193,6 +1209,16 @@ async fn serve_subscribe(
         message,
         diagnostics: Vec::new(),
     };
+    #[cfg(feature = "testing")]
+    shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .pause_subscription_response_delivery_if_armed(
+            shared.service.inner.consensus.local_node_id(),
+        )
+        .await;
     // The rows follow the reply that announces their schema. A subscription whose reply was not
     // queued, because the request was cancelled, the session ended or the reply could not be
     // encoded, was never announced, so it is abandoned before it delivers anything.
@@ -1205,44 +1231,68 @@ async fn serve_subscribe(
     }
 }
 
+/// The reply to a subscribe request the session refused.
+fn refused_outcome(refused: RefusedSubscription) -> SubscribeOutcome {
+    SubscribeOutcome {
+        disposition: SubscribeDisposition::Refused(refused.refusal),
+        message: refused.message,
+        diagnostics: wire_diagnostics(refused.diagnostics),
+    }
+}
+
 /// Opens the subscription a subscribe request describes: exactly one `CREATE SUBSCRIPTION`
 /// statement in an existing domain, delivering typed rows.
 async fn open_subscription(
     shared: &SessionShared,
     subscribe: SubscribeRequest,
     subscriptions: &mut SessionSubscriptions,
-) -> Result<OpenedSubscription, Box<CommandResult>> {
+) -> Result<OpenedSubscription, Box<RefusedSubscription>> {
     let SubscribeRequest {
         domain,
         statement,
         subscription_type,
+        expected_schema,
     } = subscribe;
     // Rows are the only subscription type a session delivers.
     let SubscriptionType::Row = subscription_type;
     if subscriptions.transaction_active() {
-        return Err(Box::new(subscription_in_transaction()));
+        return Err(RefusedSubscription::from_result(
+            SubscriptionRefusal::InTransaction,
+            subscription_in_transaction(),
+        ));
     }
-    let statements = match parse_client_statement_sources(&statement) {
+    let parsed = with_statement_grammar(|grammar| grammar.parse_sources(&statement));
+    let statements = match parsed {
         Ok(statements) => statements,
         Err(report) => {
-            return Err(Box::new(rejected_source_response(report.current_context())));
+            return Err(RefusedSubscription::from_result(
+                SubscriptionRefusal::InvalidStatement,
+                rejected_source_response(report.current_context()),
+            ));
         }
     };
     let Some(subscription) = single_create_subscription(statements) else {
-        return Err(Box::new(command_error(
+        return Err(RefusedSubscription::new(
+            SubscriptionRefusal::InvalidStatement,
             "a subscribe request carries exactly one CREATE SUBSCRIPTION statement".to_string(),
-        )));
+        ));
     };
     let existing = shared.service.inner.consensus.current_domain(&domain).await;
     if existing.is_none() {
-        return Err(Box::new(command_error(format!(
-            "domain '{}' does not exist",
-            domain.as_str()
-        ))));
+        return Err(shared.service.committed_state_refusal(
+            SubscriptionRefusal::DomainNotFound,
+            format!("domain '{}' does not exist", domain.as_str()),
+        ));
     }
     shared
         .service
-        .create_subscription(&domain, subscription, &shared.delivery, subscriptions)
+        .create_subscription(
+            &domain,
+            subscription,
+            expected_schema.as_ref(),
+            &shared.delivery,
+            subscriptions,
+        )
         .await
 }
 

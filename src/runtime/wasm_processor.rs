@@ -960,7 +960,7 @@ mod tests {
             },
             kind: ModelKind::WasmProcessor,
             identifier: ModelName::parse("sessionizer").expect("valid identifier"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: tenant_branch("alpha"),
         }
     }

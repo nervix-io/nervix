@@ -227,7 +227,10 @@ outcomes.
 Targets must be live and must advertise that their domain clocks match the committed runtime
 revision the producer started from, or a later one. Each node's domain clock owner follows every
 committed domain and schedule change, and it advertises a runtime revision once every domain clock
-the node holds, authority fence included, equals that revision's committed lifecycle. It advertises
+the node holds, authority fence included, equals that revision's committed lifecycle. The
+advertisement is the node's gossip key for that revision; the owner also records the revision in
+the node's [application progress](./interconnect.md#application-progress), which target selection
+does not read. It advertises
 neither graph preparation nor activation, so a target whose graph installation waits still receives
 progress. A lifecycle change that only graph installation installs, such as a new generation of
 another domain, holds the advertisement until graph installation installs it. A new or reconnected
@@ -276,7 +279,7 @@ bound to its predecessor.
 
 Kafka domain offsets retain the generation in which an explicit start was applied. Resuming an
 instance in that generation uses its recorded positions; a partition without one uses the original
-start timestamp. A later explicit start applies under its new generation. This source-position
+start timestamp. A later explicit start applies under its new generation. This ingestor-position
 state travels with native checkpoints and backups, independently of clock authority or mapping;
 [Kafka ingestion](./ingestors.md#kafka) owns its acknowledgement and recovery contract.
 
@@ -459,6 +462,11 @@ that outlives the timeout, and the next session attaches the clock again; a call
 for the next clock event is woken and opens that session. A restoration refused as not found ends
 the attachment with reason `DomainRemoved`.
 
+Any request timeout that closes the native client's request registry wakes the exchange reader,
+including while a refused clock restoration waits before another attempt. The reader ends its
+frame routing before it reports the clock's interruption. A waiting clock reader can then restore
+on a new session without waiting for the transport or the preceding restoration delay.
+
 A detach and a restoration of the same clock never cross. The Rust client registers a detach
 before it sends it, and no restoration decides to attach the clock while a detach of it is in
 flight: a restoration that would has its attach wait until the detach has ended, and sends it only
@@ -556,10 +564,20 @@ same guest-state lifetime replacement without changing the domain clock mapping.
 
 Generated records use the snapshot assigned to their generating operation. Buffered emitter
 batches and their retries retain the snapshot from acceptance, while external observation fields
-whose contract is actual UTC obtain that value at the shared source-host intake boundary or their
+whose contract is actual UTC obtain that value at the shared ingestor-host intake boundary or their
 connector boundary. An Iceberg emitter's `COMMIT EACH` is not measured from that retained snapshot:
 the host reads a fresh snapshot at the first cadence check after a flush stages rows and arms the
 commit's logical deadline from it, and a retry or drain forces the commit without a clock read.
+
+Emitter branch activity is measured at input acceptance in the domain's coordinate. TTL expiry is
+checked by physical maintenance against domain time, independently for each source's held
+branches. A wait for required materialized state belongs to that held work and ends when its
+branch expires. Removing a branch neither reassigns surviving records' execution snapshots nor
+creates a publish for an empty buffer. Force flush, retry and stop retain their existing clock
+ownership; branch maintenance does not turn a physical drain deadline into a logical one.
+The emitter retention owner captures the node's configured branch scan interval at startup;
+its physical wake is registered in the clock-boundary check. An unreadable clock defers that
+scan without discarding held work, and a pending stop defers expiry while its drain owns the task.
 
 An HTTP emitter's prepared method, target, headers, and optional body retain the execution
 snapshot of the admitted record through retries and an entity-pause drain. Changing the emitter
@@ -654,7 +672,7 @@ publication restores the old branch instance with its existing logical deadlines
 publication, recovery completes the fresh lifetime and never recreates the old instance or its
 timers.
 
-Recurring domain cadence is anchored to its initial logical schedule. The source host waits for
+Recurring domain cadence is anchored to its initial logical schedule. The ingestor host waits for
 each HTTP or Prometheus polling occurrence and passes its scheduled logical instant into the
 connector's poll operation; connector crates never bind or wait on a domain clock. HTTP polling and
 generator cadence begin immediately, while Prometheus polling begins after one interval. When work
@@ -719,6 +737,11 @@ not model time: under Shuttle a timeout never measures its deadline, and a check
 wins. HTTP request deadlines and `Retry-After` therefore stay physical, flush cadence keeps the
 domain clock, and no check establishes progress by waiting.
 
+An emitter's partial buffer and connector-staged acknowledged work keep their ingestor alive on a
+100-millisecond physical beat, even when another input is waiting for materialized state. New input
+does not postpone it, an active retry owns its existing beat, and no beat remains after all held work
+is released. This liveness deadline neither advances logical flush cadence nor confirms delivery.
+
 The web console's clock display is an external observer: its clock-display module reads browser UTC
 to project an attached paced mapping for the screen. That projection does not enter a node's read
 watermark, alter tick progress, or supply domain time to execution. The repository clock-boundary
@@ -754,7 +777,7 @@ This produces the following failure behavior:
 The authority's projection, cadence, tick-boundary and rate-conversion failures render the full
 typed report in both the runtime event and the corresponding warning. Timestamp overflow includes
 the timestamp arithmetic cause beneath the clock operation. Clock attachment and progress-apply
-events, source cadence errors and message-error flush-clock failures preserve their supplied
+events, ingestor cadence errors and message-error flush-clock failures preserve their supplied
 contexts in the same way, including the unavailable lifetime beneath a failed deadline wait.
 
 All nodes project from their local UTC observations. The shared mapping and per-node nondecrease

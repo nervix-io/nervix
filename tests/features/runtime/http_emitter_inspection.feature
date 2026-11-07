@@ -49,7 +49,7 @@ Feature: HTTP REQUEST emitter inspection, errors and metrics
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -281,7 +281,8 @@ Feature: HTTP REQUEST emitter inspection, errors and metrics
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE

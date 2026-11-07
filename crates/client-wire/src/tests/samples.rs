@@ -148,6 +148,7 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
             domain: name("tenant"),
             statement: "CREATE SUBSCRIPTION live FROM orders;".to_string(),
             subscription_type: SubscriptionType::Row,
+            expected_schema: None,
         }),
         ClientRequest::Unsubscribe(UnsubscribeRequest {
             subscription: name("live"),
@@ -226,6 +227,13 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
         }),
         ClientRequest::CloseEmitter(CloseEmitterRequest {
             consumer: ConsumerId::opened_by(request(22)),
+        }),
+        // A restoration on a new session, expecting the branched schema its generation announced.
+        ClientRequest::Subscribe(SubscribeRequest {
+            domain: name("tenant"),
+            statement: "CREATE SUBSCRIPTION live FROM orders;".to_string(),
+            subscription_type: SubscriptionType::Row,
+            expected_schema: Some(row_schema()),
         }),
     ];
     requests
@@ -544,7 +552,7 @@ fn full_effects() -> ImpactEffects {
         topology: AffectedTopology { before, after },
         ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
             node: junction_execution.clone(),
-            unit: nervix_models::Unit::Partition(2),
+            unit: nervix_models::Unit::partition(2),
             source: name("node-1"),
             destination: name("node-2"),
             attribution: attribution(2, 2),

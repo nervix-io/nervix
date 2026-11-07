@@ -258,7 +258,7 @@ outside its unit untouched.
 Drain, colocation consolidation, and explicit relocation use a planned handoff and restart only
 runtime nodes whose primary owner changed. A runtime node that keeps its assignment continues on every cluster node,
 including the former and new owners of a moved neighbor: it keeps buffered work, retained
-`REQUIRED WAIT` messages, branch-local state, and external source sessions. Its neighbors re-point
+`REQUIRED WAIT` messages, branch-local state, and external ingestor sessions. Its neighbors re-point
 at the committed revision. Draining a host moves hard groups and independent nodes one at a time in
 canonical kind/name order. Failover uses immediate termination because the former owner is already
 unavailable.
@@ -318,7 +318,7 @@ same spelling as `SHOW CREATE <kind> <name>`:
 
 | `<kind>` | Runtime node |
 | --- | --- |
-| `INGESTOR` | An ingestor other than an endpoint or Syslog source. |
+| `INGESTOR` | An ingestor other than an endpoint or Syslog ingestor. |
 | `REINGESTOR`, `GENERATOR` | The named reingestor or generator. |
 | `JUNCTION`, `DEDUPLICATOR`, `CORRELATOR`, `REORDERER`, `WINDOW PROCESSOR` | The named processor. |
 | `INFERENCER`, `WASM PROCESSOR` | The named processor. |
@@ -466,7 +466,7 @@ ALTER PLACEMENT scoring_local
 A placement pins the entities named in its `FROM` and `TO` lists even when its current coverage is
 empty. Dropping a referenced runtime node is blocked until every pinning placement is altered or
 dropped. A change that would make a member ineligible, such as changing an ingestor to an endpoint
-or Syslog source, is blocked in the same way. Adding or dropping a relay's materialized state does
+or Syslog ingestor, is blocked in the same way. Adding or dropping a relay's materialized state does
 not change its placement identity.
 
 When a topology edit and its placement update depend on one another, put the complete set of model
@@ -597,3 +597,21 @@ never applies a unit in part.
 
 Use `SUGGEST SEPARATION` as a performance hint only. Security, tenant isolation, and failure-domain
 requirements need controls outside placement policies.
+
+## Ingestor Instance Units
+
+An instance-capable ingestor with `INSTANCES n` has one `Instance(i)` placement per global index.
+Every unit has its own primary, replicas and ownership transition. The scheduler balances primary
+counts across eligible nodes before comparing ordinary assignment load, so replica slots do not
+make one primary appear to be several active consumers. Existing live assignments remain sticky.
+
+`INSTANCES PER PARTITION` introduces an exact colocation component for each index: ingestor instance
+`p` and partition `p` of every relay whose branch it constructs. These components move independently.
+An explicit `REQUIRE COLOCATION` corridor expands logical members to all their units and joins the
+components it captures. Placement groups therefore store exact `NodeUnitRef` members, including
+different unit kinds within one component. Shared group drain and failover update only those members;
+ordinary relay members need no state replica in order to move with a stateful ingestor.
+
+Current `RELOCATE` selection accepts only members with one execution unit. A multi-instance ingestor
+is refused there rather than treating one instance as the logical ingestor. Automatic scheduling,
+drain and failover retain exact unit ownership. See [Instancing](ingestors.md#instancing).

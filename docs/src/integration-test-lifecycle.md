@@ -2,6 +2,15 @@
 
 *Plexus, the Nervix graph definition language.*
 
+`just test-cluster-duration-scenarios` selects the one- and three-node multi-span cluster
+duration regression. It prepares the console assets, WASM processor guests and ONNX runtime
+that the in-process server loads, and needs no external transport or client-tool build.
+`just test-cluster-parameter-completion-scenarios` selects, with the same preparation, the one-
+and three-node cases where completion offers only unassigned cluster parameters and a repeated
+parameter is refused where it is written.
+`just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
+rebuilding it; its evidence applies only to the source inputs that produced that executable.
+
 The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
 system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
 address explicitly and presents the node's fixture certificate. The redirect scenario launches a
@@ -15,6 +24,72 @@ root during initial provisioning. Restart reuses those files. The rotation scena
 node's files, observes the initially loaded leaf on a fresh connection before restart, then the
 replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
 name, and the console recorder checks an opened WSS connection to the advertised leader.
+
+## Focused Native Command Recovery
+
+`just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
+outlines on one and three nodes, and `just test-client-reply-kind` the native-client and CLI
+outlines whose command is answered with a reply of another kind, each with retries disabled. Both
+run through `just test-client-recovery-witnesses <witnesses> <name>`, which builds the server's
+console assets, loads the ONNX runtime and builds the CLI before starting the scenario runner with
+`name` as its scenario filter. These cases start no paced simulation or Python driver, so the
+focused recipes do not build those tools. The ordinary scenario runner and its startup, execution,
+parallelism and teardown budgets are unchanged. Broad `just test-scenarios` and CI keep their
+complete tool prerequisites. Each recipe checks that all four of its cases execute and keeps its
+output under its own `target/<witnesses>` directory: `target/client-foreign-execution` or
+`target/client-reply-kind`.
+
+The focused client owner can be explored with
+`just test-client-shuttle exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter`
+or `just test-client-shuttle exchange::shuttle_tests::shuttle_a_reply_of_another_kind_racing_registration_interrupts_every_waiter`.
+It runs that production owner's declared exploration and its nondeterminism check in a separate
+Shuttle build directory, retaining failing schedules. The canonical `just test-shuttle` inventory
+and package-wide discovery still qualify the full selection in CI.
+
+The same focused scenario runner selects the four console restore-history examples with
+`just test-client-recovery-witnesses console-restore-recovery 'A console restore whose (reply was lost after it applied|completed reply was lost)'`.
+The bounded browser fixture loses a real completed restore's reply. Its unreadable-file control
+then fails archive reads; its unrecorded-failure case keeps the file readable and replaces exactly
+one later reply with a matching `Failed/Executed` outcome without a restore report, encoded by the
+production Rust codec. The fixture retains one start frame and the lost reply, each bounded by
+the normal frame limit, and holds at most sixteen later messages. It leaves subsequent replies
+unchanged after substitution. In the unrecorded-failure case Rust verifies the original request
+and execution reference of each lost candidate. A valid `OutcomeUnknown` can advance to the next
+held reply, within the same capture and wait bounds; a real completed outcome and its restore
+report are still required before substituting the later failure. The UI must retain Unknown under
+the original reference and name the later cause; a separate public restore stream repeats the retained start's statement and exact
+archive and checks every field of the recovered original outcome. These are one- and three-node
+browser scenarios with no retry, exclusivity or modified product deadline.
+
+`just test-client-recovery-diagnostic <selection>` uses the canonical Deloxide runner for each of
+`deloxide`, `deloxide-order`, `deloxide-stress` and `deloxide-stress-restore`. It validates the full
+register first, then retains all registered workloads in every feature file reached by the
+client request and exchange owners. Their existing tags, invocations, bounds, supervision and
+accounting remain in force. Each record declares its selected owners and features and sets
+`whole_workspace` to false; this scope cannot enter a whole-workspace coverage collection.
+The selections share a diagnostic build directory, as the canonical lane does, and retain separate
+attempt records for each selection.
+`just test-client-recovery-runner` checks scope completeness against feature discovery.
+
+## Focused Wire Schema List Scenarios
+
+`just test-wire-schema-lists` runs `tests/features/runtime/wire_schema_lists.feature` through the
+ordinary harness on one and three nodes: AVRO arrays with declared item types, JSON and CBOR list
+elements under their codec rules, and the refusals of lists a wire type cannot carry. It builds the
+server's console assets and WASM guests and loads the ONNX runtime, which every in-process node
+needs. These cases start no CLI, paced simulation or Python driver, so the recipe does not build
+those tools. Its arguments reach the scenario runner unchanged, such as `--name`, `--concurrency`
+and `--retry`. Broad `just test-scenarios` and CI keep their complete tool prerequisites.
+
+## Focused Acknowledgement Clause Scenarios
+
+`just test-acknowledgement-clauses` runs the one- and three-node examples in
+`tests/features/runtime/acknowledgement_clause.feature` through the ordinary harness, with four
+run slots and no retries. It verifies each processor/emitter family's `SHOW CREATE` body mode,
+the junction's `DESCRIBE` and `ALTER SET ATTACHED` contract, and real resource bindings for
+inferencers and WASM processors. The recipe prepares the ONNX fixtures/runtime, WASM guests,
+console assets and test CLI used for resource uploads. Additional arguments reach the ordinary
+runner unchanged; broad scenario and CI runs retain their full prerequisites.
 
 ## Delayed Consensus Heartbeat Answers
 
@@ -77,6 +152,33 @@ A focused startup scenario occupies the observability port to force the first la
 before runtime initialization.
 The harness joins that attempt and retries on a fresh observability port within the same readiness
 budget. The pacer's advertised endpoint, private target and retained connections stay in place.
+
+## Interrupted Membership Fixture
+
+The membership-recovery outline starts two stable voters and arms a one-shot interruption of the
+third node's promotion. The existing storage fault owner pauses an applied write after its durable
+sync. While that pause prevents the first membership step's reply, the fixture drives OpenRaft's
+caller until its effective joint configuration appears, then stops polling that caller. It releases
+the worker and observes the joint membership's applied log entry before refusing the caller's
+continuation with the same no-leader redirect as an unconfirmed lease. The uniform step is never
+submitted by that interrupted call. A retained witness contains both actual voter sets and the
+applied index; no fabricated membership or transport outage establishes the precondition.
+
+The storage pause's existing RAII release handles cancellation, and the complete fixture stays
+inside the existing membership mutation deadline. Its arming and witness observations clone node
+controls from the test registry before awaiting; ordinary builds delegate directly to the usual
+OpenRaft change. The public assertions wait for uniform membership, stop each possible voter in a
+separate example, and require both survivors to apply new commands. The registered diagnostic
+workloads also reach the storage pause's tracked condition-variable wait and release.
+
+Harness voter-convergence waits require the expected voters, `raft.membership_joint: false`, and
+`raft.membership_committed: true` together. A union that matches the requested identities while
+still joint, or a uniform entry that has not committed, cannot complete cluster construction or a
+new member's convergence wait. Real-process start and relaunch convergence require the same
+membership observations alongside agreement on the leader and fresh connected peer targets.
+Missing status observations are not treated as successful readiness.
+The in-process status parser is shared with the focused Rust harness tests, so its readiness
+matrix executes under the standard test runner alongside the real-process convergence reader.
 
 ## Wide Subscription Row Input
 
@@ -142,6 +244,19 @@ caller; the recipe does not expand their contents as shell code. The reuse recip
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
 
+`just test-restore-codec-replies` prepares the server assets, CLI and diagnostic reporter and runs
+only the restore reply rejection feature with the ordinary scenario runner. It forwards caller
+arguments by the same quoting rule. The bounded peer forwards the original upload to a real node,
+waits for its completed restore outcome and replaces only the reply; native and CLI cases then
+recover that outcome under the original execution reference on one- and three-node clusters.
+
+`just test-restore-attempt-history` uses the same prerequisites and quoting rule and requires all
+four native/CLI one-/three-node examples in `client_restore_uncertainty.feature`. Its peer waits
+for a real completed restore, removes the local archive and loses the answer with a retryable
+transport failure. The original restore call must remain uncertain when its next attempt cannot
+open the archive. The fixture restores the exact bytes only after that call ends, then recovers
+the completed outcome under the original statement and reference. No product fault hook is used.
+
 ## What Runs Where
 
 The emitter assembly outline observes the emitter's public received-message total before each
@@ -155,12 +270,12 @@ the twenty-second flush and the forty-five-second exact-payload assertion. The r
 when their condition holds and do not serialize other scenarios.
 
 The RabbitMQ parallel lost-rejection outline pauses its own dependency endpoint before resetting
-the connection. It observes all four original source ACK failures while recovery remains paused,
+the connection. It observes all four original ingestor ACK failures while recovery remains paused,
 then clears the terminal emitter fault before resuming the endpoint. This prevents the fault from
 rejecting only part of the replayed window into a further `MAX 4 BATCH TIMEOUT 1h` read. The
 downstream MQTT emitter uses QoS 1 with a four-record confirmation window; its sent counter and the
-RabbitMQ unacknowledged count distinguish output receipt from source settlement. The outline
-retains both sets of four payloads, one- and three-node coverage, the source's batching and ACK
+RabbitMQ unacknowledged count distinguish output receipt from ingestor settlement. The outline
+retains both sets of four payloads, one- and three-node coverage, the ingestor's batching and ACK
 deadlines, and the forty-second payload assertions. The pause is scenario-local and adds no suite
 serialization or readiness sleep.
 
@@ -196,7 +311,7 @@ beyond thirty seconds under an explicitly declared forty-five-second `ACK TIMEOU
 dependency faults do not widen a product deadline or replace a readiness observation with a sleep.
 
 The Kafka control-execution scenario uses librdkafka's mock broker to hold replies after a DOMAIN
-source delivered its first record. A codec alteration resumes that source, and the scenario waits
+ingestor delivered its first record. A codec alteration resumes that ingestor, and the scenario waits
 for a running connector-storage job before sending a record through another HTTP ingestor. The
 same oracle runs on one and three nodes. The broker's native round-trip control releases replies
 in the scenario and again during teardown before diagnostics or node drain, including after a
@@ -328,7 +443,7 @@ resubmitting an outcome that might already have produced output.
 | Syslog TLS publication and split-frame writes | One abort-on-drop task on the binary's runtime, owning TCP connection establishment, the TLS handshake and the complete prepared write. Publication closes the connection there; a split-frame write returns its sender for the later remainder | `tests/common/syslog_tls.rs`, using `tests/common/runner_observation.rs` |
 | Command outcome recovery | On the task awaiting the command, including a backup or its recovery, or on its background execution. It retains the original request and transaction position, asks nodes in turn, and keeps at most one recovery exchange per node until the answering binding can be retained | `tests/common/command_recovery.rs`, over the prepared request and raw exchange in `tests/common/raw_session.rs` |
 | Undecided request routing | On the step or background task that sends a replay session's attach, a scenario-shaped upload or a restore stream. A redirect that names a node of the cluster sends the request there next; any other answer that decides nothing sends it to the next node in node order. The request keeps its identity and its existing bound | `LeaderRoutes::after` in `tests/common/command_recovery.rs`, used by the replay attach in `tests/scenarios.rs`, the shaped uploads in `tests/common/cluster.rs` and the restore streams in `tests/backup/restore.rs` |
-| Armed command observations | On the command's background task or the step awaiting a named request. Earlier unresolved outcomes repeat the original request; a witness tied to the current attempt preserves the raw outcome after the intended boundary. Named cancellation follows the repeated request's correlation id | `tests/common/command_probe.rs`, `tests/session_protocol/mod.rs`, and the command steps in `tests/scenarios.rs` |
+| Armed command observations | On the command's background task or the step awaiting a named request. Earlier unresolved outcomes repeat the original request; a witness retains its node and command stage, and preserves the raw outcome only for an attempt that can reach that boundary on that node. Named cancellation follows the repeated request's correlation id | `tests/common/command_probe.rs`, `tests/session_protocol/mod.rs`, and the command steps in `tests/scenarios.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
@@ -337,6 +452,32 @@ resubmitting an outcome that might already have produced output.
 | Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. A stallable or silent endpoint listens on a port drawn from the port pool, so it is never handed a port another scenario's peers may still dial, and records each connection it accepts with the client's address, when it accepted it and when it stopped forwarding or holding it, which a step counting its connections reports when it fails. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards, and gives a stallable or silent endpoint's port back | The stallable and silent endpoints, `tests/common/stallable_tcp_proxy.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 | Snapshot receive probe | One authenticated interconnect transport, using placements from a validated public backup archive. Its listener port comes from the shared scenario pool. An owner-ending channel wakes its cleanup task on normal completion, panic or cancellation; that task shuts down the transport before releasing its temporary credentials and port reservation. A failed bind also returns its reservation. Normal completion awaits cleanup. A scoped reservation holds all but 4096 bytes of the node's Bulk capacity and releases on every exit. Earlier reservation releases cannot enlarge the allowance. Whole-reservation nonblocking attempts share one 60-second fixture deadline and preserve the last typed refusal; they never retain a partial grant while earlier work finishes. Requests retain the snapshot protocol's own deadline, and complete checkpoint bytes and digest are compared before and after a capacity refusal | `tests/common/cluster/snapshot_receive.rs`, driven by `tests/backup/snapshot_receive.rs` |
+
+An armed command pause belongs to its node and stage. A request to another node cannot consume its
+observation, and a `NotLeader` or `TransactionDetached` reply before admission cannot satisfy a
+pause in admitted work.
+Every armed stage on a node retains its own witness. When several stages reach, any reached stage
+eligible for the reply can satisfy the observation. Pending stages are still observed while a
+reply waits; a ready reply is selected before a newly sampled gate.
+Other terminal outcomes remain visible to the scenario, including failures. Recovery retains the
+original execution reference and transaction position; the raw session correlates each reply to
+the transport request that sent it.
+
+`just test-command-probes` prepares the server assets and runs the focused command-probe
+regressions through the ordinary harness. `just test-harness-liveness` retains the full harness
+preparation and selection. `just test-command-recovery-scenarios` prepares those server assets and
+runs the two committed-batch finalization cases below with one scenario at a time and no retries.
+
+The committed-batch finalization scenarios hold the initial leader's reconciliation of their exact
+execution reference before the reconciler takes the execution guard. Caller retries remain free
+to reach the first finalization gate after an earlier admission or applying refusal. Each releases
+the reconciliation hold after observing the caller's interrupted outcome; the successor still resumes
+the applying execution automatically. The admission-refusal case records the durable transaction
+target at the first gate and compares its exact ID after both leadership transfers and subsequent
+replays, requiring exactly one committed transaction. The hold skips only that execution on each
+pass; each pass samples its node's held references once and then uses that owned set while other
+executions continue to reconcile. Explicit release and scenario cleanup remove the hold through
+the shared pause owner, so the next pass can reconsider that execution.
 
 The Syslog mixed-framing sender assembles its octet-counted and non-transparent frames before
 connecting and writes them together on its runtime task. A stalled scenario runner cannot leave
@@ -363,7 +504,7 @@ can run beside STOP. These event boundaries establish the outage without a sleep
 observation window. The publication scenario requires every original sequence member, allowing
 the duplicates an uncertain Core NATS retry permits. The STOP scenario observes the pending-record
 uncertainty through a retained public session; terminal domain teardown may cancel unresolved
-host work under the source's existing acknowledgement contract.
+host work under the ingestor's existing acknowledgement contract.
 
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
 `just test-deloxide-stress` or `just test-deloxide-stress-restore` builds, starts its
@@ -416,10 +557,10 @@ checks.
 The `@restarted_voter_observation` scenario runs in both selections, reaching whole-cluster teardown, reopening each node's store, and automatic scheduling after the first relayed voter heartbeat. All voters start concurrently so each can discover a peer's live policy before reporting ready; if another voter leads, the fixture transfers leadership to the bootstrap node before observing its scheduling barrier. It waits for the held voter's catch-up after releasing that barrier. Its watch-channel barrier and concurrent fault map are untracked; the diagnostic evidence covers blocking locks reached by restart and scheduling. The native metadata restore scenario also runs in both selections after its Kafka replication stream and acknowledgement boundaries are repaired, retaining complete primary and replica metadata comparisons and distributed placement checks.
 
 The WASM/Kafka restore outline checks Commands-memory headroom on the restored leader after its
-source becomes ready. The cluster fixture reads the public capacity and reserved-byte metrics,
-then polls within the step's single deadline until the class can admit the 176-byte source control
+ingestor becomes ready. The cluster fixture reads the public capacity and reserved-byte metrics,
+then polls within the step's single deadline until the class can admit the 176-byte ingestor control
 call. It reports both last observations on timeout and allows the retirement reservation of a live
-Kafka consumer. This assertion preserves the source's existing readiness and error deadlines.
+Kafka consumer. This assertion preserves the ingestor's existing readiness and error deadlines.
 
 The measured restore and backup steps sample each node's public bulk and restore-metadata
 executor gauges every 20 milliseconds while the ordinary CLI runs. They also record the harness
@@ -451,7 +592,7 @@ keeps its source revision and patch, each process output and the available node 
 `target/native-metadata-restore`; its completion record is written only after all ten pass.
 
 The complete-generation fixture allows 120 seconds for every post-restore input to reach its raw
-relay. Its forty one-mebibyte guest saves exercise sequential source acknowledgements and durable
+relay. Its forty one-mebibyte guest saves exercise sequential ingestor acknowledgements and durable
 replica checkpoints beside the other diagnostic workloads. The full active diagnostic selection
 reached 77 of 80 inputs at the former 30-second bound, while the exact same binary reached all
 inputs and preserved every branch in the focused four-case replay. This condition ends as soon as
@@ -508,7 +649,7 @@ processing failures. Each replay replaces the same materialized keys with the sa
 so partial effects retain the fixture's value oracle. Every attempt and terminal result is logged;
 an unknown outcome, final admission refusal or expired round fails preparation. The producer closes
 after every tenant's batch has completed, before the scenario checks all generator rows and takes
-the backup cut. Source admission, input delivery and the final archive and restore assertions remain
+the backup cut. Ingestor admission, input delivery and the final archive and restore assertions remain
 separate observable steps.
 
 The lane then selects `@paced_simulation_reopen` from the public paced-driver feature. It builds the
@@ -595,9 +736,9 @@ authorization caching is disabled and a denial leaves the connection open, so ch
 scenario's unique client rule takes effect on its next subscription. An independent probe
 observes a successful CONNACK, a Not Authorized SUBACK, and a retained empty session on reconnect.
 It uses a different client identity from Nervix. The one- and three-node scenarios require the
-source's reconnect backoff to grow across repeated refusals, preserve refusal through an ingestor
+ingestor's reconnect backoff to grow across repeated refusals, preserve refusal through an ingestor
 hold, then deliver after the scenario grants permission. A forced drain refusal ends the codec
-alteration before replacement, so the same suspended source resumes with its current codec.
+alteration before replacement, so the same suspended ingestor resumes with its current codec.
 This observes retry progress
 instead of assuming a fixed quiet interval. Each HTTP update and the complete wire probe have
 a thirty-second observation budget. The rules neither serialize scenarios nor alter another
@@ -1501,12 +1642,41 @@ The harness keeps these boundaries explicit.
   once. A timeout that only the first run met would let a leader that runs the command again under
   the same execution reference, because the refused outcome was never recorded, drain and apply
   the alteration, and the scenario would observe that success. The execution's other drains, such
-  as a source-intake drain before the full hold or the other units one node drain moves, are left
+  as an ingestor-intake drain before the full hold or the other units one node drain moves, are left
   alone, and an alteration a scenario runs later owns the domain under its own reference and
   drains normally. The three-node Syslog regression moves leadership while the alteration waits at
   its entity gate pause, holds the new leader's run of the same transaction until the first run
   has refused and released its hold, and requires the alteration to end refused with every frame
   delivered once.
+- **Subscription reopening replies.** The native restoration outline opens an acknowledged
+  subscription through the existing TCP forwarder, ends that connection, and holds one successful
+  reopening reply on the serving node while its transport stays live. Its explicitly configured
+  request timeout ends that attempt. A reader already waiting must open another session, reach an
+  active subscription, and receive exactly one row from one subsequent HTTP post within the
+  existing thirty-second observation bound. Initial connection retains its ordinary connection
+  budget. The one-shot pause uses the command-pause owner and teardown releases it even after a
+  failed assertion. The same one- and three-node examples run in the Deloxide active, order and
+  stressed lifecycle selections: the request registry and event queues use tracked blocking
+  locks, while the watch and transport waits remain untracked and have their Shuttle check.
+- **Console restoration observations.** The browser's bounded frame gate can hold the next session
+  as well as the initial one: at most 64 frames and 1 MiB, released in receive order. It records
+  overflow or a held connection ending as a fixture failure. A reconnect that must preserve an
+  idle transaction uses the existing resettable TCP proxy: a clean WebSocket close with no request
+  in flight deliberately reverts it. The proxy resets its current sockets and keeps listening for
+  the replacement session, without changing the node or its leadership. A retained transaction
+  prompt alone does not establish that the replacement session's domain list has enabled its
+  input. Controlled restoration scenes release that gate, observe the restored subscription tab,
+  select Plexus REPL again, and require visible enabled input before arming a command reply pause.
+  A scene with multiple losses observes the intended replacement leader before using its tab;
+  an interruption notice from an earlier loss does not establish that phase. Clock notifications
+  are matched to the successful attach replies of distinct recorded
+  session connections; repeated acknowledgements on one connection fail, and the terminal must
+  render each acknowledgement exactly once. The recorder counts the browser's received frames,
+  excluding the gate's synthetic redelivery of a frame it already recorded. Extra real connections
+  do not imply extra domain-clock generations. Failed browser scenes retain their connection
+  frames, terminal, held-frame count and prompt visibility and disabled state before cleanup
+  releases the pauses. Reading this evidence has the existing console assertion bound and reports
+  an unreadable page without preventing pause cleanup.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup
@@ -1560,9 +1730,10 @@ The harness keeps these boundaries explicit.
   grows with every node's wait for CPU, its control-class queue included, whether or not a peer is
   silent.
   Its completion regression also holds every application-revision reply from the two followers
-  after sampling the reply. Local revision publication and gossip continue, so the same prepared
-  client's user creation, relay creation and cluster-status query must finish in order while
-  those replies remain held. This batch has one twenty-second harness budget. On 25 October
+  after sampling the reply. The followers keep reporting their progress to the leader, so the same
+  prepared client's user creation, relay creation and cluster-status query must finish in order,
+  through those reports, while the replies remain held. This batch has one twenty-second harness
+  budget. On 25 October
   2026, with 16 runtime workers, 48 slots, six large materialized workloads and 192 distinct
   health cases, 88 original requests exceeded nine seconds but all succeeded before fault
   release in 9.016 to 11.998 seconds. Every pre-release status still reported node-3 connected.
@@ -1689,7 +1860,7 @@ The harness keeps these boundaries explicit.
   the measured catch-up into an interconnect address and membership change.
   The planned Kafka handoff scenario installs its subscription and emitter stall, publishes and
   flushes both branch records, and then starts intake. Both records are therefore available to
-  its first parallel batch. The source host waits for that batch's attached ACKs before polling
+  its first parallel batch. The ingestor host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
   The forced-recovery startup fixture holds the promoted replica's initial installation across a
   whole-cluster restart. After the cluster rejoins, it makes the former owner's application health
@@ -1944,8 +2115,8 @@ domain-time deadlines for it and an untouched sibling. These tests and the publi
 provide complementary receipt and instance-ownership evidence; they add no synchronization claim.
 
 The MQTT changed-address restart scenario waits for the post-restart marker within its bounded
-delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;
-broker receipt does not establish that its source acknowledgement reached the broker before the
+delivery window. Its persistent QoS 1 ingestor may replay the pre-restart marker before that row;
+broker receipt does not establish that its ingestor acknowledgement reached the broker before the
 node stopped. The OTEL metric scenario observes one successful export from each concrete emitter
 owner before checking Collector output. HTTP intake acceptance does not establish emitter export,
 and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
@@ -2761,11 +2932,11 @@ the whole server, so no build has to produce another file and no launch has to f
 `nervix-server`, and `main` reads `arg0` before it does anything else. A process of that name calls
 `run_server_process`, the entry point the `nervix-server` executable's own `main` calls, and none of
 the suite runs. Clap takes the program's name from the same `arg0`, so the command line a scenario
-reads is the product's. The dependency lifecycle helper is selected the same way. The launches of
-another file are the client protocol's measurements, whose subject is a release build:
-`just client-wire-baseline` and `just client-wire-tls-cost` build that server and name it to the
-suite. The transport cost starts two such processes that differ only in their session listener: one
-serves plaintext gRPC, and the other serves TLS on the port a plaintext listener would use,
+reads is the product's. The dependency lifecycle helper is selected the same way. The remaining
+measurement that launches another file is `just client-wire-tls-cost`, whose subject is a release
+build. It builds that server and names it to the suite. The transport cost starts two such
+processes that differ only in their session listener: one serves plaintext gRPC, and the other
+serves TLS on the port a plaintext listener would use,
 presenting the development certificate in-process TLS nodes present. The process's readiness probe
 and the clients the fixture opens follow the listener's transport.
 
@@ -2950,13 +3121,13 @@ group's committed offset through clients of its own, so no refusal reaches the s
 The attached- and detached-window Kafka acknowledgement scenarios create their input topic before
 `START` and observe the consumer group's membership and the ingestor's readiness before injecting
 the output failure. Their bounded subscription assertions therefore exercise replay and
-acknowledgement isolation after source initialization, without spending those assertions' budgets
+acknowledgement isolation after ingestor initialization, without spending those assertions' budgets
 on automatic topic creation and consumer discovery.
 
 The attached-window fixture publishes both rows through one producer and allows a thirty-second
 partial-batch wait. Collection ends as soon as its two-message ACK batch is full; the window can
 then produce the output whose failure rejects both records. Separate publication steps can exceed
-a short collection window, leaving one retained window row waiting for input while the source waits
+a short collection window, leaving one retained window row waiting for input while the ingestor waits
 for that partial batch's ACK. The fixture retains its five-second ACK timeout and exact four-record
 replay assertion within eight seconds.
 
@@ -3189,11 +3360,11 @@ messages dropped or an exhaustive transport history. Receipt and event counts ne
 sequence or header mismatch.
 
 The wide-columnar NATS emission outline uses the production sticky scheduler and explicitly moves
-the source and emitter to node-1 before publishing. Its relay is on node-1 in the one-node example
+the ingestor and emitter to node-1 before publishing. Its relay is on node-1 in the one-node example
 and node-2 in the three-node example; cluster-status assertions establish both remote hops in the
-latter. Each example publishes all 32,768 records, waits for the source's sent count, releases the
+latter. Each example publishes all 32,768 records, waits for the ingestor's sent count, releases the
 emitter stall, and checks every sequence and repeated header within the original 90-second budget,
-followed by the 500-millisecond duplicate check. The source count does not confirm delivery to the
+followed by the 500-millisecond duplicate check. The ingestor count does not confirm delivery to the
 broker's observing subscriber.
 
 ## Console Command Reply Uncertainty
@@ -4317,3 +4488,10 @@ Stopping the domain before restarting the broker rules out replay by
 Nervix as the explanation for the surviving message. This broker is separate from the suite's
 shared RabbitMQ service, so the restart cannot disrupt another scenario. The after hook removes it
 explicitly after node teardown, including when the scenario fails before its restart step.
+
+### NATS authentication selection
+
+`just test-nats-authentication [arguments]` prepares the existing in-process scenario dependencies
+and selects only `tests/features/runtime/nats_authentication.feature`. It retains the ordinary
+harness, broker Testcontainers, one-/three-node examples and argument forwarding; it omits unrelated
+CLI, formatter and paced-simulation tool builds. The full scenario entry point remains unchanged.

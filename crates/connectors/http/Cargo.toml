@@ -1,5 +1,5 @@
 [package]
-description = "The HTTP source and sink connectors for Nervix"
+description = "The HTTP ingestor and emitter connectors for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-http"
@@ -38,6 +38,7 @@ url = { workspace = true }
 [dev-dependencies]
 base64 = { workspace = true }
 bolero = { workspace = true }
+nervix-crypto = { workspace = true }
 # HTTP/2 negotiation is exercised against a real HTTP/2 server.
 hyper = { workspace = true, features = ["client", "http1", "http2", "server"] }
 hyper-util = { workspace = true, features = ["server", "tokio"] }

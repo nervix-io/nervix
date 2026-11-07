@@ -1,26 +1,27 @@
-//! Controlled substitutions in replies to an already executed session command.
+//! Controlled delivery pauses and substitutions in replies to an executed session command.
 //!
 //! Layer: test harness, outside the product layer order.
-//! - **Owns.** A domain/query's scripted replies, three uncertain ones or one naming another
-//!   execution, and the execution identities the script observed.
+//! - **Owns.** A node's command-reply delivery pause, a domain/query's scripted replies, three
+//!   uncertain ones, one naming another execution or one of another reply kind, and the
+//!   identities the script observed.
 //! - **Depends on.** Public session outcomes, vocabulary identities and the shared test injector.
 //! - **Must not know.** Browser state, client retries, consensus implementation or graph execution.
 
 #![cfg_attr(
     nervix_lint,
-    nervix::context(
-        outside,
-        reason = "owns bounded testing-only command reply substitution"
-    )
+    nervix::context(outside, reason = "owns bounded testing-only command reply controls")
 )]
 
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
-    CommandDisposition, CommandOutcome, CommandRequest, OutcomeOrigin, UnknownOutcomeCause,
+    CommandDisposition, CommandOutcome, CommandRequest, DomainInfo, DomainList, OutcomeOrigin,
+    ReplyBody, UnknownOutcomeCause,
 };
-use nervix_models::{CommandExecutionReference, DomainName};
+use nervix_models::{
+    ClusterNodeName, CommandExecutionReference, DomainName, DomainPace, DomainStatus,
+};
 
-use super::FaultInjection;
+use super::{CommandPausePoint, FaultInjection};
 
 /// The message of the failure a foreign-execution script answers with, which belongs to no
 /// command the scenario sent.
@@ -45,6 +46,9 @@ enum CommandReplySubstitution {
     /// The first reply is a failure under another execution's reference; the second is the
     /// command's own.
     ForeignExecution { foreign: CommandExecutionReference },
+    /// The first reply is a listing of the command's domain, a valid reply of another kind than a
+    /// command is answered with; the second is the command's own.
+    AnotherKind,
 }
 
 /// What a foreign-execution script observed of its command.
@@ -58,6 +62,26 @@ pub struct ForeignExecutionObservation {
 }
 
 impl FaultInjection {
+    /// Holds the next completed command after its result exists but before either public session
+    /// transport can deliver it.
+    pub fn pause_command_response_delivery_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ResponseDelivery(node_id));
+    }
+
+    pub async fn wait_for_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()));
+    }
+
+    pub(crate) async fn pause_command_response_delivery_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::ResponseDelivery(node_id.clone()))
+            .await;
+    }
+
     /// Replaces three successful replies for exactly this domain and query with the three
     /// current uncertainty causes. Execution and its stored outcome are left intact.
     pub fn make_command_replies_uncertain(&self, domain: DomainName, query: String) {
@@ -98,6 +122,35 @@ impl FaultInjection {
         );
     }
 
+    /// Answers the first successful reply for exactly this domain and query with a listing of the
+    /// domain, a reply of another kind than a command is answered with, under the command's own
+    /// request identity. Execution and its stored outcome are left intact, so the command's own
+    /// outcome answers it when it is sent again.
+    pub fn answer_command_with_another_reply_kind(&self, domain: DomainName, query: String) {
+        self.inner.command_reply_scripts.insert(
+            domain,
+            CommandReplyScript {
+                query,
+                substitution: CommandReplySubstitution::AnotherKind,
+                references: Vec::new(),
+            },
+        );
+    }
+
+    /// The references of the command's first two successful replies, the one answered with
+    /// another reply kind and the one that followed it, or `None` while another script, or none,
+    /// is armed for `domain`.
+    pub fn another_reply_kind_references(
+        &self,
+        domain: &DomainName,
+    ) -> Option<Vec<CommandExecutionReference>> {
+        let script = self.inner.command_reply_scripts.get(domain)?;
+        let CommandReplySubstitution::AnotherKind = &script.substitution else {
+            return None;
+        };
+        Some(script.references.clone())
+    }
+
     /// What the foreign-execution script armed for `domain` observed, or `None` while another
     /// script, or none, is armed there.
     pub fn foreign_execution_observation(
@@ -114,32 +167,42 @@ impl FaultInjection {
         })
     }
 
-    /// Applies the armed script only to a successful reply for its exact domain/query, recording
-    /// only as many references as its substitution observes, so further commands cannot grow the
-    /// retained observation.
-    pub(crate) fn substitute_command_reply(
+    /// The reply to a command whose execution produced `outcome`. The armed script applies only
+    /// to a successful reply for its exact domain/query, recording only as many references as its
+    /// substitution observes, so further commands cannot grow the retained observation. Every
+    /// other command is answered with its own outcome.
+    pub(crate) fn script_command_reply(
         &self,
         request: &CommandRequest,
-        outcome: &mut CommandOutcome,
-    ) {
+        mut outcome: CommandOutcome,
+    ) -> ReplyBody {
         let Some(domain) = &request.domain else {
-            return;
+            return ReplyBody::Command(Box::new(outcome));
         };
         let Some(mut script) = self.inner.command_reply_scripts.get_mut(domain) else {
-            return;
+            return ReplyBody::Command(Box::new(outcome));
         };
         if script.query != request.query
             || !matches!(outcome.disposition, CommandDisposition::Completed { .. })
         {
-            return;
+            return ReplyBody::Command(Box::new(outcome));
         }
-        script.substitute(request, outcome);
+        if let Some(reply) = script.substitute(request, domain, &mut outcome) {
+            return reply;
+        }
+        ReplyBody::Command(Box::new(outcome))
     }
 }
 
 impl CommandReplyScript {
-    /// Substitutes the reply its command's successful attempts have reached.
-    fn substitute(&mut self, request: &CommandRequest, outcome: &mut CommandOutcome) {
+    /// Substitutes the reply its command's successful attempts have reached: the outcome is
+    /// changed in place, or a reply of another kind is returned to answer the command instead.
+    fn substitute(
+        &mut self,
+        request: &CommandRequest,
+        domain: &DomainName,
+        outcome: &mut CommandOutcome,
+    ) -> Option<ReplyBody> {
         match &self.substitution {
             CommandReplySubstitution::Uncertain => {
                 let cause = match self.references.len() {
@@ -148,9 +211,9 @@ impl CommandReplyScript {
                     2 => UnknownOutcomeCause::NotYetAuthoritative,
                     3 => {
                         self.references.push(request.execution_reference.clone());
-                        return;
+                        return None;
                     }
-                    _ => return,
+                    _ => return None,
                 };
                 self.references.push(request.execution_reference.clone());
                 outcome.disposition = CommandDisposition::OutcomeUnknown(cause);
@@ -158,17 +221,44 @@ impl CommandReplyScript {
                                    authoritative yet"
                     .to_string();
                 outcome.statements.clear();
+                None
             }
-            CommandReplySubstitution::ForeignExecution { foreign } => match self.references.len() {
-                0 => {
-                    let foreign = foreign.clone();
-                    self.references.push(request.execution_reference.clone());
-                    *outcome = Self::foreign_failure(foreign);
+            CommandReplySubstitution::ForeignExecution { foreign } => {
+                match self.references.len() {
+                    0 => {
+                        let foreign = foreign.clone();
+                        self.references.push(request.execution_reference.clone());
+                        *outcome = Self::foreign_failure(foreign);
+                    }
+                    1 => self.references.push(request.execution_reference.clone()),
+                    _ => {}
                 }
-                1 => self.references.push(request.execution_reference.clone()),
-                _ => {}
+                None
+            }
+            CommandReplySubstitution::AnotherKind => match self.references.len() {
+                0 => {
+                    self.references.push(request.execution_reference.clone());
+                    Some(Self::domain_listing(domain))
+                }
+                1 => {
+                    self.references.push(request.execution_reference.clone());
+                    None
+                }
+                _ => None,
             },
         }
+    }
+
+    /// A listing of `domain`, as a server answers a request to list the domains.
+    fn domain_listing(domain: &DomainName) -> ReplyBody {
+        ReplyBody::DomainList(DomainList {
+            domains: vec![DomainInfo {
+                start_version: 1,
+                domain: domain.clone(),
+                status: DomainStatus::Running,
+                pace: DomainPace::Unpaced,
+            }],
+        })
     }
 
     /// The outcome of another execution that failed, as a server answers one: every field this

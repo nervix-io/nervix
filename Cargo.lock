@@ -690,14 +690,14 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.49.1"
-source = "git+https://github.com/glebpom/nats.rs.git?rev=649282d58fb5248ea24e620385c5dabf1bdaa813#649282d58fb5248ea24e620385c5dabf1bdaa813"
+source = "git+https://github.com/nervix-io/nats.rs.git?rev=572ef042d3afaeb2eff67896843599cd7ee5c6f7#572ef042d3afaeb2eff67896843599cd7ee5c6f7"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
  "bytes",
  "futures-util",
  "memchr",
- "nkeys",
+ "nkeys 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "pin-project",
  "portable-atomic",
  "rand 0.10.3",
@@ -6797,10 +6797,12 @@ dependencies = [
  "bolero",
  "bytes",
  "error-stack",
+ "flatbuffers",
  "hyper-util",
  "indexmap 2.14.2",
  "meticulous",
  "nervix-client-wire",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -6808,7 +6810,6 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "nervix-test-environment",
- "rustls",
  "serde",
  "serde_json",
  "shuttle",
@@ -6842,6 +6843,7 @@ dependencies = [
  "nervix-primitives",
  "serde_json",
  "tonic 0.13.1",
+ "url",
  "uuid",
 ]
 
@@ -6960,6 +6962,7 @@ dependencies = [
  "error-stack",
  "humantime",
  "meticulous",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-execution",
  "nervix-model-harness",
@@ -7039,6 +7042,7 @@ dependencies = [
  "hyper-util",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-models",
  "nervix-primitives",
@@ -7209,7 +7213,6 @@ version = "0.1.0-dev"
 dependencies = [
  "async-nats",
  "async-trait",
- "aws-lc-rs",
  "bolero",
  "bytes",
  "crc",
@@ -7219,11 +7222,13 @@ dependencies = [
  "meticulous",
  "nervix-arbitrary",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
- "nkeys",
+ "nkeys 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nkeys 0.4.5 (git+https://github.com/nervix-io/nkeys.git?rev=248dc49a1a8d4ebc47504358cc011f5c26583dfe)",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -7314,6 +7319,7 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "async-trait",
+ "base64 0.22.1",
  "bolero",
  "error-stack",
  "futures-util",
@@ -7343,6 +7349,7 @@ dependencies = [
  "lapin",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7423,6 +7430,7 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7453,6 +7461,7 @@ dependencies = [
  "memchr",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7553,6 +7562,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-crypto"
+version = "0.1.0-dev"
+dependencies = [
+ "aws-lc-rs",
+ "error-stack",
+ "meticulous",
+ "nervix-primitives",
+ "nervix-recovery",
+ "rustls",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nervix-dataflow-graph"
 version = "0.1.0-dev"
 dependencies = [
@@ -7599,6 +7621,7 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.2",
  "meticulous",
+ "nervix-crypto",
  "nervix-primitives",
  "nervix-test-environment",
  "reqwest 0.12.28",
@@ -7662,6 +7685,7 @@ dependencies = [
  "imbl",
  "meticulous",
  "nervix-arbitrary",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-execution",
  "nervix-model-harness",
@@ -7946,7 +7970,6 @@ dependencies = [
  "flate2",
  "futures-util",
  "h2",
- "hdrhistogram",
  "http",
  "http-body-util",
  "httparse",
@@ -7964,9 +7987,11 @@ dependencies = [
  "nervix-backup",
  "nervix-client-core",
  "nervix-client-ffi",
+ "nervix-client-host",
  "nervix-client-wire",
  "nervix-connector-kafka",
  "nervix-consensus",
+ "nervix-crypto",
  "nervix-deadlock",
  "nervix-dns",
  "nervix-execution",
@@ -8040,6 +8065,7 @@ dependencies = [
  "chitchat",
  "chrono",
  "ciborium",
+ "ciborium-ll",
  "clap",
  "clap_complete",
  "criterion 0.5.1",
@@ -8091,6 +8117,7 @@ dependencies = [
  "nervix-connector-websockets",
  "nervix-connector-zeromq",
  "nervix-consensus",
+ "nervix-crypto",
  "nervix-dataflow-graph",
  "nervix-deadlock",
  "nervix-dns",
@@ -8316,6 +8343,7 @@ dependencies = [
  "error-stack",
  "futures-util",
  "gloo-net 0.7.0",
+ "indexmap 2.14.2",
  "js-sys",
  "leptos",
  "meticulous",
@@ -8376,6 +8404,16 @@ dependencies = [
  "log",
  "rand 0.8.8",
  "signatory",
+]
+
+[[package]]
+name = "nkeys"
+version = "0.4.5"
+source = "git+https://github.com/nervix-io/nkeys.git?rev=248dc49a1a8d4ebc47504358cc011f5c26583dfe#248dc49a1a8d4ebc47504358cc011f5c26583dfe"
+dependencies = [
+ "data-encoding",
+ "log",
+ "zeroize",
 ]
 
 [[package]]
@@ -8849,7 +8887,7 @@ dependencies = [
 [[package]]
 name = "openraft"
 version = "0.10.0-alpha.33"
-source = "git+https://github.com/glebpom/openraft.git?rev=f54a099019f2d5090393209942e88eb0701b05f9#f54a099019f2d5090393209942e88eb0701b05f9"
+source = "git+https://github.com/nervix-io/openraft.git?rev=1fa0ac5345475d6f00d219ad55bea39b7f40a87d#1fa0ac5345475d6f00d219ad55bea39b7f40a87d"
 dependencies = [
  "anyerror",
  "backoff-series",

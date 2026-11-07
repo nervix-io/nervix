@@ -99,6 +99,12 @@ subscription belongs to the session that created it and moves through one lifecy
   subscription can still be deleted by name, and its name can be used again once its end has been
   sent; because replies travel ahead of queued subscription frames, that end can reach the client
   after the reply that opens the new generation.
+- **Ended on restoration.** A client that opens a subscription again on a new session names the
+  schema its earlier generation announced. The server refuses that opening as `RelayChanged` when
+  the relay now announces another schema, and as `RelayNotFound` or `DomainNotFound` when the relay
+  or its domain no longer exists. The Rust client, the CLI and every host of the shared C binding
+  then end the subscription with reason `RelayChanged` or `RelayRemoved`, exactly as if the server
+  had ended it while a session held it, and never open it again on their own.
 - **Deleted.** `DELETE SUBSCRIPTION`, or the end of the session, stops the subscription at once
   even while its client reads nothing, and discards the frames it still has queued. Nothing about
   that generation follows the reply that deleted it.
@@ -294,7 +300,7 @@ Inside a route expression, completion also offers ordinary VM builtins. For a ju
 `input.<field>` resolves through the input relay's declared schema, and a `SET` field resolves
 through the output relay's declared schema. Qualified `udf::<name>` calls use the domain's UDF
 models, including the session's queued changes. In an ingestor construction expression,
-`read_header` and `read_headers` are offered only when the selected source supports header reads.
+`read_header` and `read_headers` are offered only when the selected ingestor supports header reads.
 In an emitter `INVOKE` expression, `write_header` is offered only when the selected emitter supports
 header writes.
 
@@ -409,9 +415,9 @@ Plexus. It carries a semantic target, typed dependent selections, search text, a
 through 100, and an optional page cursor. Targets resolve domain pace, placement policy, and a
 domain's internal schemas, each wire-schema format, branches, relays, codecs, VHOSTs, signaling
 protocols, relay fields, codec output fields, resource catalogs, and completed resource versions.
-Ingestor controls additionally ask for a source reference by connector and entity, a decoding
+Ingestor controls additionally ask for an ingestor reference by connector and entity, a decoding
 codec, relays with exact branch declarations, and fields of a selected branch's key schema. Each
-source target requires a domain and returns what its entity reads through: clients of its
+ingestor target requires a domain and returns what its entity reads through: clients of its
 connector, or for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` the endpoints of that `TYPE`. The
 ingestor codec target requires a domain and filters out codecs without decoding.
 An unbranched relay target requires a domain and also supplies ingestor error relay choices, while

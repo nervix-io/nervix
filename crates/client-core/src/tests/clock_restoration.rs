@@ -12,8 +12,8 @@ use std::{num::NonZeroU64, time::Duration};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClientFrame, ClientMessage, ClientRequest, DomainClockAttachDisposition,
-    DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockTicked, EncodedFrame, ReplyBody, RequestId, ServerFrame,
+    DomainClockAttachOutcome, DomainClockAttachRefusal, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainClockTicked, EncodedFrame, ReplyBody, RequestId, ServerFrame,
 };
 use nervix_models::{
     DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
@@ -23,8 +23,11 @@ use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc};
 
 use super::{DEADLINE, client_on, detached_exchange, domain, reply_frame, verified};
 use crate::{
-    Client, ClientError, DomainClockEvent, DomainClockInterruption, DomainClockRestorationFailure,
-    exchange::{Exchange, ExchangeReader, PendingReplies, ReaderFlow, SESSION_LIMITS},
+    Client, ClientError, DomainClockEvent, DomainClockInterruption, DomainClockRestorationCause,
+    DomainClockRestorationFailure,
+    exchange::{
+        Exchange, ExchangeReader, PendingReplies, ReaderFlow, SESSION_LIMITS, SessionEvents,
+    },
 };
 
 /// One exchange the test serves: the frames the client sends on it, and the reader the client
@@ -40,7 +43,7 @@ impl ServedExchange {
     fn connect() -> (Client, Self) {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let exchange = detached_exchange(frames, pending.clone());
+        let exchange = detached_exchange(frames, pending.clone(), SessionEvents::new().emitters);
         let reader = ExchangeReader::new(
             pending,
             exchange.emitters.clone(),
@@ -55,10 +58,8 @@ impl ServedExchange {
     fn reopen(client: &Client) -> (Exchange, Self) {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let mut exchange = detached_exchange(frames, pending.clone());
         let emitters = client.inner.events.emitters.clone();
-        exchange.generation = emitters.begin_generation();
-        exchange.emitters = emitters.clone();
+        let exchange = detached_exchange(frames, pending.clone(), emitters.clone());
         let reader = ExchangeReader::new(pending, emitters, exchange.generation.clone());
         (exchange, Self { requests, reader })
     }
@@ -160,9 +161,10 @@ fn attached(clock: DomainClockObservation) -> ReplyBody {
     })
 }
 
+/// The reply of a session that holds a transaction to an attach.
 fn refused_attach(message: &str) -> ReplyBody {
     ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
-        disposition: DomainClockAttachDisposition::Failed,
+        disposition: DomainClockAttachDisposition::Refused(DomainClockAttachRefusal::InTransaction),
         message: message.to_string(),
     })
 }
@@ -292,6 +294,7 @@ async fn a_detach_sent_while_a_refused_restoration_waits_releases_the_clock_for_
         next_event(&client).await,
         DomainClockEvent::RestorationFailed(DomainClockRestorationFailure {
             domain: domain("tenant"),
+            cause: DomainClockRestorationCause::InTransaction,
             message: "the session holds a transaction".to_string(),
             retry_after: Duration::from_secs(1),
         })

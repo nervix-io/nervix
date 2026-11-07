@@ -26,7 +26,7 @@ Feature: NATS ingestion
           'addr' = '{{nats_addr}}'
         };
         CREATE NATS SUBJECT INGESTOR nats_notifications
-        FROM nats_main SUBJECT 'notifications_{{test_id}}' QUEUE GROUP 'nats_notifications_group_{{test_id}}' INSTANCES <instances> MODE NO ACK
+        FROM nats_main SUBJECT '<subscribe_subject>' QUEUE GROUP 'nats_notifications_group_{{test_id}}' INSTANCES <instances> MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -38,11 +38,11 @@ Feature: NATS ingestion
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
-    And NATS message is published to subject "notifications_{{test_id}}"
+    And NATS message is published to subject "<publish_subject>"
       """
       {"user_id":42}
       """
-    And NATS message is published to subject "notifications_{{test_id}}"
+    And NATS message is published to subject "<publish_subject>"
       """
       {"user_id":43}
       """
@@ -53,10 +53,12 @@ Feature: NATS ingestion
       """
 
     Examples:
-      | cluster_size | instances | replica_count |
-      | 1            | 1         | 0             |
-      | 1            | 2         | 0             |
-      | 3            | 2         | 1             |
+      | cluster_size | instances | replica_count | subscribe_subject           | publish_subject                      |
+      | 1            | 1         | 0             | notifications_{{test_id}}   | notifications_{{test_id}}            |
+      | 1            | 2         | 0             | notifications_{{test_id}}   | notifications_{{test_id}}            |
+      | 3            | 2         | 1             | notifications_{{test_id}}   | notifications_{{test_id}}            |
+      | 1            | 1         | 0             | notifications_{{test_id}}.* | notifications_{{test_id}}.created    |
+      | 3            | 2         | 1             | notifications_{{test_id}}.> | notifications_{{test_id}}.created.eu |
 
   Scenario Outline: NATS ingestor reports transient source failures and recovers
     Given NATS is running
@@ -100,7 +102,7 @@ Feature: NATS ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "nats_notifications" leaves fault mode
     Then within "10s" repeatedly publishing NATS message to subject "notifications_reconnect_{{test_id}}" yields a relay subscription payload
@@ -121,7 +123,7 @@ Feature: NATS ingestion
   # The ingestor reads through an endpoint the scenario controls, so the NATS server can go down for
   # this ingestor alone while the other scenarios keep sharing it. A lost connection ends the
   # subscription and the host reopens it on its reconnect cadence: DESCRIBE INGESTOR shows the failed
-  # reconnects and a growing delay. A successful subscription makes the source ready; the previous
+  # reconnects and a growing delay. A successful subscription makes the ingestor ready; the previous
   # failure and backoff remain until the next accepted batch proves progress.
   @nats_ingestor_lost_connection
   Scenario Outline: NATS ingestor reports a lost server connection and reconnects on its reconnect cadence

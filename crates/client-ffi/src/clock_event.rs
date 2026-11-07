@@ -15,7 +15,9 @@
 
 use std::mem::ManuallyDrop;
 
-use nervix_client_host::{ClockEndReason, ClockEvent, ClockEventKind, ClockState, Failure};
+use nervix_client_host::{
+    ClockEndReason, ClockEvent, ClockEventKind, ClockState, Failure, RestorationCause,
+};
 use nervix_primitives::sync::Arc;
 
 use crate::abi;
@@ -43,6 +45,48 @@ pub unsafe extern "C" fn nx_clock_event_domain(
         let event = abi::accessor(event);
         abi::write_bytes(domain, domain_len, event.domain().as_str().as_bytes());
     }
+}
+
+/// # Safety
+///
+/// `event` is live; `message` and `message_len` are writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_clock_event_restoration_message(
+    event: *const ClockEvent,
+    message: *mut *const u8,
+    message_len: *mut usize,
+) -> *mut Failure {
+    // SAFETY: the caller guarantees a live event and writable out-parameters.
+    abi::outcome((|| unsafe {
+        abi::require_out(message, "message")?;
+        abi::require_out(message_len, "message_len")?;
+        let value = abi::handle(event, "event")?.restoration_message()?;
+        abi::write_bytes(message, message_len, value.as_bytes());
+        Ok(())
+    })())
+}
+
+/// # Safety
+///
+/// `event` is live; `retry_after_nanos` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_clock_event_restoration_retry_after(
+    event: *const ClockEvent,
+    retry_after_nanos: *mut u64,
+) -> *mut Failure {
+    // SAFETY: the caller guarantees a live event and a writable out-parameter.
+    abi::outcome((|| unsafe {
+        abi::require_out(retry_after_nanos, "retry_after_nanos")?;
+        let value = abi::handle(event, "event")?.restoration_retry_after()?;
+        let nanos = u64::try_from(value.as_nanos()).map_err(|_| {
+            Failure::new(
+                nervix_client_host::FailureKind::Protocol,
+                "restoration wait exceeds u64 nanoseconds",
+            )
+        })?;
+        abi::write(retry_after_nanos, nanos);
+        Ok(())
+    })())
 }
 
 /// # Safety
@@ -211,6 +255,33 @@ unsafe fn write_end_reason(
     let value = unsafe { abi::handle(event, "event") }?.end_reason()?;
     // SAFETY: `reason` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(reason, value) };
+    Ok(())
+}
+
+/// # Safety
+///
+/// `event` is a live event; a non-null `cause` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_clock_event_restoration_cause(
+    event: *const ClockEvent,
+    cause: *mut RestorationCause,
+) -> *mut Failure {
+    // SAFETY: the header's contract is this function's.
+    abi::outcome(unsafe { write_restoration_cause(event, cause) })
+}
+
+/// # Safety
+///
+/// As [`nx_clock_event_restoration_cause`].
+unsafe fn write_restoration_cause(
+    event: *const ClockEvent,
+    cause: *mut RestorationCause,
+) -> Result<(), Failure> {
+    abi::require_out(cause, "cause")?;
+    // SAFETY: the caller guarantees a live event.
+    let value = unsafe { abi::handle(event, "event") }?.restoration_cause()?;
+    // SAFETY: `cause` is non-null, and the caller guarantees it is writable.
+    unsafe { abi::write(cause, value) };
     Ok(())
 }
 

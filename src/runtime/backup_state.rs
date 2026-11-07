@@ -362,7 +362,7 @@ impl From<BranchInstanceSnapshotEntry<Option<BranchKey>>> for BackupBranchLifecy
     }
 }
 
-/// One Kafka source partition's next offset in a captured checkpoint.
+/// One Kafka ingestor partition's next offset in a captured checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackupKafkaPartitionOffset {
     pub(crate) topic: String,
@@ -426,14 +426,17 @@ impl Runtime {
             .revision
             .nodes
             .iter()
-            .filter(|(entity, node)| {
-                Self::node_has_branch_lifecycle(entity.kind) && node.is_primary_on(&local_node_id)
+            .filter(|(entity, _)| Self::node_has_branch_lifecycle(entity.kind))
+            .flat_map(|(entity, node)| {
+                node.units_executing_on(&local_node_id)
+                    .into_iter()
+                    .map(|unit| NodeUnitRef::new(entity.clone(), unit))
             })
-            .map(|(entity, _)| entity.clone())
             .collect::<Vec<_>>();
         drop(execution);
 
-        for entity in entities {
+        for member in entities {
+            let entity = &member.node;
             nervix_primitives::task::consume_budget().await;
             let snapshot = if entity.kind.is_processor() {
                 let commands = {
@@ -443,7 +446,7 @@ impl Runtime {
                             domain.as_str()
                         ))
                     })?;
-                    let task = execution.node_tasks.get(&entity).ok_or_else(|| {
+                    let task = execution.node_tasks.get(entity).ok_or_else(|| {
                         OwnershipHandoffError::checkpoint(format!(
                             "{} '{}' has no local task during backup checkpoint",
                             entity.kind.as_str(),
@@ -455,7 +458,7 @@ impl Runtime {
                 ScheduledNodeTask::checkpoint_via(&commands, ProcessorCheckpointPurpose::BackupCut)
                     .await?
             } else {
-                self.checkpoint_entrypoint_branch_lifecycle(domain, &entity)
+                self.checkpoint_entrypoint_branch_lifecycle(domain, entity, member.unit)
                     .await?
                     .ok_or_else(|| {
                         OwnershipHandoffError::checkpoint(format!(
@@ -466,11 +469,12 @@ impl Runtime {
                     })?
             };
             let placement = self
-                .state_placement(
+                .state_placement_for_unit(
                     domain,
                     RuntimeStateKind::BranchLru,
                     entity.kind,
                     entity.identifier.clone(),
+                    member.unit,
                     None,
                 )
                 .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
@@ -1226,7 +1230,7 @@ mod tests {
         primaries.extend(
             entities
                 .into_iter()
-                .map(|node| NodeUnitRef::new(node, nervix_models::Unit::Single)),
+                .map(|node| NodeUnitRef::new(node, nervix_models::Unit::SINGLE)),
         );
         primaries
     }
@@ -1283,7 +1287,7 @@ mod tests {
             state: RuntimeState::BranchLru {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         }
     }
@@ -1294,7 +1298,7 @@ mod tests {
                 schema: SchemaFingerprint::from_digest([4; 32]),
                 generation: WasmStateGeneration::FIRST,
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: super::super::string_branch_key("tenant", tenant),
             ..lifecycle.clone()
         }
@@ -1350,7 +1354,7 @@ mod tests {
                 .assured("lifecycle persists");
             let placement = RuntimeStatePlacement {
                 state: checkpoint.state,
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 branch_key: super::super::string_branch_key("tenant", "alpha"),
                 ..lifecycle
             };
@@ -1449,7 +1453,7 @@ mod tests {
                 .assured("lifecycle persists");
             let placement = RuntimeStatePlacement {
                 state: RuntimeState::Deduplicator { schema },
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 branch_key: super::super::string_branch_key("tenant", "alpha"),
                 ..lifecycle
             };
@@ -1531,7 +1535,7 @@ mod tests {
             state: RuntimeState::WindowProcessor {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: super::super::string_branch_key("tenant", "alpha"),
             ..lifecycle.clone()
         };
@@ -1914,7 +1918,7 @@ mod tests {
             state: RuntimeState::Deduplicator {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: super::super::string_branch_key("tenant", "alpha"),
         }
     }
@@ -1928,7 +1932,7 @@ mod tests {
             state: RuntimeState::WindowProcessor {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: super::super::string_branch_key("tenant", "alpha"),
         }
     }

@@ -1,4 +1,4 @@
-//! RabbitMQ queue entities: the queue a source consumes and the queue an emitter publishes to.
+//! RabbitMQ queue entities: the queue an ingestor consumes and the queue an emitter publishes to.
 //!
 //! Layer: engines and infrastructure.
 //!

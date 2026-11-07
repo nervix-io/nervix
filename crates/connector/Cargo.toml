@@ -1,5 +1,5 @@
 [package]
-description = "The contract between the Nervix host and its connector crates: source and sink contracts, host handles and boundary values"
+description = "The contract between the Nervix host and its connector crates: ingestor and emitter contracts, host handles and boundary values"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector"
@@ -25,6 +25,7 @@ base64 = { workspace = true }
 error-stack = { workspace = true }
 humantime = { workspace = true }
 meticulous = { workspace = true }
+nervix-crypto = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-models = { workspace = true }

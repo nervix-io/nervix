@@ -15,9 +15,15 @@ mod cancellation;
 #[cfg(not(feature = "shuttle"))]
 mod clock_restoration;
 #[cfg(not(feature = "shuttle"))]
+mod foreign_execution;
+#[cfg(not(feature = "shuttle"))]
 mod host_stack;
 #[cfg(not(feature = "shuttle"))]
+mod reply_kind;
+#[cfg(not(feature = "shuttle"))]
 mod reports;
+mod request_kinds;
+mod requests;
 #[cfg(not(feature = "shuttle"))]
 mod restoration;
 #[cfg(not(feature = "shuttle"))]
@@ -40,13 +46,14 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, ClientFrame, ClientMessage, ClientRequest,
     CommandDisposition, Diagnostic, DomainInfo, DomainList, DomainsObserved, EncodedFrame,
-    LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints, NoticeLevel, OutcomeOrigin,
-    Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection, RowSchema,
-    ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
+    LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints, NoticeKind, NoticeLevel,
+    OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection,
+    RowSchema, ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
     SessionLimits, SourceSpan, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
-    SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
-    SubscriptionType, UnknownOutcomeCause, UnsubscribeDisposition, UnsubscribeOutcome,
-    UploadDisposition, UploadFailure, UploadReply, VerifiedFrame, WireDecodeError,
+    SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRefusal,
+    SubscriptionRowsEncoder, SubscriptionType, UnknownOutcomeCause, UnsubscribeDisposition,
+    UnsubscribeOutcome, UploadDisposition, UploadFailure, UploadReply, VerifiedFrame,
+    WireDecodeError,
 };
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainName, DomainPace, DomainStatus, FieldName,
@@ -59,15 +66,15 @@ use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc, watch};
 use tonic::{Status, transport::Channel};
 use url::Url;
 
+use self::requests::{command_request, listing, register, subscribe_request, unsubscribe_request};
 use crate::{
     Client, ClientError, CommandOutcome, ConnectOptions, RequestKind, ResourceUploadOutcome,
     ServerEvent, SubscriptionEvent, SubscriptionRequest, TlsRequirement,
     connection::{GrpcConnector, ServerDirectory},
     exchange::{
         EventQueue, EventQueueError, EventTargets, Exchange, ExchangeReader, ExchangeRequests,
-        PendingReplies, ReaderFlow, RegisteredRequest, SERVER_NOTICE_BYTES, SESSION_LIMITS,
-        SUBSCRIPTION_EVENT_BYTES, SUBSCRIPTION_RETAINED_BYTES, SUBSCRIPTIONS_RETAINED_IN_FULL,
-        SessionEvents,
+        PendingReplies, ReaderFlow, SERVER_NOTICE_BYTES, SESSION_LIMITS, SUBSCRIPTION_EVENT_BYTES,
+        SUBSCRIPTION_RETAINED_BYTES, SUBSCRIPTIONS_RETAINED_IN_FULL, SessionEvents,
     },
     outcome::Routing,
     split_query_statements,
@@ -241,6 +248,7 @@ fn notice_frame(message: &str) -> VerifiedFrame<ServerFrame> {
     verified(
         ServerNotice {
             level: NoticeLevel::Info,
+            kind: NoticeKind::Membership,
             message: message.to_string(),
         }
         .encode(&SESSION_LIMITS)
@@ -274,16 +282,19 @@ fn ended_frame(handle: SubscriptionHandle) -> VerifiedFrame<ServerFrame> {
     )
 }
 
-/// An exchange with no server behind it: its frames go nowhere, and its reader has finished.
+/// An exchange served by hand, whose production reader waits until the exchange ends.
 fn detached_exchange(
     frames: mpsc::Sender<EncodedFrame<ClientFrame>>,
     pending: Arc<Mutex<PendingReplies>>,
+    emitters: EventTargets,
 ) -> Exchange {
-    let emitters = SessionEvents::new().emitters;
     let generation = emitters.begin_generation();
+    let reader = ExchangeReader::new(pending.clone(), emitters.clone(), generation.clone());
     Exchange {
         requests: Arc::new(ExchangeRequests { frames, pending }),
-        reader: nervix_primitives::task::spawn(std::future::ready(())),
+        reader: Some(nervix_primitives::task::spawn(
+            reader.run(nervix_primitives::stream::pending()),
+        )),
         emitters,
         generation,
         channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
@@ -317,7 +328,7 @@ pub(crate) fn test_client(domain_name: &str) -> Client {
     drop(outbound);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
     client_on(
-        detached_exchange(frames, pending),
+        detached_exchange(frames, pending, SessionEvents::new().emitters),
         Some(domain(domain_name)),
     )
 }
@@ -345,7 +356,7 @@ impl Loopback {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
         let client = client_reaching(
-            detached_exchange(frames, pending.clone()),
+            detached_exchange(frames, pending.clone(), SessionEvents::new().emitters),
             session_domain,
             servers,
         );
@@ -368,7 +379,7 @@ impl Loopback {
         ClientMessage::decode(&frame).assured("a request the client encoded decodes")
     }
 
-    /// Answers a request the way the exchange's reader would.
+    /// Completes a waiter directly; dispatcher witnesses separately route encoded frames.
     async fn answer(&self, request: RequestId, body: ReplyBody) {
         let waiter = self
             .pending
@@ -385,10 +396,8 @@ impl Loopback {
     async fn replace_exchange(&mut self) {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let mut replacement = detached_exchange(frames, pending.clone());
         let emitters = self.client.inner.events.emitters.clone();
-        replacement.generation = emitters.begin_generation();
-        replacement.emitters = emitters;
+        let replacement = detached_exchange(frames, pending.clone(), emitters);
         self.requests = requests;
         self.pending = pending;
         self.client.install(replacement).await;
@@ -431,13 +440,6 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
         leadership: observed_leadership,
         domains: observed_domains,
     }
-}
-
-async fn register(pending: &Mutex<PendingReplies>) -> RegisteredRequest {
-    pending
-        .lock()
-        .register()
-        .assured("an open exchange registers requests")
 }
 
 #[test]
@@ -602,7 +604,7 @@ async fn an_older_inspection_cannot_replace_a_newer_queue_preview() {
 #[nervix_primitives::test]
 async fn an_inspected_report_arrives_typed_beside_the_callers_own_binding() {
     let mut fixture = reader_fixture(4);
-    let request = register(&fixture.pending).await;
+    let request = register(&fixture.pending, &command_request("describe-1")).await;
     let inspected = TransactionStatus::new(
         "tx-inspected".to_string(),
         domain("tenant"),
@@ -657,7 +659,7 @@ async fn an_inspected_report_arrives_typed_beside_the_callers_own_binding() {
 #[nervix_primitives::test]
 async fn a_failed_inspected_transaction_names_its_failing_operation() {
     let mut fixture = reader_fixture(4);
-    let request = register(&fixture.pending).await;
+    let request = register(&fixture.pending, &command_request("describe-1")).await;
     let failing_operation = TransactionOperationNumber::new(
         NonZeroUsize::new(1).assured("the first operation number is non-zero"),
     );
@@ -730,7 +732,7 @@ async fn a_frame_the_contract_does_not_describe_ends_the_exchange() {
     );
 
     let fixture = reader_fixture(4);
-    let request = register(&fixture.pending).await;
+    let request = register(&fixture.pending, &ClientRequest::ListDomains).await;
     let frames =
         nervix_primitives::stream::iter([Ok(undecodable), Ok(notice_frame("never routed"))]);
     fixture.reader.run(frames).await;
@@ -740,7 +742,7 @@ async fn a_frame_the_contract_does_not_describe_ends_the_exchange() {
         "the waiter observes the closed session"
     );
     assert!(
-        fixture.pending.lock().register().is_none(),
+        fixture.pending.lock().register(listing()).is_none(),
         "an ended exchange takes no further requests"
     );
     assert!(
@@ -770,8 +772,8 @@ async fn connect_rejects_plain_server_when_tls_is_required() {
 #[nervix_primitives::test]
 async fn response_reordering_cannot_take_another_requests_waiter() {
     let mut fixture = reader_fixture(4);
-    let domains_request = register(&fixture.pending).await;
-    let command_request = register(&fixture.pending).await;
+    let domains_request = register(&fixture.pending, &ClientRequest::ListDomains).await;
+    let command_request = register(&fixture.pending, &command_request("command-1")).await;
 
     assert_eq!(
         fixture
@@ -810,7 +812,7 @@ async fn saturated_event_consumer_cannot_block_a_command_reply() {
         notices: _undrained_notices,
         ..
     } = reader_fixture(1);
-    let command_request = register(&pending).await;
+    let command_request = register(&pending, &command_request("command-1")).await;
     let command_id = command_request.request_id;
     reader.route(notice_frame("undrained")).await;
 
@@ -838,7 +840,7 @@ async fn saturated_event_consumer_cannot_block_a_command_reply() {
 #[nervix_primitives::test]
 async fn overflowing_a_notice_stream_is_reported_without_losing_replies() {
     let mut fixture = reader_fixture(1);
-    let request = register(&fixture.pending).await;
+    let request = register(&fixture.pending, &command_request("command-1")).await;
     fixture.reader.route(notice_frame("first")).await;
     fixture.reader.route(notice_frame("second")).await;
     fixture
@@ -878,8 +880,8 @@ async fn a_notice_overflow_is_reported_once_and_later_notices_follow() {
 #[nervix_primitives::test]
 async fn overflowing_subscription_rows_cannot_delay_a_command_reply() {
     let mut fixture = reader_fixture(1);
-    let subscribe = register(&fixture.pending).await;
-    let command = register(&fixture.pending).await;
+    let subscribe = register(&fixture.pending, &subscribe_request()).await;
+    let command = register(&fixture.pending, &command_request("command-1")).await;
     let live = subscription("live", 1);
     fixture
         .reader
@@ -1057,6 +1059,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
         &generation,
         ServerEvent {
             level: NoticeLevel::Info,
+            kind: NoticeKind::Leadership,
             message: "oversized".to_string(),
         },
         129,
@@ -1076,7 +1079,9 @@ async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
         frames,
         pending: fixture.pending.clone(),
     };
-    let mut request = exchange.register().assured("the exchange is open");
+    let mut request = exchange
+        .register_for(&ClientRequest::ListDomains)
+        .assured("the exchange is open");
     fixture
         .reader
         .run(nervix_primitives::stream::iter([Err(
@@ -1095,17 +1100,17 @@ async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
 async fn request_identities_start_at_one_and_are_never_reused() {
     let mut pending = PendingReplies::new();
     let first = pending
-        .register()
+        .register(listing())
         .assured("an open exchange registers requests");
     let second = pending
-        .register()
+        .register(listing())
         .assured("an open exchange registers requests");
     assert_eq!(first.request_id, request_id(1));
     assert_eq!(second.request_id, request_id(2));
 
     assert!(pending.take(second.request_id).is_some());
     let third = pending
-        .register()
+        .register(listing())
         .assured("an open exchange registers requests");
     assert_eq!(
         third.request_id,
@@ -1222,36 +1227,37 @@ async fn an_exchange_that_used_every_identity_takes_no_further_requests() {
     let mut pending = PendingReplies::Open {
         next_request_id: Some(RequestId::new(NonZeroU64::MAX)),
         waiters: ahash::HashMap::default(),
+        reader_ending: nervix_primitives::sync::watch::channel(()).0,
     };
     let last = pending
-        .register()
+        .register(listing())
         .assured("the last identity is still free");
     assert_eq!(last.request_id, RequestId::new(NonZeroU64::MAX));
-    assert!(pending.register().is_none());
+    assert!(pending.register(listing()).is_none());
 }
 
 #[nervix_primitives::test]
 async fn closing_an_exchange_drops_every_waiter_once() {
     let mut pending = PendingReplies::new();
     let first = pending
-        .register()
+        .register(listing())
         .assured("an open exchange registers requests");
     let second = pending
-        .register()
+        .register(listing())
         .assured("an open exchange registers requests");
 
     pending.close();
 
     assert!(first.reply.await.is_err(), "the first waiter is dropped");
     assert!(second.reply.await.is_err(), "the second waiter is dropped");
-    assert!(pending.register().is_none());
+    assert!(pending.register(listing()).is_none());
     assert!(pending.take(first.request_id).is_none());
 }
 
 #[nervix_primitives::test]
 async fn a_reply_no_request_waits_for_is_dropped() {
     let mut fixture = reader_fixture(4);
-    let mut waiting = register(&fixture.pending).await;
+    let mut waiting = register(&fixture.pending, &ClientRequest::ListDomains).await;
 
     let flow = fixture
         .reader
@@ -1282,7 +1288,7 @@ async fn a_transferred_reply_completes_its_waiter() {
     })
     .assured("the test limits pass their checks");
     let mut fixture = reader_fixture(4);
-    let request = register(&fixture.pending).await;
+    let request = register(&fixture.pending, &command_request("command-1")).await;
     let message = "x".repeat(10_000);
     let delivery = Reply {
         request_id: request.request_id,
@@ -1311,7 +1317,7 @@ async fn a_transferred_reply_completes_its_waiter() {
 #[nervix_primitives::test]
 async fn subscription_rows_render_against_the_schema_their_subscription_announced() {
     let mut fixture = reader_fixture(8);
-    let request = register(&fixture.pending).await;
+    let request = register(&fixture.pending, &subscribe_request()).await;
     let live = subscription("live", 1);
 
     fixture
@@ -1362,8 +1368,8 @@ async fn subscription_rows_render_against_the_schema_their_subscription_announce
 #[nervix_primitives::test]
 async fn an_unsubscribe_reply_stops_the_subscription_rows() {
     let mut fixture = reader_fixture(8);
-    let subscribe = register(&fixture.pending).await;
-    let unsubscribe = register(&fixture.pending).await;
+    let subscribe = register(&fixture.pending, &subscribe_request()).await;
+    let unsubscribe = register(&fixture.pending, &unsubscribe_request()).await;
     let live = subscription("live", 1);
 
     fixture
@@ -1503,7 +1509,7 @@ async fn the_client_reads_the_latest_observations_of_its_exchange() {
 #[nervix_primitives::test]
 async fn a_session_ending_frame_closes_the_waiters_of_its_exchange() {
     let fixture = reader_fixture(4);
-    let request = register(&fixture.pending).await;
+    let request = register(&fixture.pending, &ClientRequest::ListDomains).await;
     let ending = SessionEnding {
         reason: SessionEndReason::ServerShuttingDown,
     }
@@ -1620,12 +1626,14 @@ fn wire_outcomes_convert_into_public_outcomes() {
 
     let server = ServerEvent::from(ServerNotice {
         level: NoticeLevel::Warning,
+        kind: NoticeKind::ControlPlane,
         message: "watch out".to_string(),
     });
     assert_eq!(
         server,
         ServerEvent {
             level: NoticeLevel::Warning,
+            kind: NoticeKind::ControlPlane,
             message: "watch out".to_string(),
         }
     );
@@ -1913,7 +1921,10 @@ async fn a_subscription_needs_a_selected_domain() {
     let (frames, outbound) = mpsc::channel(1);
     drop(outbound);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
-    let client = client_on(detached_exchange(frames, pending), None);
+    let client = client_on(
+        detached_exchange(frames, pending, SessionEvents::new().emitters),
+        None,
+    );
 
     let error = client
         .subscribe(&SubscriptionRequest::new("live", "orders"))
@@ -2001,7 +2012,7 @@ async fn subscription_diagnostics_address_the_query_the_caller_passed() {
         .answer(
             request.request_id,
             ReplyBody::Subscribe(SubscribeOutcome {
-                disposition: SubscribeDisposition::Failed,
+                disposition: SubscribeDisposition::Refused(SubscriptionRefusal::RelayNotFound),
                 message: "relay 'order' does not exist".to_string(),
                 diagnostics: vec![
                     Diagnostic {
@@ -2185,7 +2196,7 @@ async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exc
         .answer(
             first_restore.request_id,
             ReplyBody::Subscribe(SubscribeOutcome {
-                disposition: SubscribeDisposition::Failed,
+                disposition: SubscribeDisposition::Refused(SubscriptionRefusal::Unavailable),
                 message: "relay is starting".to_string(),
                 diagnostics: Vec::new(),
             }),
@@ -2623,26 +2634,6 @@ async fn an_unknown_outcome_is_recovered_with_the_same_execution_reference() {
 }
 
 #[nervix_primitives::test]
-async fn a_command_reply_for_another_execution_cannot_claim_success() {
-    let mut loopback = Loopback::new(Some(domain("tenant")));
-    let client = loopback.client.clone();
-    let execution =
-        nervix_primitives::task::spawn(async move { client.execute("SHOW CLUSTER STATUS;").await });
-    let request = loopback.next_request().await;
-    loopback
-        .answer(
-            request.request_id,
-            command_reply(completed(), "wrong execution"),
-        )
-        .await;
-    let result = execution.await.assured("the command task completes");
-    assert!(
-        result.is_err(),
-        "a completed reply with another durable identity is not proof for this command"
-    );
-}
-
-#[nervix_primitives::test]
 async fn cancelling_a_command_releases_its_pending_reply() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
@@ -2883,6 +2874,7 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
     let generation = client.inner.exchange.lock().await.generation.clone();
     let notice = |message: &str| ServerEvent {
         level: NoticeLevel::Warning,
+        kind: NoticeKind::Runtime,
         message: message.to_string(),
     };
     let notices = &client.inner.events.emitters.notices;

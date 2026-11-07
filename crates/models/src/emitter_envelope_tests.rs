@@ -58,6 +58,8 @@ fn property(name: &str) -> EnvelopeProperty {
 /// An envelope that writes every clause kind once.
 fn every_clause() -> EmitterEnvelope {
     EmitterEnvelope {
+        key: Some(text("key")),
+        partition_from_branch: true,
         persistent: true,
         mandatory: true,
         retain: true,
@@ -121,6 +123,8 @@ fn every_clause_and_property_its_entity_declares_is_admitted() {
 fn only(kind: EnvelopeClauseKind) -> EmitterEnvelope {
     let mut envelope = EmitterEnvelope::default();
     match kind {
+        EnvelopeClauseKind::Key => envelope.key = Some(text("key")),
+        EnvelopeClauseKind::PartitionFromBranch => envelope.partition_from_branch = true,
         EnvelopeClauseKind::Persistent => envelope.persistent = true,
         EnvelopeClauseKind::Mandatory => envelope.mandatory = true,
         EnvelopeClauseKind::Retain => envelope.retain = true,
@@ -411,7 +415,7 @@ fn an_emitter_statement_writes_its_envelope_after_its_payload() {
     // before the construction a statement would write and the emitter's batching and flush.
     assert_eq!(
         emitter.to_canonical_plexus().expect("the emitter renders"),
-        "CREATE ATTACHED ZEROMQ PUSH EMITTER publish_events\n  FROM events\n  TO zeromq_main\n    \
+        "CREATE ZEROMQ PUSH EMITTER publish_events\n  FROM events\n  ATTACHED\n  TO zeromq_main\n    \
          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s\n    ENCODE USING events_codec\n    \
          PERSISTENT\n    MESSAGE ID 'id'\n    PROPERTIES {\n      'content_type' = \
          'application/json',\n      'priority' = 5\n    }\n  FLUSH IMMEDIATE\n  ON MESSAGE ERROR \

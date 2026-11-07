@@ -15,8 +15,9 @@ CREATE BRANCH tenant SCHEMA tenant_schema TTL 5m;
 CREATE RELAY input SCHEMA input_schema BRANCHED BY tenant CAPACITY 1;
 CREATE RELAY output SCHEMA output_schema BRANCHED BY tenant CAPACITY 1;
 
-CREATE ATTACHED INFERENCER batch_score_messages
+CREATE INFERENCER batch_score_messages
   FROM input
+  ATTACHED
   USING RESOURCE inference VERSION 1
   FILE 'batch-score.onnx'
   INPUTS {

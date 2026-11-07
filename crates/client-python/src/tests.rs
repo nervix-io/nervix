@@ -829,3 +829,71 @@ gc.collect()
     );
     server.ends(&mut exchange);
 }
+
+#[test]
+fn an_ended_restoration_and_a_refused_one_say_why() {
+    let handle = SubscriptionHandle {
+        name: name("live"),
+        generation: NonZeroU64::new(3).assured("three is non-zero"),
+    };
+    let ended = SubscriptionEvent::Ended(nervix_client_core::SubscriptionEnded {
+        subscription: handle.clone(),
+        reason: nervix_client_core::wire::SubscriptionEndReason::RelayChanged,
+        message: "relay 'orders' was redefined".to_string(),
+    });
+    let refused =
+        SubscriptionEvent::RestorationFailed(nervix_client_core::SubscriptionRestorationFailure {
+            subscription: handle,
+            cause: nervix_client_core::SubscriptionRestorationCause::InTransaction,
+            message: "the session holds a transaction".to_string(),
+            retry_after: std::time::Duration::from_secs(2),
+        });
+    let clock_refused = nervix_client_core::DomainClockEvent::RestorationFailed(
+        nervix_client_core::DomainClockRestorationFailure {
+            domain: name("simulation"),
+            cause: nervix_client_core::DomainClockRestorationCause::Rejected(
+                nervix_client_core::wire::RequestRejection::TooManyRequestsInFlight,
+            ),
+            message: "the session already has 64 requests in flight".to_string(),
+            retry_after: std::time::Duration::from_secs(1),
+        },
+    );
+    run_with(
+        c"
+assert ended.kind == nx.EventKind.ENDED
+assert ended.end_reason == nx.EndReason.RELAY_CHANGED
+assert ended.restoration_failure is None
+
+assert refused.kind == nx.EventKind.RESTORATION_FAILED
+failure = refused.restoration_failure
+assert failure.cause == nx.RestorationCause.IN_TRANSACTION
+assert failure.message == 'the session holds a transaction'
+assert failure.retry_after_nanos == 2_000_000_000
+try:
+    refused.end_reason
+except nx.TypeMismatchError:
+    pass
+else:
+    raise AssertionError('a restoration failure carries no end reason')
+
+assert clock_refused.kind == nx.ClockEventKind.RESTORATION_FAILED
+assert clock_refused.restoration_failure.cause == nx.RestorationCause.REJECTED
+",
+        |py, globals| {
+            let ended = host::Event::new(ended).assured("an end carries no rows");
+            let refused = host::Event::new(refused).assured("a refusal carries no rows");
+            globals.set_item("ended", Bound::new(py, crate::event::Event::new(ended))?)?;
+            globals.set_item(
+                "refused",
+                Bound::new(py, crate::event::Event::new(refused))?,
+            )?;
+            globals.set_item(
+                "clock_refused",
+                Bound::new(
+                    py,
+                    crate::clock::ClockEvent::new(host::ClockEvent::new(clock_refused)),
+                )?,
+            )
+        },
+    );
+}

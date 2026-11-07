@@ -1,5 +1,7 @@
 //! A subscription event a host reads, and bulk access to the rows it carries.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** The event kinds and cell states a host reads, copying or borrowing the cells of a
 //!   batch column by column, and building a rows event's rows as one batch of its row fields.
 //! - **Depends on.** The Rust client's subscription events, the wire contract's row views, the
@@ -11,11 +13,13 @@
 //! checked views; a batch is held to its schema once, when the event is created, which is why
 //! reading a cell the schema describes cannot fail.
 
+use std::time::Duration;
+
 use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
-    SubscriptionEvent,
-    wire::{CellView, CellsView, RowBatchView},
+    DomainClockRestorationCause, SubscriptionEvent, SubscriptionRestorationCause,
+    wire::{CellView, CellsView, RowBatchView, SubscriptionEndReason},
 };
 use nervix_models::{ParseAsType, SchemaField};
 
@@ -37,6 +41,72 @@ pub enum EventKind {
     Interrupted = 5,
     ConsumerOverflow = 6,
     RestorationFailed = 7,
+}
+
+/// Why a subscription's generation ended, with its stable values: the server ended it, or a new
+/// session refused for good to open it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum EndReason {
+    /// The relay, or the domain that held it, no longer exists.
+    RelayRemoved = 1,
+    /// The relay was redefined, so the schema the subscription announced no longer describes it.
+    RelayChanged = 2,
+}
+
+impl From<SubscriptionEndReason> for EndReason {
+    fn from(reason: SubscriptionEndReason) -> Self {
+        match reason {
+            SubscriptionEndReason::RelayRemoved => Self::RelayRemoved,
+            SubscriptionEndReason::RelayChanged => Self::RelayChanged,
+        }
+    }
+}
+
+/// Why a session refused for now to open an interrupted subscription again, or to attach an
+/// interrupted clock again, with its stable values. A clock's restoration reports only
+/// `InTransaction`, `Rejected` or `Failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum RestorationCause {
+    /// The session holds a transaction, which refuses session-local requests until it ends.
+    InTransaction = 1,
+    /// The server refused the subscription's statement.
+    InvalidStatement = 2,
+    /// The session already holds a subscription of that name.
+    NameInUse = 3,
+    /// The subscription's filter does not compile against its relay's definition.
+    InvalidFilter = 4,
+    /// The serving node could not open the subscription now.
+    Unavailable = 5,
+    /// The session rejected the request without serving it.
+    Rejected = 6,
+    /// The library could not send the request, or could not use its reply.
+    Failed = 7,
+}
+
+impl From<SubscriptionRestorationCause> for RestorationCause {
+    fn from(cause: SubscriptionRestorationCause) -> Self {
+        match cause {
+            SubscriptionRestorationCause::InTransaction => Self::InTransaction,
+            SubscriptionRestorationCause::InvalidStatement => Self::InvalidStatement,
+            SubscriptionRestorationCause::NameInUse => Self::NameInUse,
+            SubscriptionRestorationCause::InvalidFilter => Self::InvalidFilter,
+            SubscriptionRestorationCause::Unavailable => Self::Unavailable,
+            SubscriptionRestorationCause::Rejected(_) => Self::Rejected,
+            SubscriptionRestorationCause::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<DomainClockRestorationCause> for RestorationCause {
+    fn from(cause: DomainClockRestorationCause) -> Self {
+        match cause {
+            DomainClockRestorationCause::InTransaction => Self::InTransaction,
+            DomainClockRestorationCause::Rejected(_) => Self::Rejected,
+            DomainClockRestorationCause::Failed => Self::Failed,
+        }
+    }
 }
 
 /// What a cell holds, with its stable values.
@@ -194,6 +264,62 @@ impl Event {
 
     pub fn subscription_event(&self) -> &SubscriptionEvent {
         &self.event
+    }
+
+    /// Why the generation an end event reports ended.
+    pub fn end_reason(&self) -> Result<EndReason, Failure> {
+        match &self.event {
+            SubscriptionEvent::Ended(ended) => Ok(EndReason::from(ended.reason)),
+            SubscriptionEvent::Rows(_)
+            | SubscriptionEvent::DeliveryLost(_)
+            | SubscriptionEvent::RowsSkipped(_)
+            | SubscriptionEvent::Interrupted(_)
+            | SubscriptionEvent::RestorationFailed(_)
+            | SubscriptionEvent::ConsumerOverflow(_) => Err(Failure::new(
+                FailureKind::Type,
+                "the event carries no end reason",
+            )),
+        }
+    }
+
+    /// The server or local reason an attempt to restore an interrupted subscription failed.
+    pub fn restoration_message(&self) -> Result<&str, Failure> {
+        match &self.event {
+            SubscriptionEvent::RestorationFailed(failure) => Ok(&failure.message),
+            _ => Err(Failure::new(
+                FailureKind::Type,
+                "the event carries no restoration failure",
+            )),
+        }
+    }
+
+    /// Why the attempt a restoration failure reports opened nothing.
+    pub fn restoration_cause(&self) -> Result<RestorationCause, Failure> {
+        match &self.event {
+            SubscriptionEvent::RestorationFailed(failure) => {
+                Ok(RestorationCause::from(failure.cause))
+            }
+            SubscriptionEvent::Rows(_)
+            | SubscriptionEvent::DeliveryLost(_)
+            | SubscriptionEvent::RowsSkipped(_)
+            | SubscriptionEvent::Ended(_)
+            | SubscriptionEvent::Interrupted(_)
+            | SubscriptionEvent::ConsumerOverflow(_) => Err(Failure::new(
+                FailureKind::Type,
+                "the event carries no restoration cause",
+            )),
+        }
+    }
+
+    /// How long the client will wait before its next restoration attempt.
+    pub fn restoration_retry_after(&self) -> Result<Duration, Failure> {
+        match &self.event {
+            SubscriptionEvent::RestorationFailed(failure) => Ok(failure.retry_after),
+            _ => Err(Failure::new(
+                FailureKind::Type,
+                "the event carries no restoration failure",
+            )),
+        }
     }
 
     fn rows(&self) -> Result<&nervix_client_core::SubscriptionRowsEvent, Failure> {

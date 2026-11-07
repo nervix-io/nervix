@@ -35,8 +35,9 @@ Feature: Altering emitters
       """
     Then the last command output contains
       """
-      CREATE DETACHED ZEROMQ PUSH EMITTER event_emitter
+      CREATE ZEROMQ PUSH EMITTER event_emitter
         FROM outgoing COLLECT FOR 10ms MAX BATCH SIZE 512KiB
+        DETACHED
         TO emitter_b
           MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_codec
@@ -68,7 +69,7 @@ Feature: Altering emitters
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-emitter-flush.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
@@ -124,7 +125,7 @@ Feature: Altering emitters
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-emitter-swap.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
@@ -192,7 +193,7 @@ Feature: Altering emitters
       CREATE RELAY replacement SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-emitter-swap.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG

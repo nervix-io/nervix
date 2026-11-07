@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Redis client Model with its connection pool, the Pub/Sub source and emitter
-//!   Models with their delivery mode, the channel or channel pattern a source subscribes to and the
+//! - **Owns.** The Redis client Model with its connection pool, the Pub/Sub ingestor and emitter
+//!   Models with their delivery mode, the channel or channel pattern an ingestor subscribes to and the
 //!   channel an emitter publishes to with the rules they follow, the metadata a delivered message
 //!   carries, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
@@ -145,7 +145,7 @@ pub struct RedisPubSubIngestor {
     pub quiesce: IngestQuiesceMode,
 }
 
-/// The metadata of every message a subscription delivers, in the order its source hands it over:
+/// The metadata of every message a subscription delivers, in the order its ingestor hands it over:
 /// the channel the message was published to, and the pattern that matched it, which a channel
 /// subscription leaves null.
 const REDIS_PUBSUB_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
@@ -217,6 +217,7 @@ const REDIS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for RedisPubSubIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         // Redis Pub/Sub carries the channel, the pattern that matched it and the payload, without
         // transport headers.
         headers: None,
@@ -316,11 +317,11 @@ impl crate::IngestorEntityChange for RedisPubSubIngestorChange {
 
 connector_ingestors! {
     connector Redis = "REDIS";
-    /// What a Redis source reads.
+    /// What a Redis ingestor reads.
     pub enum RedisIngestor;
     /// The alterations of the ingestors that read a Redis entity.
     pub enum RedisIngestorAlteration;
-    /// The entities a Redis source reads.
+    /// The entities a Redis ingestor reads.
     pub enum RedisIngestorEntity {
         PubSub(RedisPubSubIngestor => RedisPubSubIngestorChange) = "PUBSUB", "Redis Pub/Sub";
     }

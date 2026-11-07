@@ -30,8 +30,8 @@ use nervix_interconnect::{
     EntityGateRequest as RemoteEntityGateRequest, RemoteOperationFailure, RemoteOperationSubject,
 };
 use nervix_models::{
-    ClusterNodeName, CoordinationIdentity, DomainName, ModelKind, NodeRef, PauseRequirement,
-    QuiesceSubgraph, RelayName,
+    ClusterNodeName, CoordinationIdentity, DomainName, EntityGateTargets, ModelKind,
+    PauseRequirement, QuiesceSubgraph, RelayName,
 };
 use nervix_primitives::time::{interval, sleep};
 use tracing::{debug, warn};
@@ -234,7 +234,7 @@ struct EntityGateEngagement<'a> {
     coordination: &'a CoordinationIdentity,
     domain: &'a DomainName,
     relays: &'a [RelayName],
-    affected_entities: &'a [NodeRef],
+    targets: &'a EntityGateTargets,
     purpose: EntityGatePurpose,
     deadline: nervix_primitives::time::Instant,
     reason: &'a str,
@@ -257,7 +257,7 @@ pub(in crate::application) enum EntityGateParticipants<'a> {
 pub(in crate::application) struct ClusterEntityGateScope<'a> {
     pub(in crate::application) domain: &'a DomainName,
     pub(in crate::application) relays: &'a [RelayName],
-    pub(in crate::application) affected_entities: &'a [NodeRef],
+    pub(in crate::application) targets: &'a EntityGateTargets,
     pub(in crate::application) purpose: EntityGatePurpose,
     pub(in crate::application) participants: EntityGateParticipants<'a>,
 }
@@ -267,7 +267,7 @@ struct EntityGateStatusQuery<'a> {
     coordination: &'a CoordinationIdentity,
     domain: &'a DomainName,
     relays: &'a [RelayName],
-    affected_entities: &'a [NodeRef],
+    targets: &'a EntityGateTargets,
     purpose: EntityGatePurpose,
     deadline: nervix_primitives::time::Instant,
 }
@@ -389,19 +389,13 @@ impl SessionServiceImpl {
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
     ) -> Result<EntityDrainStatusEnvelope, RemoteOperationFailure> {
         let status = self
             .inner
             .runtime
-            .entity_gate_operation_drain_status(
-                coordination,
-                domain,
-                relays,
-                affected_entities,
-                purpose,
-            )
+            .entity_gate_operation_drain_status(coordination, domain, relays, targets, purpose)
             .map_err(|error| {
                 error
                     .current_context()
@@ -442,7 +436,7 @@ impl SessionServiceImpl {
             coordination,
             domain,
             relays,
-            affected_entities,
+            targets,
             purpose,
             deadline,
             reason,
@@ -455,7 +449,7 @@ impl SessionServiceImpl {
                     coordination,
                     domain,
                     relays,
-                    affected_entities,
+                    targets,
                     purpose,
                     EntityGateLease { deadline, reason },
                 )
@@ -511,7 +505,7 @@ impl SessionServiceImpl {
                             coordination: coordination.clone(),
                             domain: domain.clone(),
                             relays: relays.to_vec(),
-                            affected_entities: affected_entities.to_vec(),
+                            targets: targets.clone(),
                             purpose,
                             deadline_millis,
                             reason: reason.to_string(),
@@ -575,13 +569,13 @@ impl SessionServiceImpl {
             coordination,
             domain,
             relays,
-            affected_entities,
+            targets,
             purpose,
             deadline,
         } = query;
         if node_id == self.inner.consensus.local_node_id() {
             let status = self
-                .local_entity_drain_status(coordination, domain, relays, affected_entities, purpose)
+                .local_entity_drain_status(coordination, domain, relays, targets, purpose)
                 .map_err(|failure| {
                     Report::new(EntityGateControlError::Remote {
                         operation: EntityGateControlOperation::EntityDrainStatus,
@@ -605,7 +599,7 @@ impl SessionServiceImpl {
                     coordination: coordination.clone(),
                     domain: domain.clone(),
                     relays: relays.to_vec(),
-                    affected_entities: affected_entities.to_vec(),
+                    targets: targets.clone(),
                     purpose,
                 },
                 remaining.min(Duration::from_secs(2)),
@@ -723,15 +717,16 @@ impl SessionServiceImpl {
         let ClusterEntityGateScope {
             domain,
             relays,
-            affected_entities,
+            targets,
             purpose,
             ..
         } = scope;
-        let ingestors = affected_entities
-            .iter()
+        let ingestors = targets
+            .entities()
+            .into_iter()
             .filter(|entity| entity.kind == ModelKind::Ingestor)
-            .cloned()
             .collect::<Vec<_>>();
+        let intake_targets = EntityGateTargets::Entities(ingestors.clone());
         if purpose != EntityGatePurpose::ModelAlteration
             || relays.is_empty()
             || ingestors.is_empty()
@@ -743,7 +738,7 @@ impl SessionServiceImpl {
 
         // A route may own an admitted partial batch that has not entered its relay yet. Closing
         // that relay first would park the batch behind the very gate waiting for its ACK root.
-        // Hold source admission on every node and drain those roots with the relay still open.
+        // Hold ingestor admission on every node and drain those roots with the relay still open.
         let intake_impact = match &impact {
             Some((recorder, PauseRequirement::Subgraph { scope })) => Some((
                 *recorder,
@@ -764,14 +759,21 @@ impl SessionServiceImpl {
         let intake_recorder = intake_impact.as_ref().map(|(recorder, _)| *recorder);
         let intake_scope = ClusterEntityGateScope {
             relays: &[],
-            affected_entities: &ingestors,
+            targets: &intake_targets,
             ..scope
         };
         let intake_gate = self
             .engage_cluster_entity_gate_scope(intake_scope, deadline, intake_impact)
             .await?;
         if let Err(error) = self
-            .wait_for_cluster_entity_drain(&intake_gate, &[], &ingestors, purpose, &[], deadline)
+            .wait_for_cluster_entity_drain(
+                &intake_gate,
+                &[],
+                &intake_targets,
+                purpose,
+                &[],
+                deadline,
+            )
             .await
         {
             if let (Some(recorder), Some(attempt)) = (intake_recorder, intake_gate.impact_attempt())
@@ -846,7 +848,7 @@ impl SessionServiceImpl {
         let ClusterEntityGateScope {
             domain,
             relays,
-            affected_entities,
+            targets,
             purpose,
             participants,
         } = scope;
@@ -902,7 +904,7 @@ impl SessionServiceImpl {
                         coordination: &coordination,
                         domain,
                         relays,
-                        affected_entities,
+                        targets,
                         purpose,
                         deadline,
                         reason,
@@ -958,7 +960,7 @@ impl SessionServiceImpl {
         &self,
         gate: &ClusterEntityGate,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
         required_live_nodes: &[ClusterNodeName],
         deadline: nervix_primitives::time::Instant,
@@ -972,7 +974,7 @@ impl SessionServiceImpl {
             polling.tick().await;
             #[cfg(feature = "testing")]
             let force_timeout = self
-                .forced_entity_drain_timeout(domain, purpose, relays, affected_entities)
+                .forced_entity_drain_timeout(domain, purpose, relays, targets)
                 .await;
             #[cfg(not(feature = "testing"))]
             let force_timeout = false;
@@ -1005,7 +1007,7 @@ impl SessionServiceImpl {
                             coordination: &gate.coordination,
                             domain,
                             relays,
-                            affected_entities,
+                            targets,
                             purpose,
                             deadline,
                         },
@@ -1086,7 +1088,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         purpose: EntityGatePurpose,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
     ) -> bool {
         let faults = self.inner.runtime.fault_injection();
         if !faults.entity_drain_timeout_is_forced(domain) {
@@ -1099,7 +1101,7 @@ impl SessionServiceImpl {
                 .map(nervix_consensus::DomainMutationLease::owner),
             purpose,
             relays,
-            affected_entities,
+            affected_entities: &targets.entities(),
         };
         faults.take_forced_entity_drain_timeout(domain, &drain)
     }
@@ -1275,7 +1277,7 @@ mod tests {
                     coordination: &coordination,
                     domain: &domain,
                     relays: &[],
-                    affected_entities: &[],
+                    targets: &EntityGateTargets::default(),
                     purpose: EntityGatePurpose::ModelAlteration,
                     deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(2),
                 },
@@ -1335,7 +1337,7 @@ mod tests {
             coordination: &coordination,
             domain: &domain,
             relays: &[],
-            affected_entities: &[],
+            targets: &EntityGateTargets::default(),
             purpose: EntityGatePurpose::ModelAlteration,
             deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
         };
@@ -1357,7 +1359,7 @@ mod tests {
                 &coordination,
                 &domain,
                 &[],
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
                 EntityGateLease {
                     deadline: query.deadline,
@@ -1419,7 +1421,7 @@ mod tests {
             path,
         } = build_test_service(false).await;
         let domain: DomainName = named("default");
-        let ingestor = NodeRef::new(
+        let ingestor = nervix_models::NodeRef::new(
             ModelKind::Ingestor,
             named::<nervix_models::ModelName>("orders_in"),
         );
@@ -1439,7 +1441,9 @@ mod tests {
                     &coordination,
                     &domain,
                     &relays,
-                    std::slice::from_ref(&ingestor),
+                    &nervix_models::EntityGateTargets::Entities(
+                        (std::slice::from_ref(&ingestor)).to_vec(),
+                    ),
                     EntityGatePurpose::ModelAlteration,
                     EntityGateLease {
                         deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
@@ -1510,7 +1514,7 @@ mod tests {
                 ClusterEntityGateScope {
                     domain: &domain,
                     relays: &[],
-                    affected_entities: &[],
+                    targets: &EntityGateTargets::default(),
                     purpose: EntityGatePurpose::OwnershipHandoff,
                     participants: EntityGateParticipants::AvailableAmong(&elsewhere),
                 },
@@ -1533,7 +1537,7 @@ mod tests {
                 ClusterEntityGateScope {
                     domain: &domain,
                     relays: &[],
-                    affected_entities: &[],
+                    targets: &EntityGateTargets::default(),
                     purpose: EntityGatePurpose::OwnershipHandoff,
                     participants: EntityGateParticipants::AvailableAmong(
                         &coordinator_and_elsewhere,

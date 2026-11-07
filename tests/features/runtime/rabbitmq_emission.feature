@@ -116,7 +116,8 @@ Feature: RabbitMQ emission
       CREATE RABBITMQ CLIENT rabbitmq_sink CONFIG {
         'addr' = '{{rabbitmq_stallable_addr}}'
       };
-      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbitmq_boundary FROM notifications
+      CREATE RABBITMQ QUEUE EMITTER rabbitmq_boundary FROM notifications
+        ATTACHED
         TO rabbitmq_sink QUEUE 'rabbitmq_boundary_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -173,7 +174,7 @@ Feature: RabbitMQ emission
       CREATE RELAY returned_events SCHEMA returned_event UNBRANCHED;
       CREATE VHOST edge returned-{{test_id}}.example.com;
       CREATE ENDPOINT returned_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR returned_source
+      CREATE HTTP ENDPOINT INGESTOR returned_ingestor
         FROM returned_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING returned_event_codec
         TIMESTAMP NOW

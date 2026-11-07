@@ -19,7 +19,7 @@ Feature: Snapshot receive decoding under overlapping bulk memory
       CREATE RELAY accepted SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge snapshot-receive-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
