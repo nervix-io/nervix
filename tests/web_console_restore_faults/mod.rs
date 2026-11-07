@@ -1,6 +1,6 @@
 //! Steps that make the web console's next restore attempt lose the reply the leader sent once it
-//! ran the restore, after which the page cannot read the archive file, and that read the reply the
-//! page lost.
+//! ran the restore, after which a later attempt cannot read the archive or receives an unrecorded
+//! failure, and that read the reply the page lost.
 //!
 //! Layer: test harness, outside the product layer order.
 //! - **Owns.** Installing the bounded restore fault on the scenario's console page, reading its
@@ -9,6 +9,8 @@
 //!   codec.
 //! - **Must not know.** How the console streams a restore or decides its outcome, or how a node
 //!   serves it.
+
+mod unrecorded_failure;
 
 use std::time::Duration;
 
@@ -23,15 +25,15 @@ use serde::Deserialize;
 
 use super::ScenarioWorld;
 
-/// The fault, as a function of the path of a restore connection.
+/// The fault, parameterized by the restore path and the later attempt's failure.
 const LOSE_RESTORE_REPLY: &str = include_str!("lose_restore_reply.js");
 
 /// Reads the fault's record.
 const READ_RECORD: &str = "() => window.__nervixRestoreFault.record()";
 
 /// How long the restore may take to stream, apply and answer, and the console to pause and stream
-/// it again, before the page has lost the reply and failed a read. Scenarios run many at a time,
-/// so the bound is generous; the wait ends as soon as the fault has seen both.
+/// it again, before the page has lost the reply and encountered the later failure. Scenarios run
+/// many at a time, so the bound is generous; each wait ends as soon as its condition holds.
 const LOST_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the fault saw on the page.
@@ -40,6 +42,12 @@ const LOST_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 struct RestoreFaultRecord {
     /// The bytes of the reply the fault kept from the console, once it kept one.
     lost_reply: Option<Vec<u8>>,
+    /// Lost candidates, including valid uncertain replies before the selected completion.
+    lost_replies: usize,
+    /// The first attempt's start, retained only for the unrecorded-failure witness.
+    start: Option<Vec<u8>>,
+    /// How many valid unrecorded failures replaced a later reply.
+    substituted_failures: usize,
     /// How many restore connections the page opened since the fault was installed.
     restore_connections: usize,
     /// How many reads of a file's bytes failed once the reply was lost.
@@ -73,8 +81,17 @@ async fn read_record(page: &playwright_rs::Page) -> RestoreFaultRecord {
      be read"
 )]
 async fn given_next_restore_attempt_loses_its_reply(world: &mut ScenarioWorld) {
+    install_fault(world, "unreadable").await;
+}
+
+async fn install_fault(world: &ScenarioWorld, later_failure: &str) {
+    let configuration = serde_json::json!({
+        "restorePath": CONSOLE_RESTORE_PATH,
+        "laterFailure": later_failure,
+        "replyFrameBytes": SessionLimits::DEFAULT.frame_bytes(),
+    });
     let installed = browser_page(world)
-        .evaluate::<&str, bool>(LOSE_RESTORE_REPLY, Some(&CONSOLE_RESTORE_PATH))
+        .evaluate::<_, bool>(LOSE_RESTORE_REPLY, Some(&configuration))
         .await
         .assured("the console page runs the restore fault");
     assert!(installed, "the restore fault reports its installation");

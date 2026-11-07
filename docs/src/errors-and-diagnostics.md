@@ -3001,6 +3001,14 @@ restore may have been admitted. If a later archive read, missing console address
 expired execution reference ends it, that failure sits beneath `the console stopped before learning
 the outcome of a restore the leader may have admitted`; the dialog reports the outcome as unknown
 naming the execution reference. An already uncertain reply failure keeps its own typed context.
+For an unrecorded request failure, `RestoreEnd::Unresolved` retains the complete typed
+`CommandOutcome` until presentation consumes it through the existing command renderer. It leaves
+the earlier outcome unknown and appends `the outcome of restore '<reference>' is unknown` to the
+later request's original message.
+The terminal prints the original diagnostics, including statement diagnostics, with the same
+request-relative source spans as a known failure. Its matching identities do not settle an earlier
+possible admission. Initial refusals,
+recovered failures and failures carrying a restore step report keep their definitive classification.
 The dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
 could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
 restore's own outcome as the dispatcher renders any command's. A session reply whose
