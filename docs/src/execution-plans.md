@@ -247,6 +247,10 @@ refresh their typed plan identity between batches. The endpoint routing index an
 resources are installed at their own cutover points under the application sequence. This is a
 node-local publication guarantee, not a distributed atomic transaction across cluster nodes.
 
+Processor binding uses the caller's node identity that selected its input units, or the caller's
+unplaced execution context. A scheduled standalone runtime supplies its node identity even when
+it has no dispatcher. Binding does not derive that identity again from transport availability.
+
 The routing snapshot also retains each materialized relay's installed-state publication and the
 domain's relay-state epoch. Assignments are registered before these handles are staged; a missing
 required publication is an installation invariant failure. A materialized origination capability

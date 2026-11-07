@@ -468,8 +468,9 @@ Feature: Coordinated WASM processor state reset
     Then the last command output is a JSON document where
       """
       /resource_version = 1
-      /reset_readiness = "Ready"
-      /reset/reset/reason = "Transaction"
+      /units/0/unit = "Single"
+      /units/0/reset_readiness = "Ready"
+      /units/0/reset/reset/reason = "Transaction"
       """
     And the last command output does not contain
       """

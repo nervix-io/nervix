@@ -855,6 +855,7 @@ impl Runtime {
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
+                local_node_id: None,
                 relay_schemas: &relay_schemas,
                 relay_services: &relay_services,
                 relay_branchings: &relay_branchings,

@@ -1119,6 +1119,8 @@ fn bind_transforming_output_programs<'a>(
 pub(in crate::runtime) struct ProcessorPlanBindingContext<'a> {
     pub runtime: &'a Runtime,
     pub domain: &'a DomainName,
+    /// The same node identity used to select inputs, or an unplaced execution.
+    pub local_node_id: Option<&'a ClusterNodeName>,
     pub relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
     pub relay_services: &'a HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub relay_branchings: &'a HashMap<RelayName, ResolvedBranching>,
@@ -1140,6 +1142,7 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
     let ProcessorPlanBindingContext {
         runtime,
         domain,
+        local_node_id,
         relay_schemas,
         relay_services,
         relay_branchings,
@@ -1150,8 +1153,6 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
         unit: selected_unit,
         previous,
     } = context;
-    let dispatcher = runtime.inner.remote_dispatcher.load_full();
-    let local = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
     let mut prepared = HashMap::<NodeRef, StdArc<PublishedProcessorPlan>>::default();
     for (owner, plan) in previous {
         prepared
@@ -1168,7 +1169,7 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
         for unit in node.units.keys().copied() {
             nervix_primitives::task::consume_budget().await;
             if selected_unit.is_some_and(|selected| selected != unit)
-                || !Runtime::scheduled_unit_executes_locally(node, unit, local)
+                || !Runtime::scheduled_unit_executes_locally(node, unit, local_node_id)
             {
                 continue;
             }

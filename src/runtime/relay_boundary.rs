@@ -1039,13 +1039,13 @@ impl RelayConsumerFanout {
         {
             warn!("detached runtime consumer receiver is unavailable");
         }
-        if detached_receiver_count > 0 {
-            if let Err(error) = detached.broadcast(batch.detached()).await {
-                warn!(
-                    error = %error,
-                    "detached runtime consumer relay broadcast failed"
-                );
-            }
+        if detached_receiver_count > 0
+            && let Err(error) = detached.broadcast(batch.detached()).await
+        {
+            warn!(
+                error = %error,
+                "detached runtime consumer relay broadcast failed"
+            );
         }
 
         Ok(())

@@ -1866,23 +1866,19 @@ impl Runtime {
         Ok(())
     }
 
-    /// Builds every part of a scheduled node's runtime that follows only from its assignment: the
-    /// replicated states this cluster node owns or replicates for it, and the background tasks
-    /// that snapshot and poll them. An assignment change rebuilds exactly this for the moved node
-    /// and leaves every other node alone.
     /// Places the materialized state of every unit of a materialized relay that this node owns or
     /// replicates: the unit's owner keeps the state's originator for its state task, and each of
     /// its replicas polls the owner for the state it keeps.
-    fn place_materialized_relay_units(
+    fn build_materialized_relay_placement(
         &self,
         domain: &DomainName,
         shutdown_tx: &watch::Sender<bool>,
         node: &ExecutionNode,
         local_node_id: &ClusterNodeName,
         schema: &StdArc<arrow_schema::Schema>,
-        placement: &mut ScheduledNodePlacement,
         selected_units: Option<&BTreeSet<Unit>>,
-    ) -> error_stack::Result<(), ExecutionBuildError> {
+    ) -> error_stack::Result<ScheduledNodePlacement, ExecutionBuildError> {
+        let mut placement = ScheduledNodePlacement::default();
         let relay = RelayName::from(&node.identifier);
         for (unit, scheduled) in &node.units {
             if selected_units.is_some_and(|selected| !selected.contains(unit)) {
@@ -1951,9 +1947,13 @@ impl Runtime {
                 }
             }
         }
-        Ok(())
+        Ok(placement)
     }
 
+    /// Builds every part of a scheduled node's runtime that follows only from its assignment: the
+    /// replicated states this cluster node owns or replicates for it, and the background tasks
+    /// that snapshot and poll them. An assignment change rebuilds exactly this for the moved node
+    /// and leaves every other node alone.
     pub(super) fn build_scheduled_node_placement(
         &self,
         domain: &DomainName,
@@ -1963,18 +1963,19 @@ impl Runtime {
         state: Option<PlacedNodeState>,
         selected_units: Option<&BTreeSet<Unit>>,
     ) -> error_stack::Result<ScheduledNodePlacement, ExecutionBuildError> {
-        let mut placement = ScheduledNodePlacement::default();
-        if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref() {
-            self.place_materialized_relay_units(
+        let mut placement = if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref()
+        {
+            self.build_materialized_relay_placement(
                 domain,
                 shutdown_tx,
                 node,
                 local_node_id,
                 schema,
-                &mut placement,
                 selected_units,
-            )?;
-        }
+            )?
+        } else {
+            ScheduledNodePlacement::default()
+        };
 
         for (unit, scheduled) in &node.units {
             if selected_units.is_some_and(|selected| !selected.contains(unit)) {

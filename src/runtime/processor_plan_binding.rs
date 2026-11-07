@@ -57,6 +57,7 @@ impl Runtime {
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
+                local_node_id,
                 relay_schemas: &routing.relay_schemas,
                 relay_services: &routing.relay_services,
                 relay_branchings: &routing.relay_branchings,
@@ -80,6 +81,8 @@ impl Runtime {
         revision: &ExecutionRevision,
         unit: Unit,
     ) -> error_stack::Result<StdArc<PublishedProcessorPlan>, RuntimeError> {
+        let dispatcher = self.inner.remote_dispatcher.load_full();
+        let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let build = || RuntimeError::build_domain_execution(domain);
         let routing = {
             let Some(execution) = self.inner.executions.get(domain) else {
@@ -95,6 +98,7 @@ impl Runtime {
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
+                local_node_id,
                 relay_schemas: &routing.relay_schemas,
                 relay_services: &routing.relay_services,
                 relay_branchings: &routing.relay_branchings,

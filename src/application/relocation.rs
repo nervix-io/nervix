@@ -139,9 +139,13 @@ impl RelocationPlan {
         for member in &self.members {
             for assignment in &member.units {
                 let unit_label = match assignment.unit.kind() {
-                    nervix_models::UnitKind::Single => String::new(),
                     nervix_models::UnitKind::Partition(index) => format!(" unit=partition:{index}"),
-                    nervix_models::UnitKind::Instance(index) => format!(" unit=instance:{index}"),
+                    nervix_models::UnitKind::Instance(index) if member.units.len() > 1 => {
+                        format!(" unit=instance:{index}")
+                    }
+                    nervix_models::UnitKind::Single | nervix_models::UnitKind::Instance(_) => {
+                        String::new()
+                    }
                 };
                 let mut line = format!(
                     "- kind={} name={}{unit_label} group={} strategy={} reason={} owner={} \
