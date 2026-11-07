@@ -189,6 +189,7 @@ fn restoration(
     env: &mut Env<'_>,
     value: crate::handles::Value,
     method: &jni::strings::JNIStr,
+    cause: i32,
 ) -> jni::errors::Result<()> {
     let handle = TestHandle(value.into_handle());
     let restored = env
@@ -216,6 +217,21 @@ fn restoration(
         .call_method(&restored, jni_str!("waitNanos"), jni_sig!("()J"), &[])?
         .j()?;
     assert_eq!(wait, 7_000_000_009);
+    let restored_cause = env
+        .call_method(
+            &restored,
+            jni_str!("cause"),
+            jni_sig!("()Lio/nervix/client/Nervix$RestorationCause;"),
+            &[],
+        )?
+        .l()?;
+    let code = env
+        .call_method(&restored_cause, jni_str!("code"), jni_sig!("()I"), &[])?
+        .i()?;
+    assert_eq!(
+        code, cause,
+        "the record decodes the cause the binding marshalled"
+    );
     Ok(())
 }
 
@@ -237,6 +253,7 @@ fn restoration_events_keep_the_complete_message_and_physical_wait() {
             env,
             crate::handles::Value::ClockEvent(Arc::new(nervix_client_host::ClockEvent::new(clock))),
             jni_str!("clockEventRestoration"),
+            1,
         )?;
         let event = SubscriptionEvent::RestorationFailed(SubscriptionRestorationFailure {
             subscription: nervix_client_core::wire::SubscriptionHandle {
@@ -256,10 +273,74 @@ fn restoration_events_keep_the_complete_message_and_physical_wait() {
             env,
             crate::handles::Value::Event(Arc::new(event)),
             jni_str!("eventRestoration"),
+            5,
         )?;
         Ok(())
     })
-    .assured("both restoration event kinds retain their message and wait through JNI");
+    .assured("both restoration event kinds retain their cause, message and wait through JNI");
+}
+
+#[test]
+fn an_ended_subscription_reads_its_end_reason_and_another_kind_refuses_it() {
+    use nervix_client_core::{
+        SubscriptionEvent, SubscriptionInterruption,
+        wire::{SubscriptionEndReason, SubscriptionEnded, SubscriptionHandle},
+    };
+    use nervix_primitives::sync::Arc;
+    fn handle() -> SubscriptionHandle {
+        SubscriptionHandle {
+            name: "events".try_into().assured("the name is valid"),
+            generation: std::num::NonZeroU64::new(1).assured("the generation is nonzero"),
+        }
+    }
+    vm().attach_current_thread(|env| -> jni::errors::Result<()> {
+        for (reason, code) in [
+            (SubscriptionEndReason::RelayRemoved, 1),
+            (SubscriptionEndReason::RelayChanged, 2),
+        ] {
+            let ended = SubscriptionEvent::Ended(SubscriptionEnded {
+                subscription: handle(),
+                reason,
+                message: "the relay is gone".to_string(),
+            });
+            let event = nervix_client_host::Event::new(ended).assured("an end needs no rows");
+            let event = TestHandle(crate::handles::Value::Event(Arc::new(event)).into_handle());
+            let read = env
+                .call_static_method(
+                    jni_str!("io/nervix/client/Native"),
+                    jni_str!("eventEnd"),
+                    jni_sig!("(J)I"),
+                    &[JValue::Long(event.0)],
+                )?
+                .i()?;
+            assert_eq!(read, code);
+        }
+        let interrupted = SubscriptionEvent::Interrupted(SubscriptionInterruption {
+            subscription: handle(),
+        });
+        let event = nervix_client_host::Event::new(interrupted).assured("a gap needs no rows");
+        let event = TestHandle(crate::handles::Value::Event(Arc::new(event)).into_handle());
+        let read = env.call_static_method(
+            jni_str!("io/nervix/client/Native"),
+            jni_str!("eventEnd"),
+            jni_sig!("(J)I"),
+            &[JValue::Long(event.0)],
+        );
+        assert!(read.is_err());
+        let exception = env
+            .exception_occurred()
+            .assured("the wrong event kind raises its typed exception");
+        env.exception_clear();
+        assert!(
+            env.is_instance_of(
+                exception,
+                jni_str!("io/nervix/client/Nervix$TypeMismatchException")
+            )?,
+            "only an ended subscription carries an end reason"
+        );
+        Ok(())
+    })
+    .assured("an end reason crosses JNI as its Java code");
 }
 
 #[test]

@@ -109,13 +109,17 @@ absent subscription. None uses its reference for durable outcome recovery. The b
 tests also check both restoration event kinds' borrowed messages and nanosecond waits, wrong-kind
 and missing-output failures, and copied options buffers.
 
-`A <runtime> C binding exposes a refused subscription restoration's message and retry wait`
+`A <runtime> client reads the cause, message and retry wait of a restoration refused for now`
 opens a subscription through a forwarded gRPC endpoint on one and three nodes, cuts that
 connection, arms every node to refuse the next subscription opening as unavailable while it is
-down, and restores the connection. The C ABI in process, C and C++ each report the interruption,
-then read the refusal message and positive retry wait from the `NX_EVENT_RESTORATION_FAILED` event.
-A removed relay ends the subscription instead (S-7), so only a refusal for now reports a failure. The owner tests cover the matching clock-event accessors
-because no domain-removal request is available to make a live clock restoration fail on demand.
+down, and restores the connection. The C ABI in process, C, C++ and Java each report the
+interruption, then read the `unavailable` cause, the refusal message and a positive retry wait
+from the restoration failure event. `A <runtime> client reads why a subscription whose relay was
+dropped while it was disconnected ended` drops the relay instead while the connection is down, and
+the same runtimes read the `relay_removed` end reason from the ended event, which S-7 makes the
+answer to a reopening of a relay that no longer exists. The owner tests cover the matching
+clock-event accessors because no domain-removal request is available to make a live clock
+restoration fail on demand.
 
 `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its
 generations apart` runs every binding host, the C ABI in process, C, C++, Python, Java and Ruby,

@@ -151,6 +151,32 @@ static int run_connection(nx_session *session) {
     return 0;
 }
 
+static const char *restoration_cause_name(nx_restoration_cause cause) {
+    switch (cause) {
+    case NX_RESTORATION_IN_TRANSACTION: return "in_transaction";
+    case NX_RESTORATION_INVALID_STATEMENT: return "invalid_statement";
+    case NX_RESTORATION_NAME_IN_USE: return "name_in_use";
+    case NX_RESTORATION_INVALID_FILTER: return "invalid_filter";
+    case NX_RESTORATION_UNAVAILABLE: return "unavailable";
+    case NX_RESTORATION_REJECTED: return "rejected";
+    case NX_RESTORATION_FAILED: return "failed";
+    }
+    fail("the binding reported an unknown restoration cause");
+    return NULL;
+}
+
+static const char *end_reason_name(nx_end_reason reason) {
+    switch (reason) {
+    case NX_END_RELAY_REMOVED: return "relay_removed";
+    case NX_END_RELAY_CHANGED: return "relay_changed";
+    }
+    fail("the binding reported an unknown end reason");
+    return NULL;
+}
+
+/* Opens a subscription, then reports how the session that replaces the lost one answers its
+   reopening: a refusal for now with its cause, message and wait, or the end of the subscription
+   with its reason. */
 static int run_restoration(nx_session *session) {
     const char *relay = env("NERVIX_PROBE_RELAY");
     const char *subscription = env("NERVIX_PROBE_SUBSCRIPTION");
@@ -172,19 +198,28 @@ static int run_restoration(nx_session *session) {
     printf("INTERRUPTED\n");
 
     event = NULL;
-    check(nx_session_next_event(session, NULL, &event), "restoration failure");
-    if (nx_event_kind_of(event) != NX_EVENT_RESTORATION_FAILED) {
-        fail("the refused reopening did not report a restoration failure");
+    check(nx_session_next_event(session, NULL, &event), "restoration answer");
+    nx_event_kind kind = nx_event_kind_of(event);
+    if (kind == NX_EVENT_ENDED) {
+        nx_end_reason reason = 0;
+        check(nx_event_end_reason(event, &reason), "end reason");
+        printf("ENDED reason=%s\n", end_reason_name(reason));
+    } else if (kind == NX_EVENT_RESTORATION_FAILED) {
+        nx_restoration_cause cause = 0;
+        const uint8_t *message = NULL;
+        size_t message_len = 0;
+        uint64_t wait_nanos = 0;
+        check(nx_event_restoration_cause(event, &cause), "restoration cause");
+        check(nx_event_restoration_message(event, &message, &message_len), "restoration message");
+        check(nx_event_restoration_retry_after(event, &wait_nanos), "restoration wait");
+        if (wait_nanos == 0) {
+            fail("the restoration retry wait was zero");
+        }
+        printf("RESTORATION cause=%s message=%.*s wait=positive\n", restoration_cause_name(cause),
+               (int)message_len, (const char *)message);
+    } else {
+        fail("the reopening was neither refused nor ended");
     }
-    const uint8_t *message = NULL;
-    size_t message_len = 0;
-    uint64_t wait_nanos = 0;
-    check(nx_event_restoration_message(event, &message, &message_len), "restoration message");
-    check(nx_event_restoration_retry_after(event, &wait_nanos), "restoration wait");
-    if (wait_nanos == 0) {
-        fail("the restoration retry wait was zero");
-    }
-    printf("RESTORATION message=%.*s wait=positive\n", (int)message_len, (const char *)message);
     nx_event_release(event);
     nx_session_free(session);
     printf("CHECKS ok\nPASS\n");

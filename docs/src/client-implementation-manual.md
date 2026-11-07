@@ -947,7 +947,9 @@ classes and enums. The C retain/release and borrowed-pointer rules become these 
 - **J-4.** Branch on `ClientException.kind()` or its typed subclass. Read `executionReference()` for exact
   command recovery and `openRefusal()` for endpoint refusal; never decide from message text. A
   command disposition is an `Outcome`, separate from a failed host operation. Completion ranges
-  count UTF-8 bytes. Read clock/event variant-specific fields only for the kind that carries them.
+  count UTF-8 bytes. Read clock/event variant-specific fields only for the kind that carries them:
+  `Event.endReason()` only for `ENDED`, and `RestorationFailure.cause()` with its message and wait
+  only for `RESTORATION_FAILED`.
 - **J-5.** Use endpoint `end(Cancel)` to wait for server closure and `close()` to release ownership. The
   library implements no Java retry, correlation, acknowledgement or restoration state machine.
 
