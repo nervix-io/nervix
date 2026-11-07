@@ -387,8 +387,11 @@ Use `just test-ratchet-units`, `just test-typed-ratchet-reports`,
 gate passed. `just ratchet` requires the gate. Cache qualification remains
 `just qualify-typed-ratchet-cache`; changed source, annotations, rules, dependencies and
 configuration invalidate evidence. The recipe invokes `nervix-ratchet qualify-cache`, which checks
-the complete evidence and cache behavior in two isolated worktrees. Compiler-fixture preparation
-runs before the Rust assertions read its outputs; tests do not start a compiler or Cargo.
+the complete evidence and cache behavior in two isolated worktrees. The second worktree receives
+the compiler driver and the ratchet runner at the same build paths. Both inputs are required; a
+failed copy keeps its typed I/O cause and input path beneath the qualification context.
+Compiler-fixture preparation runs before the Rust assertions read its outputs; tests do not start
+a compiler or Cargo.
 
 The registered `typed-source-syntax` Bolero property uses bounded current Rust syntax, complete
 source input/site equality and deliberate cast/field counts. Its ordinary corpus/randomized test
