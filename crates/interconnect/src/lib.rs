@@ -85,11 +85,11 @@ pub use request::RkyvMessage;
 pub use request::{
     ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse, ApplicationHealthProbe,
     ApplicationProgress, ApplicationProgressPhase, ApplicationProgressReceipt,
-    ApplicationProgressReport, ApplicationRevisionRequest, HandlerRegistrationError,
-    HttpsListenerInstallation, HttpsListenerInstallationRequest, HttpsListenerInstallationResponse,
-    InterconnectDuplexRequest, InterconnectRequest, InterconnectStreamRequest,
-    RemoteRequestFailure, RequestContext, RequestError, RequestSubquota, StreamHandlerError,
-    StreamingResponse,
+    ApplicationProgressReport, ApplicationRevisionRequest, DomainClockAttachReceipt,
+    DomainClockAttachRequest, HandlerRegistrationError, HttpsListenerInstallation,
+    HttpsListenerInstallationRequest, HttpsListenerInstallationResponse, InterconnectDuplexRequest,
+    InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure, RequestContext,
+    RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
@@ -1225,6 +1225,14 @@ impl ControlEnvelope {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error(
+        "node '{peer}' now runs process {actual}, but this request requires process {expected}"
+    )]
+    PeerProcessChanged {
+        peer: ClusterNodeName,
+        expected: u64,
+        actual: u64,
+    },
     #[error("invalid transport options: {reason}")]
     InvalidOptions { reason: String },
     #[error("io error: {0}")]

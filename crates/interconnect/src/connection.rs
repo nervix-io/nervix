@@ -306,6 +306,24 @@ struct OutboundPool {
     releases: StreamReleases,
 }
 
+/// The caller chooses whether this operation names a node or an exact authenticated process.
+/// The ordinary node operation retains no additional future state.
+pub(crate) trait PeerProcessFence: Copy + Send + Sync {
+    fn expected_epoch(self) -> Option<u64>;
+}
+
+impl PeerProcessFence for () {
+    fn expected_epoch(self) -> Option<u64> {
+        None
+    }
+}
+
+impl PeerProcessFence for u64 {
+    fn expected_epoch(self) -> Option<u64> {
+        Some(self)
+    }
+}
+
 struct ClientConnection {
     key: ConnectionSlotKey,
     /// The address this connection reached, one of the answers its endpoint resolved to.
@@ -1860,12 +1878,13 @@ impl TransportState {
         result
     }
 
-    pub(crate) async fn round_trip_control(
+    pub(crate) async fn round_trip_control<F: PeerProcessFence>(
         &self,
         node_id: &ClusterNodeName,
         control: ControlEnvelope,
         subquota: RequestSubquota,
         timeout_duration: Duration,
+        fence: F,
     ) -> Result<wire::Decoded<ControlEnvelope>, Report<TransportError>> {
         let class = control.pool_class();
         let deadline = Instant::now()
@@ -1874,6 +1893,16 @@ impl TransportState {
                 reason: "request deadline exceeds the monotonic clock range".to_string(),
             })?;
         let lease = self.lease(node_id, class, subquota, deadline).await?;
+        if let Some(expected) = fence.expected_epoch() {
+            let actual = lease.connection.peer_epoch;
+            if expected != actual {
+                return Err(Report::new(TransportError::PeerProcessChanged {
+                    peer: node_id.clone(),
+                    expected,
+                    actual,
+                }));
+            }
+        }
         let bytes = wire::encode_rkyv(
             &self.executor,
             class.memory_class(),

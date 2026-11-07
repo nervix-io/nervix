@@ -271,6 +271,13 @@ path = "src/application/completion/progress.rs"
 reason = "Model participants exercise the progress owner concurrently outside a node executor under the selected scheduler."
 
 [[permission]]
+bound = "Two modeled participants, an observer and one replacement handler, race the calling participant's finite attachment and stop operations and are joined in every schedule; DFS explores at most 1,000 schedules under the model runner's step and wall bounds."
+items = ["thread::spawn"]
+owner = "Domain clock attachment replacement and stop Shuttle check."
+path = "src/application/domain_clock/attachments/tests.rs"
+reason = "The observer drives the production watch and lifetime owner under Shuttle rather than running node work through the executor."
+
+[[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
 items = ["thread::spawn"]
 owner = "Restore-installation Shuttle checks."

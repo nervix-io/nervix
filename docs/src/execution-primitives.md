@@ -168,6 +168,12 @@ lists. `pause`, `advance` and `resume` exist only with the `test-util` capabilit
 tests of elapsed-time behavior enable and no production graph has, because a clock that can be
 paused is checked on every read.
 
+The clock-attachment Shuttle check has two explicitly permitted modeled participants, a producer
+observer and a replacement handler. They race finite attachment and authority-stop operations,
+join before each execution ends and explore at most 1,000 depth-first schedules under the model
+runner's step and wall bounds. Its production owner uses the boundary's watch and cancellation
+primitives; the permission adds no product thread or executor bypass.
+
 The executor admits decoded materialized snapshots into `state_read` and optional retained
 generator source views into `state_read_cache`. Each pool derives its capacity from the relay
 budget and counts independently in the startup total. A snapshot reserves its complete retained

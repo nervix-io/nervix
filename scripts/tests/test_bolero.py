@@ -218,6 +218,7 @@ class InventoryTests(unittest.TestCase):
             "backup-section-mapping",
             "stopping-node-drain-wire",
             "application-progress-wire",
+            "domain-clock-attachment-wire",
             "cluster-peer-clock-probes",
             "cluster-parameters",
             "restore-installation-storage",
