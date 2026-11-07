@@ -11,6 +11,21 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/crypto/src/__fuzz__/digest_tests__bolero_sha2_digests_match_the_reference/corpus"
+domain_version = 1
+features = []
+id = "crypto-sha2-digests"
+invariant = "AWS-LC SHA-256 and SHA-512 equal the complete independent RustCrypto digests over bounded arbitrary binary inputs, and every tested segmentation of incremental SHA-256 equals the one-shot digest."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-crypto"
+random_iterations = 256
+source = "crates/crypto/src/digest_tests.rs"
+test = "digest_tests::bolero_sha2_digests_match_the_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "tools/nervix-lint/ratchet/src/__fuzz__/representations__bolero_lease_round_trip/corpus"
 domain_version = 1
 features = []

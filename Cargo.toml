@@ -433,6 +433,8 @@ aws-credential-types = "1.2"
 aws-lc-rs = { version = "1.18.2", default-features = false, features = [
   "aws-lc-sys",
 ] }
+# The boundary's stack-resident SHA-256 context uses the same module as aws-lc-rs and librdkafka.
+aws-lc-sys = { version = "=0.46.0", default-features = false }
 # Disable the AWS SDK TLS defaults so the root's Smithy client owns AWS-LC selection.
 aws-sdk-sqs = { version = "1.76", default-features = false, features = [
   "default-https-client",
@@ -656,7 +658,6 @@ pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-
   "compression",
   "tokio-rustls-runtime",
 ] }
-rand_core = { version = "0.6", features = ["getrandom"] }
 # 0.13 provides explicit AWS-LC selection while retaining the PEM support used by tests.
 rcgen = { version = "0.13", default-features = false, features = [
   "aws_lc_rs",
