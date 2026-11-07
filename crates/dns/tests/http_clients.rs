@@ -187,7 +187,7 @@ async fn reqwest_12_uses_the_same_resolver_without_a_public_fallback() {
         ))
         .use_preconfigured_tls(
             rustls::ClientConfig::builder_with_provider(nervix_primitives::sync::StdArc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
+                nervix_crypto::tls::outward_tls_provider().rustls(),
             ))
             .with_safe_default_protocol_versions()
             .assured("AWS-LC supports the safe TLS protocol versions")

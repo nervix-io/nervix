@@ -65,6 +65,7 @@ checks = [
   "producer::slots::shuttle_tests::shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit",
   "restore::shuttle_tests::shuttle_finishing_a_restore_attempt_fences_its_last_frame",
   "subscriptions::shuttle_tests::shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change",
+  "subscriptions::shuttle_tests::shuttle_a_restoration_ended_for_good_racing_a_deletion_releases_the_name",
 ]
 name = "nervix-client-core"
 

@@ -9,7 +9,8 @@
 
 use cucumber::{given, then, when};
 use nervix_client_wire::{
-    DomainClockAttachDisposition, DomainClockDetachDisposition, ReplyBody, RequestId,
+    DomainClockAttachDisposition, DomainClockAttachRefusal, DomainClockDetachDisposition,
+    ReplyBody, RequestId,
 };
 use nervix_models::{
     DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState, DomainClockPeriod,
@@ -669,7 +670,8 @@ async fn then_named_request_refused_in_transaction(world: &mut ScenarioWorld, na
     let reply = clock_reply_to_named(world, &name).await;
     let (failed, message) = match &reply {
         ReplyBody::DomainClockAttach(outcome) => (
-            outcome.disposition == DomainClockAttachDisposition::Failed,
+            outcome.disposition
+                == DomainClockAttachDisposition::Refused(DomainClockAttachRefusal::InTransaction),
             &outcome.message,
         ),
         ReplyBody::DomainClockDetach(outcome) => (

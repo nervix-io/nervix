@@ -49,6 +49,7 @@ pub(super) fn subscribe_request() -> ClientRequest {
         domain: domain("tenant"),
         statement: "CREATE SUBSCRIPTION live FROM orders;".to_string(),
         subscription_type: SubscriptionType::Row,
+        expected_schema: None,
     })
 }
 

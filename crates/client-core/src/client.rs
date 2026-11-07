@@ -1159,6 +1159,7 @@ impl Client {
             domain: attempt.contract.domain.clone(),
             statement,
             subscription_type: attempt.contract.subscription_type,
+            expected_schema: None,
         });
         let response = self.request(request, Some(exchange), None).await;
         let outcome = match response {
@@ -1176,8 +1177,8 @@ impl Client {
             }
         };
         let opened = match &outcome.disposition {
-            nervix_client_wire::SubscribeDisposition::Opened(opened) => Some(&opened.subscription),
-            nervix_client_wire::SubscribeDisposition::Failed => None,
+            nervix_client_wire::SubscribeDisposition::Opened(opened) => Some(&**opened),
+            nervix_client_wire::SubscribeDisposition::Refused(_) => None,
         };
         self.inner.events.emitters.desired.created(&attempt, opened);
         let mut outcome = CommandOutcome::from(outcome);
@@ -1468,12 +1469,15 @@ impl Client {
     ///
     /// The stream outlives the session. When the session ends, it reports
     /// [`SubscriptionEvent::Interrupted`] for every subscription the session held that the server
-    /// had not ended, opens a new session, and opens each of them again as a new generation. An
-    /// opening that fails while the session stays open is reported as
-    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. An opening
-    /// left unanswered past the request timeout ends
-    /// that session and wakes the reader to open another. A subscription
-    /// the server ended is never opened again, and its [`SubscriptionEvent::Ended`] is reported
+    /// had not ended, opens a new session, and opens each of them again as a new generation that
+    /// expects the schema the generation it replaces announced. An opening that session refuses
+    /// because the relay or its domain no longer exists, or because the relay announces another
+    /// schema, ends the subscription with [`SubscriptionEvent::Ended`] as the server's end would.
+    /// An opening it refuses for another reason while the session stays open is reported as
+    /// [`SubscriptionEvent::RestorationFailed`] with its cause and sent again after a growing wait.
+    /// An opening left unanswered past the request timeout ends that session and wakes the reader
+    /// to open another. A subscription the server ended is never opened again, and its
+    /// [`SubscriptionEvent::Ended`] is reported
     /// once, after the events before it, even when its session ended before it was read. With
     /// nothing to restore it waits for the next session the client opens, and delivers the events
     /// of the subscriptions opened there. A failure to open a session is returned, and the next

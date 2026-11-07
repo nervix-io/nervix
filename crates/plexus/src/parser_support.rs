@@ -2806,7 +2806,15 @@ mod tests {
         for (input, expected) in [
             (
                 "CREATE JUNCTION j FROM r WHERE input.a BETWEEN 1 AND 2 ",
-                vec![",", "BRANCHED BY", "COLLECT FOR", "FILTER", "UNBRANCHED"],
+                vec![
+                    ",",
+                    "ATTACHED",
+                    "BRANCHED BY",
+                    "COLLECT FOR",
+                    "DETACHED",
+                    "FILTER",
+                    "UNBRANCHED",
+                ],
             ),
             (
                 "CREATE JUNCTION j FROM r FILTER WHERE input.a IS DISTINCT FROM 1 ",

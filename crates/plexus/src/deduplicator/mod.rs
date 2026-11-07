@@ -1,7 +1,19 @@
+//! Plexus deduplicator statements.
+//!
+//! Layer: language.
+//! - **Owns.** The deduplicator grammar, lowering into Models and grammar-derived completion.
+//! - **Depends on.** Shared parser clauses, tokens and the vocabulary.
+//! - **Must not know.** Registry validation, execution planning or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckMode, AlterDeduplicator, AlterDeduplicatorOperation, CreateDeduplicator, CreateStatement,
+    AlterDeduplicator, AlterDeduplicatorOperation, CreateDeduplicator, CreateStatement,
 };
 
 use crate::{
@@ -28,11 +40,11 @@ pub fn create_deduplicator_parser<'src>()
 + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Identifier::Deduplicator))
         .then(deduplicator_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(ack_mode().or_not())
         .then(filter_where_clause().or_not())
         .boxed()
         .then(deduplicate_on_exprs())
@@ -50,7 +62,7 @@ pub fn create_deduplicator_parser<'src>()
                     (
                         (
                             (
-                                ((((if_not_exists, mode), name), from_input), filter_where),
+                                ((((if_not_exists, name), from_input), mode), filter_where),
                                 deduplicate_on,
                             ),
                             max_time,
@@ -69,7 +81,7 @@ pub fn create_deduplicator_parser<'src>()
                         branched_by,
                         deduplicate_on,
                         max_time,
-                        mode: mode.unwrap_or(AckMode::Attached),
+                        mode: mode.unwrap_or_default(),
                         filter_where,
                         materialized_state,
                     },
@@ -187,10 +199,23 @@ pub fn suggest_alter_deduplicator(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::FlushPolicy;
+    use nervix_models::{AckMode, FlushPolicy};
 
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn input_acknowledgement_clause() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE DEDUPLICATOR tested FROM incoming",
+            "DEDUPLICATE ON input.value MAX TIME 1m UNBRANCHED TO outgoing INHERIT ALL FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG",
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE DEDUPLICATOR tested FROM incoming DETACHED ",
+            &["FILTER WHERE", "DEDUPLICATE ON"],
+        );
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)
@@ -389,7 +414,7 @@ mod tests {
     #[test]
     fn parses_create_detached_deduplicator() {
         let tokens = to_tokens(
-            "CREATE DETACHED DEDUPLICATOR dedup_txns FROM ss1 DEDUPLICATE ON input.transaction_id \
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 DETACHED DEDUPLICATE ON input.transaction_id \
              MAX TIME 10m BRANCHED BY tenant TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE \
              1MiB ON MESSAGE ERROR LOG;",
         );

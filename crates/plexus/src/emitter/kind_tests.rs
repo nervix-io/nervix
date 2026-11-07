@@ -15,7 +15,7 @@ use super::parse_create_emitter;
 #[test]
 fn connector_and_entity_head_preserves_external_name() {
     let parsed = parse_create_emitter(
-        "CREATE DETACHED KAFKA TOPIC EMITTER outgoing FROM events TO kafka_main TOPIC 'Orders' \
+        "CREATE KAFKA TOPIC EMITTER outgoing FROM events DETACHED TO kafka_main TOPIC 'Orders' \
          MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING event_codec INHERIT ALL FLUSH \
          IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
     )

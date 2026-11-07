@@ -5549,17 +5549,39 @@ fn then_cli_fails_with(world: &mut ScenarioWorld, expected: String) {
 }
 
 #[when(expr = "the CLI subscribes to relay {string} on node {string}")]
-async fn when_cli_subscribes_to_relay(world: &mut ScenarioWorld, relay: String, node: String) {
+fn when_cli_subscribes_to_relay(world: &mut ScenarioWorld, relay: String, node: String) {
     let relay = expand_placeholders(world, &relay);
     let node = expand_placeholders(world, &node);
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node)
         .assured("the scenario names a cluster node");
+    start_cli_subscription_process(world, &relay, &grpc_uri);
+}
+
+#[given(expr = "the CLI subscription connection to node {string} is forwarded")]
+async fn given_cli_subscription_connection_is_forwarded(world: &mut ScenarioWorld, node: String) {
+    forward_cli_connection(world, &node, "cli_subscription_forwarded_server").await;
+}
+
+#[when(expr = "the CLI subscribes to relay {string} through its TCP forwarder")]
+fn when_cli_subscribes_to_relay_through_forwarder(world: &mut ScenarioWorld, relay: String) {
+    let relay = expand_placeholders(world, &relay);
+    let grpc_uri = world
+        .placeholders
+        .get("cli_subscription_forwarded_server")
+        .verified("the preceding step forwarded the CLI subscription connection")
+        .clone();
+    start_cli_subscription_process(world, &relay, &grpc_uri);
+}
+
+/// Starts the CLI's `subscribe` subcommand against `grpc_uri` for the scenario's domain, and keeps
+/// the last lines it prints.
+fn start_cli_subscription_process(world: &mut ScenarioWorld, relay: &str, grpc_uri: &str) {
     let mut process = tokio::process::Command::new(scenario_cli_binary())
         .args([
             "--server",
-            &grpc_uri,
+            grpc_uri,
             "--domain",
             &world.domain,
             "--username",
@@ -5568,7 +5590,7 @@ async fn when_cli_subscribes_to_relay(world: &mut ScenarioWorld, relay: String, 
             TEST_AUTH_PASSWORD,
             "subscribe",
             "watch",
-            &relay,
+            relay,
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -5636,7 +5658,13 @@ fn when_cli_follows_domain_clock(world: &mut ScenarioWorld, domain: String, node
 
 #[given(expr = "the CLI clock connection to node {string} is forwarded")]
 async fn given_cli_clock_connection_is_forwarded(world: &mut ScenarioWorld, node: String) {
-    let node = expand_placeholders(world, &node);
+    forward_cli_connection(world, &node, "cli_clock_forwarded_server").await;
+}
+
+/// Forwards a loopback port to the gRPC endpoint of `node`, and saves the forwarded server URL a
+/// CLI process connects to as `placeholder`.
+async fn forward_cli_connection(world: &mut ScenarioWorld, node: &str, placeholder: &str) {
+    let node = expand_placeholders(world, node);
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node)
@@ -5654,14 +5682,14 @@ async fn given_cli_clock_connection_is_forwarded(world: &mut ScenarioWorld, node
         std::net::SocketAddr::new(target_host, target_port),
     )
     .await
-    .unwrap_or_else(|error| panic!("the CLI clock forwarder could not start: {error}"));
+    .unwrap_or_else(|error| panic!("the CLI connection forwarder could not start: {error}"));
     url.set_host(Some("127.0.0.1"))
         .assured("the loopback host is valid in a URL");
     url.set_port(Some(forwarders.port()))
         .assured("a reserved TCP port is valid in a URL");
     world
         .placeholders
-        .insert("cli_clock_forwarded_server".to_string(), url.to_string());
+        .insert(placeholder.to_string(), url.to_string());
     world.tcp_forwarders = Some(forwarders);
 }
 
@@ -13123,6 +13151,15 @@ async fn when_gossip_exchanges_are_blocked(
 fn when_node_refuses_next_interest_visibility_check(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     world.cluster().refuse_interest_visibility_on(&node_id);
+}
+
+#[when("every node refuses the next subscription it is asked to open as unavailable")]
+fn when_every_node_refuses_next_subscription_opening(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .refuse_next_subscription_opening_on(crate::common::cluster::node_name(&node_id));
+    }
 }
 
 #[then(expr = "node {string} refused a subscription interest visibility check")]
@@ -29988,7 +30025,7 @@ fn syslog_tls_sender(
     addr: &str,
     resource_directory: &str,
 ) -> common::syslog_tls::SyslogTlsSender {
-    nervix_interconnect::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let parsed = url::Url::parse(&format!("syslog://{addr}"))
         .unwrap_or_else(|error| panic!("invalid Syslog TLS test address '{addr}': {error}"));
     let server_name = parsed
@@ -31516,20 +31553,28 @@ async fn then_named_client_observes_subscription_interrupted(
 }
 
 #[then(
-    expr = "within {string} client {string} observes a failed restoration of subscription {string}"
+    expr = "within {string} client {string} observes a restoration of subscription {string} \
+            refused as {string}"
 )]
-async fn then_named_client_observes_failed_restoration(
+async fn then_named_client_observes_refused_restoration(
     world: &mut ScenarioWorld,
     duration: String,
     client_name: String,
     subscription_name: String,
-    #[step] step: &Step,
+    cause: String,
 ) {
     let duration =
         parse_duration_text(&duration).assured("the restoration deadline is a valid duration");
     let client_name = expand_placeholders(world, &client_name);
     let subscription_name = expand_placeholders(world, &subscription_name);
-    let expected = expand_placeholders(world, docstring(step));
+    let expected_cause = match cause.as_str() {
+        "InTransaction" => nervix_client_core::SubscriptionRestorationCause::InTransaction,
+        "InvalidStatement" => nervix_client_core::SubscriptionRestorationCause::InvalidStatement,
+        "NameInUse" => nervix_client_core::SubscriptionRestorationCause::NameInUse,
+        "InvalidFilter" => nervix_client_core::SubscriptionRestorationCause::InvalidFilter,
+        "Unavailable" => nervix_client_core::SubscriptionRestorationCause::Unavailable,
+        other => panic!("the scenario names a restoration cause the client does not have: {other}"),
+    };
     let client = world
         .transaction_clients
         .get(&client_name)
@@ -31545,10 +31590,9 @@ async fn then_named_client_observes_failed_restoration(
         panic!("client '{client_name}' did not report a failed restoration: {event:?}");
     };
     assert_eq!(failure.subscription.name.as_str(), subscription_name);
-    assert!(
-        failure.message.contains(expected.trim()),
-        "client '{client_name}' reported the restoration failure {:?}, expected it to contain \
-         {expected:?}",
+    assert_eq!(
+        failure.cause, expected_cause,
+        "client '{client_name}' reported the restoration failure {:?}",
         failure.message
     );
 }
