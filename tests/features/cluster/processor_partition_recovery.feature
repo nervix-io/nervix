@@ -90,7 +90,7 @@ Feature: Partitioned processor recovery and handoff
       """
 
   Scenario: Draining one processor partition owner hands off its state and keeps sibling owners
-    When these Plexus commands are executed on node "{{leader}}"
+    When these Plexus commands are executed on the leader node
       """
       DRAIN NODE {{moving_owner}};
       """
