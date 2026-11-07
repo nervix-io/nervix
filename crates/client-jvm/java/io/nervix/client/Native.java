@@ -112,6 +112,7 @@ final class Native {
     static native long eventSchema(long handle);
     static native long eventBatch(long handle);
     static native Object eventRestoration(long handle);
+    static native int eventEnd(long handle);
     static native Object buffer(long handle);
     static native byte[] eventStates(long handle, int part, int column);
     static native byte[] eventFixed(long handle, int part, int column);

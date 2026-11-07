@@ -350,6 +350,30 @@ void run_connection(const Session &session) {
     std::cout << "CHECKS ok" << std::endl << "PASS" << std::endl;
 }
 
+const char *restoration_cause_name(nx_restoration_cause cause) {
+    switch (cause) {
+    case NX_RESTORATION_IN_TRANSACTION: return "in_transaction";
+    case NX_RESTORATION_INVALID_STATEMENT: return "invalid_statement";
+    case NX_RESTORATION_NAME_IN_USE: return "name_in_use";
+    case NX_RESTORATION_INVALID_FILTER: return "invalid_filter";
+    case NX_RESTORATION_UNAVAILABLE: return "unavailable";
+    case NX_RESTORATION_REJECTED: return "rejected";
+    case NX_RESTORATION_FAILED: return "failed";
+    }
+    throw std::runtime_error("the binding reported an unknown restoration cause");
+}
+
+const char *end_reason_name(nx_end_reason reason) {
+    switch (reason) {
+    case NX_END_RELAY_REMOVED: return "relay_removed";
+    case NX_END_RELAY_CHANGED: return "relay_changed";
+    }
+    throw std::runtime_error("the binding reported an unknown end reason");
+}
+
+// Opens a subscription, then reports how the session that replaces the lost one answers its
+// reopening: a refusal for now with its cause, message and wait, or the end of the subscription
+// with its reason.
 void run_restoration(const Session &session) {
     const std::string query = "CREATE SUBSCRIPTION " + env("NERVIX_PROBE_SUBSCRIPTION") +
                               " TO " + env("NERVIX_PROBE_RELAY") + ";";
@@ -369,20 +393,28 @@ void run_restoration(const Session &session) {
 
     raw_event = nullptr;
     check(nx_session_next_event(session.get(), nullptr, &raw_event));
-    Event failed(raw_event);
-    if (nx_event_kind_of(failed.get()) != NX_EVENT_RESTORATION_FAILED) {
-        throw std::runtime_error("the refused reopening did not report a restoration failure");
+    Event answer(raw_event);
+    const nx_event_kind kind = nx_event_kind_of(answer.get());
+    if (kind == NX_EVENT_ENDED) {
+        nx_end_reason reason{};
+        check(nx_event_end_reason(answer.get(), &reason));
+        std::cout << "ENDED reason=" << end_reason_name(reason) << std::endl;
+    } else if (kind == NX_EVENT_RESTORATION_FAILED) {
+        nx_restoration_cause cause{};
+        const uint8_t *message = nullptr;
+        size_t message_len = 0;
+        uint64_t wait_nanos = 0;
+        check(nx_event_restoration_cause(answer.get(), &cause));
+        check(nx_event_restoration_message(answer.get(), &message, &message_len));
+        check(nx_event_restoration_retry_after(answer.get(), &wait_nanos));
+        if (wait_nanos == 0) {
+            throw std::runtime_error("the restoration retry wait was zero");
+        }
+        std::cout << "RESTORATION cause=" << restoration_cause_name(cause)
+                  << " message=" << borrowed(message, message_len) << " wait=positive" << std::endl;
+    } else {
+        throw std::runtime_error("the reopening was neither refused nor ended");
     }
-    const uint8_t *message = nullptr;
-    size_t message_len = 0;
-    uint64_t wait_nanos = 0;
-    check(nx_event_restoration_message(failed.get(), &message, &message_len));
-    check(nx_event_restoration_retry_after(failed.get(), &wait_nanos));
-    if (wait_nanos == 0) {
-        throw std::runtime_error("the restoration retry wait was zero");
-    }
-    std::cout << "RESTORATION message=" << borrowed(message, message_len)
-              << " wait=positive" << std::endl;
     std::cout << "CHECKS ok" << std::endl << "PASS" << std::endl;
 }
 

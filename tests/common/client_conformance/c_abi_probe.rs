@@ -8,26 +8,27 @@ use std::{io, ptr, slice, time::Duration};
 
 use nervix_client_ffi::{
     Cancel, CellState, ClockEvent, ClockEventKind, ClockState, ConnectionOptions, DomainClock,
-    Event, EventKind, Execution, FailureKind, FieldType, Outcome, Part, Schema, Session,
-    nx_cancel_free, nx_cancel_new, nx_cancel_trigger, nx_cancel_with_deadline,
-    nx_clock_event_domain, nx_clock_event_generation, nx_clock_event_kind_of, nx_clock_event_paced,
-    nx_clock_event_release, nx_clock_event_retain, nx_clock_event_state, nx_clock_event_tick,
-    nx_connect_options_add_seed, nx_connect_options_basic_auth, nx_connect_options_ca_certificate,
-    nx_connect_options_free, nx_connect_options_new, nx_connect_options_timeout,
-    nx_connect_options_tls_requirement, nx_domain_clock_admission_window, nx_domain_clock_admits,
-    nx_domain_clock_generation, nx_domain_clock_logical_time_at, nx_domain_clock_paced,
-    nx_domain_clock_release, nx_domain_clock_retain, nx_domain_clock_state, nx_domain_clock_tick,
+    EndReason, Event, EventKind, Execution, FailureKind, FieldType, Outcome, Part,
+    RestorationCause, Schema, Session, nx_cancel_free, nx_cancel_new, nx_cancel_trigger,
+    nx_cancel_with_deadline, nx_clock_event_domain, nx_clock_event_generation,
+    nx_clock_event_kind_of, nx_clock_event_paced, nx_clock_event_release, nx_clock_event_retain,
+    nx_clock_event_state, nx_clock_event_tick, nx_connect_options_add_seed,
+    nx_connect_options_basic_auth, nx_connect_options_ca_certificate, nx_connect_options_free,
+    nx_connect_options_new, nx_connect_options_timeout, nx_connect_options_tls_requirement,
+    nx_domain_clock_admission_window, nx_domain_clock_admits, nx_domain_clock_generation,
+    nx_domain_clock_logical_time_at, nx_domain_clock_paced, nx_domain_clock_release,
+    nx_domain_clock_retain, nx_domain_clock_state, nx_domain_clock_tick,
     nx_domain_clock_wall_duration_until, nx_error_execution_reference, nx_error_free,
     nx_error_kind_of, nx_error_message, nx_event_cell_varlen, nx_event_column_fixed,
-    nx_event_column_states, nx_event_column_varlen, nx_event_frame, nx_event_kind_of,
-    nx_event_release, nx_event_restoration_message, nx_event_restoration_retry_after,
-    nx_event_retain, nx_event_row_count, nx_event_schema, nx_event_subscription, nx_execution_free,
-    nx_execution_reference, nx_outcome_diagnostic, nx_outcome_diagnostic_count,
-    nx_outcome_disposition, nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message,
-    nx_outcome_schema, nx_outcome_subscription, nx_schema_branch, nx_schema_field,
-    nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_domain_clock,
-    nx_session_execute, nx_session_free, nx_session_next_clock_event, nx_session_next_event,
-    nx_session_prepare,
+    nx_event_column_states, nx_event_column_varlen, nx_event_end_reason, nx_event_frame,
+    nx_event_kind_of, nx_event_release, nx_event_restoration_cause, nx_event_restoration_message,
+    nx_event_restoration_retry_after, nx_event_retain, nx_event_row_count, nx_event_schema,
+    nx_event_subscription, nx_execution_free, nx_execution_reference, nx_outcome_diagnostic,
+    nx_outcome_diagnostic_count, nx_outcome_disposition, nx_outcome_execution_reference,
+    nx_outcome_free, nx_outcome_message, nx_outcome_schema, nx_outcome_subscription,
+    nx_schema_branch, nx_schema_field, nx_schema_field_count, nx_schema_free, nx_session_connect,
+    nx_session_domain_clock, nx_session_execute, nx_session_free, nx_session_next_clock_event,
+    nx_session_next_event, nx_session_prepare,
 };
 use nervix_primitives::thread;
 
@@ -1160,6 +1161,30 @@ fn run_connection(session: &OpenSession, emit: &mut Emit<'_>) -> io::Result<()> 
     emit("PASS")
 }
 
+/// The name a probe report gives `cause`.
+fn restoration_cause_name(cause: RestorationCause) -> &'static str {
+    match cause {
+        RestorationCause::InTransaction => "in_transaction",
+        RestorationCause::InvalidStatement => "invalid_statement",
+        RestorationCause::NameInUse => "name_in_use",
+        RestorationCause::InvalidFilter => "invalid_filter",
+        RestorationCause::Unavailable => "unavailable",
+        RestorationCause::Rejected => "rejected",
+        RestorationCause::Failed => "failed",
+    }
+}
+
+/// The name a probe report gives `reason`.
+fn end_reason_name(reason: EndReason) -> &'static str {
+    match reason {
+        EndReason::RelayRemoved => "relay_removed",
+        EndReason::RelayChanged => "relay_changed",
+    }
+}
+
+/// Opens a subscription, then reports how the session that replaces the lost one answers its
+/// reopening: a refusal for now with its cause, message and wait, or the end of the subscription
+/// with its reason.
 fn run_restoration(
     session: &OpenSession,
     relay: &str,
@@ -1179,30 +1204,49 @@ fn run_restoration(
         ));
     }
     emit("INTERRUPTED")?;
-    let failed = session.next_event(&deadline)?;
-    if failed.kind() != EventKind::RestorationFailed {
-        return Err(io::Error::other(
-            "the refused reopening did not report a restoration failure",
-        ));
+    let answer = session.next_event(&deadline)?;
+    match answer.kind() {
+        EventKind::Ended => {
+            let mut reason = EndReason::RelayRemoved;
+            // SAFETY: the event is live and the output is writable.
+            unsafe { check(nx_event_end_reason(answer.0, &mut reason)) }?;
+            emit(&format!("ENDED reason={}", end_reason_name(reason)))?;
+        }
+        EventKind::RestorationFailed => {
+            let mut cause = RestorationCause::Failed;
+            let mut message = ptr::null();
+            let mut len = 0;
+            let mut nanos = 0;
+            // SAFETY: the event is live and the outputs are writable; the returned text is copied
+            // before this reference is released.
+            let text = unsafe {
+                check(nx_event_restoration_cause(answer.0, &mut cause))?;
+                check(nx_event_restoration_message(
+                    answer.0,
+                    &mut message,
+                    &mut len,
+                ))?;
+                check(nx_event_restoration_retry_after(answer.0, &mut nanos))?;
+                String::from_utf8(copied(message, len)).map_err(io::Error::other)?
+            };
+            if nanos == 0 {
+                return Err(io::Error::other("the restoration retry wait was zero"));
+            }
+            emit(&format!(
+                "RESTORATION cause={} message={text} wait=positive",
+                restoration_cause_name(cause)
+            ))?;
+        }
+        EventKind::Rows
+        | EventKind::DeliveryLost
+        | EventKind::RowsSkipped
+        | EventKind::Interrupted
+        | EventKind::ConsumerOverflow => {
+            return Err(io::Error::other(
+                "the reopening was neither refused nor ended",
+            ));
+        }
     }
-    let mut message = ptr::null();
-    let mut len = 0;
-    let mut nanos = 0;
-    // SAFETY: the event is live and the outputs are writable; the returned text is copied before
-    // this reference is released.
-    let text = unsafe {
-        check(nx_event_restoration_message(
-            failed.0,
-            &mut message,
-            &mut len,
-        ))?;
-        check(nx_event_restoration_retry_after(failed.0, &mut nanos))?;
-        String::from_utf8(copied(message, len)).map_err(io::Error::other)?
-    };
-    if nanos == 0 {
-        return Err(io::Error::other("the restoration retry wait was zero"));
-    }
-    emit(&format!("RESTORATION message={text} wait=positive"))?;
     emit("CHECKS ok")?;
     emit("PASS")
 }

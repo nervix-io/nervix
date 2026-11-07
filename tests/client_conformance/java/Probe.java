@@ -1109,6 +1109,33 @@ public final class Probe {
             require(Arrays.equals(after, copies.get(index)), "a slice keeps its native frame alive after event release");
         }
     }
+    /**
+     * Opens a subscription, then reports how the session that replaces the lost one answers its
+     * reopening: a refusal for now with its cause, message and wait, or the end of the subscription
+     * with its reason.
+     */
+    static void runRestoration(Session session, Scope outcomes) {
+        String relay = System.getenv("NERVIX_PROBE_RELAY"), subscription = System.getenv("NERVIX_PROBE_SUBSCRIPTION");
+        Outcome opened = session.execute("CREATE SUBSCRIPTION " + subscription + " TO " + relay + ";", null, outcomes);
+        require(opened.disposition().equals("completed"), "the subscription was not opened");
+        report("SUBSCRIBED");
+        try (var deadline = Nervix.Cancel.deadline(120)) {
+            Event interrupted = session.nextEvent(deadline, outcomes);
+            require(interrupted.handle.kind() == Nervix.EventKind.INTERRUPTED, "the lost session did not interrupt its subscription");
+            report("INTERRUPTED");
+            Event answer = session.nextEvent(deadline, outcomes);
+            switch (answer.handle.kind()) {
+                case ENDED -> report("ENDED reason=" + lower(answer.handle.endReason()));
+                case RESTORATION_FAILED -> {
+                    Nervix.RestorationFailure failure = answer.handle.restorationFailure();
+                    require(failure.waitNanos() > 0, "the restoration retry wait was zero");
+                    report("RESTORATION cause=" + lower(failure.cause()) + " message=" + failure.message() + " wait=positive");
+                }
+                default -> throw new IllegalStateException("the reopening was neither refused nor ended");
+            }
+        }
+        report("CHECKS ok");
+    }
     static void runRows(Session session, Scope outcomes) throws InterruptedException {
         String relay = System.getenv("NERVIX_PROBE_RELAY"), subscription = System.getenv("NERVIX_PROBE_SUBSCRIPTION");
         int expected = Integer.parseInt(System.getenv("NERVIX_PROBE_ROWS"));
@@ -1152,6 +1179,7 @@ public final class Probe {
                 System.getenv("NERVIX_PROBE_USERNAME"), System.getenv("NERVIX_PROBE_PASSWORD")); var outcomes = new Scope()) {
             if (arguments.length > 0 && arguments[0].equals("io")) new Endpoints(session, domain).run();
             else if (arguments.length > 0 && arguments[0].equals("clock")) runClock(session, domain, outcomes);
+            else if (arguments.length > 0 && arguments[0].equals("restoration")) runRestoration(session, outcomes);
             else runRows(session, outcomes);
             report("PASS");
         } catch (Throwable failure) {
