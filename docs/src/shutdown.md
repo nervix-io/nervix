@@ -1537,6 +1537,12 @@ and pooled emitter teardown removes its wait registration; cancellation clears a
 wait through its guard. Handoff watches register before reading their unit's retained freeze
 publication, and release publishes thaw before waking them.
 
+Processor and generator handoff selects exact partition units. The dispatch fence, branch freeze,
+quiesce counters and queued-consumer observation select the same units, so another partition's
+ongoing traffic cannot keep a moved unit waiting. Each partition's relay admission and completion
+also contribute to the relay's aggregate sequence, preserving whole-domain drain observations.
+Common consumers retain their own lifecycle and bounded queue across all partitions.
+
 ## Stopping Spread Intake
 
 An ingestor instance is stopped under its exact `DomainNodeUnitRef`. Node drain suspends intake for

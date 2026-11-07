@@ -86,6 +86,14 @@ A normal resume reads it once; accepting an explicit start adds a canonical rere
 reads per resume attempt. Each guard ends before persistence, replica waits or native connector I/O.
 Consumer polling and offset commits retain their existing state handles.
 
+Partitioned processor installation and replacement keep task and prepared-plan maps local to the
+domain execution, keyed by `NodeUnitRef`. They bind the existing state registries once per concrete
+unit and retain those handles for branch execution, checkpointing and replica polls. Replacing one
+unit disposes of only its local task and placement handles; domain teardown still owns registry
+disposal. Partitioned `DESCRIBE` visits each distinct owner once; each owner's observer reads its
+installed execution and reports only its locally executing units. Ownership-gate preparation clones
+the execution revision before reading relay fan-outs, so those map guards never nest or cross a wait.
+
 The frequency of a map is its hottest access:
 
 - **per record**: once per accepted record, row or delivered message
@@ -279,6 +287,7 @@ the task in its next round. See
 | `RuntimeInner::compiled_domain_udfs`, `compiled_wasm_modules`, `domain_instantiation_errors` | domain installation; observers | lifecycle, observer | content identity | short | retain: lifecycle registry |
 | `IngestorQuiesceControl::buffer` (`Mutex<IngestorQuiesceBuffer>`) | locked only after the published decision selects buffering; a drain locks it to take the oldest payload out for delivery and again to end that delivery | per record, only while quiesced or draining what a quiesce retained | one exact unit host and its endpoints; a delivery borrows that unit control until it ends | `MAX SIZE` per instance, counting a payload out for delivery; no guard crosses an await | retain: bounded protocol (retained-payload buffer) |
 | `RelayConsumerQueue::batches` (`ConcurrentQueue`) | one push per batch per consumer; one receiver pops | per batch | receiver owns its queue | lock-free, bounded by admitted count | retain: bounded protocol (relay fan-out queue) |
+| `RelayConsumerFanout::unit_audiences` (`Mutex<BTreeMap>`) | first audience registration per declared relay unit; reused during execution rebuild and consumer installation; selected-unit drain observation reads transit and dedicated queue counts | lifecycle and drain observation | the relay fan-out caches fixed audience handles; services retain them directly for delivery; fan-out teardown disposes of the registry | no await under the guard; bounded by declared unit identities; no record, batch or state-poll lookup | retain: lifecycle registration and drain observation |
 | `DeduplicatorKeyspace::recent_keys` (`ExpiryMap`), `BranchInstanceRegistry`, `WasmAckMap` | their one task mutates them through `&mut self` | per record, single owner | branch or task owner | no locks | retain: single owner |
 
 Endpoint `MODE ACK` creates one acknowledgement root per admitted request through the binding's

@@ -415,8 +415,8 @@ impl Runtime {
                     && entity.kind != ModelKind::Lookup
                     && Self::scheduled_node(&execution.revision, entity).is_some_and(|existing| {
                         Self::scheduled_node(desired, entity).is_some_and(|desired_node| {
-                            existing.executes_on(local_node_id)
-                                != desired_node.executes_on(local_node_id)
+                            existing.units_executing_on(local_node_id)
+                                != desired_node.units_executing_on(local_node_id)
                         })
                     })
             })
@@ -429,6 +429,39 @@ impl Runtime {
         entity: &NodeRef,
     ) -> Option<&'a ExecutionNode> {
         revision.nodes.get(entity)
+    }
+
+    fn processor_units_to_swap(
+        &self,
+        domain: &DomainName,
+        entity: &NodeRef,
+        desired: &ExecutionRevision,
+        replace_all: bool,
+        local: Option<&ClusterNodeName>,
+    ) -> Vec<Unit> {
+        let execution = self.inner.executions.get(domain);
+        let previous = execution
+            .as_ref()
+            .and_then(|execution| execution.revision.nodes.get(entity));
+        let next = desired.nodes.get(entity);
+        let mut units = BTreeSet::new();
+        if let Some(previous) = previous {
+            units.extend(previous.units.keys().copied());
+        }
+        if let Some(next) = next {
+            units.extend(next.units.keys().copied());
+        }
+        units
+            .into_iter()
+            .filter(|unit| {
+                replace_all
+                    || previous.is_some_and(|node| {
+                        Self::scheduled_unit_executes_locally(node, *unit, local)
+                    }) != next.is_some_and(|node| {
+                        Self::scheduled_unit_executes_locally(node, *unit, local)
+                    })
+            })
+            .collect()
     }
 
     /// Rebuilds the placement-derived runtime of every reassigned node: the replicated states this
@@ -471,19 +504,33 @@ impl Runtime {
             // A relay is rebound unit by unit: the units this node owned, the owner each unit had,
             // and the units it owns now decide which owner and state tasks stop and start.
             let mut layout_replaced = false;
+            let mut changed_units = desired_node.units.keys().copied().collect::<BTreeSet<_>>();
             let (previous_local_units, previous_unit_owners) = if let Some(execution) =
                 self.inner.executions.get(domain)
                 && let Some(existing) = Self::scheduled_node(&execution.revision, entity)
             {
                 layout_replaced = existing.units.keys().ne(desired_node.units.keys());
-                (
-                    existing.units_executing_on(local_node_id),
-                    existing.unit_execution_nodes(),
-                )
+                changed_units.retain(|unit| {
+                    existing.units.get(unit).is_none_or(|previous| {
+                        let desired = &desired_node.units[unit];
+                        previous.primary_node != desired.primary_node
+                            || previous.assigned_nodes != desired.assigned_nodes
+                    })
+                });
+                let local = existing
+                    .units_executing_on(local_node_id)
+                    .intersection(&changed_units)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                (local, existing.unit_execution_nodes())
             } else {
                 (BTreeSet::new(), BTreeMap::new())
             };
-            let desired_local_units = desired_node.units_executing_on(local_node_id);
+            let desired_local_units = desired_node
+                .units_executing_on(local_node_id)
+                .intersection(&changed_units)
+                .copied()
+                .collect::<BTreeSet<_>>();
             if entity.kind == ModelKind::Ingestor {
                 for unit in previous_local_units.difference(&desired_local_units) {
                     let key = DomainNodeUnitRef::new(entity.in_domain(domain), *unit);
@@ -561,12 +608,20 @@ impl Runtime {
             }
             let previous_tasks = if let Some(mut execution) = self.inner.executions.get_mut(domain)
             {
-                execution.placement_tasks.remove(entity)
+                changed_units
+                    .iter()
+                    .filter_map(|unit| {
+                        execution
+                            .placement_tasks
+                            .remove(&NodeUnitRef::new(entity.clone(), *unit))
+                    })
+                    .collect::<Vec<_>>()
             } else {
-                None
+                Vec::new()
             };
-            if let Some(previous_tasks) = previous_tasks {
-                previous_tasks.abort().await;
+            for previous in previous_tasks {
+                nervix_primitives::task::consume_budget().await;
+                previous.abort().await;
             }
 
             let state = PlacedNodeState::of(desired_node, revision);
@@ -676,7 +731,7 @@ impl Runtime {
                         })
                         .change_context_lazy(build)?;
                     if let Some(services) = relay_services.as_ref() {
-                        services.remove_local_runtime_consumer(AckMode::Detached);
+                        services.remove_local_unit_runtime_consumer(AckMode::Detached, *unit);
                     }
                 }
             }
@@ -687,6 +742,7 @@ impl Runtime {
                     desired_node,
                     local_node_id,
                     state,
+                    Some(&changed_units),
                 )
                 .change_context_lazy(build)?;
             let tasks = placement.tasks;
@@ -728,7 +784,7 @@ impl Runtime {
                             })
                             .change_context_lazy(build)?;
                         if let Some(services) = services.as_ref() {
-                            services.remove_local_runtime_consumer(AckMode::Detached);
+                            services.remove_local_unit_runtime_consumer(AckMode::Detached, *unit);
                         }
                     }
                 }
@@ -757,7 +813,8 @@ impl Runtime {
                                 .get(&relay)
                                 .verified("the domain plan covers every scheduled relay")
                                 .retention,
-                            receiver: services.add_local_runtime_consumer(AckMode::Detached),
+                            receiver: services
+                                .add_local_unit_runtime_consumer(AckMode::Detached, *unit),
                         },
                     );
                     if let Some(mut execution) = self.inner.executions.get_mut(domain) {
@@ -802,7 +859,11 @@ impl Runtime {
             if !tasks.is_empty()
                 && let Some(mut execution) = self.inner.executions.get_mut(domain)
             {
-                execution.placement_tasks.insert(entity.clone(), tasks);
+                execution.placement_tasks.extend(
+                    tasks
+                        .into_iter()
+                        .map(|(unit, tasks)| (NodeUnitRef::new(entity.clone(), unit), tasks)),
+                );
             }
         }
         Ok(relay_states_moved)
@@ -823,6 +884,8 @@ impl Runtime {
             gate_relays,
             forced_recovery_relays,
         } = change;
+        let explicitly_replaced = entities.iter().cloned().collect::<BTreeSet<_>>();
+        let reassigned_units = reassignments.clone();
         let reassignments =
             SortedSet::from_unsorted(reassignments.iter().map(|unit| unit.node.clone()).collect())
                 .into_vec();
@@ -882,13 +945,19 @@ impl Runtime {
                 .collect::<Vec<_>>(),
         )
         .into_vec();
-        let mut relays = self.entity_pause_relays(domain, &EntityGateTargets::Entities(gated));
+        let targets = if explicitly_replaced.is_empty() {
+            EntityGateTargets::Units(reassigned_units)
+        } else {
+            EntityGateTargets::Entities(gated)
+        };
+        let mut relays = self.entity_pause_relays(domain, &targets);
         relays.extend(gate_relays.iter().cloned());
         relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         relays.dedup();
-        let mut local_gate_hold = self.engage_entity_gates(
+        let mut local_gate_hold = self.engage_entity_unit_gates(
             domain,
             &relays,
+            &targets,
             Instant::now() + self.entity_gate_deadline(),
             "local scheduled node swap",
         );
@@ -983,20 +1052,34 @@ impl Runtime {
                         schema,
                         services,
                         previous_state_tasks,
-                        execution.placement_tasks.remove(entity).unwrap_or_default(),
+                        {
+                            let keys = execution
+                                .placement_tasks
+                                .keys()
+                                .filter(|owner| owner.node == *entity)
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            keys.into_iter()
+                                .filter_map(|owner| execution.placement_tasks.remove(&owner))
+                                .collect::<Vec<_>>()
+                        },
                     )
                 };
 
                 for task in previous_state_task {
+                    let unit = task.unit;
                     task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
                         .await
                         .change_context_lazy(|| ExecutionBuildError::StopRelayStateTask {
                             relay: relay.clone(),
                         })
                         .change_context_lazy(build)?;
-                    services.remove_local_runtime_consumer(AckMode::Detached);
+                    services.remove_local_unit_runtime_consumer(AckMode::Detached, unit);
                 }
-                previous_placement_tasks.abort().await;
+                for previous in previous_placement_tasks {
+                    nervix_primitives::task::consume_budget().await;
+                    previous.abort().await;
+                }
 
                 if desired_materialized {
                     let Some(local_node) = local_node_id else {
@@ -1010,6 +1093,7 @@ impl Runtime {
                             desired_node,
                             local_node,
                             Some(PlacedNodeState::MaterializedRelay(schema.arrow_schema())),
+                            None,
                         )
                         .change_context_lazy(build)?;
                     let mut state_tasks = Vec::new();
@@ -1032,7 +1116,8 @@ impl Runtime {
                                     .get(&relay)
                                     .verified("the domain plan covers every scheduled relay")
                                     .retention,
-                                receiver: services.add_local_runtime_consumer(AckMode::Detached),
+                                receiver: services
+                                    .add_local_unit_runtime_consumer(AckMode::Detached, unit),
                             },
                         );
                         state_tasks.push((RelayUnitRef::new(relay.clone(), unit), task));
@@ -1041,7 +1126,9 @@ impl Runtime {
                         if !placement.tasks.is_empty() {
                             execution
                                 .placement_tasks
-                                .insert(entity.clone(), placement.tasks);
+                                .extend(placement.tasks.into_iter().map(|(unit, tasks)| {
+                                    (NodeUnitRef::new(entity.clone(), unit), tasks)
+                                }));
                         }
                         for (key, state_task) in state_tasks {
                             execution.relay_state_tasks.insert(key, state_task);
@@ -1340,38 +1427,69 @@ impl Runtime {
                     })
                     .change_context(build())
                 };
-                let old_task = {
-                    let Some(mut execution) = self.inner.executions.get_mut(domain) else {
-                        return Err(generator_swap_unavailable());
-                    };
-                    execution.generator_tasks.remove(entity)
-                };
-                if let Some(task) = old_task {
-                    task.abort();
-                    task.join_after_shutdown("generator").await;
-                }
-
-                if generator.assignment.executes_on(local_node_id) {
-                    let (shutdown, spec) = {
-                        let Some(execution) = self.inner.executions.get(domain) else {
+                let units = self.processor_units_to_swap(
+                    domain,
+                    entity,
+                    &revision,
+                    explicitly_replaced.contains(entity),
+                    local_node_id,
+                );
+                let mut shared_spec: Option<GeneratorTaskSpec> = None;
+                let mut units = units.into_iter().peekable();
+                while let Some(unit) = units.next() {
+                    nervix_primitives::task::consume_budget().await;
+                    let owner = NodeUnitRef::new(entity.clone(), unit);
+                    let old_task = {
+                        let Some(mut execution) = self.inner.executions.get_mut(domain) else {
                             return Err(generator_swap_unavailable());
                         };
-                        let spec = GeneratorTaskSpec::bind(
-                            domain,
-                            generator,
-                            &execution.relay_services,
-                            &execution.udfs,
-                        )
-                        .change_context_lazy(build)?;
-                        (execution.shutdown.clone(), spec)
+                        execution.generator_tasks.remove(&owner)
                     };
-                    let task = self
-                        .spawn_generator_task(domain, &shutdown, spec)
-                        .change_context_lazy(build)?;
-                    let Some(mut execution) = self.inner.executions.get_mut(domain) else {
-                        return Err(generator_swap_unavailable());
-                    };
-                    execution.generator_tasks.insert(entity.clone(), task);
+                    if let Some(task) = old_task {
+                        task.abort();
+                        task.join_after_shutdown("generator").await;
+                    }
+
+                    if generator.assignment.unit_executes_on(unit, local_node_id) {
+                        let (shutdown, spec) = {
+                            let Some(execution) = self.inner.executions.get(domain) else {
+                                return Err(generator_swap_unavailable());
+                            };
+                            if shared_spec.is_none() {
+                                shared_spec = Some(
+                                    GeneratorTaskSpec::bind(
+                                        domain,
+                                        generator,
+                                        unit,
+                                        &execution.relay_services,
+                                        &execution.udfs,
+                                    )
+                                    .change_context_lazy(build)?,
+                                );
+                            }
+                            // Programs are compiled once for this logical generator. Move the
+                            // final specification, keeping the single-unit path free of clones.
+                            let mut spec = if units.peek().is_some() {
+                                shared_spec
+                                    .as_ref()
+                                    .verified("the specification was bound above")
+                                    .clone()
+                            } else {
+                                shared_spec
+                                    .take()
+                                    .verified("the specification was bound above")
+                            };
+                            spec.unit = unit;
+                            (execution.shutdown.clone(), spec)
+                        };
+                        let task = self
+                            .spawn_generator_task(domain, &shutdown, spec)
+                            .change_context_lazy(build)?;
+                        let Some(mut execution) = self.inner.executions.get_mut(domain) else {
+                            return Err(generator_swap_unavailable());
+                        };
+                        execution.generator_tasks.insert(owner, task);
+                    }
                 }
                 continue;
             }
@@ -1434,83 +1552,95 @@ impl Runtime {
                 }
             }
 
-            let executes_locally =
-                Self::scheduled_node_executes_locally(desired_node, local_node_id);
-            let published_plan = if executes_locally {
-                Some(
-                    self.bind_installed_processor_plan(domain, &desired_spec)
-                        .await?,
-                )
-            } else {
-                None
-            };
-            let template = published_plan
-                .as_ref()
-                .map(|plan| plan.template.as_ref().clone());
-            let old_task = {
+            let units = self.processor_units_to_swap(
+                domain,
+                entity,
+                &revision,
+                explicitly_replaced.contains(entity),
+                local_node_id,
+            );
+            for unit in units {
+                nervix_primitives::task::consume_budget().await;
+                let owner = NodeUnitRef::new(entity.clone(), unit);
+                let executes_locally =
+                    Self::scheduled_unit_executes_locally(desired_node, unit, local_node_id);
+                let published_plan = if executes_locally {
+                    Some(
+                        self.bind_installed_processor_plan(domain, &desired_spec, &revision, unit)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+                let template = published_plan
+                    .as_ref()
+                    .map(|plan| plan.template.as_ref().clone());
+                let old_task = {
+                    let Some(mut execution) = self.inner.executions.get_mut(domain) else {
+                        return Err(processor_swap_unavailable());
+                    };
+                    execution.node_tasks.remove(&owner)
+                };
+                let had_old_task = old_task.is_some();
+                let handoffs = if let Some(old_task) = old_task {
+                    old_task
+                        .handoff()
+                        .await
+                        .change_context_lazy(|| ExecutionBuildError::ProcessorHandoff {
+                            node: entity.clone(),
+                        })
+                        .change_context_lazy(build)?
+                } else {
+                    Vec::new()
+                };
+
                 let Some(mut execution) = self.inner.executions.get_mut(domain) else {
                     return Err(processor_swap_unavailable());
                 };
-                execution.node_tasks.remove(entity)
-            };
-            let had_old_task = old_task.is_some();
-            let handoffs = if let Some(old_task) = old_task {
-                old_task
-                    .handoff()
-                    .await
-                    .change_context_lazy(|| ExecutionBuildError::ProcessorHandoff {
-                        node: entity.clone(),
-                    })
-                    .change_context_lazy(build)?
-            } else {
-                Vec::new()
-            };
-
-            let Some(mut execution) = self.inner.executions.get_mut(domain) else {
-                return Err(processor_swap_unavailable());
-            };
-            if let Some(published_plan) = published_plan {
-                execution
-                    .routing
-                    .processor_plans
-                    .insert(entity.clone(), published_plan);
-            } else {
-                execution.routing.processor_plans.remove(entity);
-            }
-            for relay in &old_spec.spec.input_relays {
-                if let Some(services) = execution.relay_services.get(relay)
-                    && had_old_task
-                {
-                    services.remove_local_runtime_consumer(old_spec.spec.mode);
+                if let Some(published_plan) = published_plan {
+                    execution
+                        .routing
+                        .processor_plans
+                        .insert(owner.clone(), published_plan);
+                } else {
+                    execution.routing.processor_plans.remove(&owner);
                 }
-            }
-
-            if executes_locally {
-                let template = template.assured(
-                    "a locally executing processor binds its template before its prior task stops",
-                );
-                let mut inputs = Vec::with_capacity(desired_spec.spec.input_relays.len());
-                for relay in &desired_spec.spec.input_relays {
-                    let Some(services) = execution.relay_services.get(relay) else {
-                        return Err(Report::new(ExecutionBuildError::MissingRelayBoundary {
-                            relay: relay.clone(),
-                        })
-                        .change_context(build()));
-                    };
-                    inputs.push((
-                        relay.clone(),
-                        services.add_local_runtime_consumer(desired_spec.spec.mode),
-                    ));
+                for relay in &old_spec.spec.input_relays {
+                    if let Some(services) = execution.relay_services.get(relay)
+                        && had_old_task
+                    {
+                        services.remove_local_unit_runtime_consumer(old_spec.spec.mode, unit);
+                    }
                 }
-                let task = spawn_processor_node_runtime_with_handoffs(
-                    ProcessorRuntimeContext::new(self.clone(), domain.clone()),
-                    &execution.shutdown,
-                    template,
-                    inputs,
-                    handoffs,
-                    self.inner.branch_instance_expiration_scan_interval,
-                );
-                execution.node_tasks.insert(entity.clone(), task);
+
+                if executes_locally {
+                    let template = template.assured(
+                        "a locally executing processor binds its template before its prior task \
+                         stops",
+                    );
+                    let mut inputs = Vec::with_capacity(desired_spec.spec.input_relays.len());
+                    for relay in &desired_spec.spec.input_relays {
+                        let Some(services) = execution.relay_services.get(relay) else {
+                            return Err(Report::new(ExecutionBuildError::MissingRelayBoundary {
+                                relay: relay.clone(),
+                            })
+                            .change_context(build()));
+                        };
+                        inputs.push((
+                            relay.clone(),
+                            services.add_local_unit_runtime_consumer(desired_spec.spec.mode, unit),
+                        ));
+                    }
+                    let task = spawn_processor_node_runtime_with_handoffs(
+                        ProcessorRuntimeContext::new(self.clone(), domain.clone()),
+                        &execution.shutdown,
+                        template,
+                        inputs,
+                        handoffs,
+                        self.inner.branch_instance_expiration_scan_interval,
+                    );
+                    execution.node_tasks.insert(owner, task);
+                }
             }
         }
 
@@ -1677,18 +1807,14 @@ impl Runtime {
                 }
                 DynamicExecutionUpdate::Processor => {}
                 DynamicExecutionUpdate::WasmStateReset { processor, reset } => {
-                    let commands = if let Some(execution) = self.inner.executions.get(domain)
-                        && let Some(task) = execution
-                            .node_tasks
-                            .get(&NodeRef::new(ModelKind::WasmProcessor, processor.clone()))
-                    {
-                        Some(task.commands.clone())
-                    } else {
-                        None
-                    };
+                    let commands = self
+                        .wasm_state_reset_commands(domain, processor, *reset.scope())
+                        .change_context_lazy(build)?;
                     // Every reset failure names its processor, so the reset's report sits directly
                     // beneath the domain context.
-                    if let Some(commands) = commands {
+                    for commands in commands {
+                        nervix_primitives::task::consume_budget().await;
+                        let commands = commands.change_context_lazy(build)?;
                         let (response, receiver) = oneshot::channel();
                         let sent = commands
                             .send(ProcessorNodeCommand::ApplyWasmStateReset {
@@ -1740,24 +1866,24 @@ impl Runtime {
         Ok(())
     }
 
-    /// Builds every part of a scheduled node's runtime that follows only from its assignment: the
-    /// replicated states this cluster node owns or replicates for it, and the background tasks
-    /// that snapshot and poll them. An assignment change rebuilds exactly this for the moved node
-    /// and leaves every other node alone.
     /// Places the materialized state of every unit of a materialized relay that this node owns or
     /// replicates: the unit's owner keeps the state's originator for its state task, and each of
     /// its replicas polls the owner for the state it keeps.
-    fn place_materialized_relay_units(
+    fn build_materialized_relay_placement(
         &self,
         domain: &DomainName,
         shutdown_tx: &watch::Sender<bool>,
         node: &ExecutionNode,
         local_node_id: &ClusterNodeName,
         schema: &StdArc<arrow_schema::Schema>,
-        placement: &mut ScheduledNodePlacement,
-    ) -> error_stack::Result<(), ExecutionBuildError> {
+        selected_units: Option<&BTreeSet<Unit>>,
+    ) -> error_stack::Result<ScheduledNodePlacement, ExecutionBuildError> {
+        let mut placement = ScheduledNodePlacement::default();
         let relay = RelayName::from(&node.identifier);
         for (unit, scheduled) in &node.units {
+            if selected_units.is_some_and(|selected| !selected.contains(unit)) {
+                continue;
+            }
             let executes_locally = node.unit_executes_on(*unit, local_node_id);
             if !executes_locally && !scheduled.assigned_nodes.contains(local_node_id) {
                 continue;
@@ -1789,7 +1915,12 @@ impl Runtime {
             if let Some(writer) =
                 self.spawn_materialized_stream_snapshot_task(assignment.persistence)
             {
-                placement.tasks.checkpoints.push(writer);
+                placement
+                    .tasks
+                    .entry(*unit)
+                    .or_default()
+                    .checkpoints
+                    .push(writer);
             }
             if executes_locally {
                 let Some(originator) = assignment.originator.take() else {
@@ -1807,13 +1938,22 @@ impl Runtime {
                 if let Some(task) =
                     self.spawn_materialized_stream_replica_poll_task(shutdown_tx, installer)
                 {
-                    placement.tasks.replication.push(task);
+                    placement
+                        .tasks
+                        .entry(*unit)
+                        .or_default()
+                        .replication
+                        .push(task);
                 }
             }
         }
-        Ok(())
+        Ok(placement)
     }
 
+    /// Builds every part of a scheduled node's runtime that follows only from its assignment: the
+    /// replicated states this cluster node owns or replicates for it, and the background tasks
+    /// that snapshot and poll them. An assignment change rebuilds exactly this for the moved node
+    /// and leaves every other node alone.
     pub(super) fn build_scheduled_node_placement(
         &self,
         domain: &DomainName,
@@ -1821,20 +1961,26 @@ impl Runtime {
         node: &ExecutionNode,
         local_node_id: &ClusterNodeName,
         state: Option<PlacedNodeState>,
+        selected_units: Option<&BTreeSet<Unit>>,
     ) -> error_stack::Result<ScheduledNodePlacement, ExecutionBuildError> {
-        let mut placement = ScheduledNodePlacement::default();
-        if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref() {
-            self.place_materialized_relay_units(
+        let mut placement = if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref()
+        {
+            self.build_materialized_relay_placement(
                 domain,
                 shutdown_tx,
                 node,
                 local_node_id,
                 schema,
-                &mut placement,
-            )?;
-        }
+                selected_units,
+            )?
+        } else {
+            ScheduledNodePlacement::default()
+        };
 
         for (unit, scheduled) in &node.units {
+            if selected_units.is_some_and(|selected| !selected.contains(unit)) {
+                continue;
+            }
             if !scheduled.assigned_nodes.contains(local_node_id) {
                 continue;
             }
@@ -1867,7 +2013,12 @@ impl Runtime {
                     })?;
                 if let Some(writer) = self.spawn_kafka_offset_snapshot_task(assignment.persistence)
                 {
-                    placement.tasks.checkpoints.push(writer);
+                    placement
+                        .tasks
+                        .entry(*unit)
+                        .or_default()
+                        .checkpoints
+                        .push(writer);
                 }
                 if executes_locally {
                     let originator = assignment.originator.take().ok_or_else(|| {
@@ -1885,7 +2036,12 @@ impl Runtime {
                     if let Some(task) =
                         self.spawn_kafka_offset_replica_poll_task(shutdown_tx, installer)
                     {
-                        placement.tasks.replication.push(task);
+                        placement
+                            .tasks
+                            .entry(*unit)
+                            .or_default()
+                            .replication
+                            .push(task);
                     }
                 }
             }
@@ -1914,12 +2070,22 @@ impl Runtime {
                     })?;
                 if executes_locally {
                     if let Some(writer) = self.spawn_branch_aggregated_snapshot_task(aggregate) {
-                        placement.tasks.checkpoints.push(writer);
+                        placement
+                            .tasks
+                            .entry(*unit)
+                            .or_default()
+                            .checkpoints
+                            .push(writer);
                     }
                 } else if let Some(task) =
                     self.spawn_branch_aggregated_replica_poll_task(shutdown_tx, aggregate)
                 {
-                    placement.tasks.replication.push(task);
+                    placement
+                        .tasks
+                        .entry(*unit)
+                        .or_default()
+                        .replication
+                        .push(task);
                 }
             }
             if !executes_locally {
@@ -1929,7 +2095,12 @@ impl Runtime {
                         node: node.identity(),
                     })?
                 {
-                    placement.tasks.replication.push(task);
+                    placement
+                        .tasks
+                        .entry(*unit)
+                        .or_default()
+                        .replication
+                        .push(task);
                 }
             } else if node.kind() != ModelKind::Relay {
                 self.inner.metrics.register_global_node_unit(
@@ -2623,10 +2794,13 @@ mod tests {
             execution.revision.ownership_handoff_fingerprint,
             desired_revision.ownership_handoff_fingerprint
         );
-        assert!(execution.node_tasks.contains_key(&NodeRef {
-            kind: ModelKind::Deduplicator,
-            identifier: ModelName::from(&processor),
-        }));
+        assert!(execution.node_tasks.contains_key(&NodeUnitRef::new(
+            NodeRef {
+                kind: ModelKind::Deduplicator,
+                identifier: ModelName::from(&processor),
+            },
+            Unit::SINGLE
+        )));
         drop(execution);
 
         #[cfg(feature = "testing")]

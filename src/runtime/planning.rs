@@ -1,3 +1,10 @@
+//! Node-local binding of executable plans.
+//!
+//! Layer: data plane.
+//! - **Owns.** Binding typed plans to schemas, relay handles and shared compiled engine artifacts.
+//! - **Depends on.** Decision-layer plans, vocabulary and node-local execution engines.
+//! - **Must not know.** Semantic Models, Plexus parsing or placement policy.
+
 use error_stack::ResultExt as _;
 use nervix_models::{ModelName, parse_duration_text};
 #[cfg(test)]
@@ -19,6 +26,10 @@ pub(in crate::runtime) enum FlushPolicyRequirement {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(in crate::runtime) enum PlanningError {
+    #[error("processor execution unit {owner:?} is absent from its installed plan")]
+    MissingProcessorUnit { owner: NodeUnitRef },
+    #[error("WASM processor execution unit {owner:?} has no guest-state generations")]
+    MissingWasmUnitGenerations { owner: NodeUnitRef },
     #[error("window processor '{node}' has an invalid {setting:?} duration")]
     InvalidWindowDuration {
         node: ModelName,
@@ -641,6 +652,8 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
 
 pub(in crate::runtime) fn materialize_processor_instance_template(
     node: &BranchedProcessorNodeSpec,
+    unit: Unit,
+    unit_revision: &ProcessorUnitRevision,
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
     udfs: Option<&UdfExecutor>,
@@ -667,7 +680,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         revision: ProcessorPlanRevision::new(),
         owner: NodeUnitRef::new(
             NodeRef::new(spec.kind, RelayName::from(&spec.processor)),
-            Unit::SINGLE,
+            unit,
         ),
         root_relay,
         branch: node.branch.clone(),
@@ -680,7 +693,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         error_policies: spec.error_policies.clone(),
         relays,
         processors,
-        wasm_state_reset: node.wasm_state_reset.clone(),
+        wasm_state_reset: unit_revision.reset().cloned(),
     })
 }
 
@@ -1106,70 +1119,113 @@ fn bind_transforming_output_programs<'a>(
 pub(in crate::runtime) struct ProcessorPlanBindingContext<'a> {
     pub runtime: &'a Runtime,
     pub domain: &'a DomainName,
+    /// The same node identity used to select inputs, or an unplaced execution.
+    pub local_node_id: Option<&'a ClusterNodeName>,
     pub relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
     pub relay_services: &'a HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub relay_branchings: &'a HashMap<RelayName, ResolvedBranching>,
     pub materialized_stream_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
     pub udfs: Option<&'a UdfExecutor>,
-    pub previous: &'a HashMap<NodeRef, StdArc<PublishedProcessorPlan>>,
+    pub nodes: &'a indexmap::IndexMap<NodeRef, ExecutionNode>,
+    pub unit: Option<Unit>,
+    pub previous: &'a HashMap<NodeUnitRef, StdArc<PublishedProcessorPlan>>,
 }
 
 /// Binds the node-local artifacts for every locally installed processor before their complete map
 /// is published. An unchanged specification reuses the exact published allocation, including all
 /// prepared VM and WASM artifacts it owns.
 pub(in crate::runtime) async fn bind_published_processor_plans(
-    specs: &[BranchedProcessorNodeSpec],
+    specs: &[Arc<BranchedProcessorNodeSpec>],
     context: ProcessorPlanBindingContext<'_>,
-) -> error_stack::Result<HashMap<NodeRef, StdArc<PublishedProcessorPlan>>, PlanningError> {
+) -> error_stack::Result<HashMap<NodeUnitRef, StdArc<PublishedProcessorPlan>>, PlanningError> {
     let ProcessorPlanBindingContext {
         runtime,
         domain,
+        local_node_id,
         relay_schemas,
         relay_services,
         relay_branchings,
         materialized_stream_specs,
         lookups,
         udfs,
+        nodes,
+        unit: selected_unit,
         previous,
     } = context;
+    let mut prepared = HashMap::<NodeRef, StdArc<PublishedProcessorPlan>>::default();
+    for (owner, plan) in previous {
+        prepared
+            .entry(owner.node.clone())
+            .or_insert_with(|| plan.clone());
+    }
     let mut plans = HashMap::with_capacity(specs.len());
     for spec in specs {
         nervix_primitives::task::consume_budget().await;
-        let node = NodeRef::new(spec.spec.kind, spec.spec.processor.clone());
-        if let Some(published) = previous.get(&node)
-            && spec.reuses_prepared_revision(Some(&published.source))
-        {
-            plans.insert(node, published.clone());
-            continue;
-        }
-
-        let mut template =
-            materialize_processor_instance_template(spec, relay_schemas, relay_services, udfs)?;
-        bind_processor_template_programs(
-            &mut template,
-            relay_schemas,
-            relay_branchings,
-            materialized_stream_specs,
-            lookups,
-            udfs,
-        )?;
-        template
-            .prepare_stateful_inferencers(runtime.executor(), udfs)
-            .await?;
-        template
-            .prepare_wasm_processors(runtime, domain)
-            .await
-            .change_context_lazy(|| PlanningError::PrepareWasmProcessor {
-                node: spec.spec.processor.clone(),
-            })?;
-        plans.insert(
-            node,
-            StdArc::new(PublishedProcessorPlan {
-                source: spec.clone(),
-                template: StdArc::new(template),
-            }),
+        let identity = NodeRef::new(spec.spec.kind, spec.spec.processor.clone());
+        let node = nodes.get(&identity).verified(
+            "processor definitions and node placements come from the same execution revision",
         );
+        for unit in node.units.keys().copied() {
+            nervix_primitives::task::consume_budget().await;
+            if selected_unit.is_some_and(|selected| selected != unit)
+                || !Runtime::scheduled_unit_executes_locally(node, unit, local_node_id)
+            {
+                continue;
+            }
+            let owner = NodeUnitRef::new(identity.clone(), unit);
+            let unit_revision = ProcessorUnitRevision::of(node, unit)?;
+            if let Some(published) = previous.get(&owner)
+                && spec.reuses_prepared_revision(Some(&published.source))
+                && published.unit_revision == unit_revision
+            {
+                plans.insert(owner, published.clone());
+                continue;
+            }
+            let template = if let Some(programs) = prepared.get(&identity)
+                && spec.reuses_prepared_revision(Some(&programs.source))
+            {
+                let mut template = programs.template.as_ref().clone();
+                template.owner = owner.clone();
+                template.revision = ProcessorPlanRevision::new();
+                template.wasm_state_reset = unit_revision.reset().cloned();
+                template
+            } else {
+                let mut template = materialize_processor_instance_template(
+                    spec,
+                    unit,
+                    &unit_revision,
+                    relay_schemas,
+                    relay_services,
+                    udfs,
+                )?;
+                bind_processor_template_programs(
+                    &mut template,
+                    relay_schemas,
+                    relay_branchings,
+                    materialized_stream_specs,
+                    lookups,
+                    udfs,
+                )?;
+                template
+                    .prepare_stateful_inferencers(runtime.executor(), udfs)
+                    .await?;
+                template
+                    .prepare_wasm_processors(runtime, domain)
+                    .await
+                    .change_context_lazy(|| PlanningError::PrepareWasmProcessor {
+                        node: spec.spec.processor.clone(),
+                    })?;
+                template
+            };
+            let published = StdArc::new(PublishedProcessorPlan {
+                source: spec.clone(),
+                unit_revision,
+                template: StdArc::new(template),
+            });
+            prepared.insert(identity.clone(), published.clone());
+            plans.insert(owner, published);
+        }
     }
     Ok(plans)
 }

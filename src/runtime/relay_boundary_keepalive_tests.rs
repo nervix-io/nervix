@@ -88,7 +88,8 @@ async fn a_delivery_to_a_remote_consumer_reports_its_records_alive_while_it_wait
         vec![RemoteRuntimeConsumer {
             node_id: consumer.clone(),
             relay: relay.clone(),
-            mode: AckMode::Attached,
+            mode: Some(AckMode::Attached),
+            unit_modes: BTreeMap::new(),
         }],
         Some(dispatcher),
         RelayBranchPresences::single(Arc::new(BranchPresence::new())),
