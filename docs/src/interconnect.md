@@ -1960,7 +1960,9 @@ unbounded tick queue. The node-wide progress quota bounds attempts across every 
 Liveness, relay admission, cancellation, and terminal outcomes retain their independent capacity.
 
 The receiver opens delivery with `domain_clock_attach`, a management request in the same progress
-subquota with the same two-second attempt deadline. It names its full process identity, domain,
+subquota with the same two-second attempt deadline. The attachment request derives that deadline
+from the progress request: their equality is a fixed protocol invariant, not a second timeout policy.
+It names its full process identity, domain,
 installed runtime revision, lifecycle generation and addressed authority fence. It attaches once
 its local installed-clock phase reaches that revision, ahead of graph readiness, and replaces the
 attachment after a newer installation or authority reassignment. A receiver whose graph preparation

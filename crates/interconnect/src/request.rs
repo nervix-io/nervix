@@ -573,6 +573,13 @@ impl InterconnectRequest for DomainClockAttachRequest {
     const NAME: &'static str = "domain_clock_attach";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "clock attachment and progress requests must share one attempt deadline"
+        )
+    )]
     const TIMEOUT: Duration = DomainClockProgressRequest::TIMEOUT;
 }
 
