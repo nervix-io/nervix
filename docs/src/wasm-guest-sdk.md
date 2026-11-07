@@ -260,7 +260,7 @@ through the same coordinated reset an operator triggers, with the same durabilit
 guarantees.
 
 The request is terminal for the callback that made it. Output queued with `GuestContext::emit` is
-discarded, the input the branch holds is left unacknowledged for its source to redeliver, no
+discarded, the input the branch holds is left unacknowledged for its ingestor to redeliver, no
 checkpoint is taken, and the instance is dropped with its pending timeouts. Effects earlier
 callbacks published stand, because their checkpoints completed. The processor is then created by
 `Processor::create` in the new lifetime, without a `Processor::restore` call, and it is that

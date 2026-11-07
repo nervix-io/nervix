@@ -260,12 +260,12 @@ the twenty-second flush and the forty-five-second exact-payload assertion. The r
 when their condition holds and do not serialize other scenarios.
 
 The RabbitMQ parallel lost-rejection outline pauses its own dependency endpoint before resetting
-the connection. It observes all four original source ACK failures while recovery remains paused,
+the connection. It observes all four original ingestor ACK failures while recovery remains paused,
 then clears the terminal emitter fault before resuming the endpoint. This prevents the fault from
 rejecting only part of the replayed window into a further `MAX 4 BATCH TIMEOUT 1h` read. The
 downstream MQTT emitter uses QoS 1 with a four-record confirmation window; its sent counter and the
-RabbitMQ unacknowledged count distinguish output receipt from source settlement. The outline
-retains both sets of four payloads, one- and three-node coverage, the source's batching and ACK
+RabbitMQ unacknowledged count distinguish output receipt from ingestor settlement. The outline
+retains both sets of four payloads, one- and three-node coverage, the ingestor's batching and ACK
 deadlines, and the forty-second payload assertions. The pause is scenario-local and adds no suite
 serialization or readiness sleep.
 
@@ -301,7 +301,7 @@ beyond thirty seconds under an explicitly declared forty-five-second `ACK TIMEOU
 dependency faults do not widen a product deadline or replace a readiness observation with a sleep.
 
 The Kafka control-execution scenario uses librdkafka's mock broker to hold replies after a DOMAIN
-source delivered its first record. A codec alteration resumes that source, and the scenario waits
+ingestor delivered its first record. A codec alteration resumes that ingestor, and the scenario waits
 for a running connector-storage job before sending a record through another HTTP ingestor. The
 same oracle runs on one and three nodes. The broker's native round-trip control releases replies
 in the scenario and again during teardown before diagnostics or node drain, including after a
@@ -494,7 +494,7 @@ can run beside STOP. These event boundaries establish the outage without a sleep
 observation window. The publication scenario requires every original sequence member, allowing
 the duplicates an uncertain Core NATS retry permits. The STOP scenario observes the pending-record
 uncertainty through a retained public session; terminal domain teardown may cancel unresolved
-host work under the source's existing acknowledgement contract.
+host work under the ingestor's existing acknowledgement contract.
 
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
 `just test-deloxide-stress` or `just test-deloxide-stress-restore` builds, starts its
@@ -547,10 +547,10 @@ checks.
 The `@restarted_voter_observation` scenario runs in both selections, reaching whole-cluster teardown, reopening each node's store, and automatic scheduling after the first relayed voter heartbeat. All voters start concurrently so each can discover a peer's live policy before reporting ready; if another voter leads, the fixture transfers leadership to the bootstrap node before observing its scheduling barrier. It waits for the held voter's catch-up after releasing that barrier. Its watch-channel barrier and concurrent fault map are untracked; the diagnostic evidence covers blocking locks reached by restart and scheduling. The native metadata restore scenario also runs in both selections after its Kafka replication stream and acknowledgement boundaries are repaired, retaining complete primary and replica metadata comparisons and distributed placement checks.
 
 The WASM/Kafka restore outline checks Commands-memory headroom on the restored leader after its
-source becomes ready. The cluster fixture reads the public capacity and reserved-byte metrics,
-then polls within the step's single deadline until the class can admit the 176-byte source control
+ingestor becomes ready. The cluster fixture reads the public capacity and reserved-byte metrics,
+then polls within the step's single deadline until the class can admit the 176-byte ingestor control
 call. It reports both last observations on timeout and allows the retirement reservation of a live
-Kafka consumer. This assertion preserves the source's existing readiness and error deadlines.
+Kafka consumer. This assertion preserves the ingestor's existing readiness and error deadlines.
 
 The measured restore and backup steps sample each node's public bulk and restore-metadata
 executor gauges every 20 milliseconds while the ordinary CLI runs. They also record the harness
@@ -582,7 +582,7 @@ keeps its source revision and patch, each process output and the available node 
 `target/native-metadata-restore`; its completion record is written only after all ten pass.
 
 The complete-generation fixture allows 120 seconds for every post-restore input to reach its raw
-relay. Its forty one-mebibyte guest saves exercise sequential source acknowledgements and durable
+relay. Its forty one-mebibyte guest saves exercise sequential ingestor acknowledgements and durable
 replica checkpoints beside the other diagnostic workloads. The full active diagnostic selection
 reached 77 of 80 inputs at the former 30-second bound, while the exact same binary reached all
 inputs and preserved every branch in the focused four-case replay. This condition ends as soon as
@@ -639,7 +639,7 @@ processing failures. Each replay replaces the same materialized keys with the sa
 so partial effects retain the fixture's value oracle. Every attempt and terminal result is logged;
 an unknown outcome, final admission refusal or expired round fails preparation. The producer closes
 after every tenant's batch has completed, before the scenario checks all generator rows and takes
-the backup cut. Source admission, input delivery and the final archive and restore assertions remain
+the backup cut. Ingestor admission, input delivery and the final archive and restore assertions remain
 separate observable steps.
 
 The lane then selects `@paced_simulation_reopen` from the public paced-driver feature. It builds the
@@ -726,9 +726,9 @@ authorization caching is disabled and a denial leaves the connection open, so ch
 scenario's unique client rule takes effect on its next subscription. An independent probe
 observes a successful CONNACK, a Not Authorized SUBACK, and a retained empty session on reconnect.
 It uses a different client identity from Nervix. The one- and three-node scenarios require the
-source's reconnect backoff to grow across repeated refusals, preserve refusal through an ingestor
+ingestor's reconnect backoff to grow across repeated refusals, preserve refusal through an ingestor
 hold, then deliver after the scenario grants permission. A forced drain refusal ends the codec
-alteration before replacement, so the same suspended source resumes with its current codec.
+alteration before replacement, so the same suspended ingestor resumes with its current codec.
 This observes retry progress
 instead of assuming a fixed quiet interval. Each HTTP update and the complete wire probe have
 a thirty-second observation budget. The rules neither serialize scenarios nor alter another
@@ -1632,7 +1632,7 @@ The harness keeps these boundaries explicit.
   once. A timeout that only the first run met would let a leader that runs the command again under
   the same execution reference, because the refused outcome was never recorded, drain and apply
   the alteration, and the scenario would observe that success. The execution's other drains, such
-  as a source-intake drain before the full hold or the other units one node drain moves, are left
+  as an ingestor-intake drain before the full hold or the other units one node drain moves, are left
   alone, and an alteration a scenario runs later owns the domain under its own reference and
   drains normally. The three-node Syslog regression moves leadership while the alteration waits at
   its entity gate pause, holds the new leader's run of the same transaction until the first run
@@ -1850,7 +1850,7 @@ The harness keeps these boundaries explicit.
   the measured catch-up into an interconnect address and membership change.
   The planned Kafka handoff scenario installs its subscription and emitter stall, publishes and
   flushes both branch records, and then starts intake. Both records are therefore available to
-  its first parallel batch. The source host waits for that batch's attached ACKs before polling
+  its first parallel batch. The ingestor host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
   The forced-recovery startup fixture holds the promoted replica's initial installation across a
   whole-cluster restart. After the cluster rejoins, it makes the former owner's application health
@@ -2105,8 +2105,8 @@ domain-time deadlines for it and an untouched sibling. These tests and the publi
 provide complementary receipt and instance-ownership evidence; they add no synchronization claim.
 
 The MQTT changed-address restart scenario waits for the post-restart marker within its bounded
-delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;
-broker receipt does not establish that its source acknowledgement reached the broker before the
+delivery window. Its persistent QoS 1 ingestor may replay the pre-restart marker before that row;
+broker receipt does not establish that its ingestor acknowledgement reached the broker before the
 node stopped. The OTEL metric scenario observes one successful export from each concrete emitter
 owner before checking Collector output. HTTP intake acceptance does not establish emitter export,
 and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
@@ -3111,13 +3111,13 @@ group's committed offset through clients of its own, so no refusal reaches the s
 The attached- and detached-window Kafka acknowledgement scenarios create their input topic before
 `START` and observe the consumer group's membership and the ingestor's readiness before injecting
 the output failure. Their bounded subscription assertions therefore exercise replay and
-acknowledgement isolation after source initialization, without spending those assertions' budgets
+acknowledgement isolation after ingestor initialization, without spending those assertions' budgets
 on automatic topic creation and consumer discovery.
 
 The attached-window fixture publishes both rows through one producer and allows a thirty-second
 partial-batch wait. Collection ends as soon as its two-message ACK batch is full; the window can
 then produce the output whose failure rejects both records. Separate publication steps can exceed
-a short collection window, leaving one retained window row waiting for input while the source waits
+a short collection window, leaving one retained window row waiting for input while the ingestor waits
 for that partial batch's ACK. The fixture retains its five-second ACK timeout and exact four-record
 replay assertion within eight seconds.
 
@@ -3350,11 +3350,11 @@ messages dropped or an exhaustive transport history. Receipt and event counts ne
 sequence or header mismatch.
 
 The wide-columnar NATS emission outline uses the production sticky scheduler and explicitly moves
-the source and emitter to node-1 before publishing. Its relay is on node-1 in the one-node example
+the ingestor and emitter to node-1 before publishing. Its relay is on node-1 in the one-node example
 and node-2 in the three-node example; cluster-status assertions establish both remote hops in the
-latter. Each example publishes all 32,768 records, waits for the source's sent count, releases the
+latter. Each example publishes all 32,768 records, waits for the ingestor's sent count, releases the
 emitter stall, and checks every sequence and repeated header within the original 90-second budget,
-followed by the 500-millisecond duplicate check. The source count does not confirm delivery to the
+followed by the 500-millisecond duplicate check. The ingestor count does not confirm delivery to the
 broker's observing subscriber.
 
 ## Console Command Reply Uncertainty
