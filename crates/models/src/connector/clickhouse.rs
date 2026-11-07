@@ -151,6 +151,7 @@ impl EmitterDeclaration for ClickHouseTableEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::ClickHouse),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::JsonEachRow,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: ClickHouseTablePublishingMode::KINDS,

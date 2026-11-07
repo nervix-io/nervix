@@ -148,6 +148,7 @@ const STAGED_WRITE_RESERVATION_BYTES: u64 = 1;
 /// The Iceberg emitter, which appends each mapped batch to a local Arrow IPC staging file and
 /// appends every staged batch to its table in one catalog commit.
 pub struct IcebergTableEmitter {
+    host: EmitterHost,
     client: IcebergTableEmitterClient,
     commit_state: IcebergCommitState,
     /// The exact Arrow schema every staging file is written and read back with, which is the
@@ -617,6 +618,7 @@ impl IcebergTableEmitter {
             staged_batches: Vec::new(),
             staged_rows: 0,
             staged_bytes: 0,
+            host,
         })
     }
 
@@ -1220,7 +1222,9 @@ impl IcebergTableEmitter {
         let mut ranges = Vec::<Range<usize>>::new();
         let mut rejected_rows = vec![false; staged.num_rows()];
         if let Some(policy) = self.batch_policy {
-            for request in self.staged_file_division(&staged, policy).await?.requests {
+            let division = self.staged_file_division(&staged, policy).await?;
+            self.host.record_payload_subdivisions(division.subdivisions);
+            for request in division.requests {
                 match request {
                     RowRequest::Write { members, .. } => ranges.push(members),
                     RowRequest::Oversize { member, oversize } => {
@@ -1380,6 +1384,14 @@ impl IcebergTableEmitter {
                 .await?;
             // The rows the charge covered are in data files now.
             drop(charge);
+            for file in &data_files {
+                self.host.record_prepared_payload(
+                    nervix_connector::EmitterPayloadMeasurement::sized(
+                        file.record_count(),
+                        file.file_size_in_bytes(),
+                    ),
+                );
+            }
             preparation.record_written(group.batches, data_files);
         }
         self.client.commit_prepared(preparation).await?;

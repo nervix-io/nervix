@@ -516,6 +516,11 @@ status, accounting, metric, freeze and domain-clock dependencies. Their runtime 
 registration, teardown and observers; recurring operations use the retained capabilities. See
 [Data-Plane Concurrency](./data-plane-concurrency.md#retained-task-dependencies).
 
+Emitter payload counters and current-work gauges share the task's retained interaction handle.
+Preparation and write scopes update resolved children, without reaching the registry again.
+Buffer and prepared-payload owners withdraw only their own gauge contributions when they retire;
+process-local preparation totals survive those owner lifetimes.
+
 ## Replication Routing
 
 State construction publishes resolved replication routes to the installed state and that unit's

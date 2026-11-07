@@ -50,6 +50,7 @@ mod ingest_metadata;
 // Reached through its own path rather than re-exported here, so the owner the clock-boundary check
 // declares stays the only file in this crate that names the capability constructor and UTC read.
 mod emitter;
+mod emitter_observation;
 mod ingestor;
 pub mod physical_time;
 mod row_requests;
@@ -79,6 +80,7 @@ pub use emitter::{
     RecordProperty, RejectedEmitterMember, RowEmitter, RowRequestEmitter, RowRequestPreparation,
     TypedRecordHeader,
 };
+pub use emitter_observation::{EmitterPayloadMeasurement, EmitterPayloadObserver};
 pub use http_client::{DeclaredProxy, HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{
     IngestMessageHeaders, IngestMessageMetadata, IngestMetadataFailure, IngestMetadataRow,

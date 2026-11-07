@@ -52,6 +52,7 @@ Feature: HTTP REQUEST emitter
       quiesce: none
       envelope: none
       batch: none
+      batch container: JSON record
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: outgoing
@@ -70,6 +71,7 @@ Feature: HTTP REQUEST emitter
       quiesce: none
       envelope: none
       batch: none
+      batch container: no body
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: outgoing
@@ -105,6 +107,7 @@ Feature: HTTP REQUEST emitter
       quiesce: none
       envelope: none
       batch: none
+      batch container: JSON record
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: outgoing
@@ -147,6 +150,7 @@ Feature: HTTP REQUEST emitter
       quiesce: none
       envelope: none
       batch: none
+      batch container: no body
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: outgoing
@@ -391,7 +395,7 @@ Feature: HTTP REQUEST emitter
       | 1            |
       | 3            |
 
-  @http_emitter_requests
+  @http_emitter_requests @emitter_payload_observations
   Scenario Outline: An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
@@ -489,12 +493,21 @@ Feature: HTTP REQUEST emitter
       {"event_id":"43","payload":"second"}
       """
 
+    And within "30s" DESCRIBE EMITTER "deliver_event" on the leader node contains
+      """
+      batch container: JSON record
+      """
+    And within "30s" DESCRIBE EMITTER "deliver_event" on the leader node contains
+      """
+      payloads: 2 source_messages=2 encoded_bytes=71 size_bound_bytes=71 prepared_bytes=71
+      """
+
     Examples:
       | cluster_size |
       | 1            |
       | 3            |
 
-  @http_emitter_requests
+  @http_emitter_requests @emitter_payload_observations
   Scenario Outline: An HTTP REQUEST emitter declared without a body sends zero content bytes
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
@@ -567,6 +580,15 @@ Feature: HTTP REQUEST emitter
       Idempotency-Key: 7
       X-Tenant: north
       X-Payload: ignored
+      """
+
+    And within "30s" DESCRIBE EMITTER "delete_event" on the leader node contains
+      """
+      batch container: no body
+      """
+    And within "30s" DESCRIBE EMITTER "delete_event" on the leader node contains
+      """
+      payloads: 1 source_messages=1 encoded_bytes=0 size_bound_bytes=0 prepared_bytes=0
       """
 
     Examples:

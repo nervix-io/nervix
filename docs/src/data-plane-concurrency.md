@@ -522,6 +522,16 @@ memory-ordering implementation.
 Emitter confirmation guards retain one counter resolved at startup, and task teardown removes its
 registry interest.
 
+Emitter preparation measurements retain the existing interaction handle. Each buffer, prepared
+store and write scope owns its gauge contribution and subtracts that contribution when it ends,
+including cancellation. Replacement owners therefore cannot clear each other's work. These
+observations add no delivery fence, wait, shared-map access or acknowledgment transition. The
+Prometheus library's counters are observations outside the modeled protocol; ordinary owner tests
+check their balance and public scenarios check preparation totals across retained retries.
+During branch compaction, a temporary observation owns payloads still held by the moving iterator,
+and the store owns the survivors already reinserted. Cancelling that future withdraws the
+temporary contribution without clearing the surviving store's work.
+
 An Iceberg emitter retains the first table's `FileIO` while replacing catalog metadata. Its storage
 factory initializes one operator for the configured object-store root; data, manifest and metadata
 files use that same initialized storage after refreshes, successful commits and ambiguous-result

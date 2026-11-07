@@ -337,6 +337,20 @@ test-inferencer-state *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
 
+# Observe batching through the public session and the owning node's metric endpoint.
+test-emitter-batch-metrics *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{emitter_batch_metrics,emitter_batch_metrics}.feature") }} {{ quote(args) }}
+
+# Native measurements keep their existing real transport and payload assertions.
+test-emitter-native-metrics *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{client_emitters,emitter_batch_databases,http_emitter,iceberg_emission,otel_export_retries}.feature") }} --tags '@emitter_payload_observations' {{ quote(args) }}
+
 # Run the native-client and CLI foreign-reference witnesses with only the tools they start.
 test-client-foreign-execution: (test-client-recovery-witnesses "client-foreign-execution" "(A native command|The CLI) recovers its own execution after a foreign command reply")
 

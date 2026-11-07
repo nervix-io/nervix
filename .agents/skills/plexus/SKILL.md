@@ -85,6 +85,9 @@ For authentication refusals and retry behavior, follow
 does not establish that a user exists.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
+For batching inspection, read [Emitter payload preparation](../../../docs/src/metrics-and-observability.md#emitter-payload-preparation)
+alongside Emitters: check the effective container and distinguish encoded payload measurements,
+retained work, retries and confirmed source records before interpreting a throughput figure.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session

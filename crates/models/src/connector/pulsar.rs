@@ -619,6 +619,7 @@ impl EmitterDeclaration for PulsarTopicEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Pulsar),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: PulsarTopicPublishingMode::KINDS,

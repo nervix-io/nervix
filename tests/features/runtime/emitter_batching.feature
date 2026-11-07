@@ -248,6 +248,7 @@ Feature: Emitter batching configuration
       quiesce: none
       envelope: none
       batch: MAX MESSAGES 250 MAX SIZE 4MiB
+      batch container: binary-array insert
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       """

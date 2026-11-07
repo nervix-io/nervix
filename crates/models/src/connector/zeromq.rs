@@ -225,6 +225,7 @@ impl EmitterDeclaration for ZeroMqPushEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::ZeroMq),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: ZeroMqPushPublishingMode::KINDS,

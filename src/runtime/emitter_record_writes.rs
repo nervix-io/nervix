@@ -29,6 +29,7 @@ use nervix_connector::{
 };
 
 use super::{emitter_batch_packing::BatchEnvelope, *};
+use crate::metrics::{EmitterInteractionMetrics, EmitterWork, EmitterWorkKind};
 
 /// The guarantee every lookup of an answered record relies on.
 const CHECKED_RECORD: &str =
@@ -174,6 +175,9 @@ pub(super) trait PreparedContent {
     /// The value one write hands the emitter for the payload.
     type Written;
 
+    /// Content bytes retained for another write, before driver framing or compression.
+    fn prepared_bytes(&self) -> usize;
+
     /// The value the write hands the emitter for this payload under `record`. The emitter takes its own
     /// copy, so the payload stays retained until an answer resolves it.
     #[cfg_attr(
@@ -201,6 +205,10 @@ pub(super) struct EncodedPayload {
 
 impl PreparedContent for EncodedPayload {
     type Written = EmitterRecord;
+
+    fn prepared_bytes(&self) -> usize {
+        self.payload.len()
+    }
 
     #[cfg_attr(
         nervix_lint,
@@ -252,6 +260,13 @@ pub(super) struct PreparedHttpRequest {
 impl PreparedContent for PreparedHttpRequest {
     type Written = EmitterHttpRequest;
 
+    fn prepared_bytes(&self) -> usize {
+        match &self.body {
+            Some(body) => body.len(),
+            None => 0,
+        }
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -281,6 +296,10 @@ pub(super) struct RowRequestBody {
 
 impl PreparedContent for RowRequestBody {
     type Written = EmitterRowRequest;
+
+    fn prepared_bytes(&self) -> usize {
+        self.body.len()
+    }
 
     #[cfg_attr(
         nervix_lint,
@@ -454,6 +473,24 @@ pub(super) struct PreparedPayload<Content> {
 }
 
 impl<Content: PreparedContent> PreparedPayload<Content> {
+    fn observe_retained(&self, work: &mut EmitterWork) {
+        work.add(EmitterWorkKind::Prepared, self.members.len().arch_into());
+        work.add(EmitterWorkKind::Payloads, 1);
+        work.add(
+            EmitterWorkKind::Bytes,
+            self.content.prepared_bytes().arch_into(),
+        );
+    }
+
+    fn observe_released(&self, work: &mut EmitterWork) {
+        work.remove(EmitterWorkKind::Prepared, self.members.len().arch_into());
+        work.remove(EmitterWorkKind::Payloads, 1);
+        work.remove(
+            EmitterWorkKind::Bytes,
+            self.content.prepared_bytes().arch_into(),
+        );
+    }
+
     fn first_member(&self) -> EmitterRecordPosition {
         *self
             .members
@@ -483,12 +520,15 @@ impl<Content: PreparedContent> PreparedPayload<Content> {
 #[derive(Debug)]
 pub(super) struct PreparedPayloads<Content> {
     retained: BTreeMap<EmitterRecordPosition, PreparedPayload<Content>>,
+    /// Production stores retain their task's metric handle; pure harness stores need no observer.
+    observations: Option<EmitterWork>,
 }
 
 impl<Content> Default for PreparedPayloads<Content> {
     fn default() -> Self {
         Self {
             retained: BTreeMap::new(),
+            observations: None,
         }
     }
 }
@@ -502,21 +542,39 @@ pub(super) struct PreparedWrite<Written> {
 /// The payload each record of one write carries, by the record's identity.
 pub(super) struct WrittenPayloads {
     first_members: Vec<EmitterRecordPosition>,
+    /// This write owns its in-flight contribution through answers, errors and cancellation.
+    _in_flight: Option<EmitterWork>,
 }
 
 impl<Content: PreparedContent> PreparedPayloads<Content> {
+    pub(super) fn observed(metrics: &EmitterInteractionMetrics) -> Self {
+        Self {
+            retained: BTreeMap::new(),
+            observations: Some(metrics.work()),
+        }
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.retained.is_empty()
     }
 
     pub(super) fn clear(&mut self) {
         self.retained.clear();
+        if let Some(work) = &mut self.observations {
+            work.clear();
+        }
     }
 
     /// Rebinds private storage positions after whole source branches leave the buffer. Every
     /// production payload contains one source branch, so all its carriers retire together.
     /// Contents and execution time move unchanged; no request is prepared or encoded here.
     pub(super) async fn remap_batches(&mut self, positions: &[Option<usize>]) {
+        // The iterator owns the payloads still being moved. Its observation leaves with it if
+        // this future is cancelled; the store separately owns the survivors already inserted.
+        let mut moving_work = self.observations.take();
+        if let Some(work) = &moving_work {
+            self.observations = Some(work.scope());
+        }
         for mut payload in std::mem::take(&mut self.retained).into_values() {
             nervix_primitives::task::consume_budget().await;
             let keep = positions
@@ -539,7 +597,13 @@ impl<Content: PreparedContent> PreparedPayloads<Content> {
                     );
                 }
             }
+            if let Some(work) = &mut moving_work {
+                payload.observe_released(work);
+            }
             if keep {
+                if let Some(work) = &mut self.observations {
+                    payload.observe_retained(work);
+                }
                 self.retained.insert(payload.first_member(), payload);
             }
         }
@@ -561,6 +625,9 @@ impl<Content: PreparedContent> PreparedPayloads<Content> {
             })?;
             batch.mark_prepared(member.row_index)?;
         }
+        if let Some(work) = &mut self.observations {
+            payload.observe_retained(work);
+        }
         self.retained.insert(payload.first_member(), payload);
         Ok(())
     }
@@ -570,13 +637,26 @@ impl<Content: PreparedContent> PreparedPayloads<Content> {
     pub(super) fn next_write(&self) -> PreparedWrite<Content::Written> {
         let mut records = Vec::with_capacity(self.retained.len());
         let mut first_members = Vec::with_capacity(self.retained.len());
+        let mut messages = 0_u64;
         for (first_member, payload) in &self.retained {
             records.push(payload.written(EmitterRecordId::new(records.len())));
             first_members.push(*first_member);
+            messages = messages
+                .checked_add(payload.members.len().arch_into())
+                .assured("one write counts source memberships already retained in memory");
+        }
+        let mut in_flight = None;
+        if let Some(work) = &self.observations {
+            let mut write = work.scope();
+            write.set(EmitterWorkKind::InFlight, messages);
+            in_flight = Some(write);
         }
         PreparedWrite {
             records,
-            payloads: WrittenPayloads { first_members },
+            payloads: WrittenPayloads {
+                first_members,
+                _in_flight: in_flight,
+            },
         }
     }
 
@@ -646,10 +726,14 @@ impl<Content: PreparedContent> PreparedPayloads<Content> {
             .first_members
             .get(record.index())
             .verified(CHECKED_RECORD);
-        self.retained.remove(first_member).verified(
+        let payload = self.retained.remove(first_member).verified(
             "the write was built from the retained payloads, and an answered payload leaves them \
              only here, once",
-        )
+        );
+        if let Some(work) = &mut self.observations {
+            payload.observe_released(work);
+        }
+        payload
     }
 }
 
@@ -699,6 +783,24 @@ mod tests {
         }
     }
 
+    fn assert_work(
+        context: &EmitterConnectorContext,
+        prepared: u64,
+        in_flight: u64,
+        payloads: u64,
+        bytes: u64,
+    ) {
+        let expected = format!(
+            "work: buffered=0 prepared={prepared} in_flight={in_flight} staged=0 \
+             prepared_payloads={payloads} prepared_bytes={bytes} "
+        );
+        let lines = context.interactions.describe_lines();
+        assert!(
+            lines.iter().any(|line| line.starts_with(&expected)),
+            "{lines:?}"
+        );
+    }
+
     fn payload(members: &[EmitterRecordPosition], bytes: &str) -> PreparedPayload<EncodedPayload> {
         PreparedPayload {
             members: members.to_vec(),
@@ -732,12 +834,13 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn branch_compaction_preserves_prepared_bytes_members_and_execution_time() {
+        let context = emitter_context();
         let (discard, _) = batch(&[1], 10);
         let (first, first_acks) = batch(&[2, 3], 20);
         let (middle, _) = batch(&[4], 30);
         let (last, last_acks) = batch(&[5], 40);
         let mut batches = vec![discard, first, middle, last];
-        let mut prepared = PreparedPayloads::default();
+        let mut prepared = PreparedPayloads::observed(&context.interactions);
         for candidate in [
             payload(&[position(0, 0)], "[1]"),
             payload(&[position(1, 0), position(1, 1), position(3, 0)], "[2,3,5]"),
@@ -747,15 +850,18 @@ mod tests {
                 .retain(candidate, &mut batches)
                 .assured("these members name distinct pending rows in the fixture batches");
         }
+        assert_work(&context, 5, 0, 3, 13);
         prepared
             .remap_batches(&[None, Some(0), None, Some(1)])
             .await;
+        assert_work(&context, 3, 0, 1, 7);
         let mut survivors = batches
             .into_iter()
             .enumerate()
             .filter_map(|(index, batch)| [1, 3].contains(&index).then_some(batch))
             .collect::<Vec<_>>();
         let write = prepared.next_write();
+        assert_work(&context, 3, 3, 1, 7);
         assert_eq!(written(&write), vec![(0, b"[2,3,5]".to_vec())]);
         let record = &write.records[0];
         assert_eq!(record.occurred_at, Timestamp::from_unix_nanos(1));
@@ -773,11 +879,46 @@ mod tests {
         assert!(answers.unresolved.is_none());
         assert!(answers.rejected.is_empty());
         assert!(prepared.is_empty());
+        assert_work(&context, 0, 0, 0, 0);
         for completion in first_acks.into_iter().chain(last_acks) {
             assert_eq!(completion.wait().await, AckOutcome::Ack);
         }
         assert_eq!(survivors[0].execution_now(), Timestamp::from_unix_nanos(20));
         assert_eq!(survivors[1].execution_now(), Timestamp::from_unix_nanos(40));
+    }
+
+    #[test]
+    fn cancelling_a_write_keeps_its_prepared_work_until_clear_or_store_drop() {
+        let context = emitter_context();
+        let (first, _completions) = batch(&[1, 2], 10);
+        let mut batches = vec![first];
+        let mut prepared = PreparedPayloads::observed(&context.interactions);
+        prepared
+            .retain(
+                payload(&[position(0, 0), position(0, 1)], "[1,2]"),
+                &mut batches,
+            )
+            .assured("the payload carries the two distinct pending rows");
+        assert_work(&context, 2, 0, 1, 5);
+        let write = prepared.next_write();
+        assert_work(&context, 2, 2, 1, 5);
+        drop(write);
+        assert_work(&context, 2, 0, 1, 5);
+        let retry = prepared.next_write();
+        assert_eq!(written(&retry), vec![(0, b"[1,2]".to_vec())]);
+        assert_work(&context, 2, 2, 1, 5);
+        drop(retry);
+        prepared.clear();
+        assert_work(&context, 0, 0, 0, 0);
+
+        let (next, _completions) = batch(&[3], 20);
+        let mut batches = vec![next];
+        prepared
+            .retain(payload(&[position(0, 0)], "[3]"), &mut batches)
+            .assured("the replacement batch has one pending row");
+        assert_work(&context, 1, 0, 1, 3);
+        drop(prepared);
+        assert_work(&context, 0, 0, 0, 0);
     }
 
     #[nervix_primitives::test]

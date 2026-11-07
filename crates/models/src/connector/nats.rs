@@ -614,6 +614,7 @@ impl EmitterDeclaration for NatsSubjectEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         // The NATS protocol sets no message size of its own: each server announces its
         // max_payload, and the client refuses a message above it before writing.
         batch: EmitterBatchLegality::Optional { maximum: None },
@@ -647,6 +648,7 @@ impl EmitterDeclaration for NatsStreamEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: NatsStreamPublishingMode::KINDS,

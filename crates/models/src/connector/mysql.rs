@@ -178,6 +178,7 @@ impl EmitterDeclaration for MySqlTableEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::MySql),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::Parameters,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: MySqlTablePublishingMode::KINDS,

@@ -321,6 +321,7 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         headers,
         reference,
         body,
+        payload: _,
         batch,
         requires_batch_transformation,
         publishing_modes,

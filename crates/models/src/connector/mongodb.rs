@@ -154,6 +154,7 @@ impl EmitterDeclaration for MongoDbCollectionEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::MongoDb),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::Bson,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: MongoDbCollectionPublishingMode::KINDS,

@@ -23,16 +23,16 @@ use std::{path::Path, str::FromStr};
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt};
-use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot};
 use meticulous::OptionExt;
 #[cfg(test)]
 use nervix_models::{AlterRelay, DropModel};
 use nervix_models::{
-    ClusterSchedule, CreateAvroWireSchema, CreateBranch, CreateDeduplicator, CreateEmitter,
-    CreateGenerator, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor,
-    CreateRelay, CreateReorderer, CreateSchema, DomainName, Model, ModelIndex, ModelKind,
-    ModelName, NodeRef, PlacementPolicy, RequestedResourceVersion, TransactionModelTransition,
-    UniquelyKindedModel,
+    ClusterSchedule, CreateAvroWireSchema, CreateBranch, CreateCodec, CreateDeduplicator,
+    CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction, CreatePlacement,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainName,
+    EmitterPayloadPresentation, Model, ModelIndex, ModelKind, ModelName, NodeRef, PlacementPolicy,
+    RequestedResourceVersion, TransactionModelTransition, UniquelyKindedModel,
 };
 use nervix_primitives::sync::{
     Arc,
@@ -1201,6 +1201,44 @@ impl Registry {
         }
     }
 
+    /// Reads an emitter and its effective payload from one short-lived storage snapshot.
+    /// Both reads retain storage/decode failures, without cloning the domain's model index.
+    pub(crate) fn emitter_configuration(
+        &self,
+        domain: &DomainName,
+        identifier: impl Into<ModelName>,
+    ) -> Result<Option<(CreateEmitter, EmitterPayloadPresentation)>, Report<RegistryError>> {
+        let identifier = identifier.into();
+        let snapshot = self.storage.db.snapshot();
+        let Some(emitter) = self
+            .storage
+            .get_at::<CreateEmitter>(&snapshot, domain, &identifier)
+            .change_context(RegistryError::LoadStoredModels)?
+        else {
+            return Ok(None);
+        };
+        let codec = match emitter.body.codec() {
+            Some(name) => Some(
+                self.storage
+                    .get_at::<CreateCodec>(&snapshot, domain, &ModelName::from(name))
+                    .change_context(RegistryError::LoadStoredModels)?
+                    .ok_or_else(|| {
+                        Report::new(RegistryError::MissingReference {
+                            domain: domain.as_str().to_owned(),
+                            identifier: identifier.as_str().to_owned(),
+                            expected_kind: ModelKind::Codec.as_str(),
+                            reference: name.as_str().to_owned(),
+                        })
+                    })?,
+            ),
+            None => None,
+        };
+        let payload = emitter
+            .payload_presentation(|_| codec.as_ref())
+            .assured("the snapshot read resolved the codec the emitter names");
+        Ok(Some((emitter, payload)))
+    }
+
     pub(crate) fn placement_plan(
         &self,
         domain: &DomainName,
@@ -1275,6 +1313,33 @@ struct ModelStorage {
 }
 
 impl ModelStorage {
+    /// Typed reads sharing one MVCC view, for inspection that resolves another Model.
+    fn get_at<M: UniquelyKindedModel>(
+        &self,
+        snapshot: &Snapshot,
+        domain: &DomainName,
+        identifier: &ModelName,
+    ) -> Result<Option<M>, Report<RegistryError>> {
+        let key = encode_key(domain, M::KIND, identifier)?;
+        let Some(raw) = snapshot
+            .get(&self.index, key)
+            .change_context(RegistryError::ReadValue)?
+        else {
+            return Ok(None);
+        };
+        let model = deserialize_value(raw.as_ref())?;
+        let stored_kind = model.kind();
+        let model = M::from_model(model).ok_or_else(|| {
+            Report::new(RegistryError::StoredModelKindMismatch {
+                domain: domain.as_str().to_owned(),
+                identifier: identifier.as_str().to_owned(),
+                expected_kind: M::KIND.as_str(),
+                stored_kind: stored_kind.as_str(),
+            })
+        })?;
+        Ok(Some(model))
+    }
+
     fn from_database(db: Database) -> Result<Self, Report<RegistryError>> {
         let index = db
             .keyspace("models", KeyspaceCreateOptions::default)
@@ -1623,6 +1688,78 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn emitter_configuration_keeps_persisted_codec_read_and_kind_errors() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).assured("the fixture opens an empty registry");
+        let domain = named::<DomainName>("inspection");
+        let identifier = named::<ModelName>("emit");
+        registry
+            .apply_batch(&domain, full_graph_batch())
+            .assured("the complete emitter graph validates");
+        let (emitter, payload) = registry
+            .emitter_configuration(&domain, &identifier)
+            .assured("the stored emitter and codec decode")
+            .assured("the fixture graph contains emit");
+        assert!(emitter.batch.is_none());
+        assert_eq!(payload.to_string(), "JSON record");
+        assert!(
+            registry
+                .emitter_configuration(&domain, named::<ModelName>("missing"))
+                .assured("an absent name is an ordinary lookup")
+                .is_none()
+        );
+
+        let key = encode_key(&domain, ModelKind::Codec, named::<ModelName>("event_codec"))
+            .assured("the fixture codec key encodes");
+        registry
+            .storage
+            .index
+            .insert(key.clone(), b"invalid archive")
+            .assured("the fixture corrupts only its own stored codec");
+        let error = registry
+            .emitter_configuration(&domain, &identifier)
+            .expect_err("inspection must report the persisted codec decoding failure");
+        assert!(error.frames().any(|frame| matches!(
+            frame.downcast_ref::<RegistryError>(),
+            Some(RegistryError::InvalidModelArchive)
+        )));
+
+        let misplaced =
+            serialize_value(&schema("event_schema")).assured("the current schema Model archives");
+        registry
+            .storage
+            .index
+            .insert(key.clone(), misplaced)
+            .assured("the fixture writes a current Model beneath the wrong key kind");
+        let error = registry
+            .emitter_configuration(&domain, &identifier)
+            .expect_err("inspection must report the codec key's stored kind mismatch");
+        assert!(error.frames().any(|frame| matches!(
+            frame.downcast_ref::<RegistryError>(),
+            Some(RegistryError::StoredModelKindMismatch {
+                expected_kind,
+                ..
+            }) if *expected_kind == ModelKind::Codec.as_str()
+        )));
+
+        registry
+            .storage
+            .index
+            .remove(key)
+            .assured("the fixture removes only the emitter's stored codec");
+        let error = registry
+            .emitter_configuration(&domain, &identifier)
+            .expect_err("inspection must preserve a missing codec reference as a typed failure");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::MissingReference { expected_kind, reference, .. }
+                if *expected_kind == ModelKind::Codec.as_str() && reference == "event_codec"
+        ));
+        drop(registry);
+        fs::remove_dir_all(path).assured("the fixture registry path is disposable");
     }
 
     #[test]

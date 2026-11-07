@@ -3420,6 +3420,21 @@ The observation keeps the original report, retry decision, pending acknowledgeme
 policy intact. [Connector Interactions](metrics-and-observability.md#connector-interactions) owns
 the families, labels, duration buckets and owner-routed `destination:` inspection section.
 
+Each entity's vocabulary declaration names its native payload format; codec formats and their
+batch container selection remain with the codec Model. Inspection projects the emitter and codec
+from one registry storage snapshot or schedule publication, so an ALTER cannot combine unrelated
+versions of the policy and container.
+
+Payload preparation uses those same retained children. The host observes codec, HTTP, client IPC
+and prepared row-request content; a native row connector reports its already measured request or
+completed data-file size through its opaque host service. The observation carries only source
+membership and byte counts. It introduces no driver metric registry, payload label, extra encoding
+pass, changed request grouping or delivery decision. Size-driven subdivisions are reported where
+the existing divider produces them. Retained payloads count once across unanswered retries;
+reconstructed native requests count each preparation. [Emitter payload
+preparation](metrics-and-observability.md#emitter-payload-preparation) defines the measurement
+boundaries and distinguishes preparation from delivery and driver attempts.
+
 The compiler failure-contract gate reads exact source-owned outcome classifications at the
 contract's payload preparation and Sentry's override of it, Kafka's `ACK TIMEOUT` conversion,
 Postgres's mapped-column refusal, and MongoDB's value and document refusals. A value BSON cannot

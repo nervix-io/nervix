@@ -636,6 +636,7 @@ impl EmitterDeclaration for HttpRequestEmitter {
         headers: Some(HeaderModel::lowercase(HeaderLayout::SortedByName)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Http),
         body: EmitterBodyForm::CodecOrWithoutBody,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Unavailable {
             reason: BatchUnavailability::OneRequestPerRecord,
         },
