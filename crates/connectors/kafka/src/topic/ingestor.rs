@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Kafka consumer configuration, polling, headers and metadata, partition assignment,
 //!   offset acknowledgement, partition inspection, consumer retirement, and the opaque services
-//!   through which a ingestor reads and advances host-owned domain offsets.
+//!   through which an ingestor reads and advances host-owned domain offsets.
 //! - **Depends on.** The connector contract, Kafka vocabulary values, the bounded executor,
 //!   the primitive boundary, `error-stack` and `rust-rdkafka`.
 //! - **Must not know.** Runtime offset-state types, domain execution maps, relays, branches,
@@ -35,6 +35,7 @@ mod metadata_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     num::NonZeroUsize,
     time::Duration,
 };
@@ -42,7 +43,7 @@ use std::{
 use async_trait::async_trait;
 use control::{CommitTask, ControlBudget, KafkaControl};
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
     IngestMetadataValues, IngestRowHeaders, IngestTransportPosition, IngestorAckPolicy,
@@ -51,8 +52,8 @@ use nervix_connector::{
 };
 use nervix_execution::Executor;
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, KafkaPartitionSchedule, KafkaTopicName, Timestamp,
-    TimestampError,
+    ClientConfigEntry, ConnectorKind, IngestStartPosition, IngestorMetadataType,
+    KafkaPartitionSchedule, KafkaTopicName, Timestamp,
 };
 use nervix_primitives::{
     sync::{Arc, watch},
@@ -146,6 +147,14 @@ pub trait KafkaDomainOffsetServices: Send + Sync + 'static {
     /// Accepts the explicit generation start through persistence and its replica boundary.
     /// An already accepted start retains its canonical positions. Subsequent initialization of
     /// that same generation returns `Resume` with those recorded positions.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an explicit start is selected and made durable before the driver polls \
+                      records; normal acknowledgements call commit instead"
+        )
+    )]
     async fn reset(
         &self,
         generation: u64,
@@ -184,7 +193,7 @@ impl KafkaDomainOffsetHost {
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
-            "Kafka resume installs its exact domain-offset placement before polling; the source \
+            "Kafka resume installs its exact domain-offset placement before polling; the ingestor \
              retains the resulting position",
             self.inner.services.initialization(partitions)
         )
@@ -196,7 +205,13 @@ impl KafkaDomainOffsetHost {
         generation: u64,
         positions: Vec<KafkaOffsetPosition>,
     ) -> KafkaDomainOffsetResult<()> {
-        self.inner.services.reset(generation, positions).await
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "Kafka initialization selects one explicit starting cut before polling; recurring \
+             record acknowledgements call commit instead",
+            self.inner.services.reset(generation, positions)
+        )
+        .await
     }
 
     pub async fn commit(&self, position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()> {
@@ -210,6 +225,8 @@ pub enum KafkaTopicIngestorOffsetMode {
     ConsumerGroup {
         group_id: String,
         commit: KafkaGroupCommit,
+        /// Where a partition without a usable committed offset starts.
+        start_at: IngestStartPosition,
     },
     Domain {
         group_id: String,
@@ -228,6 +245,31 @@ impl KafkaTopicIngestorOffsetMode {
                 ..
             }
         )
+    }
+
+    /// Where librdkafka moves a partition that has no usable position. A consumer group has
+    /// declared it. A domain-offset consumer is assigned explicit offsets, so this reaches it only
+    /// when retention passes the position it reads, and the next record it can read is the
+    /// earliest one the partition still holds.
+    fn offset_reset(&self) -> &'static str {
+        let reset_to = match self {
+            Self::ConsumerGroup { start_at, .. } => *start_at,
+            Self::Domain { .. } => IngestStartPosition::Earliest,
+        };
+        match reset_to {
+            IngestStartPosition::Earliest => "earliest",
+            IngestStartPosition::Latest => "latest",
+        }
+    }
+
+    /// The configuration of the consumer this mode reads through.
+    fn consumer_config(&self, entries: &[ClientConfigEntry]) -> ClientConfig {
+        let group_id = match self {
+            Self::ConsumerGroup { group_id, .. } | Self::Domain { group_id, .. } => group_id,
+        };
+        let mut config = consumer_config(entries, group_id, self.driver_commits());
+        config.set("auto.offset.reset", self.offset_reset());
+        config
     }
 }
 
@@ -267,9 +309,9 @@ pub struct KafkaTopicIngestorPlan {
 
 #[derive(Debug, Error)]
 pub enum KafkaTopicIngestorError {
-    #[error("the {connector} source cannot admit its control call", connector = ConnectorKind::Kafka)]
+    #[error("the {connector} ingestor cannot admit its control call", connector = ConnectorKind::Kafka)]
     ControlAdmission,
-    #[error("the {connector} source control call could not run", connector = ConnectorKind::Kafka)]
+    #[error("the {connector} ingestor control call could not run", connector = ConnectorKind::Kafka)]
     ControlExecution,
     #[error("the {connector} control call did not finish within socket.timeout.ms {bound}", connector = ConnectorKind::Kafka, bound = humantime::format_duration(*timeout))]
     ControlTimeout { timeout: Duration },
@@ -334,93 +376,8 @@ pub enum KafkaTopicIngestorError {
     ReadAssignment { topic: String },
     #[error("Kafka topic '{topic}' partition {partition} returned the maximum offset")]
     OffsetOverflow { topic: String, partition: i32 },
-    #[error(
-        "{connector} record in topic '{topic}' partition {partition} offset {offset} has a \
-         timestamp outside the signed Unix-nanosecond range",
-        connector = ConnectorKind::Kafka
-    )]
-    RecordTimestamp {
-        topic: String,
-        partition: i32,
-        offset: i64,
-    },
     #[error("Kafka batch timeout exceeds the monotonic clock range")]
     BatchDeadline,
-    #[error(
-        "Kafka topic '{topic}' partition {partition} has no domain offset, and the client's \
-         auto.offset.reset refuses to start a partition without one"
-    )]
-    ResetRefused { topic: String, partition: i32 },
-}
-
-/// Where the client's `auto.offset.reset` starts a partition that has no offset to resume from,
-/// under each of the names librdkafka accepts for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
-enum KafkaOffsetReset {
-    /// The partition's earliest retained record.
-    #[strum(
-        serialize = "smallest",
-        serialize = "earliest",
-        serialize = "beginning"
-    )]
-    Earliest,
-    /// The partition's end, so only the records produced after it was taken up are read.
-    #[strum(serialize = "largest", serialize = "latest", serialize = "end")]
-    Latest,
-    /// No start: the partition cannot be read until it has an offset.
-    #[strum(serialize = "error")]
-    Refuse,
-}
-
-impl KafkaOffsetReset {
-    /// The policy `config` declares, or librdkafka's own default when it declares none.
-    ///
-    /// `auto.offset.reset` is a topic property, which librdkafka's client configuration reports
-    /// only once the client sets one. A client that declares no policy gets the property's
-    /// default, `largest`.
-    fn of(config: &ClientConfig) -> Result<Self, Report<KafkaTopicIngestorError>> {
-        if config.get("auto.offset.reset").is_none() {
-            return Ok(Self::Latest);
-        }
-        let native = config
-            .create_native_config()
-            .change_context(KafkaTopicIngestorError::Initialize)?;
-        let value = native
-            .get("auto.offset.reset")
-            .change_context(KafkaTopicIngestorError::Initialize)?;
-        let policy = value.parse::<Self>().assured(
-            "librdkafka accepts a declared policy under any of its seven names, in any case, and \
-             reports it under the first name of its value, which this policy parses",
-        );
-        Ok(policy)
-    }
-
-    /// The next offset of each of `partitions` of `topic` this policy starts it at.
-    fn starts(
-        self,
-        consumer: &KafkaConsumer,
-        topic: &str,
-        partitions: &BTreeSet<i32>,
-        budget: &ControlBudget<'_>,
-    ) -> Result<BTreeMap<i32, i64>, Report<KafkaTopicIngestorError>> {
-        let mut starts = BTreeMap::new();
-        for partition in partitions {
-            budget.remaining()?;
-            let watermarks = PartitionWatermarks::fetch(consumer, topic, *partition, budget)?;
-            let start = match self {
-                Self::Earliest => watermarks.low,
-                Self::Latest => watermarks.high,
-                Self::Refuse => {
-                    return Err(Report::new(KafkaTopicIngestorError::ResetRefused {
-                        topic: topic.to_string(),
-                        partition: *partition,
-                    }));
-                }
-            };
-            starts.insert(*partition, start);
-        }
-        Ok(starts)
-    }
 }
 
 /// The offset of a partition's earliest retained record and the offset the next record produced to
@@ -512,39 +469,71 @@ impl KafkaConsumerAssignment {
     }
 }
 
-/// The driver's unavailable time or one validated instant with its original timestamp kind.
+/// The driver's unavailable time, or the milliseconds a record carries with their original kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KafkaRecordTimestamp {
     Unavailable,
-    CreateTime(Timestamp),
-    LogAppendTime(Timestamp),
+    CreateTime(KafkaTimestampMillis),
+    LogAppendTime(KafkaTimestampMillis),
 }
 
-impl TryFrom<rdkafka::Timestamp> for KafkaRecordTimestamp {
-    type Error = Report<TimestampError>;
-
-    fn try_from(source: rdkafka::Timestamp) -> Result<Self, Self::Error> {
+impl From<rdkafka::Timestamp> for KafkaRecordTimestamp {
+    fn from(source: rdkafka::Timestamp) -> Self {
         // The driver's own conversion resolves Kafka's external unavailable encoding.
-        let Some(millis) = source.to_millis() else {
-            return Ok(Self::Unavailable);
+        let Some(unix_millis) = source.to_millis() else {
+            return Self::Unavailable;
         };
-        let nanos = millis
-            .checked_mul(i64::from(super::NANOS_PER_MILLI))
-            .ok_or_else(|| Report::new(TimestampError::ArithmeticOverflow))?;
-        let instant = Timestamp::from_unix_nanos(nanos);
-        let timestamp = match source {
+        let millis = KafkaTimestampMillis(unix_millis);
+        match source {
             rdkafka::Timestamp::NotAvailable => Self::Unavailable,
-            rdkafka::Timestamp::CreateTime(_) => Self::CreateTime(instant),
-            rdkafka::Timestamp::LogAppendTime(_) => Self::LogAppendTime(instant),
-        };
-        Ok(timestamp)
+            rdkafka::Timestamp::CreateTime(_) => Self::CreateTime(millis),
+            rdkafka::Timestamp::LogAppendTime(_) => Self::LogAppendTime(millis),
+        }
+    }
+}
+
+/// A Kafka record timestamp as Kafka writes it: a signed count of milliseconds since the Unix epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KafkaTimestampMillis(i64);
+
+impl KafkaTimestampMillis {
+    /// The instant these milliseconds name, or `None` before 1677-09-21 and after 2262-04-11,
+    /// outside the instants a signed count of nanoseconds holds.
+    fn instant(self) -> Option<Timestamp> {
+        let unix_nanos = self.0.checked_mul(i64::from(super::NANOS_PER_MILLI))?;
+        Some(Timestamp::from_unix_nanos(unix_nanos))
+    }
+
+    /// Hands these milliseconds over as the `DATETIME` they name, or as unrepresentable where no
+    /// `DATETIME` holds that instant, so that the record is refused only where a program reads it.
+    fn visit(self, values: &mut dyn IngestMetadataValues) {
+        match self.instant() {
+            Some(instant) => values.datetime(instant),
+            None => values.unrepresentable(IngestorMetadataType::Datetime, &self),
+        }
+    }
+}
+
+impl fmt::Display for KafkaTimestampMillis {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let distance = self.0.unsigned_abs();
+        if self.0 < 0 {
+            write!(
+                formatter,
+                "the Kafka timestamp {distance} milliseconds before the Unix epoch"
+            )
+        } else {
+            write!(
+                formatter,
+                "the Kafka timestamp {distance} milliseconds after the Unix epoch"
+            )
+        }
     }
 }
 
 pub struct KafkaTopicIngestorMessage {
     message: rdkafka::message::OwnedMessage,
     position: KafkaOffsetPosition,
-    timestamp: KafkaRecordTimestamp,
 }
 
 impl KafkaTopicIngestorMessage {
@@ -562,19 +551,7 @@ impl KafkaTopicIngestorMessage {
             partition: message.partition(),
             offset: next_offset,
         };
-        let timestamp =
-            KafkaRecordTimestamp::try_from(message.timestamp()).change_context_lazy(|| {
-                KafkaTopicIngestorError::RecordTimestamp {
-                    topic: message.topic().to_string(),
-                    partition: message.partition(),
-                    offset: message.offset(),
-                }
-            })?;
-        Ok(Self {
-            message,
-            position,
-            timestamp,
-        })
+        Ok(Self { message, position })
     }
 }
 
@@ -622,7 +599,8 @@ impl IngestorMessage for KafkaTopicIngestorMessage {
 }
 
 /// The values of the metadata `KAFKA TOPIC` declares, in its order: the record's topic, partition
-/// and offset, binary key, timestamp and kind, and whether its value is null.
+/// and offset, binary key, timestamp and kind, and whether its value is null. The timestamp is
+/// converted here, when the host visits the record's metadata, never when the record is read.
 impl IngestMessageMetadata for KafkaTopicIngestorMessage {
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.message.topic());
@@ -632,17 +610,17 @@ impl IngestMessageMetadata for KafkaTopicIngestorMessage {
             Some(key) => values.bytes(key),
             None => values.absent(),
         }
-        match self.timestamp {
+        match KafkaRecordTimestamp::from(self.message.timestamp()) {
             KafkaRecordTimestamp::Unavailable => {
                 values.absent();
                 values.absent();
             }
-            KafkaRecordTimestamp::CreateTime(instant) => {
-                values.datetime(instant);
+            KafkaRecordTimestamp::CreateTime(millis) => {
+                millis.visit(values);
                 values.string("create_time");
             }
-            KafkaRecordTimestamp::LogAppendTime(instant) => {
-                values.datetime(instant);
+            KafkaRecordTimestamp::LogAppendTime(millis) => {
+                millis.visit(values);
                 values.string("log_append_time");
             }
         }
@@ -657,8 +635,6 @@ pub struct KafkaTopicIngestor {
     consumer: KafkaConsumerHandle,
     topic: nervix_models::KafkaTopicName,
     offset_mode: KafkaTopicIngestorOffsetMode,
-    /// Where a partition with no domain offset starts when no paced domain time places it.
-    offset_reset: KafkaOffsetReset,
     commits: GroupCommits,
     /// Whether a rejection's floor may still be outstanding in the consumer's context, so an
     /// acknowledged commit confirms it.
@@ -678,14 +654,8 @@ impl IngestorConnector for KafkaTopicIngestor {
     type Plan = KafkaTopicIngestorPlan;
 
     async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
-        let group_id = match &plan.offset_mode {
-            KafkaTopicIngestorOffsetMode::ConsumerGroup { group_id, .. }
-            | KafkaTopicIngestorOffsetMode::Domain { group_id, .. } => group_id,
-        };
-        let config = consumer_config(&plan.config, group_id, plan.offset_mode.driver_commits());
+        let config = plan.offset_mode.consumer_config(&plan.config);
         let control = KafkaControl::new(&config, plan.executor.clone())
-            .change_context(IngestorError::Open { connector: KAFKA })?;
-        let offset_reset = KafkaOffsetReset::of(&config)
             .change_context(IngestorError::Open { connector: KAFKA })?;
         let consumer = KafkaConsumerHandle::create(&config, plan.executor.clone())
             .change_context(IngestorError::Open { connector: KAFKA })?;
@@ -694,7 +664,6 @@ impl IngestorConnector for KafkaTopicIngestor {
             consumer,
             topic: plan.topic.clone(),
             offset_mode: plan.offset_mode.clone(),
-            offset_reset,
             commits: GroupCommits::new(COMMIT_ANSWER_DEADLINE),
             rejections_outstanding: false,
             instance_index,
@@ -718,7 +687,9 @@ impl IngestorConnector for KafkaTopicIngestor {
 
     async fn suspend(&mut self) -> IngestorResult<()> {
         match &self.offset_mode {
-            KafkaTopicIngestorOffsetMode::ConsumerGroup { group_id, commit } => self
+            KafkaTopicIngestorOffsetMode::ConsumerGroup {
+                group_id, commit, ..
+            } => self
                 .commits
                 .leave_group(&self.control, &self.consumer, group_id, *commit)
                 .await
@@ -770,7 +741,9 @@ impl IngestorConnector for KafkaTopicIngestor {
 
     async fn close(&mut self) -> IngestorResult<()> {
         match &self.offset_mode {
-            KafkaTopicIngestorOffsetMode::ConsumerGroup { group_id, commit } => self
+            KafkaTopicIngestorOffsetMode::ConsumerGroup {
+                group_id, commit, ..
+            } => self
                 .commits
                 .leave_group(&self.control, &self.consumer, group_id, *commit)
                 .await
@@ -887,6 +860,7 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
             KafkaTopicIngestorOffsetMode::ConsumerGroup {
                 group_id,
                 commit: KafkaGroupCommit::EachAcknowledgedBatch,
+                ..
             } => {
                 let request = GroupCommitRequest::acknowledged(&positions)
                     .change_context(IngestorError::Acknowledge { connector: KAFKA })?;
@@ -919,11 +893,11 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
         let starts = earliest_message_offsets(positions)
             .change_context(IngestorError::Reject { connector: KAFKA })?;
         // A consumer group can revoke a partition before its rewound records are read again, and
-        // then resumes it from a committed offset past them, or from where the client's reset
-        // policy starts a partition the group committed nothing for. The floor starts the
-        // partition at its earliest rejected record whenever the group assigns it to this
-        // consumer, until a commit passes that record. Domain offsets need none: they record only
-        // acknowledged positions, which never pass a rejected record.
+        // then resumes it from a committed offset past them, or from where its `START AT` places
+        // a partition the group committed nothing for. The floor starts the partition at its
+        // earliest rejected record whenever the group assigns it to this consumer, until a commit
+        // passes that record. Domain offsets need none: they record only acknowledged positions,
+        // which never pass a rejected record.
         if let KafkaTopicIngestorOffsetMode::ConsumerGroup { .. } = &self.offset_mode {
             self.consumer.context().record_rejection(&starts);
             self.rejections_outstanding = true;
@@ -1027,7 +1001,6 @@ impl KafkaTopicIngestor {
             }
             let topic = self.topic.as_str().to_owned();
             let instance_index = self.instance_index;
-            let offset_reset = self.offset_reset;
             let mut assignment = std::mem::take(&mut self.assignment);
             struct InitializedOffsets {
                 ready: bool,
@@ -1046,13 +1019,8 @@ impl KafkaTopicIngestor {
                             instance_index,
                         ),
                     };
-                    let start = DomainStart::resolve(
-                        consumer,
-                        &scheduled,
-                        initialization.start,
-                        offset_reset,
-                        budget,
-                    )?;
+                    let start =
+                        DomainStart::resolve(consumer, &scheduled, initialization.start, budget)?;
                     assign_offsets_for_instance(
                         consumer,
                         &scheduled,
@@ -1099,8 +1067,8 @@ struct ScheduledPartitions<'a> {
 enum UnrecordedPartitionStart {
     /// At its first record at or after a paced domain's current logical time.
     At(Timestamp),
-    /// Where the client's `auto.offset.reset` starts a partition without an offset.
-    Reset(KafkaOffsetReset),
+    /// At its earliest retained record, because an unpaced domain's plain `START` places nothing.
+    Earliest,
 }
 
 impl UnrecordedPartitionStart {
@@ -1117,20 +1085,37 @@ impl UnrecordedPartitionStart {
         }
         match self {
             Self::At(timestamp) => offsets_at(consumer, topic, partitions, *timestamp, budget),
-            Self::Reset(policy) => policy.starts(consumer, topic, partitions, budget),
+            Self::Earliest => earliest_offsets(consumer, topic, partitions, budget),
         }
     }
+}
+
+/// The offset of the earliest record each of `partitions` of `topic` retains.
+fn earliest_offsets(
+    consumer: &KafkaConsumer,
+    topic: &str,
+    partitions: &BTreeSet<i32>,
+    budget: &ControlBudget<'_>,
+) -> Result<BTreeMap<i32, i64>, Report<KafkaTopicIngestorError>> {
+    let mut starts = BTreeMap::new();
+    for partition in partitions {
+        budget.remaining()?;
+        let watermarks = PartitionWatermarks::fetch(consumer, topic, *partition, budget)?;
+        starts.insert(*partition, watermarks.low);
+    }
+    Ok(starts)
 }
 
 /// Where the partitions a domain-offset instance reads start after it resumed.
 enum DomainStart {
     /// The instance's partitions resume from their domain offsets; those in `unrecorded` had none
-    /// and start where the domain's time or the client's reset policy places them.
+    /// and start where the domain's time places them, or at their earliest retained record.
     Resumed {
         offsets: BTreeMap<i32, i64>,
         unrecorded: BTreeSet<i32>,
     },
-    /// A new start point places every partition of the topic, replacing the domain offsets.
+    /// A new start point places every topic partition in one canonical cut before any instance
+    /// consumes its assigned slice.
     Reset { offsets: BTreeMap<i32, i64> },
 }
 
@@ -1139,7 +1124,6 @@ impl DomainStart {
         consumer: &KafkaConsumer,
         scheduled: &ScheduledPartitions<'_>,
         start: KafkaDomainOffsetStart,
-        offset_reset: KafkaOffsetReset,
         budget: &ControlBudget<'_>,
     ) -> Result<Self, Report<KafkaTopicIngestorError>> {
         match start {
@@ -1149,14 +1133,18 @@ impl DomainStart {
             } => {
                 let unrecorded_start = match missing_partition_timestamp {
                     Some(timestamp) => UnrecordedPartitionStart::At(timestamp),
-                    None => UnrecordedPartitionStart::Reset(offset_reset),
+                    None => UnrecordedPartitionStart::Earliest,
                 };
                 Self::resume(consumer, scheduled, positions, &unrecorded_start, budget)
             }
             KafkaDomainOffsetStart::At(timestamp) => {
-                let partitions = scheduled.partitions.iter().copied().collect();
-                let offsets =
-                    offsets_at(consumer, scheduled.topic, &partitions, timestamp, budget)?;
+                let offsets = offsets_at(
+                    consumer,
+                    scheduled.topic,
+                    &scheduled.partitions.iter().copied().collect(),
+                    timestamp,
+                    budget,
+                )?;
                 Ok(Self::Reset { offsets })
             }
         }
@@ -1745,6 +1733,8 @@ impl TopicPartitionInspector {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use meticulous::ResultExt as _;
+
     use super::*;
 
     fn assignment_at(offset: i64) -> TopicPartitionList {

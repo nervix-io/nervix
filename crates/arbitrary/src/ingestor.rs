@@ -1,23 +1,25 @@
 //! Ingestors: the transport or client source they read, and the routes that build their records.
 
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckWindow, ClientIngestMode, ClientIngestorEntity, ClientProducerIngestor, CreateIngestor,
     EndpointIngestMode, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestIngestMode,
-    HttpRequestIngestor, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
-    IngestorDeclaration, IngestorEntity, IngestorEntityBody, IngestorEntityKind, IngestorInput,
-    KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, MqttIngestMode,
-    MqttIngestorEntity, MqttQos, MqttSession, MqttTopicIngestor, NatsIngestMode,
-    NatsIngestorEntity, NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestorEntity,
+    HttpRequestIngestor, IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestTimestampSource, IngestorDeclaration, IngestorEntity, IngestorEntityBody,
+    IngestorEntityKind, IngestorInput, KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode,
+    KafkaTopicIngestor, MqttIngestMode, MqttIngestorEntity, MqttQos, MqttSession,
+    MqttTopicIngestor, NatsIngestMode, NatsIngestorEntity, NatsStreamIngestMode,
+    NatsStreamIngestor, NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestorEntity,
     PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
     PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestorEntity,
     RabbitMqQueueIngestor, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor,
     RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor,
-    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, TransportIngestorInput,
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
-    WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
+    TransportIngestorInput, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestMode, WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity,
+    ZeroMqPullIngestor,
 };
 
 use crate::{
@@ -121,6 +123,9 @@ impl Arbitrary<'_> {
             IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => {
                 self.nats_subject_source().into()
             }
+            IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => {
+                self.nats_stream_source().into()
+            }
             IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => {
                 self.rabbitmq_queue_source().into()
             }
@@ -153,9 +158,21 @@ impl Arbitrary<'_> {
             ["GET", "HEAD", "POST", "PATCH"][usize::from(self.entropy().byte() % 4)].to_owned();
         let mut headers = Vec::new();
         for index in 0..(self.entropy().byte() % 3) {
+            let value = if self.entropy.flag() {
+                nervix_models::HttpRequestHeaderValue::ClientSecret(format!(
+                    "{}fixture-{}'\"\\",
+                    nervix_models::HTTP_CLIENT_SECRET_KEY_PREFIX,
+                    self.entropy().byte()
+                ))
+            } else {
+                nervix_models::HttpRequestHeaderValue::Literal(format!(
+                    "fixture-{}'\"\\",
+                    self.entropy().byte()
+                ))
+            };
             headers.push(nervix_models::HttpRequestHeader {
                 name: format!("x-nervix-event-{index}"),
-                value: format!("fixture-{}'\"\\", self.entropy().byte()),
+                value,
             });
         }
         let max_body_size = if self.entropy.flag() {
@@ -185,18 +202,44 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
+    /// A small instancing declaration for generated graphs. Encoding boundary checks cover the
+    /// full count range without allocating its execution units.
+    pub fn ingestor_instances(&mut self) -> nervix_models::IngestorInstances {
+        if self.entropy.flag() {
+            nervix_models::IngestorInstances::PerPartition
+        } else {
+            let count = self.entropy.pick([1u64, 2, 3, 4]);
+            nervix_models::IngestorInstances::Count(
+                std::num::NonZeroU64::new(count).assured("every declared count choice is positive"),
+            )
+        }
+    }
+
     /// A Kafka topic, its offsets kept by a consumer group or by the domain.
     pub fn kafka_topic_source(&mut self) -> KafkaTopicIngestor {
         let offset_mode = if self.entropy.flag() {
-            KafkaOffsetMode::ConsumerGroup(self.kafka_consumer_group_name())
+            KafkaOffsetMode::ConsumerGroup {
+                group: self.kafka_consumer_group_name(),
+                start_at: self.ingest_start_position(),
+            }
         } else {
             KafkaOffsetMode::Domain
+        };
+        let instances = match offset_mode {
+            KafkaOffsetMode::ConsumerGroup { .. } => {
+                let count = self.entropy.pick([1u64, 2, 3, 4]);
+                nervix_models::IngestorInstances::Count(
+                    std::num::NonZeroU64::new(count)
+                        .assured("every declared count choice is positive"),
+                )
+            }
+            KafkaOffsetMode::Domain => self.ingestor_instances(),
         };
         let source = KafkaTopicIngestor {
             client: self.name(),
             topic: self.kafka_topic_name(),
             offset_mode,
-            instances: self.positive_u64(),
+            instances,
             mode: self.kafka_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
@@ -204,34 +247,54 @@ impl Arbitrary<'_> {
     }
 
     /// A Pulsar topic read through a subscription that the ingestor owns or an operator
-    /// provisioned.
+    /// provisioned, in any type, by the instances that type can serve.
     pub fn pulsar_topic_source(&mut self) -> PulsarTopicIngestor {
         let client = self.name();
         let topic = self.pulsar_topic_name();
         let name = self.pulsar_subscription_name();
         let ownership = if self.entropy.flag() {
-            let start_at = self.pulsar_start_position();
+            let start_at = self.ingest_start_position();
             PulsarSubscriptionOwnership::Ingestor { start_at }
         } else {
             PulsarSubscriptionOwnership::Provisioned
         };
+        let kind = self.pulsar_subscription_type();
+        let instances = if kind.reads_through_one_consumer() {
+            nervix_models::IngestorInstances::Count(NonZeroU64::MIN)
+        } else {
+            self.ingestor_instances()
+        };
         let source = PulsarTopicIngestor {
             client,
             topic,
-            subscription: PulsarSubscription { name, ownership },
-            instances: self.positive_u64(),
+            subscription: PulsarSubscription {
+                name,
+                ownership,
+                kind,
+            },
+            instances,
             mode: self.pulsar_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
     }
 
-    /// The explicit position of a newly created owned Pulsar subscription.
-    pub fn pulsar_start_position(&mut self) -> nervix_models::PulsarStartPosition {
+    /// A source's explicit `START AT` position.
+    pub fn ingest_start_position(&mut self) -> nervix_models::IngestStartPosition {
         if self.entropy.flag() {
-            nervix_models::PulsarStartPosition::Earliest
+            nervix_models::IngestStartPosition::Earliest
         } else {
-            nervix_models::PulsarStartPosition::Latest
+            nervix_models::IngestStartPosition::Latest
+        }
+    }
+
+    /// The declared type of a Pulsar subscription.
+    pub fn pulsar_subscription_type(&mut self) -> nervix_models::PulsarSubscriptionType {
+        match self.entropy.byte() % 4 {
+            0 => nervix_models::PulsarSubscriptionType::Shared,
+            1 => nervix_models::PulsarSubscriptionType::KeyShared,
+            2 => nervix_models::PulsarSubscriptionType::Failover,
+            _ => nervix_models::PulsarSubscriptionType::Exclusive,
         }
     }
 
@@ -241,7 +304,7 @@ impl Arbitrary<'_> {
     pub fn mqtt_topic_source(&mut self) -> MqttTopicIngestor {
         let client = self.name();
         let topic = self.mqtt_topic_filter();
-        let instances = self.positive_u64();
+        let instances = self.ingestor_instances();
         let mode = self.mqtt_mode();
         let acknowledged = mode.is_ack();
         let session = if acknowledged {
@@ -274,8 +337,20 @@ impl Arbitrary<'_> {
             client: self.name(),
             subject: self.nats_subject_name(),
             queue_group: self.nats_queue_group_name(),
-            instances: self.positive_u64(),
+            instances: self.ingestor_instances(),
             mode: NatsIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A durable pull consumer of a JetStream stream.
+    pub fn nats_stream_source(&mut self) -> NatsStreamIngestor {
+        let source = NatsStreamIngestor {
+            client: self.name(),
+            stream: self.nats_stream_name(),
+            consumer: self.nats_consumer_name(),
+            mode: self.nats_stream_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -286,7 +361,7 @@ impl Arbitrary<'_> {
         let source = RabbitMqQueueIngestor {
             client: self.name(),
             queue: self.rabbitmq_queue_name(),
-            instances: self.positive_u64(),
+            instances: self.ingestor_instances(),
             mode: self.rabbitmq_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
@@ -348,11 +423,8 @@ impl Arbitrary<'_> {
         let source = SqsQueueIngestor {
             client: self.name(),
             queue: self.sqs_queue_name(),
-            instances: self.positive_u64(),
-            mode: SqsIngestMode::AckSequential {
-                timeout: self.duration(),
-                retry_policy: self.retry_policy(),
-            },
+            instances: self.ingestor_instances(),
+            mode: self.sqs_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -432,6 +504,27 @@ impl Arbitrary<'_> {
         supported.swap_remove(chosen)
     }
 
+    /// A quiesce mode of `kind`, with its own sizes and durations.
+    pub(crate) fn quiesce_mode_of(&mut self, kind: IngestQuiesceKind) -> IngestQuiesceMode {
+        match kind {
+            IngestQuiesceKind::Suspend => IngestQuiesceMode::Suspend,
+            IngestQuiesceKind::Buffer => IngestQuiesceMode::Buffer {
+                max_size: self.positive_byte_size(),
+                overflow: self.entropy.pick([
+                    IngestQuiesceOverflow::DropOldest,
+                    IngestQuiesceOverflow::DropNewest,
+                ]),
+            },
+            IngestQuiesceKind::Drop => IngestQuiesceMode::Drop,
+            IngestQuiesceKind::Reject => IngestQuiesceMode::Reject {
+                retry_after: self.duration(),
+            },
+            IngestQuiesceKind::EndpointBuffer => IngestQuiesceMode::EndpointBuffer {
+                max_size: self.positive_byte_size(),
+            },
+        }
+    }
+
     /// Every quiesce mode, each with its own sizes and durations.
     fn quiesce_candidates(&mut self) -> [IngestQuiesceMode; 5] {
         [
@@ -497,6 +590,26 @@ impl Arbitrary<'_> {
         }
     }
 
+    fn sqs_mode(&mut self) -> SqsIngestMode {
+        if self.entropy.flag() {
+            return SqsIngestMode::AckSequential {
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            };
+        }
+        let value = self
+            .entropy
+            .boundary_biased(1..=u64::from(SqsReceiveMax::MAX));
+        let max = SqsReceiveMax::try_from(value)
+            .verified("the sampled range is the receive window's whole range");
+        SqsIngestMode::AckParallel {
+            max,
+            batch_timeout: self.duration(),
+            timeout: self.duration(),
+            retry_policy: self.retry_policy(),
+        }
+    }
+
     fn rabbitmq_mode(&mut self) -> RabbitMqIngestMode {
         match self.entropy.byte() % 3 {
             0 => RabbitMqIngestMode::NoAck,
@@ -516,6 +629,21 @@ impl Arbitrary<'_> {
                     retry_policy: self.retry_policy(),
                 }
             }
+        }
+    }
+
+    fn nats_stream_mode(&mut self) -> NatsStreamIngestMode {
+        if self.entropy.flag() {
+            return NatsStreamIngestMode::AckSequential {
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            };
+        }
+        NatsStreamIngestMode::AckParallel {
+            max: self.positive_u64(),
+            batch_timeout: self.duration(),
+            timeout: self.duration(),
+            retry_policy: self.retry_policy(),
         }
     }
 

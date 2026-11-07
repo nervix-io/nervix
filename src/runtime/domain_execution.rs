@@ -20,11 +20,14 @@
     )
 )]
 
+#[cfg(test)]
 use error_stack::ResultExt as _;
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
-use super::{domain_rebuild::ActivatedDomainSurfaces, *};
+#[cfg(test)]
+use super::domain_rebuild::ActivatedDomainSurfaces;
+use super::*;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub(super) enum DomainRoutingError {
@@ -57,12 +60,32 @@ pub(crate) struct DomainRoutingSnapshot {
     pub(super) relay_branchings: HashMap<RelayName, ResolvedBranching>,
     pub(super) materialized_stream_specs: HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(super) materialized_stream_reads:
-        HashMap<RelayName, state_replication::routing::MaterializedRelayPublication>,
+        HashMap<RelayName, materialized_read::MaterializedRelayReads>,
     pub(super) relay_state_epoch: Arc<AtomicU64>,
-    pub(super) materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
+    /// Where the owner of each unit of every materialized relay runs, which materialized reads ask
+    /// for the state of a key's unit.
+    pub(super) materialized_stream_owner_nodes: HashMap<RelayName, RelayOwnerRoutes>,
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
-    pub(super) processor_plans: HashMap<NodeRef, StdArc<PublishedProcessorPlan>>,
+    pub(super) processor_plans: HashMap<NodeUnitRef, StdArc<PublishedProcessorPlan>>,
+}
+
+impl DomainRoutingSnapshot {
+    /// How the keys of `relay` are divided among its units, as its branch declares.
+    pub(super) fn relay_partitioning(&self, relay: &RelayName) -> RelayPartitioning {
+        RelayPartitioning::of(self.relay_branchings.get(relay))
+    }
+
+    /// Where the schedule places the owner of `unit` of the materialized relay `relay`, if it
+    /// places one.
+    pub(super) fn materialized_stream_owner_of(
+        &self,
+        relay: &RelayName,
+        unit: Unit,
+    ) -> Option<ClusterNodeName> {
+        let owners = self.materialized_stream_owner_nodes.get(relay)?;
+        owners.owner_of(unit).cloned()
+    }
 }
 
 pub(crate) type SharedDomainRouting = StdArc<ArcSwap<DomainRoutingSnapshot>>;
@@ -187,6 +210,8 @@ impl std::ops::DerefMut for DomainRouting {
 }
 
 pub(super) struct DomainExecution {
+    pub(super) mqtt_ingestor_clients:
+        HashMap<IngestorName, super::ingestors::mqtt::PreparedMqttIngestorClient>,
     pub(super) revision: Arc<ExecutionRevision>,
     pub(super) start_version: u64,
     pub(super) domain_clock: DomainClock,
@@ -194,18 +219,60 @@ pub(super) struct DomainExecution {
     pub(super) routing: DomainRouting,
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
-    pub(super) node_tasks: HashMap<NodeRef, ScheduledNodeTask>,
+    pub(super) node_tasks: HashMap<NodeUnitRef, ScheduledNodeTask>,
     pub(super) emitter_tasks: HashMap<NodeRef, ScheduledEmitterTask>,
-    pub(super) generator_tasks: HashMap<NodeRef, JoinHandle<()>>,
+    pub(super) generator_tasks: HashMap<NodeUnitRef, JoinHandle<()>>,
     pub(super) reingestor_tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
     /// Placement-derived tasks grouped by the scheduled node whose assignment owns them, so a
     /// reassignment can replace one node's replication runtime without disturbing its siblings.
-    pub(super) placement_tasks: HashMap<NodeRef, PlacementTasks>,
-    /// The task maintaining each locally owned materialized relay, keyed by that relay.
-    pub(super) relay_state_tasks: HashMap<RelayName, RelayStateTask>,
-    /// The single buffer-and-fan-out task for every relay owned by this cluster node.
-    pub(super) relay_owner_tasks: HashMap<RelayName, RelayOwnerTask>,
+    pub(super) placement_tasks: HashMap<NodeUnitRef, PlacementTasks>,
+    /// The task maintaining each locally owned unit of a materialized relay, keyed by that unit.
+    pub(super) relay_state_tasks: BTreeMap<RelayUnitRef, RelayStateTask>,
+    /// The buffer-and-fan-out task of every relay unit this cluster node owns: a relay without
+    /// partitions has one, and a partitioned relay one for each partition this node owns.
+    pub(super) relay_owner_tasks: BTreeMap<RelayUnitRef, RelayOwnerTask>,
     pub(super) tasks: Vec<JoinHandle<()>>,
+}
+
+/// One unit of one relay of a domain execution: the key its owner and state tasks run under.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct RelayUnitRef {
+    pub(super) relay: RelayName,
+    pub(super) unit: Unit,
+}
+
+impl RelayUnitRef {
+    pub(super) fn new(relay: RelayName, unit: Unit) -> Self {
+        Self { relay, unit }
+    }
+
+    /// Every unit of `relay`, as one contiguous range of an ordered map keyed by relay unit.
+    fn units_of(relay: &RelayName) -> std::ops::RangeInclusive<Self> {
+        Self::new(relay.clone(), Unit::SINGLE)
+            ..=Self::new(
+                relay.clone(),
+                Unit::try_instance(Unit::MAX_INSTANCE_INDEX)
+                    .assured("the maximum execution-unit index is representable"),
+            )
+    }
+}
+
+impl DomainExecution {
+    /// Removes the state task of every unit of `relay` this execution runs, in unit order.
+    pub(super) fn take_relay_state_tasks(&mut self, relay: &RelayName) -> Vec<RelayStateTask> {
+        let units = self
+            .relay_state_tasks
+            .range(RelayUnitRef::units_of(relay))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut tasks = Vec::with_capacity(units.len());
+        for key in units {
+            if let Some(task) = self.relay_state_tasks.remove(&key) {
+                tasks.push(task);
+            }
+        }
+        tasks
+    }
 }
 
 impl std::ops::Deref for DomainExecution {
@@ -235,8 +302,7 @@ impl DomainExecution {
                         path: route.path.clone(),
                     },
                     RoutedEndpoint {
-                        endpoint_type: route.endpoint_type,
-                        signaling_protocol: route.signaling_protocol.clone(),
+                        kind: route.kind.clone(),
                     },
                 )
             })
@@ -445,7 +511,7 @@ impl Runtime {
                 .retain(|key, _| key.entity.domain != domain);
             self.inner
                 .in_flight_by_ingestor
-                .retain(|key, _| key.domain != domain);
+                .retain(|key, _| key.entity.domain != domain);
             self.inner.generator_activity_by_domain.remove(&domain);
             if let Some((_, force_flush)) = self.inner.force_flush_by_domain.remove(&domain) {
                 force_flush.close();
@@ -553,6 +619,7 @@ impl Runtime {
         installation
     }
 
+    #[cfg(test)]
     pub(in crate::runtime) async fn rebuild_domain_execution(
         &self,
         domain: &DomainName,
@@ -617,17 +684,17 @@ impl Runtime {
             .await?;
 
         for relay in activation_plan.relays.values() {
-            // A branch relay shares its presence with the relay's state placement, which outlives
-            // this execution; any other relay starts from a presence of its own.
-            let branch_presence = if branch_relays.contains(&relay.name) {
-                self.relay_branch_presence(domain, &relay.name)
-                    .change_context_lazy(|| ExecutionBuildError::RelayBranchPresence {
-                        relay: relay.name.clone(),
-                    })
-                    .change_context_lazy(build)?
-            } else {
-                Arc::new(BranchPresence::new())
-            };
+            // A branch relay shares the presence of each unit with the unit's state placement,
+            // which outlives this execution; any other relay starts from presences of its own. An
+            // unplaced graph owns every unit wherever it runs.
+            let partitioning = RelayPartitioning::of(Some(&relay.branching));
+            let shared = branch_relays.contains(&relay.name);
+            let branch_presences = self
+                .relay_branch_presences(domain, &relay.name, partitioning, |_| shared)
+                .change_context_lazy(|| ExecutionBuildError::RelayBranchPresence {
+                    relay: relay.name.clone(),
+                })
+                .change_context_lazy(build)?;
             let fanout = self
                 .relay_boundary_fanout_with_capacity(
                     domain,
@@ -642,7 +709,8 @@ impl Runtime {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
-                    branch_presence,
+                    unit_runtime_consumer_counts: BTreeMap::new(),
+                    branch_presences,
                     remote_runtime_consumers: Vec::new(),
                 },
             );
@@ -657,7 +725,8 @@ impl Runtime {
                         relay.branching.clone(),
                     ),
                 );
-                materialized_stream_owner_nodes.insert(relay.name.clone(), None);
+                materialized_stream_owner_nodes
+                    .insert(relay.name.clone(), RelayOwnerRoutes::default());
             }
         }
 
@@ -714,21 +783,31 @@ impl Runtime {
 
         let mut processor_input_specs = Vec::new();
         for node_spec in &branched_specs.processors {
-            let mut inputs = Vec::new();
-            for input_relay in &node_spec.spec.input_relays {
-                let Some(relay) = relay_builders.get_mut(input_relay) else {
-                    return Err(Report::new(ExecutionBuildError::MissingInputRelay {
-                        node: NodeRef::new(node_spec.spec.kind, node_spec.spec.processor.clone()),
-                        relay: input_relay.clone(),
-                    })
-                    .change_context(build()));
-                };
-                inputs.push((
-                    input_relay.clone(),
-                    relay.runtime_consumer_fan_in_for_mode(node_spec.spec.mode),
-                ));
+            let identity = NodeRef::new(node_spec.spec.kind, node_spec.spec.processor.clone());
+            let node = revision
+                .nodes
+                .get(&identity)
+                .verified("processor plans and execution nodes come from one revision");
+            for unit in node.units.keys().copied() {
+                let mut inputs = Vec::new();
+                for input_relay in &node_spec.spec.input_relays {
+                    let Some(relay) = relay_builders.get_mut(input_relay) else {
+                        return Err(Report::new(ExecutionBuildError::MissingInputRelay {
+                            node: NodeRef::new(
+                                node_spec.spec.kind,
+                                node_spec.spec.processor.clone(),
+                            ),
+                            relay: input_relay.clone(),
+                        })
+                        .change_context(build()));
+                    };
+                    inputs.push((
+                        input_relay.clone(),
+                        relay.runtime_consumer_fan_in_for_unit(node_spec.spec.mode, unit),
+                    ));
+                }
+                processor_input_specs.push((NodeUnitRef::new(identity.clone(), unit), inputs));
             }
-            processor_input_specs.push((node_spec.clone(), inputs));
         }
 
         let relay_services = relay_builders
@@ -736,50 +815,54 @@ impl Runtime {
             .map(|(identifier, relay)| {
                 (
                     identifier,
-                    Arc::new(RelayBoundaryServices::new(
-                        relay.fanout,
-                        relay.attached_runtime_consumer_count,
-                        relay.detached_runtime_consumer_count,
-                        relay.remote_runtime_consumers,
-                        None,
-                        relay.branch_presence,
-                        self.domain_ack_root_tracker(domain),
-                    )),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let relay_owner_tasks = relay_services
-            .iter()
-            .map(|(relay, services)| {
-                (
-                    relay.clone(),
-                    self.spawn_relay_owner_task(
-                        domain,
-                        relay,
-                        services.clone(),
-                        RelayRetention::default(),
+                    Arc::new(
+                        RelayBoundaryServices::new(
+                            relay.fanout,
+                            relay.attached_runtime_consumer_count,
+                            relay.detached_runtime_consumer_count,
+                            relay.remote_runtime_consumers,
+                            None,
+                            relay.branch_presences,
+                            self.domain_ack_root_tracker(domain),
+                        )
+                        .with_unit_runtime_consumer_counts(relay.unit_runtime_consumer_counts),
                     ),
                 )
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
+        // An unplaced graph owns every unit of every relay on this node.
+        let mut relay_owner_tasks = BTreeMap::new();
+        for (relay, services) in &relay_services {
+            for unit in services.partitioning.units() {
+                let task = self
+                    .spawn_relay_owner_task(
+                        domain,
+                        relay,
+                        unit,
+                        services.clone(),
+                        RelayRetention::default(),
+                    )
+                    .change_context_lazy(build)?;
+                relay_owner_tasks.insert(RelayUnitRef::new(relay.clone(), unit), task);
+            }
+        }
 
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
-        let processor_specs = processor_input_specs
-            .iter()
-            .map(|(spec, _)| spec.clone())
-            .collect::<Vec<_>>();
         let previous_processor_plans = HashMap::default();
         let processor_plans = bind_published_processor_plans(
-            &processor_specs,
+            &branched_specs.processors,
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
+                local_node_id: None,
                 relay_schemas: &relay_schemas,
                 relay_services: &relay_services,
                 relay_branchings: &relay_branchings,
                 materialized_stream_specs: &materialized_stream_specs,
                 lookups: &lookup_runtimes,
                 udfs: Some(&udf_executor),
+                nodes: &revision.nodes,
+                unit: None,
                 previous: &previous_processor_plans,
             },
         )
@@ -800,11 +883,7 @@ impl Runtime {
             .change_context_lazy(build)?,
         );
 
-        for (node_spec, inputs) in processor_input_specs {
-            let entity = NodeRef {
-                kind: node_spec.spec.kind,
-                identifier: node_spec.spec.processor.clone(),
-            };
+        for (entity, inputs) in processor_input_specs {
             let template = processor_plans
                 .get(&entity)
                 .verified("the published plan binder returns every planned processor")
@@ -833,14 +912,34 @@ impl Runtime {
         };
 
         for generator in resource_plans.generators.values() {
-            let spec = GeneratorTaskSpec::bind(domain, generator, &relay_services, &udf_executor)
-                .change_context_lazy(build)?;
-            let entity = NodeRef::new(ModelKind::Generator, &generator.name);
-            generator_tasks.insert(
-                entity,
-                self.spawn_generator_task(domain, &shutdown_tx, spec)
+            let mut units = generator.assignment.units_executing_on(None).peekable();
+            let Some(first) = units.peek().copied() else {
+                continue;
+            };
+            let mut prepared = Some(
+                GeneratorTaskSpec::bind(domain, generator, first, &relay_services, &udf_executor)
                     .change_context_lazy(build)?,
             );
+            while let Some(unit) = units.next() {
+                let mut spec = if units.peek().is_some() {
+                    prepared
+                        .as_ref()
+                        .verified("the prepared programs are moved only into the final unit")
+                        .clone()
+                } else {
+                    prepared
+                        .take()
+                        .verified("the final unit consumes the prepared programs once")
+                };
+                spec.unit = unit;
+                let entity =
+                    NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &generator.name), unit);
+                generator_tasks.insert(
+                    entity,
+                    self.spawn_generator_task(domain, &shutdown_tx, spec)
+                        .change_context_lazy(build)?,
+                );
+            }
         }
 
         for (emitter, inputs) in emitter_specs {
@@ -888,6 +987,7 @@ impl Runtime {
         self.install_domain_execution(
             domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision,
                 start_version,
                 domain_clock,
@@ -919,7 +1019,7 @@ impl Runtime {
                 generator_tasks,
                 reingestor_tasks,
                 placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
+                relay_state_tasks: BTreeMap::default(),
                 relay_owner_tasks,
                 tasks,
             },
@@ -946,10 +1046,10 @@ mod tests {
         CreateBranch, CreateCodec, CreateEndpoint, CreateGenerator, CreateLookup, CreateReingestor,
         CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWireSchema,
         DomainClockState, DomainConfig, DomainPace, DomainState, DomainStatus, DomainTick,
-        DomainTimeRate, EndpointType, FlushPolicy, JsonType, MaterializedRelayState,
-        MessageErrorPolicy, Model, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, RelayBranching, SchemaField, SchemaFingerprint,
-        SignalingProtocolOnConnect, SignalingWireFormat, Timestamp, WireSchemaField,
+        DomainTimeRate, FlushPolicy, JsonType, MaterializedRelayState, MessageErrorPolicy, Model,
+        OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        RelayBranching, SchemaField, SchemaFingerprint, SignalingProtocolOnConnect,
+        SignalingWireFormat, Timestamp, WireSchemaField,
     };
     use nonzero_ext::nonzero;
 
@@ -963,25 +1063,32 @@ mod tests {
         let second_owner = named::<ClusterNodeName>("node-b");
         let mut routing = DomainRouting::new(DomainRoutingSnapshot {
             passive_only: false,
-            materialized_stream_owner_nodes: [(relay.clone(), Some(first_owner.clone()))]
-                .into_iter()
-                .collect(),
+            materialized_stream_owner_nodes: [(
+                relay.clone(),
+                RelayOwnerRoutes::new(BTreeMap::from([(Unit::SINGLE, first_owner.clone())])),
+            )]
+            .into_iter()
+            .collect(),
             ..DomainRoutingSnapshot::default()
         });
         let mut cache = DomainRoutingCache::new(routing.shared());
         let first_revision = cache.load().clone();
 
         routing.passive_only = true;
-        routing
-            .materialized_stream_owner_nodes
-            .insert(relay.clone(), Some(second_owner.clone()));
+        routing.materialized_stream_owner_nodes.insert(
+            relay.clone(),
+            RelayOwnerRoutes::new(BTreeMap::from([(Unit::SINGLE, second_owner.clone())])),
+        );
 
         let staged_revision = cache.load().clone();
         assert!(StdArc::ptr_eq(&first_revision, &staged_revision));
         assert!(!staged_revision.passive_only);
         assert_eq!(
-            staged_revision.materialized_stream_owner_nodes.get(&relay),
-            Some(&Some(first_owner))
+            staged_revision
+                .materialized_stream_owner_nodes
+                .get(&relay)
+                .and_then(|owners| owners.owner_of(Unit::SINGLE)),
+            Some(&first_owner)
         );
 
         routing.publish();
@@ -990,8 +1097,11 @@ mod tests {
         assert!(!StdArc::ptr_eq(&first_revision, &second_revision));
         assert!(second_revision.passive_only);
         assert_eq!(
-            second_revision.materialized_stream_owner_nodes.get(&relay),
-            Some(&Some(second_owner))
+            second_revision
+                .materialized_stream_owner_nodes
+                .get(&relay)
+                .and_then(|owners| owners.owner_of(Unit::SINGLE)),
+            Some(&second_owner)
         );
     }
 
@@ -1401,8 +1511,9 @@ mod tests {
                     name: named("receive"),
                     on_vhost: named("edge"),
                     path: "/ingest".to_string(),
-                    endpoint_type: EndpointType::Websockets,
-                    signaling_protocol: Some(named("handshake")),
+                    kind: nervix_models::EndpointKind::Websockets {
+                        signaling_protocol: Some(named("handshake")),
+                    },
                 })),
             ],
             Vec::new(),
@@ -1604,9 +1715,9 @@ mod tests {
             .executions
             .get(&domain)
             .assured("the running domain has an execution");
-        assert!(execution.generator_tasks.contains_key(&NodeRef::new(
-            ModelKind::Generator,
-            named::<GeneratorName>("synth")
+        assert!(execution.generator_tasks.contains_key(&NodeUnitRef::new(
+            NodeRef::new(ModelKind::Generator, named::<GeneratorName>("synth")),
+            Unit::SINGLE
         )));
         drop(execution);
         runtime
@@ -1693,6 +1804,7 @@ mod tests {
         .with_resolved_branching(Some(ResolvedBranching::branched(
             named("by_tenant"),
             tenant_schema("tenant_key"),
+            nervix_models::BranchPartitions::ONE,
         )));
         let schedule = DomainSchedule::new(
             domain.clone(),

@@ -34,7 +34,7 @@ where
 
 fn plan(processor: &str, input: &str) -> StdArc<PublishedProcessorPlan> {
     StdArc::new(PublishedProcessorPlan {
-        source: BranchedProcessorNodeSpec {
+        source: Arc::new(BranchedProcessorNodeSpec {
             spec: BranchedProcessorSpec {
                 kind: ModelKind::Junction,
                 processor: named(processor),
@@ -52,16 +52,22 @@ fn plan(processor: &str, input: &str) -> StdArc<PublishedProcessorPlan> {
             branch: None,
             branch_ttl: None,
             branch_max_instances: None,
-            wasm_state_reset: None,
             binding: Default::default(),
-        },
+        }),
+        unit_revision: ProcessorUnitRevision::Stateless,
         template: StdArc::new(junction_branch_template(processor, input)),
     })
 }
 
 fn a_reader_observes_one_complete_typed_routing_revision() {
-    let route_identity = NodeRef::new(ModelKind::Junction, named::<ModelName>("route_events"));
-    let audit_identity = NodeRef::new(ModelKind::Junction, named::<ModelName>("audit_events"));
+    let route_identity = NodeUnitRef::new(
+        NodeRef::new(ModelKind::Junction, named::<ModelName>("route_events")),
+        Unit::SINGLE,
+    );
+    let audit_identity = NodeUnitRef::new(
+        NodeRef::new(ModelKind::Junction, named::<ModelName>("audit_events")),
+        Unit::SINGLE,
+    );
     let first_route_plan = plan("route_events", "incoming");
     let first_audit_plan = plan("audit_events", "audit_incoming");
     let second_route_plan = plan("route_events", "incoming");

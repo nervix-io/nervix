@@ -143,6 +143,19 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "runtime-kafka-unit-layouts",
+            "runtime-ingestor-metric-layouts",
+            "models-ingestor-instancing",
+            "interconnect-intake-units",
+            "typed-runner-lease",
+            "typed-runner-policy",
+            "typed-runner-compilation",
+            "typed-runner-completion",
+            "typed-runner-identity",
+            "typed-runner-matrix",
+            "typed-gate-baseline",
+            "typed-gate-product-graph",
+            "typed-audit-report",
             "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",
@@ -195,16 +208,28 @@ class InventoryTests(unittest.TestCase):
             "client-ffi-host-columns",
             "client-ffi-field-descriptors",
             "client-ffi-field-descriptors-malformed",
+            "client-ffi-seed-urls",
+            "client-host-arrow-columns",
+            "client-host-typed-field-descriptors",
+            "client-jvm-columns",
+            "client-jvm-fields",
             "branch-membership",
             "restore-installation-wire",
             "backup-capture-wire",
             "backup-capture-wire-malformed",
             "backup-section-mapping",
             "stopping-node-drain-wire",
+            "application-progress-wire",
+            "domain-clock-attachment-wire",
             "cluster-peer-clock-probes",
+            "cluster-parameters",
             "restore-installation-storage",
             "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
+            "typed-non-aws-lc-crypto",
+            "nats-user-authentication",
+            "nats-authentication-malformed",
+            "nats-subject-grammar",
             "plexus-statement",
             "plexus-statement-text",
             "plexus-emitter-envelopes",
@@ -218,8 +243,12 @@ class InventoryTests(unittest.TestCase):
             "models-connector-declarations",
             "websocket-retained-metadata",
             "ingest-metadata-projection",
+            "sqs-system-metadata",
+            "nats-delivery-metadata",
+            "nats-ordered-header-transport",
             "endpoint-request-metadata",
             "websocket-client-config",
+            "mqtt-client-config",
             "websocket-upgrade-headers",
             "websocket-subprotocol-offers",
             "models-timestamps",
@@ -235,6 +264,8 @@ class InventoryTests(unittest.TestCase):
             "models-json-path-validation",
             "models-batch-limits",
             "models-batch-limit-validation",
+            "models-sqs-receive-windows",
+            "models-sqs-receive-window-validation",
             "models-identities",
             "models-identity-validation",
             "models-prerequisite-records",
@@ -245,6 +276,7 @@ class InventoryTests(unittest.TestCase):
             "models-archived-counts",
             "consensus-archived-counts",
             "registry-archived-models",
+            "inferencer-tensor-columns",
             "runtime-window-archived-counts",
             "simd-constant-division",
             "simd-checked-lanes",
@@ -252,7 +284,12 @@ class InventoryTests(unittest.TestCase):
             "simd-xml-chars",
             "syslog-client-sides",
             "syslog-stream-framing",
+            "syslog-listener-metadata",
             "rabbitmq-client-address",
+            "rabbitmq-amqp-properties",
+            "syslog-message-encoding",
+            "syslog-encoding-bounds",
+            "syslog-message-malformed",
             "syslog-structured-data",
             "replica-progress",
             "replica-catch-up",
@@ -333,6 +370,9 @@ class InventoryTests(unittest.TestCase):
             "wasm-generated-pools",
             "wasm-generated-pools-malformed",
             "expiry-map-operations",
+            "authentication-quota-clock",
+            "rate-limit-quota-bounds",
+            "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
             "vm-decimal-rounding-integers",
             "approx-into-rounding",
@@ -348,6 +388,8 @@ class InventoryTests(unittest.TestCase):
             "connector-row-request-division",
             "connector-confirmation-window",
             "pulsar-unconfirmed-receipts",
+            "pulsar-message-times",
+            "pulsar-record-destinations",
             "emitter-batch-subdivision",
             "emitter-batch-packing",
             "codec-bounded-encodings",
@@ -357,13 +399,17 @@ class InventoryTests(unittest.TestCase):
             "iceberg-nested-datetime-staging",
             "iceberg-table-projection",
             "iceberg-staged-file-encoding",
+            "iceberg-staging-file-spans",
             "sentry-prepared-envelopes",
             "sentry-event-models",
             "http-poll-response-headers",
             "http-emitter-requests",
             "mqtt-publish-packets",
+            "mqtt-publish-properties",
+            "mqtt-publish-metadata",
             "postgres-insert-measures",
             "mysql-insert-measures",
+            "prometheus-sample-encoding",
             "mongodb-write-answers",
             "mongodb-bson-mapping",
             "websocket-signaling-protobuf-values",
@@ -376,17 +422,24 @@ class InventoryTests(unittest.TestCase):
             "console-pending-backups-malformed",
             "console-restore-drafts",
             "console-client-drafts",
+            "console-codec-drafts",
+            "console-endpoint-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
+            "kafka-destination-partitions",
             "kafka-record-create-times",
             "kafka-record-metadata",
+            "pulsar-message-metadata",
             "ingestor-describe-envelope",
             "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-connector-nats",
             "nervix-client-core",
             "nervix-client-wire",
             "nervix-client-ffi",
+            "nervix-client-host",
+            "nervix-client-jvm",
             "nervix-server",
             "nervix-plexus",
             "nervix-plexus-format",
@@ -402,6 +455,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
             "nervix-connector-rabbitmq",
+            "nervix-connector-nats",
             "nervix-connector-pulsar",
             "nervix-connector-kafka",
             "nervix-paced-simulation",
@@ -410,9 +464,11 @@ class InventoryTests(unittest.TestCase):
             "nervix-wasm-sdk",
             "nervix-jaq",
             "nervix-expiry-map",
+            "nervix-rate-limit",
             "nervix-vm",
             "nervix-approx-into",
             "nervix-columnar-json",
+            "nervix-ratchet",
             "nervix-bounded-write",
             "nervix-connector",
             "nervix-connector-sqs",
@@ -420,6 +476,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-mqtt",
             "nervix-connector-postgres",
             "nervix-connector-mysql",
+            "nervix-connector-prometheus",
             "nervix-connector-mongodb",
             "nervix-connector-websockets",
             "nervix-connector-otel",
@@ -438,6 +495,29 @@ class InventoryTests(unittest.TestCase):
             )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
+
+    def test_inferencer_state_domains_include_the_required_model_field(self) -> None:
+        versions = {
+            target.id: target.domain_version for target in bolero.load_inventory().targets
+        }
+        for target, version in {
+            "plexus-model": 54,
+            "plexus-archive-model": 56,
+            "plexus-statement": 55,
+            "plexus-statement-text": 54,
+            "plexus-format-document": 54,
+            "plexus-format-text": 53,
+            "models-archived-models": 54,
+            "registry-archived-models": 49,
+            "consensus-state-records": 46,
+            "consensus-state-corruption": 46,
+            "consensus-raft-records": 45,
+            "registry-stored-models": 42,
+            "registry-stored-models-corruption": 42,
+            "inferencer-tensor-columns": 1,
+        }.items():
+            with self.subTest(target=target):
+                self.assertEqual(versions[target], version)
 
     def test_invalid_case_budget_and_duplicate_id_fail(self) -> None:
         text = bolero.INVENTORY.read_text()
@@ -609,7 +689,17 @@ class DiscoveryTests(unittest.TestCase):
                 found["bolero_new"] = manifest.parent / "src/lib.rs"
             return found
 
-        with mock.patch.object(bolero, "static_targets", side_effect=unregistered):
+        with (
+            mock.patch.object(bolero, "static_targets", side_effect=unregistered),
+            mock.patch.object(bolero, "listed_tests",
+                              side_effect=lambda package, test_target, ignored, features, manifest=None:
+                              [] if ignored else
+                              [item["test_name"] for item in self.compiled(package, test_target)]),
+            mock.patch.object(bolero, "compiled_targets", side_effect=self.compiled),
+            mock.patch.object(bolero, "command", side_effect=AssertionError(
+                "discovery unit tests must not run Cargo"
+            )),
+        ):
             with self.assertRaisesRegex(bolero.BoleroError, "differ from inventory"):
                 bolero.discover(self.inventory)
 
@@ -959,6 +1049,15 @@ class ExecutionTests(unittest.TestCase):
         with mock.patch.object(bolero, "command", return_value=missing_cases):
             with self.assertRaisesRegex(bolero.BoleroError, f"expected {iterations}"):
                 bolero.test_targets(self.inventory, (self.target,))
+
+    def test_jvm_classes_are_prepared_before_its_registered_harness(self) -> None:
+        target = dataclasses.replace(self.target, package="nervix-client-jvm", features=("jvm-tests",))
+        good = self.ordinary_result(target)
+        with mock.patch.object(bolero, "command", return_value=good) as command:
+            bolero.test_targets(self.inventory, (target,))
+        self.assertEqual(command.call_args_list[0], mock.call(["just", "build-client-jvm-tests"], timeout=1800))
+        self.assertIn("--no-run", command.call_args_list[1].args[0])
+        self.assertIn("--exact", command.call_args_list[2].args[0])
 
     def test_ordinary_prepares_each_exact_harness_before_bounded_execution(self) -> None:
         target = dataclasses.replace(self.target, package="nervix-server", features=())

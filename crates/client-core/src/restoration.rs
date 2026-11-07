@@ -4,8 +4,9 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Sending the restoration requests of a new exchange in the order the protocol
-//!   requires, waiting for their replies, and sending a restoration the exchange refused again
-//!   after a wait that doubles with each refusal.
+//!   requires, waiting for their replies, deciding from a typed refusal whether a subscription's
+//!   restoration ends or is tried again, and sending a restoration the exchange refused for now
+//!   again after a wait that doubles with each refusal.
 //! - **Depends on.** The exchange's request registry, the followed domain clocks and desired
 //!   subscriptions, and the wire contract.
 //! - **Must not know.** How a lost session is detected, which server the new exchange opened on,
@@ -25,7 +26,10 @@
 //! The exchange reader applies replies to followed clocks and desired subscriptions as they
 //! arrive. Each endpoint's restoration task checks its own open reply against the pinned contract
 //! before publishing a new attachment. A restoration task waits for the replies of its own
-//! requests and sends a transient refusal again while the exchange stays open. A clock's
+//! requests and sends a transient refusal again while the exchange stays open. A subscription
+//! refused because its relay or domain no longer exists, or because its relay announces another
+//! schema than the one its restoration expects, ends with the reason the server would have ended
+//! it with, and is never sent again. A clock's
 //! restoration task whose exchange stops taking requests, as one whose attach outlives the request
 //! timeout does, wakes the caller waiting for clock events so that it opens the next session.
 
@@ -42,7 +46,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDomainClockRequest, ClientMessage, ClientRequest, ConsumerId,
     DomainClockAttachDisposition, OpenEmitterDisposition, OpenIngestorDisposition, ReplyBody,
-    SubscribeDisposition,
+    SubscribeDisposition, SubscriptionEndReason, SubscriptionRefusal,
 };
 use nervix_models::DomainName;
 use nervix_primitives::{
@@ -55,13 +59,55 @@ use crate::{
     consumer::ConsumerHandle,
     domain_clock::{
         ClockRestorationAttempt, ClockRestorationScope, ClockRestorationStep,
-        DomainClockAttachments,
+        DomainClockAttachments, DomainClockRestorationCause,
     },
     error::{ClientError, RequestKind},
     exchange::{EventTargets, Exchange, ExchangeRequests, PendingRequest, SESSION_LIMITS},
     producer::{Answered, ProducerInner},
-    subscriptions::{DesiredSubscriptions, RestoreAttempt},
+    subscriptions::{DesiredSubscriptions, RestoreAttempt, SubscriptionRestorationCause},
 };
+
+/// What a typed refusal of a subscription's restoration says about opening it again.
+enum RefusedRestoration {
+    /// Opening it again would be refused the same way, because its relay or domain no longer
+    /// exists or its relay announces another schema: the subscription ends as the server's end of
+    /// its generation would end it.
+    Ended(SubscriptionEndReason),
+    /// A later attempt may open it.
+    Retried(SubscriptionRestorationCause),
+}
+
+impl From<SubscriptionRefusal> for RefusedRestoration {
+    fn from(refusal: SubscriptionRefusal) -> Self {
+        match refusal {
+            SubscriptionRefusal::DomainNotFound | SubscriptionRefusal::RelayNotFound => {
+                Self::Ended(SubscriptionEndReason::RelayRemoved)
+            }
+            SubscriptionRefusal::RelayChanged => Self::Ended(SubscriptionEndReason::RelayChanged),
+            SubscriptionRefusal::InTransaction => {
+                Self::Retried(SubscriptionRestorationCause::InTransaction)
+            }
+            SubscriptionRefusal::InvalidStatement => {
+                Self::Retried(SubscriptionRestorationCause::InvalidStatement)
+            }
+            SubscriptionRefusal::NameInUse => {
+                Self::Retried(SubscriptionRestorationCause::NameInUse)
+            }
+            SubscriptionRefusal::InvalidFilter => {
+                Self::Retried(SubscriptionRestorationCause::InvalidFilter)
+            }
+            SubscriptionRefusal::Unavailable => {
+                Self::Retried(SubscriptionRestorationCause::Unavailable)
+            }
+        }
+    }
+}
+
+/// A restoration attempt the session refused for now: why, and what its message says.
+struct RetriedAttempt<C> {
+    cause: C,
+    message: String,
+}
 
 /// The wait before a restoration its exchange refused is sent again. It starts at one second and
 /// doubles after each refusal on the same exchange up to thirty seconds, so a refusal that clears
@@ -112,7 +158,7 @@ impl RestorationChannel {
         request: ClientRequest,
     ) -> error_stack::Result<PendingRequest, ClientError> {
         let kind = RequestKind::from(&request);
-        let Some(registered) = self.requests.register() else {
+        let Some(registered) = self.requests.register_for(&request) else {
             let failure = self.requests.pending.lock().failure();
             return Err(Report::new(failure));
         };
@@ -309,7 +355,7 @@ impl Restoration {
     pub(crate) async fn open_subscriptions(&mut self) {
         for attempt in self.emitters.desired.restore(self.generation.clone()) {
             nervix_primitives::task::consume_budget().await;
-            let request = ClientRequest::Subscribe(attempt.contract.request());
+            let request = ClientRequest::Subscribe(attempt.request());
             let sent = self.channel.send(request).await;
             self.subscriptions
                 .push(SubscriptionRestoration { attempt, sent });
@@ -638,32 +684,46 @@ impl ClockFollower {
             .channel
             .reply(sent, RequestKind::AttachDomainClock)
             .await;
-        let message = match reply {
+        let retried = match reply {
             Ok(ReplyBody::DomainClockAttach(outcome)) => match outcome.disposition {
                 // The reader applied each of these as the reply arrived.
                 DomainClockAttachDisposition::Attached { .. }
                 | DomainClockAttachDisposition::AlreadyAttached(_)
                 | DomainClockAttachDisposition::DomainNotFound(_) => return None,
-                DomainClockAttachDisposition::Failed => outcome.message,
+                DomainClockAttachDisposition::Refused(refusal) => RetriedAttempt {
+                    cause: DomainClockRestorationCause::from(refusal),
+                    message: outcome.message,
+                },
             },
-            Ok(other) => {
-                ClientError::unexpected_reply(RequestKind::AttachDomainClock, other).to_string()
-            }
+            Ok(ReplyBody::Rejected(rejected)) => RetriedAttempt {
+                cause: DomainClockRestorationCause::Rejected(rejected.rejection),
+                message: rejected.message,
+            },
+            Ok(other) => RetriedAttempt {
+                cause: DomainClockRestorationCause::Failed,
+                message: ClientError::unexpected_reply(RequestKind::AttachDomainClock, other)
+                    .to_string(),
+            },
             Err(report) if report.current_context().retryable_session_failure() => {
                 self.clocks.restoration_abandoned();
                 return None;
             }
-            Err(report) => format!("{report:#}"),
+            Err(report) => RetriedAttempt {
+                cause: DomainClockRestorationCause::Failed,
+                message: format!("{report:#}"),
+            },
         };
         if !self.channel.is_open() {
             self.clocks.restoration_abandoned();
             return None;
         }
         let retry_after = delay.advance();
-        if !self
-            .clocks
-            .restoration_failed(&self.domain, message, retry_after)
-        {
+        if !self.clocks.restoration_failed(
+            &self.domain,
+            retried.cause,
+            retried.message,
+            retry_after,
+        ) {
             return None;
         }
         Some(retry_after)
@@ -723,20 +783,41 @@ impl SubscriptionFollower {
         loop {
             nervix_primitives::task::consume_budget().await;
             let reply = self.channel.reply(sent, RequestKind::Subscribe).await;
-            let message = match reply {
-                Ok(ReplyBody::Subscribe(outcome)) => match &outcome.disposition {
+            let retried = match reply {
+                Ok(ReplyBody::Subscribe(outcome)) => match outcome.disposition {
                     SubscribeDisposition::Opened(opened) => {
-                        self.desired.created(&attempt, Some(&opened.subscription));
+                        self.desired.created(&attempt, Some(&opened));
                         return;
                     }
-                    SubscribeDisposition::Failed => {
+                    SubscribeDisposition::Refused(refusal) => {
                         self.desired.created(&attempt, None);
-                        outcome.message
+                        match RefusedRestoration::from(refusal) {
+                            RefusedRestoration::Ended(reason) => {
+                                self.desired
+                                    .restoration_ended(&attempt, reason, outcome.message);
+                                return;
+                            }
+                            RefusedRestoration::Retried(cause) => RetriedAttempt {
+                                cause,
+                                message: outcome.message,
+                            },
+                        }
                     }
                 },
+                Ok(ReplyBody::Rejected(rejected)) => {
+                    self.desired.created(&attempt, None);
+                    RetriedAttempt {
+                        cause: SubscriptionRestorationCause::Rejected(rejected.rejection),
+                        message: rejected.message,
+                    }
+                }
                 Ok(other) => {
                     self.desired.created(&attempt, None);
-                    ClientError::unexpected_reply(RequestKind::Subscribe, other).to_string()
+                    RetriedAttempt {
+                        cause: SubscriptionRestorationCause::Failed,
+                        message: ClientError::unexpected_reply(RequestKind::Subscribe, other)
+                            .to_string(),
+                    }
                 }
                 // The exchange ended, and the next one opens the subscription again.
                 Err(report) if report.current_context().retryable_session_failure() => {
@@ -745,17 +826,22 @@ impl SubscriptionFollower {
                 }
                 Err(report) => {
                     self.desired.created(&attempt, None);
-                    format!("{report:#}")
+                    RetriedAttempt {
+                        cause: SubscriptionRestorationCause::Failed,
+                        message: format!("{report:#}"),
+                    }
                 }
             };
             if !self.channel.is_open() {
                 return;
             }
             let retry_after = delay.advance();
-            if !self
-                .desired
-                .restoration_failed(&attempt, message, retry_after)
-            {
+            if !self.desired.restoration_failed(
+                &attempt,
+                retried.cause,
+                retried.message,
+                retry_after,
+            ) {
                 return;
             }
             sleep(retry_after).await;
@@ -763,7 +849,7 @@ impl SubscriptionFollower {
                 return;
             };
             attempt = next;
-            let request = ClientRequest::Subscribe(attempt.contract.request());
+            let request = ClientRequest::Subscribe(attempt.request());
             sent = self.channel.send(request).await;
         }
     }

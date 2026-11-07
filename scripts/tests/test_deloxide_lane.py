@@ -20,6 +20,7 @@ import unittest
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from scripts import deloxide_lane
 from scripts.deloxide_lane import (
@@ -437,7 +438,7 @@ class InventoryTests(unittest.TestCase):
         for index, group in enumerate(identities):
             for other in identities[index + 1:]:
                 self.assertTrue(group.isdisjoint(other))
-        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [170, 10, 6])
+        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [326, 10, 6])
         for invocation, group in zip(phases, groups, strict=True):
             registered = inventory.workloads_of(invocation.id, "deloxide-stress")
             self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, group), [])
@@ -468,13 +469,17 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(order_only), 9)
         self.assertEqual(
             list(inventory.invocations),
-            ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
-             "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios"],
+            ["rate-limit-store", "emitter-branch-retirement", "probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
+             "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios", "cluster-parameters"],
         )
         for name in ("scenarios", "paced-simulation"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order"})
         for name in ("primitive-conformance", "owner-tests"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order", "deloxide-stress"})
+        self.assertEqual(
+            inventory.invocations["emitter-branch-retirement"].selections,
+            {"deloxide", "deloxide-order", "deloxide-stress", "deloxide-stress-restore"},
+        )
         for name in ("stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide-stress"})
         self.assertEqual(inventory.invocations["stress-restore-scenarios"].selections, {"deloxide-stress-restore"})
@@ -513,6 +518,13 @@ class InventoryTests(unittest.TestCase):
         restore_identities = {
             (scenario.feature, scenario.name) for scenario in restore_scenarios
         }
+        baseline_invocation = inventory.invocations["stress-scenarios"]
+        baseline_identities = {
+            (scenario.feature, scenario.name)
+            for scenario in deloxide_lane.discover_scenarios(
+                REPOSITORY, baseline_invocation.inputs, baseline_invocation.tags
+            )
+        }
         endpoint_invocation = inventory.invocations["stress-endpoint-acknowledgement"]
         endpoint_identities = {
             (scenario.feature, scenario.name)
@@ -527,11 +539,10 @@ class InventoryTests(unittest.TestCase):
                 REPOSITORY, retention_invocation.inputs, retention_invocation.tags
             )
         }
-        stressed = {
-            (workload.feature, workload.scenario): workload
-            for workload in inventory.workloads.values()
-            if workload.invocation.startswith("stress-")
-        }
+        stressed = {}
+        for candidate in inventory.workloads.values():
+            if candidate.invocation.startswith("stress-"):
+                stressed.setdefault((candidate.feature, candidate.scenario), []).append(candidate)
         expected: set[tuple[str | None, str | None]] = set()
         for workload in inventory.workloads.values():
             if workload.invocation not in {"scenarios", "paced-simulation"}:
@@ -541,30 +552,41 @@ class InventoryTests(unittest.TestCase):
             with self.subTest(active=workload.id):
                 identity = (workload.feature, workload.scenario)
                 expected.add(identity)
-                counterpart = stressed.get(identity)
-                assert counterpart is not None, f"{workload.id} has no stressed counterpart"
+                counterparts = stressed.get(identity)
+                assert counterparts is not None, f"{workload.id} has no stressed counterpart"
                 if workload.invocation == "paced-simulation":
+                    self.assertEqual(len(counterparts), 1)
+                    counterpart = counterparts[0]
                     self.assertEqual(counterpart.id, f"stress.{workload.id}")
                     self.assertEqual(counterpart.invocation, "stress-paced-simulation")
                 else:
-                    self.assertEqual(counterpart.id, workload.id.replace("scenario.", "stress.", 1))
-                    if identity in restore_identities:
-                        self.assertEqual(counterpart.invocation, "stress-restore-scenarios")
-                    elif identity in endpoint_identities:
-                        self.assertEqual(counterpart.invocation, "stress-endpoint-acknowledgement")
-                    elif identity in retention_identities:
-                        self.assertEqual(counterpart.invocation, "stress-transaction-retention")
-                    else:
-                        self.assertEqual(counterpart.invocation, "stress-scenarios")
-                self.assertEqual(counterpart.examples, workload.examples)
-                self.assertEqual(counterpart.invariant, workload.invariant)
-                self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
+                    required = {
+                        invocation
+                        for identities, invocation in (
+                            (baseline_identities, "stress-scenarios"),
+                            (restore_identities, "stress-restore-scenarios"),
+                            (endpoint_identities, "stress-endpoint-acknowledgement"),
+                            (retention_identities, "stress-transaction-retention"),
+                        )
+                        if identity in identities
+                    }
+                    self.assertEqual({counterpart.invocation for counterpart in counterparts}, required)
+                    self.assertEqual(len(counterparts), len(required))
+                for counterpart in counterparts:
+                    if workload.invocation != "paced-simulation":
+                        expected_id = workload.id.replace("scenario.", "stress.", 1)
+                        if counterpart.invocation == "stress-restore-scenarios" and len(counterparts) > 1:
+                            expected_id += "-restore"
+                        self.assertEqual(counterpart.id, expected_id)
+                    self.assertEqual(counterpart.examples, workload.examples)
+                    self.assertEqual(counterpart.invariant, workload.invariant)
+                    self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
         self.assertEqual(set(stressed), expected)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 170)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 326)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-transaction-retention", "deloxide-stress")), 6)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-endpoint-acknowledgement", "deloxide-stress")), 10)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 82)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 98)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):
@@ -1110,13 +1132,41 @@ class SupervisionTests(unittest.TestCase):
     def test_an_interruption_ends_the_process_and_propagates(self) -> None:
         marker = self.root / "started"
         launch = self.launch(f"touch {marker}; sleep 60")
+        wait = subprocess.Popen.wait
+        processes: list[subprocess.Popen[bytes]] = []
+
+        def cleanup() -> None:
+            for process in processes:
+                if deloxide_lane.running_members(process.pid):
+                    self.processes.stop(process, self.processes.stop_grace_seconds)
+
+        self.addCleanup(cleanup)
+
+        def interrupt_after_start(process: subprocess.Popen[bytes], timeout: float | None = None) -> int:
+            if not processes:
+                processes.append(process)
+                deadline = time.monotonic() + (launch.bound_seconds if timeout is None else timeout)
+                while not marker.exists():
+                    self.assertIsNone(process.poll(), "the child ended before reporting readiness")
+                    self.assertLess(time.monotonic(), deadline, "the child never reported readiness")
+                    time.sleep(0.01)
+                # Process construction and readiness do not consume the interruption interval.
+                signal.setitimer(signal.ITIMER_REAL, 0.5)
+                timeout = max(deadline - time.monotonic(), 0.0)
+            return wait(process, timeout=timeout)
+
         previous = signal.signal(signal.SIGALRM, lambda number, frame: (_ for _ in ()).throw(deloxide_lane.Interrupted(signal.SIGTERM)))
         self.addCleanup(signal.signal, signal.SIGALRM, previous)
-        signal.setitimer(signal.ITIMER_REAL, 0.5)
-        with self.assertRaises(deloxide_lane.Interrupted):
-            self.processes.run(launch)
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        try:
+            with mock.patch.object(subprocess.Popen, "wait", interrupt_after_start):
+                with self.assertRaises(deloxide_lane.Interrupted) as interrupted:
+                    self.processes.run(launch)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
         self.assertTrue(marker.exists())
+        self.assertEqual(interrupted.exception.number, signal.SIGTERM)
+        self.assertEqual(len(processes), 1)
+        self.assertEqual(deloxide_lane.running_members(processes[0].pid), [])
 
 
 class LaneTests(unittest.TestCase):
@@ -1150,7 +1200,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual([(stage["name"], stage["duration_seconds"]) for stage in stages], [("build", 630.0), ("workloads", 0.0)])
         self.assertTrue(all(stage["verdict"] == "complete" for stage in stages))
 
-    def test_the_paced_driver_build_uses_the_build_stage_and_keeps_its_binding_path(self) -> None:
+    def test_the_paced_driver_build_uses_the_build_stage_and_keeps_its_python_interpreter(self) -> None:
         fixture = Fixture(self, INVENTORY.replace('tags = ["@lane"]', 'tags = ["@lane"]\ndriver = "nervix-paced-simulation"'))
         processes = ScriptedProcesses(fixture.root)
         lane = fixture.lane(processes)
@@ -1159,7 +1209,7 @@ class LaneTests(unittest.TestCase):
         self.assertLess(names.index("nervix-paced-simulation-build"), names.index("probes"))
         scenario = processes.launches[-1]
         self.assertEqual(scenario.environment["NERVIX_PACED_SIMULATION_PATH"], str(processes.executable("driver")))
-        self.assertEqual(scenario.environment["NERVIX_CLIENT_LIBRARY"], str(fixture.target / "debug/libnervix_client_ffi.so"))
+        self.assertEqual(scenario.environment["NERVIX_PACED_SIMULATION_PYTHON"], str(fixture.target / "paced-simulation/python/bin/python"))
 
     def test_a_build_measurement_runs_no_workload_and_cannot_qualify_as_one(self) -> None:
         processes = ScriptedProcesses(self.fixture.root)

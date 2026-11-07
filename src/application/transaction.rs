@@ -45,7 +45,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use super::{
-    command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
+    command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::{current_timestamp, subtract_timestamp_duration},
     domain_lifecycle::DomainAlterError,
     model_mutation::{
@@ -138,6 +138,7 @@ struct PreparedTransactionCommit {
 
 #[derive(Serialize)]
 struct TransactionPlanningBasisInput<'a> {
+    parameters: Option<&'a nervix_models::ClusterParameterRecord>,
     domain: &'a DomainState,
     models: Vec<&'a Model>,
     resources: Vec<&'a ResourceName>,
@@ -181,6 +182,7 @@ fn transaction_planning_basis(
     ordered_models.sort_by_key(|model| model.node_ref());
     let resources = resources.iter().collect();
     let input = TransactionPlanningBasisInput {
+        parameters: authoritative_inputs.parameters(),
         domain,
         models: ordered_models,
         resources,
@@ -700,7 +702,10 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
 
 impl SessionServiceImpl {
     pub(in crate::application) fn transaction_activity(&self) -> TransactionActivity {
-        TransactionActivity::from_timeout(current_timestamp(), self.inner.transaction_idle_timeout)
+        TransactionActivity::from_timeout(
+            current_timestamp(),
+            self.cluster_parameters().transaction_idle_timeout(),
+        )
     }
 
     /// The configuration this session's bound transaction has queued for `domain`. Queued
@@ -837,13 +842,26 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.detach_transaction() else {
             return;
         };
-        if self
-            .inner
+        self.inner
             .transaction_bindings
-            .get(&id)
-            .is_some_and(|binding| binding.value() == &subscriptions.session_id)
+            .remove_if(&id, |_, binding| binding == &subscriptions.session_id);
+    }
+
+    /// A definitive failure without a transaction status may mean its finished record has already
+    /// been reclaimed. A session that still names that transaction can then release its binding;
+    /// uncertain outcomes and failures of transactions that still exist keep their binding.
+    pub(in crate::application) async fn release_missing_transaction_binding_on_failure(
+        &self,
+        id: &str,
+        result: &CommandResult,
+        subscriptions: &mut SessionSubscriptions,
+    ) {
+        if subscriptions.transaction_id() == Some(id)
+            && matches!(&result.disposition, CommandDisposition::Failed)
+            && result.transaction.is_none()
+            && self.inner.consensus.current_transaction(id).await.is_none()
         {
-            self.inner.transaction_bindings.remove(&id);
+            self.release_session_transaction_binding(subscriptions);
         }
     }
 
@@ -878,7 +896,7 @@ impl SessionServiceImpl {
         {
             warn!(
                 transaction_id = id,
-                error = %error,
+                error = %format_args!("{error:#}"),
                 "failed to revert transaction during clean session close"
             );
         }
@@ -901,6 +919,9 @@ impl SessionServiceImpl {
             .current_transaction(&transaction_id)
             .await
         else {
+            if subscriptions.transaction_id() == Some(transaction_id.as_str()) {
+                self.release_session_transaction_binding(subscriptions);
+            }
             return TransactionAttachment::Refused(Box::new(command_error(format!(
                 "transaction '{transaction_id}' is unknown"
             ))));
@@ -911,6 +932,14 @@ impl SessionServiceImpl {
             ))));
         }
         if let Some(attachment) = finished_transaction_attachment(&transaction) {
+            // An attach that reports a finished transaction grants no binding. A session that
+            // still named the transaction, as after its binding was lost, therefore no longer
+            // holds it: the commands it repeats under their own references are planned without
+            // it, and receive their recorded outcomes or a definitive failure instead of being
+            // refused as detached again.
+            if subscriptions.transaction_id() == Some(transaction_id.as_str()) {
+                self.release_session_transaction_binding(subscriptions);
+            }
             return attachment;
         }
 
@@ -1037,12 +1066,19 @@ impl SessionServiceImpl {
                 },
             ));
         }
-        let models = self.inner.registry.transaction_planning_models(domain);
         let control = self
             .inner
             .consensus
             .transaction_control_snapshot(domain)
             .await;
+        let models = match control.planning_inputs.schedule() {
+            Some(schedule) => schedule
+                .nodes
+                .values()
+                .map(|node| node.config.as_ref().clone())
+                .collect(),
+            None => Default::default(),
+        };
         if let Some(execution) = &control.restore_installation
             && statements
                 .iter()
@@ -1079,6 +1115,11 @@ impl SessionServiceImpl {
             schedule_inputs: &schedule_inputs,
         })?;
         let snapshot = TransactionPlanningSnapshot {
+            parameters: control
+                .planning_inputs
+                .parameters()
+                .ok_or_else(|| Report::new(TransactionPlanningError::ClusterParametersUnseeded))?
+                .values,
             domain: domain_state.clone(),
             models,
             resources,
@@ -1105,6 +1146,7 @@ impl SessionServiceImpl {
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {
                         node: ImpactNodeCoverage::all_executions(moved.entity),
+                        unit: moved.unit,
                         source: moved.former_owner,
                         destination: moved.destination,
                         attribution: attribution.clone(),
@@ -1512,7 +1554,7 @@ impl SessionServiceImpl {
         };
         let result = self
             .revert_identified_transaction(
-                id,
+                id.clone(),
                 subscriptions.user.clone(),
                 self.transaction_activity(),
             )
@@ -1524,6 +1566,8 @@ impl SessionServiceImpl {
         {
             self.release_session_transaction_binding(subscriptions);
         }
+        self.release_missing_transaction_binding_on_failure(&id, &result, subscriptions)
+            .await;
         result
     }
 
@@ -1547,7 +1591,7 @@ impl SessionServiceImpl {
         };
         let result = self
             .commit_identified_transaction(
-                id,
+                id.clone(),
                 subscriptions.user.clone(),
                 self.transaction_activity(),
                 expected_preview,
@@ -1560,6 +1604,8 @@ impl SessionServiceImpl {
         {
             self.release_session_transaction_binding(subscriptions);
         }
+        self.release_missing_transaction_binding_on_failure(&id, &result, subscriptions)
+            .await;
         result
     }
 
@@ -1652,6 +1698,13 @@ impl SessionServiceImpl {
                 }
             }
         };
+        #[cfg(feature = "testing")]
+        if finished.is_err() {
+            self.inner
+                .runtime
+                .pause_explicit_commit_failure_if_armed(self.inner.consensus.local_node_id(), &id)
+                .await;
+        }
         match finished {
             Ok(transaction) => transaction_commit_result(&transaction),
             Err(error) => {
@@ -1667,6 +1720,18 @@ impl SessionServiceImpl {
                         ))
                     };
                 if let Some(transaction) = self.inner.consensus.current_transaction(&id).await {
+                    if matches!(transaction.state, TransactionState::Finished(_)) {
+                        // Another coordinator's recorded outcome owns the reply after this
+                        // attempt has released its execution lock, including a recorded failure.
+                        drop(result);
+                        return transaction_commit_result(&transaction);
+                    }
+                    if matches!(transaction.state, TransactionState::Committing(_))
+                        && !matches!(proposal_error, Some(ConsensusError::LeadershipLost { .. }))
+                    {
+                        result.disposition =
+                            CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying);
+                    }
                     result.transaction = Some(transaction_status(&transaction));
                 }
                 result
@@ -2494,7 +2559,7 @@ impl SessionServiceImpl {
                 {
                     warn!(
                         transaction_id = id,
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to resume replicated Plexus commit"
                     );
                 }
@@ -2509,10 +2574,12 @@ impl SessionServiceImpl {
             return;
         }
         let now = current_timestamp();
-        let finished_before =
-            subtract_timestamp_duration(now, self.inner.transaction_tombstone_retention);
+        let finished_before = subtract_timestamp_duration(
+            now,
+            self.cluster_parameters().transaction_tombstone_retention(),
+        );
         let command_retry_fence =
-            subtract_timestamp_duration(now, self.inner.command_execution_policy.retry_validity());
+            subtract_timestamp_duration(now, self.command_execution_policy().retry_validity());
         self.reconcile_persistent_commands(command_retry_fence, command_retry_fence)
             .await;
         let transactions = self.inner.consensus.current_transactions().await;
@@ -2546,15 +2613,18 @@ impl SessionServiceImpl {
                         Err(error) => {
                             warn!(
                                 transaction_id = transaction.id,
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to expire inactive Plexus transaction"
                             );
                         }
                     }
                 }
                 TransactionState::Committing(_) => {}
+                // A finished transaction keeps the binding of the session that holds it. That
+                // session's next transaction request is answered from the recorded outcome and
+                // releases the binding, as a commit another reference finished is reported to a
+                // session that attached before it finished.
                 TransactionState::Finished(_) => {
-                    self.inner.transaction_bindings.remove(&transaction.id);
                     #[cfg(feature = "testing")]
                     self.inner
                         .runtime
@@ -2579,7 +2649,7 @@ impl SessionServiceImpl {
                 .remove_finished_transactions(finished_before)
                 .await
         {
-            warn!(error = %error, "failed to remove expired transaction tombstones");
+            warn!(error = %format_args!("{error:#}"), "failed to remove expired transaction tombstones");
         }
         self.schedule_transaction_recovery(&transactions);
     }
@@ -2627,3 +2697,7 @@ impl SessionServiceImpl {
 #[cfg(test)]
 #[path = "transaction/tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "testing"))]
+#[path = "transaction/maintenance_tests.rs"]
+mod maintenance_tests;

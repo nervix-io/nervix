@@ -17,10 +17,13 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::{collections::BTreeMap, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+};
 
 use indexmap::IndexMap;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
@@ -28,7 +31,7 @@ use strum::AsRefStr;
 use crate::{
     BranchKeyFingerprint, ClusterNodeName, CommandExecutionReference, CreateWasmProcessor,
     DomainName, DomainNodeRef, IngestorEntity, KafkaIngestor, KafkaOffsetMode, Model, ModelKind,
-    ModelName, NodeRef, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel,
+    ModelName, NodeRef, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, Unit,
     WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations, WasmStateRecoveries,
     WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase,
     WasmStateResetReason, WasmStateResetScope,
@@ -60,30 +63,6 @@ impl FromIterator<DomainSchedule> for ClusterSchedule {
 /// identity so callers resolve a node by kind and identifier without scanning the sequence.
 pub type ScheduledNodes = IndexMap<NodeRef, ScheduledNode>;
 
-/// One independently placed execution of a logical node. Partition and instance numbers are
-/// zero-based within that node. A graph without declared partitions or external instances has
-/// exactly one `Single` unit.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-pub enum Unit {
-    Single,
-    Partition(u32),
-    Instance(u32),
-}
-
 /// The identity of one unit of a scheduled node, shared by planning and state ownership.
 #[derive(
     Debug,
@@ -110,6 +89,64 @@ impl NodeUnitRef {
     }
 }
 
+/// The scope of an intake gate: a model operation selects complete logical entities, whereas an
+/// ownership handoff selects only the units being transferred.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum EntityGateTargets {
+    Entities(Vec<NodeRef>),
+    Units(Vec<NodeUnitRef>),
+}
+
+impl Default for EntityGateTargets {
+    fn default() -> Self {
+        Self::Entities(Vec::new())
+    }
+}
+
+impl EntityGateTargets {
+    pub fn entities(&self) -> Vec<NodeRef> {
+        match self {
+            Self::Entities(entities) => entities.clone(),
+            Self::Units(units) => units
+                .iter()
+                .map(|unit| unit.node.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    pub fn contains(&self, member: &NodeUnitRef) -> bool {
+        match self {
+            Self::Entities(entities) => entities.contains(&member.node),
+            Self::Units(units) => units.contains(member),
+        }
+    }
+
+    pub fn normalized(&self) -> Self {
+        match self {
+            Self::Entities(entities) => Self::Entities(
+                entities
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            Self::Units(units) => Self::Units(
+                units
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            ),
+        }
+    }
+}
+
 /// A scheduled unit in its owning domain. Shared by state assignment and ownership records.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DomainNodeUnitRef {
@@ -123,7 +160,7 @@ impl DomainNodeUnitRef {
     }
 
     pub fn single(entity: DomainNodeRef) -> Self {
-        Self::new(entity, Unit::Single)
+        Self::new(entity, Unit::SINGLE)
     }
 }
 
@@ -207,8 +244,7 @@ pub struct ScheduledModel<'a, M> {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct PlacementGroupSchedule {
-    pub members: Vec<NodeRef>,
-    pub unit: Unit,
+    pub members: Vec<NodeUnitRef>,
     pub primary_node: Option<ClusterNodeName>,
 }
 
@@ -382,6 +418,10 @@ impl ScheduledUnit {
             .collect()
     }
 
+    pub fn is_assigned_to(&self, node: &ClusterNodeName) -> bool {
+        self.assigned_nodes.iter().any(|assigned| assigned == node)
+    }
+
     fn for_model(config: &Model) -> Self {
         let (wasm_state_generations, wasm_state_recoveries) = match config {
             Model::WasmProcessor(_) => (
@@ -427,22 +467,135 @@ impl ScheduledNode {
     /// An unplaced entry for `config`, whose records are laid out by the schemas `schema_fingerprint`
     /// covers, before a scheduler decides which cluster nodes run it.
     pub fn new(config: Model, schema_fingerprint: SchemaFingerprint) -> Self {
-        let unit = ScheduledUnit::for_model(&config);
+        let units = Self::units_for(&config, None)
+            .into_iter()
+            .map(|unit| (unit, ScheduledUnit::for_model(&config)))
+            .collect();
         Self {
             identifier: config.name(),
             config: Box::new(config),
             resolved_branching: None,
             schema_fingerprint,
             kafka_partition_schedule: None,
-            units: IndexMap::from([(Unit::Single, unit)]),
+            units,
         }
     }
 
-    /// The complete branch declaration the registry resolved for this node.
+    /// The complete branch declaration the registry resolved for this node, and the units it
+    /// decides: a relay of a branch with several partitions is scheduled as one `Partition` unit
+    /// per partition. Fixed-count ingestors declare `Instance` units; the registry supplies a
+    /// per-partition ingestor's resolved units with [`Self::with_units`]. Units are unplaced until
+    /// [`Self::placed_on`] or [`Self::place_unit`] places them.
     #[must_use]
     pub fn with_resolved_branching(mut self, branching: Option<ResolvedBranching>) -> Self {
+        let units = Self::units_for(&self.config, branching.as_ref());
+        if !units.iter().eq(self.units.keys()) {
+            let config = self.config.as_ref();
+            self.units = units
+                .into_iter()
+                .map(|unit| (unit, ScheduledUnit::for_model(config)))
+                .collect();
+        }
         self.resolved_branching = branching;
         self
+    }
+
+    /// Installs an explicit unit declaration. Units retained by the declaration retain their
+    /// placements; newly declared units are unplaced.
+    #[must_use]
+    pub fn with_units(mut self, units: &[Unit]) -> Self {
+        let mut previous = std::mem::take(&mut self.units);
+        self.units = units
+            .iter()
+            .map(|unit| {
+                let scheduled = previous
+                    .swap_remove(unit)
+                    .unwrap_or_else(|| ScheduledUnit::for_model(self.config.as_ref()));
+                (*unit, scheduled)
+            })
+            .collect();
+        self
+    }
+
+    /// The units a node configured by `config` is scheduled as under `branching`.
+    fn units_for(config: &Model, branching: Option<&ResolvedBranching>) -> Vec<Unit> {
+        if let Some(partitions) = Self::branch_partitions_for(config, branching) {
+            return partitions.units();
+        }
+        match config {
+            Model::Ingestor(ingestor) => match ingestor.input.instances() {
+                Some(crate::IngestorInstances::Count(count)) => (0..count.get())
+                    .map(|index| {
+                        Unit::try_instance(index)
+                            .assured("the validated allocation layout bounds the instance index")
+                    })
+                    .collect(),
+                _ => vec![Unit::SINGLE],
+            },
+            _ => vec![Unit::SINGLE],
+        }
+    }
+
+    fn branch_partitions_for(
+        config: &Model,
+        branching: Option<&ResolvedBranching>,
+    ) -> Option<crate::BranchPartitions> {
+        match config {
+            Model::Relay(_)
+            | Model::Junction(_)
+            | Model::Deduplicator(_)
+            | Model::Reorderer(_)
+            | Model::WindowProcessor(_)
+            | Model::Correlator(_)
+            | Model::Inferencer(_)
+            | Model::WasmProcessor(_)
+            | Model::Generator(_) => branching.and_then(ResolvedBranching::partitions),
+            _ => None,
+        }
+    }
+
+    /// Whether the scheduled identities match the current declaration. Ingestor units also
+    /// depend on resolved construction references and are validated by their entrypoint plan.
+    pub fn units_match_declaration(&self) -> bool {
+        if matches!(self.config.as_ref(), Model::Ingestor(_)) {
+            return true;
+        }
+        match Self::branch_partitions_for(self.config.as_ref(), self.resolved_branching.as_ref()) {
+            Some(partitions) if partitions.is_partitioned() => {
+                self.units.len() == usize::from(partitions.count().get())
+                    && (0..u32::from(partitions.count().get()))
+                        .all(|index| self.units.contains_key(&Unit::partition(index)))
+            }
+            _ => self.units.len() == 1 && self.units.contains_key(&Unit::SINGLE),
+        }
+    }
+
+    /// Whether this node is scheduled as several partition units.
+    pub fn is_partitioned(&self) -> bool {
+        self.units
+            .keys()
+            .any(|unit| matches!(unit.kind(), crate::UnitKind::Partition(_)))
+    }
+
+    /// The placement of `unit`, when this node is scheduled as it.
+    pub fn unit(&self, unit: Unit) -> Option<&ScheduledUnit> {
+        self.units.get(&unit)
+    }
+
+    /// Places `unit` on `assigned`, with `primary` owning its state. A unit this node is not
+    /// scheduled as is left alone and reported as not placed.
+    pub fn place_unit(
+        &mut self,
+        unit: Unit,
+        primary: Option<ClusterNodeName>,
+        assigned: Vec<ClusterNodeName>,
+    ) -> bool {
+        let Some(scheduled) = self.units.get_mut(&unit) else {
+            return false;
+        };
+        scheduled.primary_node = primary;
+        scheduled.assigned_nodes = assigned;
+        true
     }
 
     /// The Kafka partitions the leader observed for this node, and how they are shared out.
@@ -452,31 +605,87 @@ impl ScheduledNode {
         self
     }
 
-    /// The cluster nodes this entry is placed on, with `primary` owning its state.
+    /// The cluster nodes every unit of this entry is placed on, with `primary` owning its state.
     #[must_use]
     pub fn placed_on(
         mut self,
         primary: Option<ClusterNodeName>,
         assigned: Vec<ClusterNodeName>,
     ) -> Self {
-        let unit = self.single_unit_mut();
-        unit.primary_node = primary;
-        unit.assigned_nodes = assigned;
+        for unit in self.units.values_mut() {
+            unit.primary_node = primary.clone();
+            unit.assigned_nodes = assigned.clone();
+        }
         self
     }
 
-    /// The sole unit of a graph that has not declared partitions or external instances.
+    /// The unit of a node with exactly one execution unit, regardless of its unit kind.
     pub fn single_unit(&self) -> &ScheduledUnit {
-        self.units
-            .get(&Unit::Single)
-            .assured("current graphs construct exactly one Single unit per node")
+        self.sole_unit()
+            .assured("this operation selects a node with exactly one execution unit")
     }
 
-    /// The sole unit of a graph that has not declared partitions or external instances.
+    /// The unit of a node with exactly one execution unit, mutably.
     pub fn single_unit_mut(&mut self) -> &mut ScheduledUnit {
+        self.sole_unit_mut()
+            .assured("this operation selects a node with exactly one execution unit")
+    }
+
+    /// The first unit of this node in unit order. A placement group places every unit of each
+    /// member together, so for a grouped node it stands for the placement of each of its units.
+    pub fn first_unit(&self) -> &ScheduledUnit {
         self.units
-            .get_mut(&Unit::Single)
-            .assured("current graphs construct exactly one Single unit per node")
+            .values()
+            .next()
+            .assured("every scheduled node is scheduled as at least one unit")
+    }
+
+    /// Places every unit of this node on `assigned`, with `primary` owning its state, as a
+    /// placement group places each of its members.
+    pub fn place_every_unit(
+        &mut self,
+        primary: Option<ClusterNodeName>,
+        assigned: Vec<ClusterNodeName>,
+    ) {
+        for unit in self.units.values_mut() {
+            unit.primary_node = primary.clone();
+            unit.assigned_nodes = assigned.clone();
+        }
+    }
+
+    /// Records `transition` as the ownership move of every unit of this node, as a placement group
+    /// moves each of its members whole.
+    pub fn record_ownership_transition_of_every_unit(&mut self, transition: &OwnershipTransition) {
+        for unit in self.units.values_mut() {
+            unit.ownership_transition = Some(transition.clone());
+        }
+    }
+
+    /// The units of this node that execute on `node_id`, in unit order: each unit whose primary,
+    /// or whose one assigned node when it has no primary, is `node_id`. None for a node that runs
+    /// on every cluster node.
+    pub fn units_executing_on(&self, node_id: &ClusterNodeName) -> Vec<Unit> {
+        if self.executes_on_every_cluster_node() {
+            return Vec::new();
+        }
+        let mut units = Vec::new();
+        for (unit, scheduled) in &self.units {
+            if scheduled.execution_node() == Some(node_id) {
+                units.push(*unit);
+            }
+        }
+        units
+    }
+
+    /// The units of this node assigned to `node_id`, as their primary or a replica, in unit order.
+    pub fn units_assigned_to(&self, node_id: &ClusterNodeName) -> Vec<Unit> {
+        let mut units = Vec::new();
+        for (unit, scheduled) in &self.units {
+            if scheduled.is_assigned_to(node_id) {
+                units.push(*unit);
+            }
+        }
+        units
     }
 
     /// The kind of runtime node this entry configures.
@@ -493,17 +702,51 @@ impl ScheduledNode {
 
     /// The guest-state generation of every branch, when this node is a WASM processor.
     pub fn wasm_state_generations(&self) -> Option<&WasmStateGenerations> {
-        self.single_unit().wasm_state_generations.as_ref()
+        self.sole_unit()?.wasm_state_generations.as_ref()
     }
 
     /// The latest coordinated guest-state reset this WASM processor published.
     pub fn wasm_state_reset(&self) -> Option<&WasmStateReset> {
-        self.single_unit().wasm_state_reset.as_ref()
+        self.sole_unit()?.wasm_state_reset.as_ref()
     }
 
     /// The recovery attempts this WASM processor's refused guest-state lifetimes have spent.
     pub fn wasm_state_recoveries(&self) -> Option<&WasmStateRecoveries> {
-        self.single_unit().wasm_state_recoveries.as_ref()
+        self.sole_unit()?.wasm_state_recoveries.as_ref()
+    }
+
+    /// The execution unit of a concrete branch, using the same fingerprint seed as data routing.
+    pub fn unit_of_branch(&self, branch: Option<&BranchKeyFingerprint>) -> Option<Unit> {
+        let unit = match self
+            .resolved_branching
+            .as_ref()
+            .and_then(|branching| branching.partitions())
+        {
+            Some(partitions) if partitions.is_partitioned() => {
+                partitions.unit_of(branch?.partition_seed())
+            }
+            _ => Unit::SINGLE,
+        };
+        self.units.contains_key(&unit).then_some(unit)
+    }
+
+    pub fn wasm_state_generations_of_branch(
+        &self,
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> Option<&WasmStateGenerations> {
+        self.units
+            .get(&self.unit_of_branch(branch)?)?
+            .wasm_state_generations
+            .as_ref()
+    }
+
+    /// The concrete units selected by one reset, in unit order.
+    pub fn units_for_wasm_state_scope(&self, scope: &WasmStateResetScope) -> Vec<Unit> {
+        self.units
+            .keys()
+            .copied()
+            .filter(|unit| scope.selects_unit(*unit, self.resolved_branching.as_ref()))
+            .collect()
     }
 
     /// Decide what the refused `generation` of `scope` is entitled to, recording an admitted
@@ -517,7 +760,16 @@ impl ScheduledNode {
         generation: WasmStateGeneration,
         rejection: WasmSavedStateRejection,
     ) -> Option<WasmStateRecoveryAdmission> {
-        let recoveries = self.single_unit_mut().wasm_state_recoveries.as_mut()?;
+        let identity = match &scope {
+            WasmStateResetScope::Branch(branch) => self.unit_of_branch(Some(branch))?,
+            WasmStateResetScope::Unbranched => self.unit_of_branch(None)?,
+            WasmStateResetScope::AllBranches => return None,
+        };
+        let recoveries = self
+            .units
+            .get_mut(&identity)?
+            .wasm_state_recoveries
+            .as_mut()?;
         let request = scope.recovery_request(generation);
         Some(recoveries.admit(scope, generation, rejection, request))
     }
@@ -531,7 +783,14 @@ impl ScheduledNode {
         request: &CommandExecutionReference,
         outcome: WasmStateRecoveryOutcome,
     ) -> bool {
-        let Some(recoveries) = self.single_unit_mut().wasm_state_recoveries.as_mut() else {
+        let units = self.units_for_wasm_state_scope(scope);
+        let [identity] = units.as_slice() else {
+            return false;
+        };
+        let Some(unit) = self.units.get_mut(identity) else {
+            return false;
+        };
+        let Some(recoveries) = unit.wasm_state_recoveries.as_mut() else {
             return false;
         };
         recoveries.settle(scope, request, outcome)
@@ -542,7 +801,8 @@ impl ScheduledNode {
     /// A generation belongs to the pinned module binding it was published for. When this entry
     /// binds a different resource version or file than `existing`, the lifetimes continue from
     /// `existing` and every branch then starts a new one, so no snapshot saved under the previous
-    /// binding can attach to this one.
+    /// binding can attach to this one. Every execution unit continues only the lifetimes of its
+    /// matching unit; a newly declared unit keeps its own initial lifetimes.
     pub fn continue_wasm_state_generations_of(&mut self, existing: &Self) {
         let (Some(processor), Some(existing_processor)) =
             (self.wasm_processor(), existing.wasm_processor())
@@ -552,42 +812,53 @@ impl ScheduledNode {
         let binding_changed = processor.resource != existing_processor.resource
             || processor.resource_version != existing_processor.resource_version
             || processor.file != existing_processor.file;
-        let existing_unit = existing.single_unit();
-        let Some(existing_generations) = existing_unit.wasm_state_generations.as_ref() else {
-            return;
-        };
-        let mut generations = existing_generations.clone();
-        if binding_changed {
-            generations.begin_every_branch();
+        for (identity, unit) in &mut self.units {
+            let Some(existing_unit) = existing.units.get(identity) else {
+                continue;
+            };
+            let Some(existing_generations) = existing_unit.wasm_state_generations.as_ref() else {
+                continue;
+            };
+            let mut generations = existing_generations.clone();
+            if binding_changed {
+                generations.begin_every_branch();
+            }
+            unit.wasm_state_generations = Some(generations);
+            unit.wasm_state_reset = if binding_changed {
+                None
+            } else {
+                existing_unit.wasm_state_reset.clone()
+            };
+            // A recovery attempt belongs to its unit's admitted lifetime. A changed binding
+            // restarts that lifetime, so its preceding attempts no longer name a refusal.
+            unit.wasm_state_recoveries = match binding_changed {
+                true => Some(WasmStateRecoveries::empty()),
+                false => existing_unit.wasm_state_recoveries.clone(),
+            };
         }
-        let unit = self.single_unit_mut();
-        unit.wasm_state_generations = Some(generations);
-        unit.wasm_state_reset = if binding_changed {
-            None
-        } else {
-            existing_unit.wasm_state_reset.clone()
-        };
-        // A recovery attempt is spent on the lifetime it was admitted for. A changed binding
-        // restarts every lifetime, so the attempts recorded against the previous ones no longer
-        // name anything this entry can refuse.
-        unit.wasm_state_recoveries = match binding_changed {
-            true => Some(WasmStateRecoveries::empty()),
-            false => existing_unit.wasm_state_recoveries.clone(),
-        };
     }
 
     /// Start a new guest-state lifetime for every branch of this WASM processor, including branches
-    /// that exist only as persisted snapshots. Every other kind of node has no guest state.
+    /// that exist only as persisted snapshots. Every other kind of node has no guest state, a relay
+    /// scheduled as partitions included.
     pub fn begin_wasm_state_generation(&mut self) {
-        if let Some(generations) = self.single_unit_mut().wasm_state_generations.as_mut() {
-            generations.begin_every_branch();
+        for unit in self.units.values_mut() {
+            if let Some(generations) = unit.wasm_state_generations.as_mut() {
+                generations.begin_every_branch();
+            }
         }
     }
 
     /// Start a new guest-state lifetime for one concrete branch of this WASM processor, leaving every
     /// other branch in the lifetime it has.
     pub fn begin_wasm_branch_state_generation(&mut self, branch: BranchKeyFingerprint) {
-        if let Some(generations) = self.single_unit_mut().wasm_state_generations.as_mut() {
+        let Some(identity) = self.unit_of_branch(Some(&branch)) else {
+            return;
+        };
+        let Some(unit) = self.units.get_mut(&identity) else {
+            return;
+        };
+        if let Some(generations) = unit.wasm_state_generations.as_mut() {
             generations.begin_branch(branch);
         }
     }
@@ -603,32 +874,45 @@ impl ScheduledNode {
         scope: WasmStateResetScope,
         reason: WasmStateResetReason,
     ) -> bool {
-        let unit = self.single_unit_mut();
-        let Some(generations) = unit.wasm_state_generations.as_mut() else {
-            return false;
-        };
-        if unit
-            .wasm_state_reset
-            .as_ref()
-            .is_some_and(|reset| reset.request() == &request && reset.scope() == &scope)
-        {
-            return false;
+        let selected = self.units_for_wasm_state_scope(&scope);
+        let mut began = false;
+        for identity in selected {
+            let unit = self
+                .units
+                .get_mut(&identity)
+                .verified("the selected unit belongs to this node");
+            let Some(generations) = unit.wasm_state_generations.as_mut() else {
+                continue;
+            };
+            if unit
+                .wasm_state_reset
+                .as_ref()
+                .is_some_and(|reset| reset.request() == &request && reset.scope() == &scope)
+            {
+                continue;
+            }
+            generations.begin_reset(&scope);
+            unit.wasm_state_reset =
+                Some(WasmStateReset::publishing(request.clone(), scope, reason));
+            began = true;
         }
-        generations.begin_reset(&scope);
-        unit.wasm_state_reset = Some(WasmStateReset::publishing(request, scope, reason));
-        true
+        began
     }
 
     /// Mark the initial checkpoint of this exact reset durable and ready for runtime admission.
     pub fn complete_wasm_state_reset(&mut self, request: &CommandExecutionReference) -> bool {
-        let Some(reset) = self.single_unit_mut().wasm_state_reset.as_mut() else {
-            return false;
-        };
-        if reset.request() != request || reset.phase() == WasmStateResetPhase::Ready {
-            return false;
+        let mut completed = false;
+        for unit in self.units.values_mut() {
+            let Some(reset) = unit.wasm_state_reset.as_mut() else {
+                continue;
+            };
+            if reset.request() != request || reset.phase() == WasmStateResetPhase::Ready {
+                continue;
+            }
+            reset.mark_ready();
+            completed = true;
         }
-        reset.mark_ready();
-        true
+        completed
     }
 
     pub fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {
@@ -679,41 +963,57 @@ impl ScheduledNode {
         self.config.executes_on_every_cluster_node()
     }
 
+    /// Whether any unit of this node is assigned to `node_id`, as its primary or a replica.
     pub fn is_assigned_to(&self, node_id: &ClusterNodeName) -> bool {
-        self.single_unit()
-            .assigned_nodes
-            .iter()
-            .any(|assigned| assigned == node_id)
+        self.units.values().any(|unit| unit.is_assigned_to(node_id))
     }
 
+    /// The one execution unit of a node, or `None` when its units have distinct placements.
+    pub fn sole_unit(&self) -> Option<&ScheduledUnit> {
+        match self.units.len() {
+            1 => self.units.values().next(),
+            _ => None,
+        }
+    }
+
+    /// The one execution unit of a node, mutably, or `None` for several units.
+    pub fn sole_unit_mut(&mut self) -> Option<&mut ScheduledUnit> {
+        match self.units.len() {
+            1 => self.units.values_mut().next(),
+            _ => None,
+        }
+    }
+
+    /// The one node a single-unit node is assigned to, when it is assigned to exactly one. `None`
+    /// for a node scheduled as several units.
     pub fn assigned_single_node(&self) -> Option<&ClusterNodeName> {
-        match self.single_unit().assigned_nodes.as_slice() {
+        match self.sole_unit()?.assigned_nodes.as_slice() {
             [node_id] => Some(node_id),
             _ => None,
         }
     }
 
+    /// The primary of a single-unit node. `None` for a node scheduled as several units.
     pub fn primary_node(&self) -> Option<&ClusterNodeName> {
-        self.single_unit().primary_node.as_ref()
+        self.sole_unit()?.primary_node.as_ref()
     }
 
+    /// The replicas of a single-unit node. Empty for a node scheduled as several units.
     pub fn replica_nodes(&self) -> Vec<&ClusterNodeName> {
-        let primary = self.primary_node();
-        self.single_unit()
-            .assigned_nodes
-            .iter()
-            .filter(|node_id| Some(*node_id) != primary)
-            .collect()
-    }
-
-    pub fn is_primary_on(&self, node_id: &ClusterNodeName) -> bool {
-        if let Some(primary_node) = self.primary_node() {
-            primary_node == node_id
-        } else {
-            self.is_assigned_to(node_id)
+        match self.sole_unit() {
+            Some(unit) => unit.replica_nodes(),
+            None => Vec::new(),
         }
     }
 
+    /// Whether any unit of this node is primary on `node_id`.
+    pub fn is_primary_on(&self, node_id: &ClusterNodeName) -> bool {
+        self.units.values().any(|unit| unit.is_primary_on(node_id))
+    }
+
+    /// The cluster node a single-unit node executes on: its primary, or its one assigned node
+    /// when it has no primary. `None` for a node that runs on every cluster node, and for a node
+    /// scheduled as several units, which have no one execution node.
     pub fn execution_node(&self) -> Option<&ClusterNodeName> {
         if self.executes_on_every_cluster_node() {
             None
@@ -722,6 +1022,17 @@ impl ScheduledNode {
         }
     }
 
+    /// The cluster node `unit` executes on: its primary, or its one assigned node when it has no
+    /// primary. `None` for a node that runs on every cluster node, and for a unit this node is not
+    /// scheduled as.
+    pub fn unit_execution_node(&self, unit: Unit) -> Option<&ClusterNodeName> {
+        if self.executes_on_every_cluster_node() {
+            return None;
+        }
+        self.units.get(&unit)?.execution_node()
+    }
+
+    /// Whether any unit of this node executes on `node_id`.
     pub fn executes_on(&self, node_id: &ClusterNodeName) -> bool {
         if self.executes_on_every_cluster_node() {
             self.is_assigned_to(node_id)
@@ -730,16 +1041,36 @@ impl ScheduledNode {
         }
     }
 
-    /// Every node [`Self::executes_on`] accepts: each assigned node of an entity that runs on every
-    /// cluster node, and otherwise the primary, or each assigned node when there is no primary.
-    pub fn execution_nodes(&self) -> &[ClusterNodeName] {
+    /// Whether `unit` of this node executes on `node_id`.
+    pub fn unit_executes_on(&self, unit: Unit, node_id: &ClusterNodeName) -> bool {
+        let Some(scheduled) = self.units.get(&unit) else {
+            return false;
+        };
         if self.executes_on_every_cluster_node() {
-            return &self.single_unit().assigned_nodes;
+            scheduled.is_assigned_to(node_id)
+        } else {
+            scheduled.is_primary_on(node_id)
         }
-        match &self.single_unit().primary_node {
-            Some(primary) => std::slice::from_ref(primary),
-            None => &self.single_unit().assigned_nodes,
+    }
+
+    /// Every node [`Self::executes_on`] accepts, once each, across every unit: each assigned node
+    /// of an entity that runs on every cluster node, and otherwise each unit's primary, or each of
+    /// its assigned nodes when it has no primary.
+    pub fn execution_nodes(&self) -> Vec<ClusterNodeName> {
+        let mut nodes = BTreeSet::new();
+        for unit in self.units.values() {
+            if self.executes_on_every_cluster_node() {
+                nodes.extend(unit.assigned_nodes.iter().cloned());
+                continue;
+            }
+            match &unit.primary_node {
+                Some(primary) => {
+                    nodes.insert(primary.clone());
+                }
+                None => nodes.extend(unit.assigned_nodes.iter().cloned()),
+            }
         }
+        nodes.into_iter().collect()
     }
 
     /// True when `other` gives this runtime node the same primary owner and the same replica set.

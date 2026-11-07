@@ -1,6 +1,6 @@
 Feature: HTTP REQUEST emitter lifecycle
   A configuration change drains requests with the client and request fields that admitted them.
-  A stopped emitter retains no prepared HTTP request; an attached source decides redelivery.
+  A stopped emitter retains no prepared HTTP request; an attached ingestor decides redelivery.
 
   @http_emitter_lifecycle
   Scenario Outline: ALTER drains an admitted HTTP request before changing its destination
@@ -21,12 +21,12 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (event_id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-lifecycle-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -36,7 +36,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -99,12 +100,12 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (event_id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-drain-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -114,7 +115,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -170,28 +172,29 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA required_body (id STRING);
       CREATE WIRE JSON SCHEMA required_wire MODE STRICT (id string);
-      CREATE CODEC required_codec FROM WIRE JSON SCHEMA required_wire TO SCHEMA required_body;
+      CREATE WIRE JSON CODEC required_codec FROM WIRE SCHEMA required_wire TO SCHEMA required_body;
       CREATE SCHEMA optional_body (id STRING OPTIONAL);
       CREATE WIRE JSON SCHEMA optional_wire MODE STRICT (id string OPTIONAL);
-      CREATE CODEC optional_codec FROM WIRE JSON SCHEMA optional_wire TO SCHEMA optional_body;
+      CREATE WIRE JSON CODEC optional_codec FROM WIRE SCHEMA optional_wire TO SCHEMA optional_body;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY spare SCHEMA event UNBRANCHED;
       CREATE SCHEMA rejected (attempted_id STRING OPTIONAL);
       CREATE RELAY rejected_requests SCHEMA rejected UNBRANCHED;
       CREATE VHOST edge http-body-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'POST' PATH '/coded'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         INHERIT id INVOKE write_header('X-Mode', 'coded')
@@ -264,7 +267,8 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'GET' PATH '/refused'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         INHERIT id
@@ -281,7 +285,8 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'DELETE' PATH '/refused'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -309,7 +314,8 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'DELETE' PATH '/empty'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING optional_codec
         INVOKE write_header('X-Mode', 'replacement')
@@ -365,13 +371,13 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY backup SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-impact-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -476,15 +482,15 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       <cordon>
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR source
+      CREATE KAFKA TOPIC INGESTOR ingestor
         FROM kafka_main TOPIC 'http_recovery_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'http_recovery_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'http_recovery_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -492,7 +498,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'POST' PATH concat('/events/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -538,19 +545,20 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       <cordon>
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-shutdown-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO api_client METHOD 'POST' PATH concat('/events/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -593,15 +601,15 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR source
+      CREATE KAFKA TOPIC INGESTOR ingestor
         FROM kafka_main TOPIC 'http_stop_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'http_stop_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'http_stop_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -612,7 +620,8 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        ATTACHED
         TO first_api METHOD 'POST' PATH concat('/first/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

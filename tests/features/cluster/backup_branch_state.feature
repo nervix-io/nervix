@@ -6,10 +6,10 @@ Feature: Deduplicator and window state in backup archives
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA payment ( tenant STRING, transaction_id STRING, amount I64 );
       CREATE WIRE JSON SCHEMA payment_wire MODE STRICT ( tenant string, transaction_id string, amount integer );
-      CREATE CODEC payment_codec FROM WIRE JSON SCHEMA payment_wire TO SCHEMA payment;
+      CREATE WIRE JSON CODEC payment_codec FROM WIRE SCHEMA payment_wire TO SCHEMA payment;
       CREATE SCHEMA metric ( tenant STRING, latency I64 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( tenant string, latency integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA metric_summary (
         tenant STRING,
         samples I64,
@@ -27,14 +27,14 @@ Feature: Deduplicator and window state in backup archives
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant;
       CREATE VHOST edge backup-branch-state-{{test_id}}.example.com;
-      CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
-      CREATE ENDPOINT metric_ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR payment_source FROM payment_ingress MODE NO ACK
+      CREATE HTTP ENDPOINT payment_ingress ON edge PATH '/payments';
+      CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR payment_ingestor FROM payment_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING payment_codec
         TO payments INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR metric_source FROM metric_ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG

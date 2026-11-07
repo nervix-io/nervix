@@ -1,13 +1,13 @@
 //! The Models other entities stand on: relays, branches, virtual hosts, endpoints, signaling
 //! protocols, lookups and placements.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    BranchEviction, CreateBranch, CreateEndpoint, CreateLookup, CreatePlacement, CreateRelay,
-    CreateSignalingProtocol, CreateVhost, EndpointType, MaterializedRelayState, ModelName,
-    PlacementPolicy, RelayBranching, RequestedResourceVersion, SignalingProtobufConfig,
+    BranchEviction, BranchPartitions, CreateBranch, CreateEndpoint, CreateLookup, CreatePlacement,
+    CreateRelay, CreateSignalingProtocol, CreateVhost, EndpointKind, MaterializedRelayState,
+    ModelName, PlacementPolicy, RelayBranching, RequestedResourceVersion, SignalingProtobufConfig,
     SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
     VhostTlsResource,
 };
@@ -49,11 +49,13 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A branch declaration, with or without an LRU bound on its live instances.
+    /// A branch declaration of any partition count, with or without an LRU bound on its live
+    /// instances.
     pub fn create_branch(&mut self) -> CreateBranch {
         let name = self.name();
         let schema = self.name();
         let ttl = self.duration();
+        let partitions = self.branch_partitions();
         let eviction = if self.entropy.flag() {
             Some(BranchEviction::Lru {
                 max_instances: self.positive_u64(),
@@ -65,9 +67,17 @@ impl Arbitrary<'_> {
             name,
             schema,
             ttl,
-            partitions: nervix_models::BranchPartitions::ONE,
+            partitions,
             eviction,
         }
+    }
+
+    /// A partition count anywhere in its 16-bit range, biased towards its boundaries, so the
+    /// default single partition, the smallest partitioned count and the largest count all appear.
+    pub fn branch_partitions(&mut self) -> BranchPartitions {
+        let count = self.entropy.boundary_biased(1..=u64::from(u16::MAX));
+        let count = u16::try_from(count).verified("the range above ends at u16::MAX");
+        BranchPartitions::Direct(NonZeroU16::new(count).verified("the range above starts at one"))
     }
 
     /// A virtual host answering one or more hostnames, optionally with a TLS resource.
@@ -130,26 +140,26 @@ impl Arbitrary<'_> {
         hostname
     }
 
-    /// An endpoint on a virtual host, of either type, optionally speaking a signaling protocol.
+    /// An endpoint kind with signaling data only on its WebSockets variant.
     pub fn create_endpoint(&mut self) -> CreateEndpoint {
         let name = self.name();
         let on_vhost = self.name();
         let path = format!("/{}", self.string());
-        let endpoint_type = self
-            .entropy
-            .pick([EndpointType::Websockets, EndpointType::Http]);
-        let signaling_protocol = if endpoint_type == EndpointType::Websockets && self.entropy.flag()
-        {
-            Some(self.name())
+        let kind = if self.entropy.flag() {
+            EndpointKind::Http
         } else {
-            None
+            let signaling_protocol = if self.entropy.flag() {
+                Some(self.name())
+            } else {
+                None
+            };
+            EndpointKind::Websockets { signaling_protocol }
         };
         CreateEndpoint {
             name,
             on_vhost,
             path,
-            endpoint_type,
-            signaling_protocol,
+            kind,
         }
     }
 

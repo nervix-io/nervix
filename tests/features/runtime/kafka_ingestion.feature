@@ -17,19 +17,18 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -79,18 +78,17 @@ Feature: Kafka ingestion
       CREATE WIRE JSON SCHEMA forwarding_event_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC forwarding_event_codec
-        FROM WIRE JSON SCHEMA forwarding_event_wire
+      CREATE WIRE JSON CODEC forwarding_event_codec
+        FROM WIRE SCHEMA forwarding_event_wire
         TO SCHEMA forwarding_event;
       CREATE RELAY forwarding_events SCHEMA forwarding_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR kafka_forwarding_source
+      CREATE KAFKA TOPIC INGESTOR kafka_forwarding_ingestor
         FROM kafka_main TOPIC 'forwarding_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_forwarding_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_forwarding_{{test_id}}' START AT EARLIEST
         MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING forwarding_event_codec
         TO forwarding_events
@@ -99,8 +97,9 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_forward
+      CREATE KAFKA TOPIC EMITTER kafka_forward
         FROM forwarding_events
+        ATTACHED
         TO kafka_main TOPIC 'forwarding_output_{{test_id}}'
         MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING forwarding_event_codec
@@ -139,18 +138,17 @@ Feature: Kafka ingestion
       CREATE WIRE JSON SCHEMA grouped_event_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC grouped_event_codec
-        FROM WIRE JSON SCHEMA grouped_event_wire
+      CREATE WIRE JSON CODEC grouped_event_codec
+        FROM WIRE SCHEMA grouped_event_wire
         TO SCHEMA grouped_event;
       CREATE RELAY grouped_events SCHEMA routed_grouped_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR grouped_event_source
+      CREATE KAFKA TOPIC INGESTOR grouped_event_ingestor
         FROM kafka_main TOPIC 'grouped_program_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_grouped_program_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_grouped_program_{{test_id}}' START AT EARLIEST
         MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING grouped_event_codec
         FILTER WHERE now() = now()
@@ -193,18 +191,17 @@ Feature: Kafka ingestion
         tenant string,
         user_id integer
       );
-      CREATE CODEC mixed_event_codec
-        FROM WIRE JSON SCHEMA mixed_event_wire
+      CREATE WIRE JSON CODEC mixed_event_codec
+        FROM WIRE SCHEMA mixed_event_wire
         TO SCHEMA mixed_event;
       CREATE RELAY mixed_events SCHEMA mixed_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR mixed_event_source
+      CREATE KAFKA TOPIC INGESTOR mixed_event_ingestor
         FROM kafka_main TOPIC 'mixed_group_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_mixed_group_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_mixed_group_{{test_id}}' START AT EARLIEST
         MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING mixed_event_codec
         TO mixed_events
@@ -254,23 +251,22 @@ Feature: Kafka ingestion
         matrix <matrix_type>
       );
       CREATE WIRE <wire_format> SCHEMA nested_event_wire MODE STRICT (
-        tenant string,
+        tenant <tenant_wire_type>,
         matrix array
       );
-      CREATE CODEC nested_event_codec
-        FROM WIRE <wire_format> SCHEMA nested_event_wire
+      CREATE WIRE <wire_format> CODEC nested_event_codec
+        FROM WIRE SCHEMA nested_event_wire
         TO SCHEMA nested_event;
       CREATE SCHEMA nested_tenant ( tenant STRING );
       CREATE BRANCH by_nested_tenant SCHEMA nested_tenant TTL 5m;
       CREATE RELAY nested_events SCHEMA nested_event BRANCHED BY by_nested_tenant;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR nested_event_source
+      CREATE KAFKA TOPIC INGESTOR nested_event_ingestor
         FROM kafka_main TOPIC 'nested_group_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_nested_group_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_nested_group_{{test_id}}' START AT EARLIEST
         MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING nested_event_codec
         TO nested_events
@@ -302,11 +298,11 @@ Feature: Kafka ingestion
     And the relay subscription does not receive a payload within "1s"
 
     Examples:
-      | cluster_size | wire_format | matrix_type  |
-      | 1            | JSON        | VEC<VEC<U8>> |
-      | 3            | JSON        | VEC<VEC<U8>> |
-      | 1            | CBOR        | VEC<VEC<U8>> |
-      | 3            | CBOR        | VEC<VEC<U8>> |
+      | cluster_size | wire_format | tenant_wire_type | matrix_type  |
+      | 1            | JSON        | string           | VEC<VEC<U8>> |
+      | 3            | JSON        | string           | VEC<VEC<U8>> |
+      | 1            | CBOR        | text             | VEC<VEC<U8>> |
+      | 3            | CBOR        | text             | VEC<VEC<U8>> |
 
   @decode_rejection
   Scenario Outline: A Kafka <mode_name> ingestor consumes a payload its codec refuses, reports its record and delivers the next one
@@ -327,18 +323,17 @@ Feature: Kafka ingestion
         tenant string,
         user_id integer
       );
-      CREATE CODEC poison_event_codec
-        FROM WIRE JSON SCHEMA poison_event_wire
+      CREATE WIRE JSON CODEC poison_event_codec
+        FROM WIRE SCHEMA poison_event_wire
         TO SCHEMA poison_event;
       CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR poison_source
+      CREATE KAFKA TOPIC INGESTOR poison_ingestor
         FROM kafka_main TOPIC 'poison_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_poison_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_poison_{{test_id}}' START AT EARLIEST
         MODE <mode>
         ON QUIESCE SUSPEND DECODE USING poison_event_codec
         TO poison_events
@@ -364,17 +359,17 @@ Feature: Kafka ingestion
       """
     And within "30s" the active session observes a server error containing
       """
-      ingestor 'poison_source' general error in domain '{{domain}}': decode rejection
+      ingestor 'poison_ingestor' general error in domain '{{domain}}': decode rejection
       """
     And the last server error contains
       """
       codec 'poison_event_codec' refused the payload from Kafka topic 'poison_input_{{test_id}}' partition 0 offset 0: codec 'poison_event_codec' failed to parse field 'user_id'
       """
-    And within "30s" DESCRIBE INGESTOR "poison_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "poison_ingestor" on the leader node contains
       """
       nervix_ingestor_decode_rejections_total: 1
       """
-    And within "30s" DESCRIBE INGESTOR "poison_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "poison_ingestor" on the leader node contains
       """
       codec 'poison_event_codec' refused the payload from Kafka topic 'poison_input_{{test_id}}' partition 0 offset 0
       """
@@ -406,18 +401,17 @@ Feature: Kafka ingestion
         tenant string,
         user_id integer
       );
-      CREATE CODEC poison_event_codec
-        FROM WIRE JSON SCHEMA poison_event_wire
+      CREATE WIRE JSON CODEC poison_event_codec
+        FROM WIRE SCHEMA poison_event_wire
         TO SCHEMA poison_event;
       CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR ignored_poison_source
+      CREATE KAFKA TOPIC INGESTOR ignored_poison_ingestor
         FROM kafka_main TOPIC 'ignored_poison_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_ignored_poison_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_ignored_poison_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING poison_event_codec
         TO poison_events
@@ -441,11 +435,11 @@ Feature: Kafka ingestion
       """
       "tenant":"acme","user_id":2
       """
-    And within "30s" DESCRIBE INGESTOR "ignored_poison_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "ignored_poison_ingestor" on the leader node contains
       """
       nervix_ingestor_decode_rejections_total: 1
       """
-    And within "30s" DESCRIBE INGESTOR "ignored_poison_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "ignored_poison_ingestor" on the leader node contains
       """
       codec 'poison_event_codec' refused the payload from Kafka topic 'ignored_poison_input_{{test_id}}' partition 0 offset 0
       """
@@ -469,17 +463,16 @@ Feature: Kafka ingestion
     When these Plexus commands are executed
       """
       CREATE SCHEMA unfolded_event ( user_id I64 );
-      CREATE CODEC unfolded_codec FROM JSON TO SCHEMA unfolded_event
+      CREATE JAQ JSON CODEC unfolded_codec TO SCHEMA unfolded_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY unfolded_events SCHEMA unfolded_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR unfolded_source
+      CREATE KAFKA TOPIC INGESTOR unfolded_ingestor
         FROM kafka_main TOPIC 'unfolded_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_unfolded_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_unfolded_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING unfolded_codec
         TO unfolded_events
@@ -508,11 +501,11 @@ Feature: Kafka ingestion
       """
       "user_id":42
       """
-    And within "30s" DESCRIBE INGESTOR "unfolded_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "unfolded_ingestor" on the leader node contains
       """
       nervix_ingestor_decode_rejections_total: 0
       """
-    And within "30s" DESCRIBE INGESTOR "unfolded_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "unfolded_ingestor" on the leader node contains
       """
       last decode rejection: -
       """
@@ -538,19 +531,18 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_reconnect_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_reconnect_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_reconnect_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_reconnect_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -564,7 +556,7 @@ Feature: Kafka ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "kafka_notifications" leaves fault mode
     And Kafka message is published to topic "notifications_reconnect_{{test_id}}"
@@ -598,14 +590,13 @@ Feature: Kafka ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA down_event ( seq I64 );
       CREATE WIRE JSON SCHEMA down_wire MODE STRICT ( seq integer );
-      CREATE CODEC down_codec FROM WIRE JSON SCHEMA down_wire TO SCHEMA down_event;
+      CREATE WIRE JSON CODEC down_codec FROM WIRE SCHEMA down_wire TO SCHEMA down_event;
       CREATE RELAY down_events SCHEMA down_event UNBRANCHED;
       CREATE KAFKA CLIENT down_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
-        'auto.offset.reset' = 'earliest',
         'socket.timeout.ms' = '500'
       };
-      CREATE KAFKA TOPIC INGESTOR down_source
+      CREATE KAFKA TOPIC INGESTOR down_ingestor
         FROM down_kafka TOPIC 'no_ack_down_{{test_id}}'
         OFFSET BY DOMAIN MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING down_codec
@@ -616,7 +607,7 @@ Feature: Kafka ingestion
       """
     # Without a declared retry policy the ingestor waits 250 ms after its first failure and doubles
     # the wait after each one, so the wait reaches two seconds after four failures.
-    Then within "60s" DESCRIBE INGESTOR "down_source" on the leader node reports a reconnect backoff of at least "2s"
+    Then within "60s" DESCRIBE INGESTOR "down_ingestor" on the leader node reports a reconnect backoff of at least "2s"
     When the mock Kafka broker comes back up
     And mock Kafka message is published to topic "no_ack_down_{{test_id}}"
       """
@@ -645,16 +636,15 @@ Feature: Kafka ingestion
       """
       CREATE SCHEMA refused_commit_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA refused_commit_wire MODE STRICT ( event_id integer );
-      CREATE CODEC refused_commit_codec
-        FROM WIRE JSON SCHEMA refused_commit_wire TO SCHEMA refused_commit_event;
+      CREATE WIRE JSON CODEC refused_commit_codec
+        FROM WIRE SCHEMA refused_commit_wire TO SCHEMA refused_commit_event;
       CREATE RELAY refused_commit_records SCHEMA refused_commit_event UNBRANCHED;
       CREATE KAFKA CLIENT refused_commit_kafka CONFIG {
-        'bootstrap.servers' = '{{mock_kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{mock_kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR refused_commit_source
+      CREATE KAFKA TOPIC INGESTOR refused_commit_ingestor
         FROM refused_commit_kafka TOPIC 'refused_commit_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'refused_commit_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'refused_commit_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING refused_commit_codec
@@ -672,14 +662,14 @@ Feature: Kafka ingestion
       """
       "event_id":1
       """
-    And within "30s" DESCRIBE INGESTOR "refused_commit_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "refused_commit_ingestor" on the leader node contains
       """
       transient error: GroupAuthorizationFailed (Broker: Group authorization failed)
       """
     And within "2s" mock Kafka consumer group "refused_commit_group_{{test_id}}" next offset for topic "refused_commit_{{test_id}}" partition 0 is "below 1"
     When the mock Kafka broker accepts offset commits again
     Then within "30s" mock Kafka consumer group "refused_commit_group_{{test_id}}" next offset for topic "refused_commit_{{test_id}}" partition 0 is "at least 1"
-    And within "30s" DESCRIBE INGESTOR "refused_commit_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "refused_commit_ingestor" on the leader node contains
       """
       transient error: -
       """
@@ -702,16 +692,15 @@ Feature: Kafka ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retired_event ( seq I64 );
       CREATE WIRE JSON SCHEMA retired_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC retired_event_codec
-        FROM WIRE JSON SCHEMA retired_event_wire TO SCHEMA retired_event;
+      CREATE WIRE JSON CODEC retired_event_codec
+        FROM WIRE SCHEMA retired_event_wire TO SCHEMA retired_event;
       CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
       CREATE KAFKA CLIENT retiring_kafka CONFIG {
-        'bootstrap.servers' = '{{mock_kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{mock_kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR retiring_source
+      CREATE KAFKA TOPIC INGESTOR retiring_ingestor
         FROM retiring_kafka TOPIC 'retired_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'retired_group_{{test_id}}' INSTANCES 8
+          OFFSET BY CONSUMER GROUP 'retired_group_{{test_id}}' START AT EARLIEST INSTANCES 8
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING retired_event_codec
@@ -719,8 +708,8 @@ Feature: Kafka ingestion
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE VHOST edge retire-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR healthy_source
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
         FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
         TO retired_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -739,11 +728,11 @@ Feature: Kafka ingestion
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "ingestor" "retiring_source" is saved as placeholder "kafka_owner"
+    Then the last cluster status owner for scheduled "ingestor" "retiring_ingestor" is saved as placeholder "kafka_owner"
     Given the mock Kafka broker holds every answer
     When these Plexus statements are executed on the leader node
       """
-      DROP INGESTOR retiring_source;
+      DROP INGESTOR retiring_ingestor;
       """
     Then within "30s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually reaches at least 1
       """
@@ -797,19 +786,18 @@ Feature: Kafka ingestion
         tenant integer,
         level integer
       );
-        CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+        CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant I64 );
         CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
         CREATE RELAY events SCHEMA routed_event BRANCHED BY by_tenant;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-        CREATE KAFKA TOPIC INGESTOR event_source
-        FROM kafka_main TOPIC 'events_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR event_ingestor
+        FROM kafka_main TOPIC 'events_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         FILTER WHERE input.level > 0
         TO events
@@ -893,18 +881,17 @@ Feature: Kafka ingestion
       CREATE WIRE JSON SCHEMA sourced_event_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC sourced_event_codec
-        FROM WIRE JSON SCHEMA sourced_event_wire
+      CREATE WIRE JSON CODEC sourced_event_codec
+        FROM WIRE SCHEMA sourced_event_wire
         TO SCHEMA sourced_event;
       CREATE RELAY sourced_events SCHEMA routed_sourced_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR sourced_event_source
+      CREATE KAFKA TOPIC INGESTOR sourced_event_ingestor
         FROM kafka_main TOPIC 'sourced_events_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_sourced_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_sourced_{{test_id}}' START AT EARLIEST
         MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING sourced_event_codec
         TO sourced_events
@@ -968,19 +955,18 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1028,19 +1014,18 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1089,19 +1074,18 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1150,19 +1134,18 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 3s ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 3s ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1203,19 +1186,18 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1224,7 +1206,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications DETACHED TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1263,19 +1245,18 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1326,8 +1307,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1335,11 +1316,10 @@ Feature: Kafka ingestion
         CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1348,7 +1328,8 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED DEDUPLICATOR passthrough FROM notifications
+        CREATE DEDUPLICATOR passthrough FROM notifications
+        DETACHED
         DEDUPLICATE ON input.user_id
         MAX TIME 10m
         BRANCHED BY by_kafka_notifications
@@ -1399,8 +1380,8 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -1408,11 +1389,10 @@ Feature: Kafka ingestion
         CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1481,14 +1461,13 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE RELAY notifications SCHEMA notification UNBRANCHED;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'unprovisioned_{{test_id}}' OFFSET BY <offsets> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
@@ -1518,11 +1497,11 @@ Feature: Kafka ingestion
       """
 
     Examples:
-      | cluster_size | offsets                                           |
-      | 1            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' |
-      | 1            | DOMAIN                                            |
-      | 3            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' |
-      | 3            | DOMAIN                                            |
+      | cluster_size | offsets                                                             |
+      | 1            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' START AT EARLIEST |
+      | 1            | DOMAIN                                                              |
+      | 3            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' START AT EARLIEST |
+      | 3            | DOMAIN                                                              |
 
   @kafka_owned_broker_state
   Scenario Outline: CREATE KAFKA CLIENT refuses a Kafka CONFIG that lets a consumer create topics
@@ -1568,14 +1547,13 @@ Feature: Kafka ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE RELAY notifications SCHEMA notification UNBRANCHED;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_dropped
         FROM kafka_main TOPIC 'dropped_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
@@ -1587,7 +1565,7 @@ Feature: Kafka ingestion
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE KAFKA TOPIC INGESTOR kafka_grouped
-        FROM kafka_main TOPIC 'dropped_{{test_id}}' OFFSET BY CONSUMER GROUP 'operator_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        FROM kafka_main TOPIC 'dropped_{{test_id}}' OFFSET BY CONSUMER GROUP 'operator_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

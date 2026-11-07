@@ -1,7 +1,8 @@
 //! Tests of materialized generation reads through the authenticated transport.
 //!
 //! Layer: test harness.
-//! - **Owns.** Repeated-read transfer bounds and complete rows after owner generation changes.
+//! - **Owns.** Repeated-read transfer bounds, complete rows after owner generation changes and
+//!   partition-selective dependency reads across an ownership fence.
 //! - **Depends on.** Materialized state publications, runtime fixtures and the real interconnect.
 //! - **Must not know.** Archive restore policy or control-plane scheduling decisions.
 
@@ -146,9 +147,12 @@ impl RemoteGenerationFixture {
             ],
         });
         let routing = DomainRouting::new(DomainRoutingSnapshot {
-            materialized_stream_owner_nodes: [(relay.clone(), Some(owner_name.clone()))]
-                .into_iter()
-                .collect(),
+            materialized_stream_owner_nodes: [(
+                relay.clone(),
+                RelayOwnerRoutes::new(BTreeMap::from([(Unit::SINGLE, owner_name.clone())])),
+            )]
+            .into_iter()
+            .collect(),
             materialized_stream_specs: [(
                 relay.clone(),
                 RuntimeMaterializedRelaySpec::new(
@@ -246,7 +250,13 @@ impl RemoteGenerationFixture {
         cache: &mut MaterializedGenerationReadCache,
     ) -> Vec<MaterializedGenerationRecord> {
         self.reader
-            .materialized_records_from_owner(routing, cache, &self.domain, &self.relay)
+            .materialized_unit_records_from_owner(
+                routing.load(),
+                cache,
+                &self.domain,
+                &self.relay,
+                Unit::SINGLE,
+            )
             .await
             .assured("the authenticated remote generation is readable")
             .collect()
@@ -303,6 +313,191 @@ impl RemoteGenerationFixture {
             .shutdown()
             .await;
     }
+}
+
+#[nervix_primitives::test]
+async fn a_partition_handoff_hides_only_its_materialized_dependency_until_the_fence_reopens() {
+    let runtime = Runtime::new();
+    let local = named("reader");
+    attach_loopback_cluster(&runtime, &local).await;
+    let domain = domain("materialized_fence");
+    let relay = named::<RelayName>("profiles");
+    install_unpaced_test_domain(&runtime, &domain);
+    let schema = compile_schema(&CreateSchema {
+        name: named("profile"),
+        fields: vec![SchemaField {
+            name: named("value"),
+            ty: ParseAsType::I64,
+            optional: false,
+            sensitive: false,
+        }],
+    });
+    let mut branching = test_branching(&[("tenant", ParseAsType::String)]);
+    let nervix_models::ResolvedBranching::Branched { partitions, .. } = &mut branching else {
+        unreachable!("the fixture declares a named branch");
+    };
+    *partitions = nervix_models::BranchPartitions::Direct(nonzero_ext::nonzero!(2u16));
+    let partitioning = RelayPartitioning::of(Some(&branching));
+    let services = Arc::new(RelayBoundaryServices::new(
+        RelayBoundaryFanout::branch_collapse_with_capacity(nonzero_ext::nonzero!(1usize)),
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::fresh(partitioning),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    ));
+    let mut consumers = Vec::new();
+    let mut writers = Vec::new();
+    let keys = [
+        string_branch_key("tenant", "eta"),
+        string_branch_key("tenant", "acme"),
+    ];
+    for (index, key) in (0u32..2).zip(&keys) {
+        nervix_primitives::task::consume_budget().await;
+        let unit = Unit::partition(index);
+        assert_eq!(
+            partitioning
+                .unit_of(key)
+                .assured("the key names a partition"),
+            unit
+        );
+        consumers
+            .push(services.add_local_unit_runtime_consumer(nervix_models::AckMode::Attached, unit));
+        runtime.publish_unit_state_assignment(
+            DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, &relay),
+                unit,
+            ),
+            ScheduledStateAssignment {
+                identity: ScheduledStateIdentity {
+                    schema_fingerprint: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+                    wasm_state_generations: None,
+                },
+                checkpoint_owners: None,
+            },
+        );
+        let placement = runtime
+            .state_placement_for_unit(
+                &domain,
+                RuntimeStateKind::MaterializedRelay,
+                ModelKind::Relay,
+                &relay,
+                unit,
+                None,
+            )
+            .assured("each current unit has its own state identity");
+        let mut assignment = runtime.replicated_materialized_stream_state(
+            placement,
+            schema.arrow_schema(),
+            Some(local.clone()),
+            Vec::new(),
+            Some(&local),
+        );
+        let mut writer = assignment
+            .originator
+            .take()
+            .assured("the reader owns both fixture units");
+        let row = schema
+            .batch_from_test_rows([[(
+                "value".to_string(),
+                RuntimeValue::I64(10 + i64::from(index)),
+            )]])
+            .assured("the row matches the declared schema")
+            .runtime_row(
+                0,
+                RuntimeRecordMetadata::from_ingested_at_watermarks(
+                    Timestamp::from_unix_nanos(1),
+                    Timestamp::from_unix_nanos(1),
+                ),
+            )
+            .assured("the fixture batch contains its one row");
+        writer
+            .update_last_by_timestamp(key, row)
+            .assured("the owner publishes its own partition's row");
+        writers.push(writer);
+    }
+    let specs = [(
+        relay.clone(),
+        RuntimeMaterializedRelaySpec::new(
+            schema.arrow_schema(),
+            VmSchemaSensitivity::default(),
+            branching.clone(),
+        ),
+    )]
+    .into_iter()
+    .collect();
+    let routing = DomainRoutingSnapshot {
+        relay_services: [(relay.clone(), services.clone())].into_iter().collect(),
+        relay_branchings: [(relay.clone(), branching)].into_iter().collect(),
+        materialized_stream_reads: runtime.materialized_relay_publications(&domain, &specs),
+        materialized_stream_specs: specs,
+        materialized_stream_owner_nodes: [(
+            relay.clone(),
+            RelayOwnerRoutes::new(
+                [
+                    (Unit::partition(0), local.clone()),
+                    (Unit::partition(1), local.clone()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        )]
+        .into_iter()
+        .collect(),
+        ..DomainRoutingSnapshot::default()
+    };
+    for key in &keys {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            runtime
+                .load_materialized_dependency_values(&routing, &domain, key, &relay)
+                .await
+                .assured("both live dependencies are readable")
+                .is_some()
+        );
+    }
+    let mut lease = RelayDispatchGateLease::engage(
+        services
+            .fanout
+            .unit_dispatch_gate(Unit::partition(0))
+            .assured("unit registration retained its gate"),
+        Instant::now() + Duration::from_secs(5),
+        "partition handoff",
+    );
+    assert!(lease.wait_quiescent().await);
+    assert!(
+        runtime
+            .load_materialized_dependency_values(&routing, &domain, &keys[0], &relay)
+            .await
+            .assured("a fenced dependency waits without reading stale state")
+            .is_none()
+    );
+    let sibling = runtime
+        .load_materialized_dependency_values(&routing, &domain, &keys[1], &relay)
+        .await
+        .assured("the sibling remains readable")
+        .assured("the sibling retains its own row");
+    assert_eq!(
+        sibling.get("relay_state.profiles.value"),
+        Some(&RuntimeValue::I64(11))
+    );
+    drop(lease);
+    assert!(
+        runtime
+            .load_materialized_dependency_values(&routing, &domain, &keys[0], &relay)
+            .await
+            .assured("the selected dependency resumes after activation")
+            .is_some()
+    );
+    runtime
+        .inner
+        .remote_dispatcher
+        .load_full()
+        .assured("the fixture retains its dispatcher")
+        .interconnect
+        .shutdown()
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -372,7 +567,13 @@ async fn unchanged_remote_generations_transfer_once_and_replaced_contents_are_re
     fixture.selected_owner.send_replace(Runtime::new());
     let unavailable = fixture
         .reader
-        .materialized_records_from_owner(&mut routing, &mut cache, &fixture.domain, &fixture.relay)
+        .materialized_unit_records_from_owner(
+            routing.load(),
+            &mut cache,
+            &fixture.domain,
+            &fixture.relay,
+            Unit::SINGLE,
+        )
         .await;
     assert!(
         unavailable.is_err(),
@@ -395,7 +596,13 @@ async fn unchanged_remote_generations_transfer_once_and_replaced_contents_are_re
     assert!(fixture.received_bytes() > restored_bytes);
     let read = fixture
         .reader
-        .materialized_records_from_owner(&mut routing, &mut cache, &fixture.domain, &fixture.relay)
+        .materialized_unit_records_from_owner(
+            routing.load(),
+            &mut cache,
+            &fixture.domain,
+            &fixture.relay,
+            Unit::SINGLE,
+        )
         .await
         .assured("the recovered generation can be retained by a read");
     cache.clear();
@@ -436,7 +643,13 @@ async fn unchanged_remote_generations_transfer_once_and_replaced_contents_are_re
         .assured("other read tasks can occupy the entire optional cache pool");
     let uncached = fixture
         .reader
-        .materialized_records_from_owner(&mut routing, &mut cache, &fixture.domain, &fixture.relay)
+        .materialized_unit_records_from_owner(
+            routing.load(),
+            &mut cache,
+            &fixture.domain,
+            &fixture.relay,
+            Unit::SINGLE,
+        )
         .await
         .assured("cache pressure still admits a complete active source read");
     assert!(
@@ -480,7 +693,7 @@ async fn unchanged_remote_generations_transfer_once_and_replaced_contents_are_re
         let uncached = fixture.read(&mut routing, &mut cache).await;
         fixture.assert_records(&uncached, &expected);
         assert!(
-            cache.remote.is_none(),
+            cache.remote.is_empty(),
             "cache pressure leaves a complete uncached read"
         );
         assert_eq!(
@@ -502,14 +715,20 @@ async fn unchanged_remote_generations_transfer_once_and_replaced_contents_are_re
     let available = fixture.read(&mut routing, &mut cache).await;
     fixture.assert_records(&available, &expected);
     assert!(
-        cache.remote.is_some(),
+        cache.remote.contains_key(&Unit::SINGLE),
         "a later read can retain the generation when room returns"
     );
     let expected = fixture.replace_generation(40, 2);
     fixture.fetch_owner.send_replace(Runtime::new());
     let Err(error) = fixture
         .reader
-        .materialized_records_from_owner(&mut routing, &mut cache, &fixture.domain, &fixture.relay)
+        .materialized_unit_records_from_owner(
+            routing.load(),
+            &mut cache,
+            &fixture.domain,
+            &fixture.relay,
+            Unit::SINGLE,
+        )
         .await
     else {
         panic!("a successful description cannot authorize a failed fetch");

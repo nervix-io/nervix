@@ -116,6 +116,40 @@ no interleaving. What it reports, and what it cannot, belong to
 
 ## Policy Boundaries
 
+### Allowance clock adapter
+
+`nervix-rate-limit` captures `nervix_primitives::time::Instant` once per admission and implements
+governor's `Clock` and `Reference` over that captured value. Every clause therefore uses the same
+physical-clock coordinate. The engine returns a deadline; its caller owns `time::sleep_until` and
+retry. It reads no UTC clock and uses no governor timer, default clock, keyed store or jitter.
+Its relative GCRA store translates the captured epoch offset into remaining nanoseconds before
+calling governor and translates the result back afterwards. Quotas bound a burst horizon to
+`u64::MAX / 2`, so governor's intermediate sum of two horizons fits its nanosecond representation.
+The replenishment interval rounds up to whole nanoseconds, preserving the requested rate ceiling.
+
+This adapter adds no primitive. Ordinary and Turmoil admissions read the boundary's corresponding
+clock. Shuttle's `Instant::now` remains a real clock read, so its keyed-store check injects fixed
+offsets and checks synchronization independently of elapsed time. The Loom model exercises only
+the actual selected atomic cell, without reading a clock. Relative generations and their UTC
+conversions take explicit anchors and perform no clock reads. The public engine scenarios test
+elapsed waits on the ordinary boundary timer; they do not qualify a cluster or host integration.
+
+### Authentication clock adapter
+
+The node's failed-name admission owner samples the selected monotonic instant under its map
+guard. It gives governor a snapshot clock at zero and the bucket's remaining arrival mark,
+then reanchors the complete updated mark at that selected instant. The per-second quota bounds
+the remaining mark by one burst, so the conversion does not depend on node uptime. Its exclusive
+state-store cell uses no backend clock or atomic store, and quota waits use boundary timers after
+the map guard ends. This adds no primitive or mode selection.
+
+The authentication owner's paused-clock tests qualify elapsed refill and concurrent refusal
+ordering. Its `authentication-quota-clock` property compares every decision, exact wait and complete
+arrival mark with a persistent governor limiter. Public authentication scenarios qualify the real
+transport waits separately; these asynchronous mutex and timer paths are untracked by Deloxide.
+
+### Executor and clock permissions
+
 The boundary supplies mechanisms and decides no policy. `net` never decides what a name means: a
 node resolves through its own resolver in `nervix-dns`, no mode but Turmoil's offers a lookup, and
 the boundary check rejects `tokio::net::lookup_host` and the `ToSocketAddrs` traits, which resolve
@@ -133,6 +167,20 @@ its work instead, as [Blocking work outside the executor](#blocking-work-outside
 lists. `pause`, `advance` and `resume` exist only with the `test-util` capability, which ordinary
 tests of elapsed-time behavior enable and no production graph has, because a clock that can be
 paused is checked on every read.
+
+A watch receiver's `mark_unchanged` marks its current version seen without borrowing the value,
+publishing a change or changing another receiver. The Shuttle adapter takes a scheduling point
+before reading that version, matching the registration it observes. Shared native/Shuttle
+conformance exercises it while the value's write guard is held, its next send and channel closure;
+the paired race checks expose marking after a predicate read as a lost wake and keep marking before
+the read sound. Ordinary builds still re-export Tokio's operation directly.
+
+The clock-attachment Shuttle checks have at most two explicitly permitted modeled participants,
+an observer and replacement handler, or two competing attachment handlers. They race finite
+attachment, availability observation and authority-stop operations,
+join before each execution ends and explore at most 1,000 depth-first schedules under the model
+runner's step and wall bounds. Its production owner uses the boundary's watch and cancellation
+primitives; the permission adds no product thread or executor bypass.
 
 The executor admits decoded materialized snapshots into `state_read` and optional retained
 generator source views into `state_read_cache`. Each pool derives its capacity from the relay
@@ -190,11 +238,11 @@ unverified:
 | The WASM runtime's epoch driver and guest-callback time | The epoch driver is an operating-system thread no model runs, which sleeps for real and is stopped by a flag; a guest callback reads its domain time from Tokio's task-local storage, which no model isolates | When the epoch thread observes shutdown, and a callback's time scope, which Shuttle tasks would share while polled |
 | The C binding's session | The binding owns the runtime its host's threads enter and shuts it down in the background, which is its contract with the host and which Shuttle's runtime does not provide | Everything the binding runs; the Rust client it drives has its own checks |
 | The cluster membership transport and its native watch fixtures | Chitchat hands out Tokio's own lock and watch receiver and runs on Tokio's runtime, so the transport tasks it drives wait, sleep and select on Tokio's primitives; native watcher fixtures construct that same external receiver type | Cluster membership gossip; the native watch assertions are not model-checking evidence |
-| Process-wide one-time state: the SIMD instruction level, the interconnect's cryptography provider, the ONNX Runtime environment, and the test and benchmark schema and certificate fixtures | Initialized once per process and read by every later model execution in it; ONNX Runtime allows a process one environment, so every node and model inspection in it shares the first | Detection, installation, environment creation and fixture construction |
+| Process-wide one-time state: the SIMD instruction level, the checked interconnect provider in `nervix-crypto`, the ONNX Runtime environment, and the test and benchmark schema and certificate fixtures | Initialized once per process and read by every later model execution in it; ONNX Runtime allows a process one environment, so every node and model inspection in it shares the first | Detection, installation, environment creation and fixture construction |
 | The browser console: its executor installation, and the `futures` channel, `select!` and abort handles its tasks use on the browser's event loop | The browser target runs in no execution mode and has no native capability, so the console takes those families from the `futures` crate, which a native build takes from Tokio | Everything the console runs |
 | The VM benchmarks' allocation probe | A global allocator counts allocations made on every thread | Nothing; the benchmark claims nothing about synchronization |
 | The application unit-test fixtures | Test databases and node ports must differ across every unit test the process runs in parallel, so their identities outlive each test | Nothing a check claims; no model builds the fixtures |
-| The records of the relay gate and fan-out, relay branch presence, entity gate, emitter record-write, durability barrier, WASM checkpoint, source host-loop, stream-slot, retained-archive and client ingestor Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own primitives are modeled |
+| The records of the relay gate and fan-out, relay branch presence, entity gate, emitter record-write, durability barrier, WASM checkpoint, ingestor host-loop, stream-slot, retained-archive and client ingestor Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own primitives are modeled |
 | The Turmoil runner's real-time bound and the scenario driver's attempt deadline | A run's bound must expire even when a host blocks the scheduler thread and simulated time stops advancing, and the driver kills an attempt process that outlived its bound; both read the operating system's monotonic clock | Nothing a scenario claims: they decide only when a run fails, never how a simulated request proceeds |
 | The integration-test harness's port pool and the benchmark driver | They reserve free ports from the operating system for real node processes and containers, synchronously and before anything binds them, with the standard library's blocking listener | Nothing a check claims; the ports carry the traffic of real processes |
 
@@ -355,13 +403,19 @@ executor's storage workers are the one built-in owner of the runtime's blocking 
 owns `task::block_in_place`, which blocks the runtime worker thread that calls it.
 
 Connector network control calls use a storage class of their own, with two admitted workers by
-default and the same bounded queue policy as other classes. Kafka source metadata, watermarks,
+default and the same bounded queue policy as other classes. Kafka ingestor metadata, watermarks,
 timestamp queries, seeks, assignments and consumer-group commits use it, and so does the destruction
 of a Kafka consumer or producer whose last handle is gone. A synchronous commit may
 outlive its caller's thirty-second wait, so sharing filesystem or consensus worker permits would
 let an unavailable broker hold those operations behind it. The connector class bounds those jobs
 without taking another class's admission. All classes still use the process-wide blocking pool;
 admission isolation does not reserve physical threads.
+
+NATS authentication reads its immutable mounted credentials file on filesystem storage workers.
+Ingestor composition and the emitter host supply the actual node executor. The file's length is
+charged to credentials memory before its bytes are allocated, and the charge stays until the
+zeroizing temporary buffer is cleared. Admission, worker and cancellation failures retain typed
+initialization outcomes; a refusal that read no credential is not an authentication rejection.
 
 Everything else that blocks a thread is a declared owner in
 `crates/primitives/blocking-permissions.toml`, which names the file, the blocking items the owner
@@ -372,10 +426,11 @@ a file whose owners block in different ways, such as the CLI's, has a permission
 | Owner | Blocks through | Why it stays outside the executor | What bounds it |
 | --- | --- | --- | --- |
 | The resolver's configuration load in `nervix-dns` | `task::spawn_blocking` | The Rust client and the CLI build the same resolver without an executor, and a node loads it through the same function in its startup preflight | Two small files, read once for each resolver built |
-| The Kafka emitter's final producer-queue drain | `task::spawn_blocking` | librdkafka's flush waits on the network, independently of the source control-call class | The host's physical flush deadline |
+| The Kafka emitter's final producer-queue drain | `task::spawn_blocking` | librdkafka's flush waits on the network, independently of the ingestor control-call class | The host's physical flush deadline |
 | The Rust client's backup download and restore upload, and the CLI's event printer | `task::spawn_blocking` | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
 | The CLI's completion prompt | `task::block_in_place` | A client tool is not a node and has no executor; its line editor asks for completions synchronously on the thread that runs the CLI's main task, so the prompt waits there for the completion while the runtime's workers keep the session running | One completion at a time, only while the operator waits at the prompt; each page of suggestions ends by the client's retry deadline, and a repeated continuation ends the completion |
 | The benchmark driver and the scenario harness | `task::spawn_blocking` | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |
+| The architecture audit's local Git provenance reads | `thread::scope` | The standalone tooling process has no node executor; independent blame and line-history reads retain their bounded parallelism | At most eight scoped workers and eight Git children per finite read group; each input is read once, the dispatch lock is released before I/O, and every worker joins before return |
 
 The boundary check rejects either item in a file no permission lists it for, and a listed item its
 file no longer names.

@@ -18,7 +18,7 @@ use crate::{
     },
     domain::ALL_DOMAIN_STATUSES,
     domain_clock::ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
-    event::ALL_NOTICE_LEVELS,
+    event::{ALL_NOTICE_KINDS, ALL_NOTICE_LEVELS},
     impact::{
         ALL_ACTIVATION_ACTIONS, ALL_DOMAIN_LIFECYCLE_ACTIONS, ALL_IMPACT_DIAGNOSTIC_KINDS,
         ALL_IMPACT_EDGE_KINDS, ALL_MODEL_CHANGE_ASPECTS, ALL_REBUILD_REASONS,
@@ -113,6 +113,7 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
     );
     assert_exact_mapping(ALL_DOMAIN_STATUSES, wire::DomainStatus::ENUM_VALUES);
     assert_exact_mapping(ALL_NOTICE_LEVELS, wire::NoticeLevel::ENUM_VALUES);
+    assert_exact_mapping(ALL_NOTICE_KINDS, wire::NoticeKind::ENUM_VALUES);
     assert_exact_mapping(
         ALL_IMPACT_DIAGNOSTIC_KINDS,
         wire::ImpactDiagnosticKind::ENUM_VALUES,
@@ -245,6 +246,7 @@ fn every_undeclared_enum_byte_is_refused() {
         wire::NoticeLevel::ENUM_MAX,
         wire::NoticeLevel,
     );
+    assert_undeclared_refused::<crate::NoticeKind, _>(wire::NoticeKind::ENUM_MAX, wire::NoticeKind);
     assert_undeclared_refused::<nervix_models::ImpactDiagnosticKind, _>(
         wire::ImpactDiagnosticKind::ENUM_MAX,
         wire::ImpactDiagnosticKind,
@@ -364,5 +366,73 @@ fn every_undeclared_enum_byte_is_refused() {
     assert_undeclared_refused::<nervix_models::ClientProducerEndReason, _>(
         wire::ProducerEndReason::ENUM_MAX,
         wire::ProducerEndReason,
+    );
+}
+
+/// The names a node's traffic series label a session's requests, rejections and cancellation
+/// stages with, and that each vocabulary iterates exactly the variants the wire declares.
+#[test]
+fn traffic_labels_are_the_snake_case_names_of_their_variants() {
+    use strum::IntoEnumIterator as _;
+
+    assert_eq!(
+        crate::RequestRejection::iter().collect::<Vec<_>>(),
+        ALL_REQUEST_REJECTIONS.to_vec()
+    );
+    let rejections: Vec<&'static str> = crate::RequestRejection::iter()
+        .map(<&'static str>::from)
+        .collect();
+    assert_eq!(
+        rejections,
+        [
+            "invalid_request",
+            "unsupported_request",
+            "unsupported_value",
+            "duplicate_request_id",
+            "reply_too_large",
+            "too_many_requests_in_flight",
+            "server_busy",
+        ]
+    );
+
+    assert_eq!(
+        crate::CancellationStage::iter().collect::<Vec<_>>(),
+        ALL_CANCELLATION_STAGES.to_vec()
+    );
+    let stages: Vec<&'static str> = crate::CancellationStage::iter()
+        .map(<&'static str>::from)
+        .collect();
+    assert_eq!(stages, ["before_admission", "after_admission"]);
+
+    let kinds: Vec<&'static str> = crate::ClientRequestKind::iter()
+        .map(<&'static str>::from)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "command",
+            "suggest",
+            "choice",
+            "list_domains",
+            "select_domain",
+            "attach_transaction",
+            "inspect_transaction",
+            "subscribe",
+            "unsubscribe",
+            "cancel",
+            "attach_domain_clock",
+            "detach_domain_clock",
+            "open_ingestor",
+            "submit_batch",
+            "close_ingestor",
+            "open_emitter",
+            "read_emitter_batch",
+            "settle_emitter_batch",
+            "close_emitter",
+        ]
+    );
+    assert_eq!(
+        crate::ClientRequestKind::from(&crate::ClientRequest::ListDomains),
+        crate::ClientRequestKind::ListDomains
     );
 }

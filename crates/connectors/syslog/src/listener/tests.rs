@@ -17,6 +17,7 @@
 use std::{
     collections::VecDeque,
     future::{Future as _, poll_fn},
+    net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
@@ -543,7 +544,7 @@ async fn read_connection(
     let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
     let outcome = read_stream_connection(
         ScriptedStream::new(chunks),
-        peer_addr,
+        SyslogPeer::Tcp(peer_addr),
         nonzero!(128usize),
         framing,
         None,
@@ -553,7 +554,7 @@ async fn read_connection(
     .await;
     let mut frames = Vec::new();
     while let Ok(frame) = rx.try_recv() {
-        assert_eq!(frame.peer_addr, peer_addr);
+        assert_eq!(frame.peer.address(), peer_addr);
         frames.push(frame.payload);
     }
     (outcome, frames)
@@ -599,14 +600,14 @@ async fn a_decoded_frame_waiting_for_intake_survives_suspension() {
     let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
     tx.send(ReceivedSyslogFrame {
         payload: b"first".to_vec(),
-        peer_addr,
+        peer: SyslogPeer::Tcp(peer_addr),
     })
     .await
     .expect("the intake queue is open");
     let (pause_tx, pause_rx) = watch::channel(false);
     let mut connection = Box::pin(read_stream_connection(
         ScriptedStream::new(&[b"6 second"]),
-        peer_addr,
+        SyslogPeer::Tcp(peer_addr),
         nonzero!(128usize),
         None,
         None,
@@ -668,20 +669,20 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         |_| bind_addr,
     )
     .expect("the TCP plan is valid");
-    let mut source = SyslogListenerIngestor::open(&plan, 0)
+    let mut ingestor = SyslogListenerIngestor::open(&plan, 0)
         .await
-        .expect("the source opens");
-    source.resume().await.expect("the listener binds");
+        .expect("the ingestor opens");
+    ingestor.resume().await.expect("the listener binds");
     let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
     let (mut client, server) = tokio::io::duplex(128);
-    let Some(SyslogListener::Stream(listener)) = source.listener.as_mut() else {
-        panic!("the source has a stream listener");
+    let Some(SyslogListener::Stream(listener)) = ingestor.listener.as_mut() else {
+        panic!("the ingestor has a stream listener");
     };
     let tx = listener.frame_tx.clone();
     let paused = listener.paused.subscribe();
     listener.connections.spawn(read_stream_connection(
         server,
-        peer_addr,
+        SyslogPeer::Tcp(peer_addr),
         nonzero!(128usize),
         None,
         None,
@@ -689,29 +690,29 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         paused,
     ));
 
-    let failure = source.on_listener_error(Report::new(SyslogListenerError::StreamAccept {
+    let failure = ingestor.on_listener_error(Report::new(SyslogListenerError::StreamAccept {
         source: std::io::Error::other("accept failed"),
     }));
     assert!(failure.contains::<SyslogListenerError>());
-    assert!(source.needs_resume());
+    assert!(ingestor.needs_resume());
 
-    let blocker = TcpListener::bind(source.bind_addr)
+    let blocker = TcpListener::bind(ingestor.bind_addr)
         .await
         .expect("another listener claims the retired socket's port");
-    let retry_failure = source
+    let retry_failure = ingestor
         .resume()
         .await
         .expect_err("rebinding must report a transient error while the port is busy");
     assert!(retry_failure.contains::<SyslogListenerError>());
-    assert!(source.needs_resume());
+    assert!(ingestor.needs_resume());
 
     client
         .write_all(b"6 second")
         .await
         .expect("the established connection remains writable");
     client.shutdown().await.expect("the client closes cleanly");
-    let Some(SyslogListener::Stream(listener)) = source.listener.as_mut() else {
-        panic!("the source retains its stream state");
+    let Some(SyslogListener::Stream(listener)) = ingestor.listener.as_mut() else {
+        panic!("the ingestor retains its stream state");
     };
     let frame = nervix_primitives::time::timeout(Duration::from_secs(1), listener.frame_rx.recv())
         .await
@@ -719,9 +720,9 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         .expect("the connection keeps its intake channel");
     assert_eq!(frame.payload, b"second");
     drop(blocker);
-    source.resume().await.expect("the listener rebinds");
-    assert!(!source.needs_resume());
-    source.close().await.expect("the source closes");
+    ingestor.resume().await.expect("the listener rebinds");
+    assert!(!ingestor.needs_resume());
+    ingestor.close().await.expect("the ingestor closes");
 }
 
 #[test]
@@ -797,14 +798,14 @@ fn shuttle_a_decoded_frame_racing_suspension_is_handed_off_once() {
             let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
             tx.send(ReceivedSyslogFrame {
                 payload: b"first".to_vec(),
-                peer_addr,
+                peer: SyslogPeer::Tcp(peer_addr),
             })
             .await
             .expect("the intake queue is open");
             let (pause_tx, pause_rx) = watch::channel(false);
             let mut connection = Box::pin(read_stream_connection(
                 ScriptedStream::new(&[b"6 second"]),
-                peer_addr,
+                SyslogPeer::Tcp(peer_addr),
                 nonzero!(128usize),
                 None,
                 None,
@@ -824,20 +825,23 @@ fn shuttle_a_decoded_frame_racing_suspension_is_handed_off_once() {
                 nervix_primitives::task::yield_now().await;
                 pauser_tx.send_replace(false);
             });
-            assert_eq!(
-                rx.recv()
-                    .await
-                    .expect("the queued frame is retained")
-                    .payload,
-                b"first"
-            );
-            assert_eq!(
-                rx.recv()
-                    .await
-                    .expect("the pending frame is retained")
-                    .payload,
-                b"second"
-            );
+            let first = rx.recv().await.assured("the queued frame is retained");
+            let second = rx.recv().await.assured("the pending frame is retained");
+            assert_eq!(first.payload, b"first");
+            assert_eq!(second.payload, b"second");
+            for frame in [first, second] {
+                use nervix_connector::{
+                    RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
+                };
+                assert_eq!(
+                    RetainedIngestMetadata::capture(&frame.peer).values(),
+                    [
+                        Value::String(peer_addr.to_string()),
+                        Value::String("tcp".to_string()),
+                        Value::Absent,
+                    ]
+                );
+            }
             reader
                 .await
                 .expect("the connection task finishes")
@@ -892,7 +896,7 @@ impl IdleConnection {
         let (paused, paused_rx) = watch::channel(false);
         let reader = nervix_primitives::task::spawn(read_stream_connection(
             server,
-            SocketAddr::from(([127, 0, 0, 1], 6514)),
+            SyslogPeer::Tcp(SocketAddr::from(([127, 0, 0, 1], 6514))),
             nonzero!(128usize),
             None,
             Some(idle_deadline()),
@@ -982,7 +986,7 @@ async fn a_connection_without_an_idle_deadline_waits_for_its_sender() {
     let (_paused, paused_rx) = watch::channel(false);
     let reader = nervix_primitives::task::spawn(read_stream_connection(
         server,
-        SocketAddr::from(([127, 0, 0, 1], 6514)),
+        SyslogPeer::Tcp(SocketAddr::from(([127, 0, 0, 1], 6514))),
         nonzero!(128usize),
         None,
         None,
@@ -1005,7 +1009,7 @@ async fn a_connection_without_an_idle_deadline_waits_for_its_sender() {
 
 /// A TLS acceptor for a self-signed `localhost` identity.
 fn tls_acceptor() -> TlsAcceptor {
-    nervix_connector::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .assured("a self-signed identity for a fixed name can be generated");
     let key = rustls_pki_types::PrivateKeyDer::Pkcs8(rustls_pki_types::PrivatePkcs8KeyDer::from(
@@ -1123,28 +1127,31 @@ async fn an_oversized_datagram_is_dropped_and_the_next_one_received() {
     };
     assert_eq!(message.payload(), b"<13>1 - - - - - -");
     assert_eq!(
-        message.peer_addr,
+        message.peer.address(),
         sender.local_addr().assured("the sender is bound")
     );
 }
 
-/// A listener message hands over the one metadata value SYSLOG LISTENER declares, its peer address
-/// as STRING, and names that peer as its position.
+/// A listener message hands over its complete declared metadata row and names its peer position.
 #[test]
-fn a_message_hands_over_its_peer_as_declared_metadata_and_names_it_as_its_position() {
+fn a_message_hands_over_every_declared_field_and_names_its_peer_position() {
     use nervix_connector::{
         IngestTransportPosition, RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
     };
     use nervix_models::{IngestorEntityKind, SyslogIngestorEntity};
 
     let peer = std::net::SocketAddr::from(([192, 0, 2, 7], 5514));
-    let message = SyslogListenerIngestorMessage::new(b"<13>event".to_vec(), peer);
+    let message = SyslogListenerIngestorMessage::new(b"<13>event".to_vec(), SyslogPeer::Udp(peer));
     let metadata = message.metadata();
 
     let retained = RetainedIngestMetadata::capture(metadata.fields);
     assert_eq!(
         retained.values(),
-        [Value::String("192.0.2.7:5514".to_string())]
+        [
+            Value::String("192.0.2.7:5514".to_string()),
+            Value::String("udp".to_string()),
+            Value::Absent
+        ]
     );
     let declared = IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener)
         .capabilities()
@@ -1155,7 +1162,12 @@ fn a_message_hands_over_its_peer_as_declared_metadata_and_names_it_as_its_positi
         .map(|field| Some(field.ty()))
         .collect::<Vec<_>>();
     let handed_types = retained.values().iter().map(Value::ty).collect::<Vec<_>>();
-    assert_eq!(handed_types, declared_types);
+    assert_eq!(handed_types.len(), declared_types.len());
+    for (handed, declared) in handed_types.into_iter().zip(declared_types) {
+        if let Some(ty) = handed {
+            assert_eq!(Some(ty), declared);
+        }
+    }
     assert_eq!(
         metadata.position,
         Some(IngestTransportPosition::Syslog { peer })

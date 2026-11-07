@@ -914,6 +914,156 @@ Feature: Plexus transactions
       status: stopped
       """
 
+  @command_completion
+  Scenario Outline: A resumed commit that reaches the leader after its transaction finished reports the commit
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "owner" is connected to node "{{leader}}"
+    And client "observer" is connected to node "{{leader}}"
+    When client "owner" executes these Plexus commands
+      """
+      BEGIN;
+      START;
+      """
+    Then client "owner" transaction id is saved as placeholder "start_transaction_id"
+    Given transaction commit on node "{{leader}}" pauses after 1 statement
+    When client "owner" begins executing these Plexus commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "{{leader}}" after 1 statement is reached
+    And transaction "{{start_transaction_id}}" eventually has state "COMMITTING"
+    Then the background Plexus execution is discarded
+    When client "owner" closes its session cleanly
+    Given client "resumed" is connected to node "{{leader}}"
+    When client "resumed" attaches to transaction "{{start_transaction_id}}"
+    Given transaction tombstone cleanup for domain "{{domain}}" pauses on every node
+    When the transaction commit pause on node "{{leader}}" after 1 statement is released
+    Then transaction "{{start_transaction_id}}" eventually has state "COMMITTED"
+    And transaction tombstone cleanup for domain "{{domain}}" is paused on node "{{leader}}"
+    When transaction tombstone cleanup for domain "{{domain}}" is released on every node
+    And client "resumed" executes these Plexus commands
+      """
+      COMMIT;
+      """
+    Then client "resumed" transaction state is "COMMITTED"
+    When client "observer" executes these Plexus commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: running
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @command_completion
+  Scenario Outline: A session that re-attaches a transaction which finished meanwhile begins a new one
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "owner" is connected to node "{{leader}}"
+    When client "owner" executes these Plexus commands
+      """
+      BEGIN;
+      START;
+      """
+    Then client "owner" transaction id is saved as placeholder "start_transaction_id"
+    Given transaction commit on node "{{leader}}" pauses after 1 statement
+    When client "owner" begins executing these Plexus commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "{{leader}}" after 1 statement is reached
+    And transaction "{{start_transaction_id}}" eventually has state "COMMITTING"
+    Then the background Plexus execution is discarded
+    When client "owner" closes its session cleanly
+    Given client "resumed" is connected to node "{{leader}}"
+    When client "resumed" attaches to transaction "{{start_transaction_id}}"
+    And the transaction commit pause on node "{{leader}}" after 1 statement is released
+    Then transaction "{{start_transaction_id}}" eventually has state "COMMITTED"
+    Given the leader node forgets its transaction session bindings
+    When client "resumed" executes these Plexus commands
+      """
+      BEGIN;
+      """
+    Then client "resumed" transaction state is "OPEN"
+    When client "resumed" executes these Plexus commands
+      """
+      REVERT;
+      """
+    Then client "resumed" transaction state is "REVERTED"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_reclaimed_binding
+  Scenario Outline: A session begins another transaction after the one it held loses its tombstone
+    Given the transaction tombstone retention is configured as "2s"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "owner" is connected to node "{{leader}}"
+    When client "owner" executes these Plexus commands
+      """
+      BEGIN;
+      START;
+      """
+    Then client "owner" transaction id is saved as placeholder "finished_transaction"
+    Given transaction commit on node "{{leader}}" pauses after 1 statement
+    When client "owner" begins executing these Plexus commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "{{leader}}" after 1 statement is reached
+    And transaction "{{finished_transaction}}" eventually has state "COMMITTING"
+    Then the background Plexus execution is discarded
+    When client "owner" closes its session cleanly
+    Given client "resumed" is connected to node "{{leader}}"
+    When client "resumed" attaches to transaction "{{finished_transaction}}"
+    And the transaction commit pause on node "{{leader}}" after 1 statement is released
+    Then transaction "{{finished_transaction}}" eventually has state "COMMITTED"
+    And transaction "{{finished_transaction}}" is eventually removed
+    When client "resumed" attempts to commit its transaction
+    Then the last command error contains
+      """
+      transaction '{{finished_transaction}}' is unknown
+      """
+    When client "resumed" executes these Plexus commands
+      """
+      BEGIN;
+      """
+    Then client "resumed" transaction state is "OPEN"
+    When client "resumed" executes these Plexus commands
+      """
+      REVERT;
+      """
+    Then client "resumed" transaction state is "REVERTED"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @transaction_failed_resume
   Scenario: A failing resumed commit records the failing step and preserves its prefix
     Given a 3 node nervix cluster is started
@@ -1734,8 +1884,8 @@ Feature: Plexus transactions
       CREATE WIRE JSON SCHEMA transaction_event_wire MODE STRICT (
         value string
       );
-      CREATE CODEC transaction_event_codec
-        FROM WIRE JSON SCHEMA transaction_event_wire
+      CREATE WIRE JSON CODEC transaction_event_codec
+        FROM WIRE SCHEMA transaction_event_wire
         TO SCHEMA transaction_event;
       """
     When this Plexus command request is executed on the leader node
@@ -1746,8 +1896,8 @@ Feature: Plexus transactions
       ALTER SCHEMA transaction_event
         ALTER FIELD value SET TYPE F64;
       DROP CODEC transaction_event_codec;
-      CREATE CODEC transaction_event_codec
-        FROM WIRE JSON SCHEMA transaction_event_wire
+      CREATE WIRE JSON CODEC transaction_event_codec
+        FROM WIRE SCHEMA transaction_event_wire
         TO SCHEMA transaction_event;
       COMMIT
       """
@@ -1790,13 +1940,13 @@ Feature: Plexus transactions
         value string
       );
       CREATE WIRE CBOR SCHEMA transaction_event_wire MODE STRICT (
-        value string
+        value text
       );
-      CREATE CODEC transaction_json_codec
-        FROM WIRE JSON SCHEMA transaction_event_wire
+      CREATE WIRE JSON CODEC transaction_json_codec
+        FROM WIRE SCHEMA transaction_event_wire
         TO SCHEMA transaction_event_wire;
-      CREATE CODEC transaction_cbor_codec
-        FROM WIRE CBOR SCHEMA transaction_event_wire
+      CREATE WIRE CBOR CODEC transaction_cbor_codec
+        FROM WIRE SCHEMA transaction_event_wire
         TO SCHEMA transaction_event_wire;
       """
     When these Plexus commands are executed on the leader node
@@ -1827,7 +1977,7 @@ Feature: Plexus transactions
     Then the last command output contains
       """
       CREATE WIRE CBOR SCHEMA transaction_event_wire MODE STRICT (
-        value STRING
+        value TEXT
       );
       """
 
@@ -1877,3 +2027,53 @@ Feature: Plexus transactions
       | cluster_size |
       | 1            |
       | 3            |
+
+  @client_wire_held_recovery @command_reference_recovery
+  Scenario: A held transaction reaches its semantic preflight after admission loses leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA atomic_event (value STRING);
+      """
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      ALTER SCHEMA atomic_event ADD FIELD note STRING OPTIONAL;
+      CREATE SCHEMA must_not_exist (value STRING);
+      """
+    Then the current leader node is saved as placeholder "preflight_leader"
+    And a node other than placeholder "preflight_leader" is saved as placeholder "preflight_successor"
+    Given leadership moves from node "{{preflight_leader}}" to node "{{preflight_successor}}" before its next admission proposal
+    When these Plexus commands fail on the active session
+      """
+      ALTER SCHEMA atomic_event DROP FIELD missing;
+      """
+    Then the last command error contains
+      """
+      field `missing` does not exist
+      """
+    And the leadership move before the admission proposal completed
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA atomic_event;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA atomic_event (
+        value STRING
+      );
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA must_not_exist;
+      """
+    Then the last command error contains
+      """
+      schema 'must_not_exist' does not exist
+      """
+    When these Plexus commands are executed on the active session
+      """
+      REVERT;
+      """

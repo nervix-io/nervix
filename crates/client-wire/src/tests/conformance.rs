@@ -25,14 +25,15 @@ use nervix_models::{
     ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     CommandExecutionReference, DomainClockObservation, DomainClockObservedState,
     DomainClockTickObservation, ModelKind, ModelName, NodeRef, ParseAsType, PlacementPolicy,
-    RequestedResourceVersion, RestoreArchive, RestoreMode, RestoreReport, RestoreStep,
-    RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaField, Timestamp,
+    RequestedResourceVersion, ResourceUploadIdentity, RestoreArchive, RestoreMode, RestoreReport,
+    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaField,
+    Timestamp,
 };
 
 use super::{
     fixtures::{limits, name, non_zero, request},
     samples::{
-        client_messages, command_outcome, domain_clock_observations, leader, producer,
+        client_messages, command_outcome, diagnostics, domain_clock_observations, leader, producer,
         producer_description, producer_fields, row_schema, rows_frame, subscription,
     },
 };
@@ -41,20 +42,23 @@ use crate::{
     BackupDownloadMessage, BackupDownloadRequest, BackupDownloadRequestFrame, CellView, CellsView,
     Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue, ClientFrame,
     ClientMessage, ClientRequest, CloseEmitterOutcome, CloseIngestorDisposition,
-    CloseIngestorOutcome, CommandDisposition, CommandOutcome, DomainClockAttachDisposition,
-    DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
-    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
-    DomainPaceChoice, EmitterBatchReceived, EmitterCloseDisposition, EmitterOpened,
-    EmitterSettlement, LeaderRedirect, NodeEndpoints, OpenEmitterDisposition, OpenEmitterOutcome,
-    OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged, ProducerEnded,
-    ProducerOpened, ReadEmitterBatchOutcome, ReadEmitterDisposition, Reply, ReplyBody,
-    ReplyDelivery, RequestRejected, RequestRejection, RestoreDisposition, RestoreFrame,
-    RestoreMessage, RestoreReply, RestoreReplyFrame, RestoreStart, RestoreUploadFailure,
-    ServerEvent, ServerFrame, ServerMessage, SettleEmitterBatchOutcome, SubmissionOutcome,
-    SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded,
-    SubscriptionOpened, SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind,
-    SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame, producer::wire_refusal,
-    restore::RestoreChunk, wire,
+    CloseIngestorOutcome, CommandDisposition, CommandOutcome, Diagnostic,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachRefusal,
+    DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked, DomainPaceChoice,
+    EmitterBatchReceived, EmitterCloseDisposition, EmitterOpened, EmitterSettlement,
+    LeaderRedirect, NodeEndpoints, NoticeKind, NoticeLevel, OpenEmitterDisposition,
+    OpenEmitterOutcome, OpenIngestorDisposition, OpenIngestorOutcome, OutcomeOrigin,
+    ProducerAdmissionChanged, ProducerEnded, ProducerOpened, ReadEmitterBatchOutcome,
+    ReadEmitterDisposition, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
+    RestoreDisposition, RestoreFrame, RestoreMessage, RestoreReply, RestoreReplyFrame,
+    RestoreStart, RestoreUploadFailure, RowSchema, ServerEvent, ServerFrame, ServerMessage,
+    ServerNotice, SettleEmitterBatchOutcome, SubmissionOutcome, SubscribeDisposition,
+    SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened,
+    SubscriptionRefusal, SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind,
+    SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadChunk, UploadDisposition, UploadFailure,
+    UploadFrame, UploadMessage, UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
+    producer::wire_refusal, restore::RestoreChunk, wire,
 };
 
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
@@ -169,6 +173,16 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     }
     .encode(&limits())
     .assured("a corpus producer frame fits the default limits");
+    let notice = |level: NoticeLevel, kind: NoticeKind, message: &str| {
+        ServerNotice {
+            level,
+            kind,
+            message: message.to_string(),
+        }
+        .encode(&limits())
+        .assured("a corpus notice fits the default limits")
+        .into_bytes()
+    };
     let download = |frame: crate::EncodedFrame<BackupDownloadFrame>| frame.into_bytes();
     let backup = CommandOutcome {
         backup: Some(Box::new(backup_archive())),
@@ -192,6 +206,21 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     }
     .encode(&limits())
     .assured("a corpus tick frame fits the default limits");
+    let upload_identity = || {
+        ResourceUploadIdentity::parse("corpus-upload")
+            .assured("the corpus upload identity is valid")
+    };
+    let upload_reply = |request_id, disposition, message: &str| {
+        UploadReply {
+            request_id,
+            disposition,
+            message: message.to_string(),
+            diagnostics: diagnostics(),
+        }
+        .encode(&limits())
+        .assured("a corpus upload reply fits the default limits")
+        .into_bytes()
+    };
     vec![
         (
             "backup_download_chunk.nxbd",
@@ -280,6 +309,7 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
         ("client_settle_emitter_batch.nxcm", client(23)),
         ("client_submit_batch.nxcm", client(19)),
         ("client_subscribe.nxcm", client(11)),
+        ("client_subscribe_restoring.nxcm", client(25)),
         ("client_suggest.nxcm", client(3)),
         (
             "restore_chunk.nxrm",
@@ -453,10 +483,10 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
-            "server_domain_clock_attach_failed.nxsm",
+            "server_domain_clock_attach_refused.nxsm",
             clock_attach(
                 12,
-                DomainClockAttachDisposition::Failed,
+                DomainClockAttachDisposition::Refused(DomainClockAttachRefusal::InTransaction),
                 "session-scoped and client-local statements cannot be queued in a transaction",
             ),
         ),
@@ -606,6 +636,47 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
+            "server_notice_cluster_parameters.nxsm",
+            notice(
+                NoticeLevel::Info,
+                NoticeKind::ClusterParameters,
+                "cluster parameters committed at revision 3",
+            ),
+        ),
+        (
+            "server_notice_control_plane.nxsm",
+            notice(
+                NoticeLevel::Error,
+                NoticeKind::ControlPlane,
+                "failed to apply domain clock progress for 'tenant'",
+            ),
+        ),
+        (
+            "server_notice_leadership.nxsm",
+            notice(
+                NoticeLevel::Info,
+                NoticeKind::Leadership,
+                "raft transition: state=Leader leader=node-1 term=2 last_log_index=7 \
+                 last_applied=7",
+            ),
+        ),
+        (
+            "server_notice_membership.nxsm",
+            notice(
+                NoticeLevel::Info,
+                NoticeKind::Membership,
+                "node 'node-2' restarted (incarnation 1793845627114630656)",
+            ),
+        ),
+        (
+            "server_notice_runtime.nxsm",
+            notice(
+                NoticeLevel::Warning,
+                NoticeKind::Runtime,
+                "ingestor 'orders_in' general error in domain 'tenant': decode rejection",
+            ),
+        ),
+        (
             "server_producer_admission.nxsm",
             producer_admission.into_bytes(),
         ),
@@ -665,6 +736,20 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
+            "server_subscription_refused.nxsm",
+            reply(
+                26,
+                ReplyBody::Subscribe(SubscribeOutcome {
+                    disposition: SubscribeDisposition::Refused(SubscriptionRefusal::RelayNotFound),
+                    message: "stream 'orders' does not exist in domain 'tenant'".to_string(),
+                    diagnostics: vec![Diagnostic {
+                        message: "stream 'orders' not found".to_string(),
+                        span: None,
+                    }],
+                }),
+            ),
+        ),
+        (
             "server_suggest.nxsm",
             reply(
                 8,
@@ -682,6 +767,91 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                     continuation: Some("next-page".to_string()),
                 }),
             ),
+        ),
+        (
+            "upload_chunk.nxum",
+            UploadChunk::encode(&[0x00, 0x7f, 0x80, 0xff], &limits())
+                .assured("a corpus upload chunk fits the default limits")
+                .into_bytes(),
+        ),
+        (
+            "upload_failed_identity_conflict.nxur",
+            upload_reply(
+                Some(request(u64::MAX)),
+                UploadDisposition::Failed {
+                    upload_identity: Some(upload_identity()),
+                    failure: UploadFailure::IdentityConflict,
+                    assigned_version: Some(NonZeroU64::MAX),
+                },
+                "the identity already names another archive",
+            ),
+        ),
+        (
+            "upload_failed_invalid_stream.nxur",
+            upload_reply(
+                None,
+                UploadDisposition::Failed {
+                    upload_identity: None,
+                    failure: UploadFailure::InvalidStream,
+                    assigned_version: None,
+                },
+                "the stream has no start",
+            ),
+        ),
+        (
+            "upload_installed.nxur",
+            upload_reply(
+                Some(request(1)),
+                UploadDisposition::Installed {
+                    upload_identity: upload_identity(),
+                    version: NonZeroU64::MAX,
+                    origin: OutcomeOrigin::Executed,
+                },
+                "installed",
+            ),
+        ),
+        (
+            "upload_recovered.nxur",
+            upload_reply(
+                Some(request(2)),
+                UploadDisposition::Installed {
+                    upload_identity: upload_identity(),
+                    version: non_zero(1),
+                    origin: OutcomeOrigin::Recovered,
+                },
+                "recovered",
+            ),
+        ),
+        (
+            "upload_redirect.nxur",
+            upload_reply(
+                Some(request(3)),
+                UploadDisposition::NotLeader(LeaderRedirect {
+                    leader: Some(leader()),
+                }),
+                "retry on the leader",
+            ),
+        ),
+        (
+            "upload_redirect_unknown.nxur",
+            upload_reply(
+                None,
+                UploadDisposition::NotLeader(LeaderRedirect { leader: None }),
+                "no leader is known",
+            ),
+        ),
+        (
+            "upload_start.nxum",
+            UploadStart {
+                request_id: request(u64::MAX),
+                domain: name("tenant"),
+                resource: name("bundle"),
+                upload_identity: upload_identity(),
+                total_bytes: NonZeroU64::MAX,
+            }
+            .encode(&limits())
+            .assured("a corpus upload start fits the default limits")
+            .into_bytes(),
         ),
     ]
 }
@@ -967,6 +1137,32 @@ fn submission_line(id: u64, outcome: &SubmissionOutcome) -> String {
     }
 }
 
+/// A row schema: a FIELD line per field, then the branch and a KEY line per key field when the
+/// relay is branched.
+fn schema_lines(schema: &RowSchema, lines: &mut Vec<String>) {
+    for field in &schema.fields {
+        lines.push(field_line("FIELD", field));
+    }
+    if let Some(branch) = &schema.branch {
+        lines.push(format!("BRANCH {}", branch.branch().as_str()));
+        for field in branch.fields() {
+            lines.push(field_line("KEY", field));
+        }
+    }
+}
+
+/// One diagnostic and its span, or `none` when it names no position.
+fn diagnostic_line(diagnostic: &Diagnostic) -> String {
+    let span = match diagnostic.span {
+        Some(span) => format!("{}..{}", span.start(), span.end()),
+        None => "none".to_string(),
+    };
+    format!(
+        "DIAGNOSTIC span={span} message={}",
+        text(&diagnostic.message)
+    )
+}
+
 fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
     match message {
         ServerMessage::Reply(reply) => {
@@ -1038,14 +1234,19 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                         opened.relay.as_str(),
                         opened.subscription_type
                     ));
-                    for field in &opened.schema.fields {
-                        lines.push(field_line("FIELD", field));
-                    }
-                    if let Some(branch) = &opened.schema.branch {
-                        lines.push(format!("BRANCH {}", branch.branch().as_str()));
-                        for field in branch.fields() {
-                            lines.push(field_line("KEY", field));
-                        }
+                    schema_lines(&opened.schema, lines);
+                }
+                ReplyBody::Subscribe(SubscribeOutcome {
+                    disposition: SubscribeDisposition::Refused(refusal),
+                    message,
+                    diagnostics,
+                }) => {
+                    lines.push(format!(
+                        "REPLY {id} SUBSCRIBE_REFUSED refusal={refusal:?} message={}",
+                        text(message)
+                    ));
+                    for diagnostic in diagnostics {
+                        lines.push(diagnostic_line(diagnostic));
                     }
                 }
                 ReplyBody::DomainClockAttach(outcome) => {
@@ -1073,8 +1274,9 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                                 domain.as_str()
                             ));
                         }
-                        DomainClockAttachDisposition::Failed => lines.push(format!(
-                            "REPLY {id} DOMAIN_CLOCK_ATTACH failed message={message}"
+                        DomainClockAttachDisposition::Refused(refusal) => lines.push(format!(
+                            "REPLY {id} DOMAIN_CLOCK_ATTACH refused refusal={refusal:?} \
+                             message={message}"
                         )),
                     }
                 }
@@ -1246,6 +1448,14 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                 schema_name(wire::ProducerAdmission::from(changed.admission).variant_name())
             ));
         }
+        ServerMessage::Event(ServerEvent::Notice(notice)) => {
+            lines.push(format!(
+                "EVENT NOTICE level={} kind={} message={}",
+                schema_name(wire::NoticeLevel::from(notice.level).variant_name()),
+                schema_name(wire::NoticeKind::from(notice.kind).variant_name()),
+                text(&notice.message)
+            ));
+        }
         ServerMessage::Event(ServerEvent::ProducerEnded(ended)) => {
             lines.push(format!(
                 "EVENT PRODUCER_ENDED producer={} reason={} message={}",
@@ -1286,12 +1496,18 @@ fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
                 command.execution_reference.as_str()
             ));
         }
-        ClientRequest::Subscribe(subscribe) => lines.push(format!(
-            "REQUEST {id} SUBSCRIBE domain={} statement={} type={:?}",
-            subscribe.domain.as_str(),
-            text(&subscribe.statement),
-            subscribe.subscription_type
-        )),
+        ClientRequest::Subscribe(subscribe) => {
+            lines.push(format!(
+                "REQUEST {id} SUBSCRIBE domain={} statement={} type={:?}",
+                subscribe.domain.as_str(),
+                text(&subscribe.statement),
+                subscribe.subscription_type
+            ));
+            if let Some(schema) = &subscribe.expected_schema {
+                lines.push("EXPECTED_SCHEMA".to_string());
+                schema_lines(schema, lines);
+            }
+        }
         ClientRequest::Suggest(suggest) => lines.push(format!(
             "REQUEST {id} SUGGEST input={} cursor={} domain={} page_size={} continuation={}",
             text(suggest.input()),
@@ -1398,14 +1614,7 @@ fn render_command(head: &str, outcome: &CommandOutcome, lines: &mut Vec<String>)
         text(&outcome.message)
     ));
     for diagnostic in &outcome.diagnostics {
-        let span = match diagnostic.span {
-            Some(span) => format!("{}..{}", span.start(), span.end()),
-            None => "none".to_string(),
-        };
-        lines.push(format!(
-            "DIAGNOSTIC span={span} message={}",
-            text(&diagnostic.message)
-        ));
+        lines.push(diagnostic_line(diagnostic));
     }
     match &outcome.disposition {
         CommandDisposition::NotLeader(LeaderRedirect {
@@ -1502,6 +1711,82 @@ fn render_restore_report(report: &RestoreReport, lines: &mut Vec<String>) {
     }
 }
 
+fn render_upload(message: &UploadMessage, lines: &mut Vec<String>) {
+    match message {
+        UploadMessage::Start(start) => lines.push(format!(
+            "UPLOAD_START request={} domain={} resource={} identity={} total_bytes={}",
+            start.request_id,
+            start.domain,
+            start.resource,
+            start.upload_identity,
+            start.total_bytes,
+        )),
+        UploadMessage::Chunk(chunk) => {
+            lines.push(format!("UPLOAD_CHUNK bytes={}", hex(chunk.bytes())))
+        }
+    }
+}
+
+fn render_upload_reply(reply: &UploadReply, lines: &mut Vec<String>) {
+    let request = match reply.request_id {
+        Some(request) => request.to_string(),
+        None => "none".to_string(),
+    };
+    let disposition = match &reply.disposition {
+        UploadDisposition::Installed {
+            upload_identity,
+            version,
+            origin,
+        } => format!("INSTALLED identity={upload_identity} version={version} origin={origin:?}"),
+        UploadDisposition::Failed {
+            upload_identity,
+            failure,
+            assigned_version,
+        } => {
+            let identity = match upload_identity {
+                Some(identity) => identity.as_str(),
+                None => "none",
+            };
+            let version = match assigned_version {
+                Some(version) => version.to_string(),
+                None => "none".to_string(),
+            };
+            format!("FAILED identity={identity} failure={failure:?} version={version}")
+        }
+        UploadDisposition::NotLeader(LeaderRedirect {
+            leader: Some(leader),
+        }) => {
+            let uri = |uri: &Option<url::Url>| match uri {
+                Some(uri) => uri.as_str().to_string(),
+                None => "none".to_string(),
+            };
+            format!(
+                "NOT_LEADER leader={} grpc={} console={}",
+                leader.node,
+                uri(&leader.grpc_uri),
+                uri(&leader.web_console_uri)
+            )
+        }
+        UploadDisposition::NotLeader(LeaderRedirect { leader: None }) => {
+            "NOT_LEADER leader=none".to_string()
+        }
+    };
+    lines.push(format!(
+        "UPLOAD_REPLY {request} {disposition} message={}",
+        text(&reply.message)
+    ));
+    for diagnostic in &reply.diagnostics {
+        let span = match diagnostic.span {
+            Some(span) => format!("{}..{}", span.start(), span.end()),
+            None => "none".to_string(),
+        };
+        lines.push(format!(
+            "DIAGNOSTIC span={span} message={}",
+            text(&diagnostic.message)
+        ));
+    }
+}
+
 fn render_restore(message: &RestoreMessage, lines: &mut Vec<String>) {
     match message {
         RestoreMessage::Start(start) => lines.push(format!(
@@ -1588,7 +1873,17 @@ fn report_of(frames: &[(&'static str, Bytes)]) -> String {
     let mut lines = Vec::new();
     for (file, bytes) in frames {
         lines.push(format!("FRAME {file}"));
-        if file.ends_with(".nxbq") {
+        if file.ends_with(".nxum") {
+            let frame = VerifiedFrame::<UploadFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus upload frame verifies");
+            let message = UploadMessage::decode(&frame).assured("a corpus upload frame decodes");
+            render_upload(&message, &mut lines);
+        } else if file.ends_with(".nxur") {
+            let frame = VerifiedFrame::<UploadReplyFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus upload reply verifies");
+            let reply = UploadReply::decode(&frame).assured("a corpus upload reply decodes");
+            render_upload_reply(&reply, &mut lines);
+        } else if file.ends_with(".nxbq") {
             let frame =
                 VerifiedFrame::<BackupDownloadRequestFrame>::verify(bytes.clone(), &limits())
                     .assured("a corpus download request verifies");

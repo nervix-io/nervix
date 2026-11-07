@@ -16,8 +16,8 @@ use ahash::{HashMap, HashMapExt};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
-    CreateEndpoint, DomainName, EndpointType, IngestorInput, IngestorReference, Model, ModelIndex,
-    ModelKind, NodeRef, PrometheusApiRoot, RelayName, WebsocketsClientConfig, parse_duration_text,
+    CreateEndpoint, DomainName, IngestorInput, IngestorReference, Model, ModelIndex, ModelKind,
+    NodeRef, PrometheusApiRoot, RelayName, WebsocketsClientConfig, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::graph::DiGraph;
@@ -61,12 +61,12 @@ use crate::registry::{
             validate_model_message_error_policies,
         },
         processor::{
-            add_correlation_timeout_action_edges, add_processor_output_edges,
-            effective_processor_output_filter_map_schema, ensure_deduplicator_key_compiles,
-            ensure_inferencer_input_mappings, ensure_processor_output_flush_policies,
-            ensure_processor_output_schemas, ensure_wasm_processor_output_schemas,
-            ensure_window_processor_output_schemas, parse_window_bound_duration,
-            processor_input_schemas, validate_correlator,
+            InferencerRegistrySchema as _, add_correlation_timeout_action_edges,
+            add_processor_output_edges, effective_processor_output_filter_map_schema,
+            ensure_deduplicator_key_compiles, ensure_inferencer_input_mappings,
+            ensure_processor_output_flush_policies, ensure_processor_output_schemas,
+            ensure_wasm_processor_output_schemas, ensure_window_processor_output_schemas,
+            parse_window_bound_duration, processor_input_schemas, validate_correlator,
             validate_correlator_input_sides_do_not_overlap, validate_correlator_output,
             validate_filter_where_for_internal_schemas, validate_from_where_for_internal_schemas,
             validate_generator_output, validate_inferencer_output_filter_map,
@@ -141,6 +141,12 @@ impl DomainState {
                     .transpose()?,
             };
             let node = ActiveNode {
+                ingestor_units: match model {
+                    Model::Ingestor(ingestor) => Some(
+                        super::ingestor_units::IngestorUnits::decide(domain, ingestor, models)?,
+                    ),
+                    _ => None,
+                },
                 identifier: key.identifier.clone(),
                 kind: key.kind,
                 config: Arc::new(model.clone()),
@@ -208,6 +214,17 @@ impl DomainState {
                 _ => {}
             }
 
+            if let Model::Inferencer(processor) = model {
+                processor.execution_mode().change_context(
+                    RegistryError::InferencerTensorSchemas {
+                        domain: domain.clone(),
+                        node: identifier.clone(),
+                    },
+                )?;
+                super::validation::inferencer_state::ensure_inferencer_state(
+                    domain, identifier, models, processor,
+                )?;
+            }
             let materialized_state = model_materialized_state_dependencies(model);
             add_materialized_state_dependency_edges(
                 domain,
@@ -242,7 +259,10 @@ impl DomainState {
                     graph.add_edge(branch_schema, source, EdgeKind::RequiredBy);
                     validate_branch_model(domain, identifier, models, branch)?;
                 }
-                Model::WireJsonSchema(schema) | Model::WireCborSchema(schema) => {
+                Model::WireJsonSchema(schema) => {
+                    ensure_wire_schema_has_fields(domain, identifier, schema)?;
+                }
+                Model::WireCborSchema(schema) => {
                     ensure_wire_schema_has_fields(domain, identifier, schema)?;
                 }
                 Model::WireAvroSchema(schema) => {
@@ -282,13 +302,6 @@ impl DomainState {
                             domain: domain.as_str().to_string(),
                             identifier: identifier.as_str().to_string(),
                             reason: "UDF arity must be between 1 and 8".to_string(),
-                        }));
-                    }
-                    if udf.code.len() > 64 * 1024 {
-                        return Err(Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: "UDF code exceeds the 64 KiB limit".to_string(),
                         }));
                     }
                 }
@@ -395,9 +408,6 @@ impl DomainState {
                         identifier,
                         &processor.output_routes,
                     )?;
-                    processor.execution_mode().map_err(|rejection| {
-                        RegistryError::invalid_model(domain, identifier.as_str(), rejection)
-                    })?;
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -444,7 +454,7 @@ impl DomainState {
                         branch_schema,
                         processor.filter_where.as_ref(),
                     )?;
-                    ensure_inferencer_input_mappings(
+                    let generated_sensitive = ensure_inferencer_input_mappings(
                         domain,
                         identifier,
                         models,
@@ -454,6 +464,11 @@ impl DomainState {
                     for output in processor.output_routes.outputs() {
                         let consumer_schema =
                             schema_for_ack_model(domain, identifier, models, &output.relay)?;
+                        let generated_schema = processor.inner_output_schema(
+                            domain,
+                            identifier,
+                            generated_sensitive,
+                        )?;
                         validate_inferencer_output_filter_map(
                             domain,
                             identifier,
@@ -461,7 +476,7 @@ impl DomainState {
                             output,
                             consumer_schema,
                             branch_schema,
-                            processor,
+                            &generated_schema,
                         )?;
                     }
                     add_output_message_error_policy_edges(
@@ -645,6 +660,20 @@ impl DomainState {
                                         &input.source,
                                         client_model,
                                     )?;
+                                    if let (
+                                        nervix_models::IngestorEntity::Http(
+                                            nervix_models::HttpIngestor::Request(polled),
+                                        ),
+                                        Model::ClientHttp(http_client),
+                                    ) = (&input.source, client_model)
+                                    {
+                                        polled.validate_headers(http_client).change_context_lazy(
+                                            || RegistryError::InvalidHttpRequestHeaders {
+                                                domain: domain.clone(),
+                                                ingestor: identifier.clone(),
+                                            },
+                                        )?;
+                                    }
                                     graph.add_edge(client_node, source, EdgeKind::RequiredBy);
                                 }
                                 IngestorReference::Endpoint(endpoint) => {
@@ -662,7 +691,8 @@ impl DomainState {
                                             "expect_kind above resolved this endpoint reference \
                                              against the same model set",
                                         )
-                                        .endpoint_type;
+                                        .kind
+                                        .endpoint_type();
                                     if let Some(required) =
                                         kind.capabilities().reference.endpoint_type()
                                         && found != required
@@ -683,7 +713,7 @@ impl DomainState {
                             }
                         }
                         IngestorInput::Client(client_entity) => {
-                            // A client source's batches carry the schema it names, so that schema
+                            // A client ingestor's batches carry the schema it names, so that schema
                             // is what the ingestor depends on in place of a codec and a client.
                             let schema_node = expect_kind(
                                 domain,
@@ -892,15 +922,7 @@ impl DomainState {
                         ModelKind::Vhost,
                     )?;
                     graph.add_edge(vhost, source, EdgeKind::RequiredBy);
-                    if let Some(signaling_protocol) = endpoint.signaling_protocol.as_ref() {
-                        if endpoint.endpoint_type != EndpointType::Websockets {
-                            return Err(Report::new(RegistryError::InvalidModel {
-                                domain: domain.as_str().to_string(),
-                                identifier: identifier.as_str().to_string(),
-                                reason: "SIGNALING PROTOCOL is only valid for WEBSOCKETS endpoints"
-                                    .to_string(),
-                            }));
-                        }
+                    if let Some(signaling_protocol) = endpoint.kind.signaling_protocol() {
                         let signaling_protocol = expect_kind(
                             domain,
                             identifier,

@@ -26,13 +26,13 @@ CREATE WIRE JSON SCHEMA payment_wire MODE STRICT (
   amount integer
 );
 
-CREATE CODEC payment_codec
-  FROM WIRE JSON SCHEMA payment_wire
+CREATE WIRE JSON CODEC payment_codec
+  FROM WIRE SCHEMA payment_wire
   TO SCHEMA payment_record;
 
 CREATE RELAY payments SCHEMA payment_record UNBRANCHED;
 
-CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
+CREATE HTTP ENDPOINT payment_ingress ON edge PATH '/payments';
 
 CREATE HTTP ENDPOINT INGESTOR payment_source
   FROM payment_ingress MODE NO ACK

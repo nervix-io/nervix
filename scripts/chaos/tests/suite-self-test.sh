@@ -53,6 +53,11 @@ unknown_scenarios="$(jq -r --argjson scenarios "${scenarios}" \
     '[.suites[].entries[] | select((.run[0] | IN($scenarios[])) | not) | .id] | unique | join(", ")' \
     "${chaos_dir}/suites.json")"
 [[ -z "${unknown_scenarios}" ]] || fail "suite entries name no runner scenario: ${unknown_scenarios}"
+for suite in smoke soak; do
+    jq -e --arg suite "${suite}" '[.suites[$suite].entries[] | select(.id == "stateful-partitions-3-owner-crash")]
+        | length == 1 and .[0].run == ["stateful", "--nodes", "3", "--state-partitions", "4", "--fault", "owner-crash"]' \
+        "${chaos_dir}/suites.json" >/dev/null || fail "${suite} omits the bounded partitioned processor owner crash"
+done
 runner_reserve="$(sed -n 's/^teardown_reserve_seconds=\([0-9][0-9]*\)$/\1/p' "${chaos_dir}/run-baseline.sh")"
 suite_reserve="$(sed -n 's/^teardown_reserve_minutes=\([0-9][0-9]*\)$/\1/p' "${chaos_dir}/suite.sh")"
 [[ -n "${runner_reserve}" && -n "${suite_reserve}" && "${runner_reserve}" -eq $((suite_reserve * 60)) ]] \
@@ -62,7 +67,8 @@ suite_reserve="$(sed -n 's/^teardown_reserve_minutes=\([0-9][0-9]*\)$/\1/p' "${c
 # shellcheck source=../verifier-self-check.sh
 source "${chaos_dir}/verifier-self-check.sh"
 preparation_minutes=$(((chaos_verifier_self_check_seconds + 59) / 60))
-for suite in smoke soak; do
+mapfile -t suites < <(jq -r '.suites | keys[]' "${chaos_dir}/suites.json")
+for suite in "${suites[@]}"; do
     "${chaos_dir}/suite.sh" shards "${suite}" >"${tmp_dir}/${suite}-shards.json"
     jq -e --slurpfile suites "${chaos_dir}/suites.json" --arg suite "${suite}" --argjson reserve "${suite_reserve}" \
         --argjson preparation "${preparation_minutes}" '

@@ -47,13 +47,12 @@ Feature: Durable consensus storage
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA slow_commit_event ( seq I64 );
       CREATE WIRE JSON SCHEMA slow_commit_wire MODE STRICT ( seq integer );
-      CREATE CODEC slow_commit_codec FROM WIRE JSON SCHEMA slow_commit_wire TO SCHEMA slow_commit_event;
+      CREATE WIRE JSON CODEC slow_commit_codec FROM WIRE SCHEMA slow_commit_wire TO SCHEMA slow_commit_event;
       CREATE RELAY slow_commit_events SCHEMA slow_commit_event UNBRANCHED;
       CREATE KAFKA CLIENT slow_commit_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR slow_commit_source
+      CREATE KAFKA TOPIC INGESTOR slow_commit_ingestor
         FROM slow_commit_kafka TOPIC 'slow_commits_{{test_id}}'
         OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING slow_commit_codec
@@ -73,13 +72,13 @@ Feature: Durable consensus storage
       """
       START;
       """
-    Then within "60s" DESCRIBE INGESTOR "slow_commit_source" on the leader node contains
+    Then within "60s" DESCRIBE INGESTOR "slow_commit_ingestor" on the leader node contains
       """
       ready: true
       """
     # A control call refused for Commands memory stays the source's transient error until its next
     # accepted batch, so this holds only if every control call of the start found room.
-    And within "10s" DESCRIBE INGESTOR "slow_commit_source" on the leader node contains
+    And within "10s" DESCRIBE INGESTOR "slow_commit_ingestor" on the leader node contains
       """
       transient error: -
       """

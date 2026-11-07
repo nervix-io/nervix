@@ -19,6 +19,18 @@ Domain creation is never transaction content. A transaction is bound to one alre
 domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is rejected. See
 [Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions).
 
+## Duration Literals
+
+A duration literal can contain several number-and-unit spans, such as `13m 49s` or
+`1h 2m 3s 4ms 5us 6ns`. Fractional spans such as `1.5s` are supported too. The spans add
+together without losing nanosecond precision. Canonical Plexus may render a duration using
+several spans, and that text is accepted wherever a duration literal is expected. The following
+clause remains separate: for example, `PERIOD 1m 30s SKEW 250ms` names two durations.
+
+Each consumer still applies its own bounds. Cluster parameters use the limits in
+[Node Settings](node-settings.md#committed-parameter-changes); paced domain periods and skews
+use the limits below.
+
 ## Paced Domains
 
 Paced domains maintain a domain clock.
@@ -114,17 +126,17 @@ Domain lifecycle commands apply to the active domain:
 
 Important runtime consequences:
 
-- `START;` resumes from persisted domain-owned runtime state when a source supports it
-- `START AT NOW` reinitializes paced time and domain-owned source offsets from current wall clock
+- `START;` resumes from persisted domain-owned runtime state when an ingestor supports it
+- `START AT NOW` reinitializes paced time and domain-owned ingestor offsets from current wall clock
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
 
 Successful lifecycle commands are completion boundaries. `START` returns after every current live
-node has prepared the same revision and every configured listener and assigned source has completed
+node has prepared the same revision and every configured listener and assigned ingestor has completed
 startup. `STOP` returns after intake and runtime work have stopped remotely, including when it is the
 last running domain, and after every deduplicator and window branch it ended has written the state
 it published last, and the records of every materialized relay and the domain offsets of every
-Kafka source have been written as they stood once the tasks that change them ended, so a backup
+Kafka ingestor have been written as they stood once the tasks that change them ended, so a backup
 taken as soon as `STOP` returns holds that state. A dependent
 connection, observation, or publish can follow immediately through any live node.
 
@@ -170,12 +182,17 @@ subquota. For each domain and each remote node that installed its clock, the aut
 replaceable pending report and permits one delivery attempt at a time. A newer frontier replaces an
 older pending frontier while connection capacity or a response is delayed. The interconnection
 bounds all in-flight progress requests independently of the stream and memory reservations for
-health, cancellation, admission, and terminal outcomes. A joining or reconnected node receives the
-newest retained frontier once it advertises that it installed the required domain clocks.
+health, cancellation, admission, and terminal outcomes. A receiver opens delivery with a
+`domain_clock_attach` management request once its clocks match the committed runtime revision,
+ahead of graph readiness. It names its incarnation, installed revision and addressed authority
+fence, and attaches again after a newer installation or authority reassignment. Accepted
+attachments intersected with effective availability select delivery targets, so a joining or
+reconnected node receives the newest retained frontier through its installed-clock attachment.
 
-Each progress attempt has a two-second physical deadline. A failed attempt retries the newest
-frontier after a 200-millisecond physical backoff, and authority shutdown cancels both the request
-and that backoff. The response only confirms that the authenticated receiver evaluated the report;
+Each attachment or progress attempt has a two-second physical deadline. A failed attempt retries
+the current attachment or newest frontier after a 200-millisecond physical backoff. Replacement
+and terminal shutdown cancel the request and that backoff. The progress response only confirms
+that the authenticated receiver evaluated the report;
 the committed generation and authority fence decide whether it is current. Progress never replaces
 the committed mapping or moves a node's logical clock. Its wire value contains typed logical and
 UTC timestamps and never contains a process-local monotonic instant.
@@ -219,17 +236,17 @@ accelerates or slows them, and a stopped clock cannot silently turn any of them 
 wait. Each source relay and concrete branch owns its collection deadline; each concrete output
 branch owns its route deadline. A deadline starts only when data enters an empty buffer and is
 cleared when that buffer is released by time, size, force flush, shutdown, or error handling. For
-`COMMIT EACH` that buffer is the Iceberg emitter's staged files: its deadline starts when a flush
+`COMMIT EACH` that buffer is the Iceberg emitter's staged rows: its deadline starts when a flush
 stages rows while none are staged, not at the domain time those rows' batch was accepted at, and a
 retry or drain commits them without reading the clock.
 
 `FLUSH IMMEDIATE` instead uses a physical 100 µs minimum on the process monotonic clock, regardless
-of domain rate. The ingestor source-group bound of 1,024 messages and 5 ms idle close are also
+of domain rate. The ingest-group bound of 1,024 messages and 5 ms idle close are also
 physical and run before route-local flushing. Connector retry and backoff timers remain separate
 physical controls; none of these operational waits is projected through the domain clock.
 
 An emitter's publish cadence and its publish attempts are separate state. Retry backoff, the
-acknowledgement keepalive that holds an upstream `MODE ACK` source open while an emitter is
+acknowledgement keepalive that holds an upstream `MODE ACK` ingestor open while an emitter is
 unavailable, the emitter acknowledgement timeout, the stop and drain deadlines, and an HTTP
 `Retry-After` a server returns are all physical: a paced domain never shortens or lengthens the
 real wait an external system asked for. A failed attempt keeps the emitter's pending batches, their
@@ -319,7 +336,7 @@ For an HTTP emitter, this means a pending request must finish at the origin sele
 admitted before a new method, path, body mode, or client takes effect. A failed drain keeps that
 emitter definition active. An operator facing a persistently unavailable origin may restore it,
 or `STOP`, change the configuration while stopped, and `START`. Stopping leaves no prepared HTTP
-request or retry state to carry over; an acknowledged source may redeliver unresolved attached
+request or retry state to carry over; an acknowledged ingestor may redeliver unresolved attached
 work, including work the destination applied before its successful response was lost.
 
 Pause is not a restart: domain clock state, start version, broker offsets, branch identity, and
@@ -331,7 +348,7 @@ eligible handoff residue are preserved across the quiesce cycle.
 mapping after installing all compatible runtime state. That mapping projects the downtime, so
 `TIMESTAMP AT` admission uses the restored clock's reached windows. Unpaced domains resume without
 a mapping. A default restore stays stopped. A later normal `START` advances the generation and
-clears materialized relay rows while preserving compatible WASM state, source offsets, branch
+clears materialized relay rows while preserving compatible WASM state, ingestor offsets, branch
 lifecycle, deduplicator keys and windows. To start from the archived frontier with a new mapping, use a default restore and
 explicit `START AT '<frontier>' TIME RATE <rate>`. `DESCRIBE DOMAIN` exposes the generation, start
 point and mapping; `LIST DOMAINS` exposes pace, status and generation. See
@@ -348,8 +365,9 @@ Timestamp sources:
   the newest reached tick center, so a `SKEW` smaller than `PERIOD` rejects the records delivered
   between two windows, and a `SKEW` of at least `PERIOD` admits every delivery.
 - `TIMESTAMP AT <field>` preserves the decoded `DATETIME` field as the event time.
-- `TIMESTAMP AT metadata.<field>` preserves a `DATETIME` metadata field the source's entity
-  declares, such as an HTTP poll's scheduled `metadata.polled_at`, as the event time. It is admitted
+- `TIMESTAMP AT metadata.<field>` preserves a `DATETIME` metadata field the ingestor's entity
+  declares, such as an HTTP poll's scheduled `metadata.polled_at` or a Prometheus sample's
+  `metadata.evaluated_at`, as the event time. It is admitted
   exactly as a payload field is, and a message that carries no value for the field is rejected as a
   null payload timestamp is.
 - Connector timestamps selected when the clause is omitted in an unpaced domain, and broker

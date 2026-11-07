@@ -13,18 +13,18 @@ Feature: Delivery latency metrics
       CREATE SCHEMA reading ( tenant STRING, sequence I64, occurred_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
-      CREATE CODEC reading_batch_codec FROM JSON TO SCHEMA reading
+      CREATE JAQ JSON CODEC reading_batch_codec TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sequence integer, occurred_at string );
-      CREATE CODEC reading_wire_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading
+      CREATE WIRE JSON CODEC reading_wire_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY raw_readings SCHEMA reading BRANCHED BY tenants;
       CREATE RELAY admitted_readings SCHEMA reading BRANCHED BY tenants;
       CREATE RELAY reingested_readings SCHEMA reading BRANCHED BY tenants;
       CREATE RELAY emitted_readings SCHEMA reading BRANCHED BY tenants;
       CREATE VHOST edge delivery-latency-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TIMESTAMP AT occurred_at
         TO raw_readings INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant

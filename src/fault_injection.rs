@@ -46,18 +46,26 @@ use nervix_recovery::NoReceiver as _;
 
 use crate::registry::SchedulerMode;
 
+mod application_progress;
 mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod command_pause_point;
+mod command_reconciliation;
+mod command_reply;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
+mod emitter_mode;
 mod entity_drain;
 #[cfg(test)]
 mod entity_drain_tests;
 mod execution;
+mod explicit_commit;
 mod handoff_gate_link;
+mod interest_visibility;
+mod listener_accept;
 mod live_view_gap;
 #[cfg(test)]
 mod live_view_gap_tests;
@@ -66,11 +74,16 @@ mod materialized_reads;
 mod model_publication;
 mod pause;
 mod relay_memory;
+mod relay_partition_fanout;
 mod relocation_commit;
 mod resource_discovery;
 mod resource_publication;
 #[cfg(test)]
 mod resource_publication_tests;
+mod resource_upload_reply;
+#[cfg(test)]
+mod resource_upload_reply_tests;
+mod resource_upload_start;
 mod restarted_voter;
 mod restore_publication;
 #[cfg(test)]
@@ -79,21 +92,33 @@ mod restore_staging;
 #[cfg(test)]
 mod restore_staging_tests;
 mod runtime_installation;
+mod session_backpressure;
 mod shutdown_handoff;
 mod standalone_transaction;
+mod subscription_opening;
+mod subscription_response;
 #[cfg(test)]
 mod syslog_tests;
 mod transaction_cleanup;
 mod wasm_reset_publication;
 
+pub(crate) use application_progress::ApplicationProgressQuery;
+pub use application_progress::ApplicationProgressQueryError;
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
+use command_pause_point::CommandPausePoint;
+use command_reply::CommandReplyScript;
+pub use command_reply::ForeignExecutionObservation;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
+use emitter_mode::EmitterFaultMode;
 use entity_drain::ForcedEntityDrainTimeout;
 pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
+use interest_visibility::InterestVisibilityRefusal;
+use listener_accept::ListenerAcceptFailures;
+pub(crate) use listener_accept::ListenerAcceptFaults;
 use live_view_gap::{LiveViewGap, LiveViewGapState};
 use materialized_reads::DelayedMaterializedReads;
 use model_publication::ModelPublicationRefusal;
@@ -102,19 +127,16 @@ use pause::TestPause;
 use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
 use resource_publication::ResourcePublicationRefusal;
+use resource_upload_reply::ResourceUploadReplyLoss;
+use resource_upload_start::ResourceUploadStartRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
 pub use restore_staging::RestoreStagingKind;
 use restore_staging::{RestoreStagingFailure, RestoreStagingTarget};
 use runtime_installation::RuntimeInstallationRefusals;
+use session_backpressure::ArmedSessionBackpressure;
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EmitterFaultMode {
-    Fail,
-    Stall,
-}
 
 /// A consensus storage failure a scenario armed for a node before that node started.
 ///
@@ -158,6 +180,8 @@ pub struct FaultInjection {
 
 #[derive(Debug)]
 struct FaultInjectionState {
+    /// One bounded command-reply script per scenario domain, absent from ordinary builds.
+    command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_emitter_clients: DashMap<String, (), RandomState>,
@@ -169,6 +193,12 @@ struct FaultInjectionState {
     /// so the public regression verifies that its construction failures actually happened.
     refused_runtime_installations:
         DashMap<ClusterNodeName, RuntimeInstallationRefusals, RandomState>,
+    /// One-shot, node-local refusals of the next subscription interest visibility check a node
+    /// answers, each keeping whether it was delivered so a scenario proves the refusal happened.
+    refused_interest_visibility: DashMap<ClusterNodeName, InterestVisibilityRefusal, RandomState>,
+    /// One-shot, node-local refusals of the next subscription a node is asked to open, each removed
+    /// when its node delivers it.
+    refused_subscription_openings: DashMap<ClusterNodeName, (), RandomState>,
     wasm_reset_publication_authority_losses:
         DashMap<DomainName, WasmResetPublicationAuthorityLoss, RandomState>,
     failed_wasm_reset_publications: DashMap<DomainName, WasmResetPublicationFailure, RandomState>,
@@ -201,10 +231,10 @@ struct FaultInjectionState {
     /// One-shot waits, keyed by a stopping node, that the leader spends before it releases the
     /// cordon that node's own graceful shutdown drain set.
     delayed_shutdown_cordon_releases: DashMap<ClusterNodeName, Duration, RandomState>,
-    /// Waits, keyed by an ingestor, that its source hosts spend between learning that a batch was
-    /// acknowledged through the graph and letting the source confirm the batch's positions on its
+    /// Waits, keyed by an ingestor, that its ingestor hosts spend between learning that a batch was
+    /// acknowledged through the graph and letting the connector confirm the batch's positions on its
     /// transport, as a transport slow to answer an acknowledgement would.
-    delayed_source_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
+    delayed_ingestor_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
     /// Waits, keyed by the node whose state is written, that a snapshot task spends before the last
     /// write it makes as that state stops, as storage slow to take a large checkpoint would: the
     /// snapshot task of each branch of a deduplicator or window processor once the branch stopped,
@@ -224,6 +254,13 @@ struct FaultInjectionState {
     /// met it and whether the node's reconciliation took the refused upload up.
     refused_resource_publications:
         DashMap<ClusterNodeName, watch::Sender<ResourcePublicationRefusal>, RandomState>,
+    /// Losses of the reply to a node's next upload call that installs a version, each keeping
+    /// whether an installing call met it.
+    lost_resource_upload_replies: DashMap<ClusterNodeName, ResourceUploadReplyLoss, RandomState>,
+    /// Refusals of a node's next resource upload start, each keeping whether an upload start met
+    /// it.
+    refused_resource_upload_starts:
+        DashMap<ClusterNodeName, ResourceUploadStartRefusal, RandomState>,
     /// Failures of every staging of one kind of a restored domain's checkpoints until cleared,
     /// each keeping whether a staging met it.
     failed_restore_checkpoint_stagings:
@@ -288,6 +325,13 @@ struct FaultInjectionState {
     relay_memory_owners: DashMap<ClusterNodeName, Executor, RandomState>,
     /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// The owner of one partition of one relay pauses its first buffered batch the same way, while
+    /// the owners of the relay's other partitions fan out as usual.
+    owner_relay_partition_fanout_pauses: DashMap<
+        relay_partition_fanout::OwnerRelayPartitionFanoutPauseKey,
+        Arc<TestPause>,
+        RandomState,
+    >,
     /// The owner waits this long before it fans out each buffered batch of a domain's relays, so
     /// the rows its sources admitted reach their consumers slowly, as on a loaded node.
     owner_relay_fanout_delays: DashMap<String, Duration, RandomState>,
@@ -327,6 +371,11 @@ struct FaultInjectionState {
     /// source consumed the fault before checking its established connections. The armed request
     /// remains available until acknowledged; another request cannot overwrite it before then.
     syslog_listener_faults: watch::Sender<Option<SyslogListenerFault>>,
+    /// The public listeners, by bound address, whose next accept fails, and those whose armed
+    /// failure happened.
+    listener_accept_failures: watch::Sender<ListenerAcceptFailures>,
+    /// One scoped observation, borrowed only when a native session starts.
+    session_backpressure: watch::Sender<Option<ArmedSessionBackpressure>>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
     entity_gate_deadline: RwLock<Option<Duration>>,
@@ -334,6 +383,9 @@ struct FaultInjectionState {
     leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
     wasm_state_reset_coordinators:
         DashMap<ClusterNodeName, mpsc::Sender<WasmStateResetRequest>, RandomState>,
+    /// Each running node's responder to the scenario's application progress queries.
+    application_progress_queries:
+        DashMap<ClusterNodeName, mpsc::Sender<ApplicationProgressQuery>, RandomState>,
 }
 
 pub(crate) struct WasmStateResetRequest {
@@ -426,57 +478,6 @@ enum HandoffEngagementTransportFailure {
     Delivered,
 }
 
-/// The command boundary a test controls without racing an election against a request.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum CommandPausePoint {
-    TransactionCleanup {
-        node: ClusterNodeName,
-        domain: DomainName,
-    },
-    StandaloneTransaction {
-        node: ClusterNodeName,
-        domain: DomainName,
-        boundary: StandaloneTransactionBoundary,
-    },
-    DomainResume {
-        node: ClusterNodeName,
-        domain: DomainName,
-        boundary: DomainResumeBoundary,
-    },
-    Admission(ClusterNodeName),
-    ClientInspectionAdmission(DomainName),
-    RuntimeInstallation(ClusterNodeName),
-    ForcedRecoveryMissingSchedule(ClusterNodeName),
-    RuntimePreparation(ClusterNodeName),
-    ApplicationRevisionResponse(ClusterNodeName),
-    ReferenceLookup(ClusterNodeName),
-    DurableAdmission(ClusterNodeName),
-    Finalization(ClusterNodeName),
-    RelocationPublication(DomainName),
-    ResponseDelivery(ClusterNodeName),
-    ResourceInstallation(ClusterNodeName),
-    ResourceSourceDiscovery(ClusterNodeName),
-    RestoreStep {
-        node_id: ClusterNodeName,
-        step: RestoreStep,
-    },
-    BackupDownload(ClusterNodeName),
-    RestoreStatePublication {
-        domain: DomainName,
-        coordinator: ClusterNodeName,
-    },
-    RestoreBranchStateConversion(DomainName),
-    IngestorRoutePoll(DomainNodeRef),
-    OwnershipHandoffFlush(DomainName),
-    OwnershipHandoffActivation(DomainName),
-    GracefulDrain(ClusterNodeName),
-    TransactionCommit {
-        node_id: ClusterNodeName,
-        domain: String,
-        completed_statements: usize,
-    },
-}
-
 /// How far one WASM guest-state checkpoint has come when a scenario holds it.
 ///
 /// Every window lies after the callback's output was dispatched and before the success
@@ -514,15 +515,20 @@ impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
         let (syslog_listener_faults, _) = watch::channel(None);
+        let (listener_accept_failures, _) = watch::channel(ListenerAcceptFailures::default());
+        let (session_backpressure, _) = watch::channel(None);
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
+                command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
                 unavailable_emitter_clients: DashMap::default(),
                 stalled_emitter_connectors: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 refused_runtime_installations: DashMap::default(),
+                refused_interest_visibility: DashMap::default(),
+                refused_subscription_openings: DashMap::default(),
                 wasm_reset_publication_authority_losses: DashMap::default(),
                 failed_wasm_reset_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
@@ -536,12 +542,14 @@ impl Default for FaultInjection {
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 delayed_shutdown_cordon_releases: DashMap::default(),
-                delayed_source_confirmations: DashMap::default(),
+                delayed_ingestor_confirmations: DashMap::default(),
                 delayed_stopped_state_writes: DashMap::default(),
                 delayed_materialized_dependency_reads: DashMap::default(),
                 materialized_snapshot_fetch_holds: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 refused_resource_publications: DashMap::default(),
+                lost_resource_upload_replies: DashMap::default(),
+                refused_resource_upload_starts: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),
                 failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
@@ -568,6 +576,7 @@ impl Default for FaultInjection {
                 relay_memory_fills: DashMap::default(),
                 relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
+                owner_relay_partition_fanout_pauses: DashMap::default(),
                 owner_relay_fanout_delays: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
@@ -584,12 +593,15 @@ impl Default for FaultInjection {
                 state_replica_installation_failing: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 syslog_listener_faults,
+                listener_accept_failures,
+                session_backpressure,
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),
                 entity_gate_deadline: RwLock::new(None),
                 scheduler_mode: RwLock::new(SchedulerMode::default()),
                 leadership_transfers,
                 wasm_state_reset_coordinators: DashMap::default(),
+                application_progress_queries: DashMap::default(),
             }),
         }
     }
@@ -1111,28 +1123,6 @@ impl FaultInjection {
         keyspace.rotate_memtable_and_wait()
     }
 
-    pub fn fail_emitter(&self, emitter: &str) {
-        self.inner
-            .emitter_faults
-            .insert(emitter.to_ascii_lowercase(), EmitterFaultMode::Fail);
-    }
-
-    pub fn stall_emitter(&self, emitter: &str) {
-        self.inner
-            .emitter_faults
-            .insert(emitter.to_ascii_lowercase(), EmitterFaultMode::Stall);
-    }
-
-    pub fn clear_emitter_fault(&self, emitter: &str) {
-        self.inner
-            .emitter_faults
-            .remove(&emitter.to_ascii_lowercase());
-    }
-
-    pub fn clear_all_emitter_faults(&self) {
-        self.inner.emitter_faults.clear();
-    }
-
     pub fn fail_ingestor(&self, ingestor: &str) {
         self.inner
             .failed_ingestors
@@ -1240,13 +1230,13 @@ impl FaultInjection {
             .insert(stopping_node, delay);
     }
 
-    /// Makes every source host of `ingestor` wait `delay` after a batch was acknowledged through
-    /// the graph before its source confirms the batch's positions on its transport, as a transport
+    /// Makes every ingestor host of `ingestor` wait `delay` after a batch was acknowledged through
+    /// the graph before its connector confirms the batch's positions on its transport, as a transport
     /// slow to answer an acknowledgement would. A host reads the delay as it starts, so a scenario
     /// arms it before the ingestor starts.
-    pub fn delay_source_confirmation(&self, ingestor: DomainNodeRef, delay: Duration) {
+    pub fn delay_ingestor_confirmation(&self, ingestor: DomainNodeRef, delay: Duration) {
         self.inner
-            .delayed_source_confirmations
+            .delayed_ingestor_confirmations
             .insert(ingestor, delay);
     }
 
@@ -1288,42 +1278,6 @@ impl FaultInjection {
             },
             Arc::new(TestPause::default()),
         );
-    }
-
-    /// Holds every revision-query reply from this node until the scenario releases it. Local
-    /// revision publication and gossip continue while the replies retain their sampled values.
-    pub fn pause_application_revision_responses_from(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::ApplicationRevisionResponse(node_id));
-    }
-
-    pub async fn wait_for_application_revision_response_pause(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
-            node_id.clone(),
-        ))
-        .await;
-    }
-
-    pub fn release_application_revision_responses_from(&self, node_id: &ClusterNodeName) {
-        self.release_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
-            node_id.clone(),
-        ));
-    }
-
-    pub(crate) async fn pause_application_revision_response_if_armed(
-        &self,
-        node_id: &ClusterNodeName,
-    ) {
-        let point = CommandPausePoint::ApplicationRevisionResponse(node_id.clone());
-        let Some(pause) = self
-            .inner
-            .command_pauses
-            .get(&point)
-            .map(|pause| pause.value().clone())
-        else {
-            return;
-        };
-        pause.reach();
-        pause.wait_until_released().await;
     }
 
     pub fn fail_health_responses_from(&self, responding_node: ClusterNodeName) {
@@ -1414,6 +1368,23 @@ impl FaultInjection {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }
 
+    /// Holds initial live-policy discovery after the public observation listeners start.
+    pub fn pause_initial_cluster_parameters_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::InitialClusterParameters(node_id));
+    }
+
+    pub async fn wait_for_initial_cluster_parameters_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::InitialClusterParameters(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_initial_cluster_parameters_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::InitialClusterParameters(
+            node_id.clone(),
+        ));
+    }
     pub async fn wait_for_command_admission_pause(&self, node_id: &ClusterNodeName) {
         self.wait_for_command_pause(&CommandPausePoint::Admission(node_id.clone()))
             .await;
@@ -1480,21 +1451,6 @@ impl FaultInjection {
 
     pub fn release_relocation_publication_pause(&self, domain: &DomainName) {
         self.release_command_pause(&CommandPausePoint::RelocationPublication(domain.clone()));
-    }
-
-    /// Holds the next completed command after its result exists but before either public session
-    /// transport can deliver it.
-    pub fn pause_command_response_delivery_on(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::ResponseDelivery(node_id));
-    }
-
-    pub async fn wait_for_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()))
-            .await;
-    }
-
-    pub fn release_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
-        self.release_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()));
     }
 
     pub fn release_all_command_pauses(&self) {
@@ -2068,38 +2024,6 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario selects one retained emitter fault mode",
-            key = "one test emitter",
-            bound = "one keyed read; the guard ends with the synchronous predicate"
-        )
-    )]
-    pub(crate) fn emitter_should_fail(&self, emitter: &EmitterName) -> bool {
-        self.inner
-            .emitter_faults
-            .get(&emitter.as_str().to_ascii_lowercase())
-            .is_some_and(|mode| *mode == EmitterFaultMode::Fail)
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "the scenario selects one retained emitter stall mode",
-            key = "one test emitter",
-            bound = "one keyed read; the guard ends with the synchronous predicate"
-        )
-    )]
-    pub(crate) fn emitter_should_stall(&self, emitter: &EmitterName) -> bool {
-        self.inner
-            .emitter_faults
-            .get(&emitter.as_str().to_ascii_lowercase())
-            .is_some_and(|mode| *mode == EmitterFaultMode::Stall)
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
             reason = "the scenario selects one retained ingestor failure seam",
             key = "one test ingestor",
             bound = "one keyed presence read with no retained guard"
@@ -2250,8 +2174,8 @@ impl FaultInjection {
         Some(delay)
     }
 
-    pub(crate) fn source_confirmation_delay(&self, ingestor: &DomainNodeRef) -> Option<Duration> {
-        let delay = self.inner.delayed_source_confirmations.get(ingestor)?;
+    pub(crate) fn ingestor_confirmation_delay(&self, ingestor: &DomainNodeRef) -> Option<Duration> {
+        let delay = self.inner.delayed_ingestor_confirmations.get(ingestor)?;
         Some(*delay)
     }
 
@@ -2285,6 +2209,14 @@ impl FaultInjection {
             .await;
     }
 
+    pub(crate) async fn pause_initial_cluster_parameters_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::InitialClusterParameters(node_id.clone()))
+            .await;
+    }
+
     pub(crate) async fn pause_runtime_installation_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::RuntimeInstallation(node_id.clone()))
             .await;
@@ -2297,11 +2229,6 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::ReferenceLookup(node_id.clone()))
-            .await;
-    }
-
-    pub(crate) async fn pause_command_response_delivery_if_armed(&self, node_id: &ClusterNodeName) {
-        self.pause_command_if_armed(CommandPausePoint::ResponseDelivery(node_id.clone()))
             .await;
     }
 

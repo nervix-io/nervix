@@ -1,15 +1,69 @@
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain};
 use nonzero_ext::nonzero;
 
 use crate::{
-    AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CreateIngestor, CreateJunction,
-    CreateSchema, CreateWasmProcessor, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy,
-    GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity,
-    KafkaPartitionSchedule, Model, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
-    OwnershipTransition, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SyslogIngestMode,
-    SyslogIngestor, SyslogListenerIngestor, Unit, WasmProcessorLimits,
+    AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, ClusterSchedule,
+    CommandExecutionReference, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
+    DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy, GeneralErrorPolicy,
+    HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity, KafkaPartitionSchedule,
+    Model, OwnershipStateComponent, ParseAsType, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayBranching, ResolvedBranching, ScheduledNode, SchemaField,
+    SchemaFingerprint, SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor, Unit,
+    WasmStateResetReason, WasmStateResetScope,
 };
+
+#[test]
+fn execution_unit_has_bounded_native_and_archived_storage() {
+    assert_eq!(std::mem::size_of::<Unit>(), 8);
+    assert_eq!(std::mem::size_of::<rkyv::Archived<Unit>>(), 8);
+    assert_eq!(std::mem::align_of::<rkyv::Archived<Unit>>(), 4);
+}
+
+#[test]
+fn execution_units_preserve_order_and_round_trip_every_boundary() {
+    let mut units = vec![Unit::SINGLE, Unit::partition(0), Unit::partition(u32::MAX)];
+    for index in [
+        0,
+        1,
+        u64::from(u32::MAX),
+        u64::from(u32::MAX) + 1,
+        Unit::MAX_INSTANCE_INDEX,
+    ] {
+        let unit = Unit::try_instance(index).assured("the selected index is within the unit range");
+        assert_eq!(unit.kind(), crate::UnitKind::Instance(index));
+        units.push(unit);
+    }
+    assert!(units.windows(2).all(|pair| pair[0] < pair[1]));
+    for unit in units {
+        let json = serde_json::to_vec(&unit).assured("a unit has a JSON representation");
+        assert_eq!(
+            serde_json::from_slice::<Unit>(&json).assured("a unit decodes"),
+            unit
+        );
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&unit).assured("a unit archives");
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(
+            rkyv::from_bytes::<Unit, rkyv::rancor::Error>(&bytes).assured("a unit decodes"),
+            unit
+        );
+    }
+}
+
+#[test]
+fn execution_unit_range_contains_every_addressable_vector_position() {
+    let largest_position =
+        u64::try_from(isize::MAX).assured("supported targets have at most 64-bit pointers");
+    assert!(largest_position <= Unit::MAX_INSTANCE_INDEX);
+    assert!(Unit::try_instance(largest_position).is_ok());
+    let outside = Unit::MAX_INSTANCE_INDEX
+        .checked_add(1)
+        .assured("the unit rank reserves kind values");
+    assert!(matches!(Unit::try_instance(outside), Err(cause) if cause.index == outside));
+    let json =
+        serde_json::to_vec(&crate::UnitKind::Instance(outside)).assured("a boundary input encodes");
+    assert!(serde_json::from_slice::<Unit>(&json).is_err());
+}
 
 #[test]
 fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
@@ -18,68 +72,27 @@ fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
         .with_max_len(128)
         .for_each(|bytes: &[u8]| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
-            let owner = named::<ClusterNodeName>("node-a");
-            let config = if arbitrary.entropy().flag() {
-                Model::WasmProcessor(CreateWasmProcessor {
-                    name: named("guest"),
-                    from: ProcessorInputs::single(named("input")),
-                    output_routes: ProcessorOutputs::single(named("output")),
-                    branched_by: BranchSelection::unbranched(),
-                    resource: named("guest_bundle"),
-                    resource_version: u64::from(arbitrary.entropy().byte()).max(1),
-                    file: "processors/guest.wasm".to_string(),
-                    limits: WasmProcessorLimits {
-                        max_fuel: nonzero!(1_000_000u64),
-                        max_memory_bytes: nonzero!(67_108_864u64),
-                    },
-                    global_error_policy: GeneralErrorPolicy::Log,
-                    rejected_state_policy: Default::default(),
-                    mode: AckMode::Attached,
-                    filter_where: None,
-                    materialized_state: Vec::new(),
-                })
-            } else {
-                Model::Schema(CreateSchema {
-                    name: named("orders"),
-                    fields: Vec::new(),
-                })
-            };
-            let mut node = ScheduledNode::new(
-                config,
-                SchemaFingerprint::from_digest([arbitrary.entropy().byte(); 32]),
-            )
-            .placed_on(Some(owner.clone()), vec![owner.clone()]);
-            if matches!(node.config.as_ref(), Model::WasmProcessor(_)) {
-                if arbitrary.entropy().flag() {
-                    node.begin_wasm_state_generation();
-                }
-                if arbitrary.entropy().flag() {
-                    node.single_unit_mut().ownership_transition = Some(OwnershipTransition {
-                        id: "unit-handoff".to_string(),
-                        source: named("node-b"),
-                        destination: owner.clone(),
-                        state_recovery: OwnershipStateRecoveryOutcome::Complete,
-                        resets: Vec::new(),
-                    });
-                }
-            }
-            let base = node.single_unit().clone();
-            let ordinal = u32::from(arbitrary.entropy().byte());
-            for unit in [Unit::Partition(ordinal), Unit::Instance(ordinal)] {
-                if arbitrary.entropy().flag() {
-                    let mut placement = base.clone();
-                    placement.primary_node = Some(named("node-b"));
-                    placement.assigned_nodes = vec![named("node-b")];
-                    if let Some(transition) = placement.ownership_transition.as_mut() {
-                        transition.source = owner.clone();
-                        transition.destination = named("node-b");
-                    }
-                    if arbitrary.entropy().flag()
-                        && let Some(generations) = placement.wasm_state_generations.as_mut()
-                    {
-                        generations.begin_every_branch();
-                    }
-                    node.units.insert(unit, placement);
+            // The generator links the vocabulary library; this unit test is a separate crate
+            // instance. Read the generated current value into this instance before varying it.
+            let generated = arbitrary.scheduled_node();
+            let generated = rkyv::to_bytes::<rkyv::rancor::Error>(&generated)
+                .assured("the generated current node archives");
+            let mut node = rkyv::from_bytes::<ScheduledNode, rkyv::rancor::Error>(&generated)
+                .assured("the generated current node reads in the tested crate instance");
+            assert!(
+                node.units_match_declaration(),
+                "the generator must construct the node's declared current units"
+            );
+            for placement in node.units.values_mut() {
+                let owner = named::<ClusterNodeName>(if arbitrary.entropy().flag() {
+                    "node-a"
+                } else {
+                    "node-b"
+                });
+                placement.primary_node = Some(owner.clone());
+                placement.assigned_nodes = vec![owner.clone()];
+                if let Some(transition) = placement.ownership_transition.as_mut() {
+                    transition.destination = owner;
                 }
             }
             let schedule = DomainSchedule::new(domain("prod"), [node], Vec::new());
@@ -386,7 +399,7 @@ fn a_domain_schedule_names_the_units_a_node_is_the_primary_of_in_schedule_order(
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        vec![("orders", Unit::Single), ("refunds", Unit::Single)]
+        vec![("orders", Unit::SINGLE), ("refunds", Unit::SINGLE)]
     );
     assert!(schedule.primary_units_on(&named("node-c")).is_empty());
 }
@@ -404,4 +417,46 @@ fn every_ownership_component_but_branch_aggregated_metrics_is_archived() {
     ] {
         assert!(component.is_archived(), "{component:?}");
     }
+}
+
+#[test]
+fn a_relay_scheduled_as_partitions_takes_no_guest_state_lifetime_or_reset() {
+    let owner = named::<ClusterNodeName>("node-a");
+    let mut relay = ScheduledNode::new(
+        Model::Relay(CreateRelay {
+            name: named("tenant_events"),
+            schema: named("event"),
+            buffer: nonzero!(1usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(Some(owner.clone()), vec![owner.clone()]);
+    let single = relay
+        .units
+        .shift_remove(&Unit::SINGLE)
+        .expect("the fixture starts with one unit");
+    relay.units.insert(Unit::partition(0), single.clone());
+    relay.units.insert(Unit::partition(1), single);
+    let before = relay.clone();
+
+    // Failover and drain begin a new guest-state lifetime for every node they move, so these run
+    // for each partition of a relay too, which holds no guest state of any unit.
+    relay.begin_wasm_state_generation();
+    relay.begin_wasm_branch_state_generation(BranchKeyFingerprint::new([7; 32]));
+    let request = CommandExecutionReference::parse("reset-tenant-events")
+        .expect("the reset reference must be valid");
+    let published = relay.begin_wasm_state_reset(
+        request.clone(),
+        WasmStateResetScope::Unbranched,
+        WasmStateResetReason::Operator,
+    );
+    let completed = relay.complete_wasm_state_reset(&request);
+
+    assert!(!published);
+    assert!(!completed);
+    assert_eq!(relay, before);
+    assert_eq!(relay.wasm_state_generations(), None);
+    assert_eq!(relay.wasm_state_reset(), None);
 }

@@ -49,12 +49,16 @@
     )
 )]
 
-use std::{future::Future, num::NonZeroUsize, time::Duration};
+use std::{
+    future::Future,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{MQTT_SOURCE_MAXIMUM_PACKET_BYTES, MQTT_SOURCE_READ_AHEAD_HEADROOM};
+use nervix_models::MQTT_SOURCE_READ_AHEAD_HEADROOM;
 use nervix_primitives::{
     sync::{
         OwnedSemaphorePermit, Semaphore, StdArc, TryAcquireError,
@@ -101,7 +105,7 @@ impl ConnectionEvents for EventLoop {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "a source requests the acknowledgement of every publish the host accepted"
+        reason = "an ingestor requests the acknowledgement of every publish the host accepted"
     )
 )]
 pub(super) trait AcknowledgementRequests: Send + Sync + 'static {
@@ -119,15 +123,17 @@ impl AcknowledgementRequests for AsyncClient {
 }
 
 /// What the driver retains after classifying one decoded publish.
-enum IngestorPacket {
+pub(super) enum IngestorPacket {
     Message(Publish),
     Oversized(Option<ManualAck>),
 }
 
 impl IngestorPacket {
-    fn classify(mut publish: Publish, mode: AckMode) -> Self {
+    /// Admits `publish` when its complete packet holds at most `admission` bytes, and otherwise
+    /// keeps only the acknowledgement its quality of service needs under `mode`.
+    pub(super) fn classify(mut publish: Publish, mode: AckMode, admission: NonZeroU32) -> Self {
         let packet_bytes: u64 = publish.size().arch_into();
-        if packet_bytes > MQTT_SOURCE_MAXIMUM_PACKET_BYTES {
+        if packet_bytes > u64::from(admission.get()) {
             let acknowledgement = match mode {
                 AckMode::Automatic => None,
                 AckMode::Manual => acknowledgement(&publish),
@@ -147,7 +153,7 @@ impl IngestorPacket {
     }
 }
 
-/// A queued QoS 0 outcome retains its capacity until the source takes it, including a compact
+/// A queued QoS 0 outcome retains its capacity until the ingestor takes it, including a compact
 /// oversized outcome. The same ordered queue reserves separate capacity for acknowledged packets.
 struct ReadAheadPacket {
     packet: IngestorPacket,
@@ -331,6 +337,8 @@ struct ConnectionDriver<E> {
     acknowledgement: DriverAcknowledgement,
     /// The host resolves this counter once; recording an overflow reaches no metrics registry.
     read_ahead_dropped: prometheus::IntCounter,
+    /// The largest complete publish the client's configuration admits.
+    admission: NonZeroU32,
     /// How many publishes the driver has handed to the read-ahead.
     handed: u64,
     progress: watch::Sender<DriverProgress>,
@@ -355,7 +363,11 @@ impl<E: ConnectionEvents> ConnectionDriver<E> {
                         }
                     };
                     let packet = ReadAheadPacket {
-                        packet: IngestorPacket::classify(publish, self.acknowledgement.ack_mode()),
+                        packet: IngestorPacket::classify(
+                            publish,
+                            self.acknowledgement.ack_mode(),
+                            self.admission,
+                        ),
                         _qos_zero_capacity: qos_zero_capacity,
                     };
                     if let Err(ended) = self.hand_over(packet).await {
@@ -445,12 +457,14 @@ pub(super) struct MqttConnection<R = AsyncClient> {
 
 impl<R: AcknowledgementRequests> MqttConnection<R> {
     /// Starts the driver of a subscribed connection, with the read-ahead and acknowledgement mode
-    /// its plan declares and the keep-alive its broker keeps, if any.
+    /// its plan declares, the keep-alive its broker keeps, if any, and the largest complete
+    /// publish its client admits.
     pub(super) fn start<E: ConnectionEvents>(
         requests: R,
         events: E,
         acknowledgement: IngestorAcknowledgement,
         keep_alive: Option<Duration>,
+        admission: NonZeroU32,
         read_ahead_dropped: prometheus::IntCounter,
     ) -> Self {
         let read_ahead_capacity = acknowledgement.read_ahead();
@@ -464,6 +478,7 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
             read_ahead,
             acknowledgement: acknowledgement.into(),
             read_ahead_dropped,
+            admission,
             handed: 0,
             progress,
         };
@@ -692,7 +707,7 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
             .taken
             .checked_add(1)
             .assured("a connection cannot read 2^64 publishes in the lifetime of a node");
-        // Moving the packet out releases its QoS 0 permit before any following source wait.
+        // Moving the packet out releases its QoS 0 permit before any following ingestor wait.
         Ok(packet.packet)
     }
 }

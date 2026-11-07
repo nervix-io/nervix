@@ -37,15 +37,36 @@ pub(super) fn topic_body<'src>(
     )
 }
 
+/// `SET TOPIC '<name>'` or `SET MODE <mode>`: one part of a `KAFKA TOPIC` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], KafkaTopicEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    let locator = kw(Identifier::Topic)
+        .ignore_then(external_name::<KafkaTopicName>())
+        .map(KafkaTopicEmitterChange::Topic);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(KafkaTopicEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((locator, publishing)))
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
 
     use meticulous::OptionExt as _;
-    use nervix_models::{AckWindow, EmitterEntity, KafkaEmitter, KafkaTopicPublishingMode, Model};
+    use nervix_models::{
+        AckWindow, AlterEmitterOperation, EmitterEntity, EmitterEnvelopeAlteration,
+        EnvelopeClauseKind, EnvelopeClauseValue, KafkaEmitter, KafkaTopicPublishingMode, Model,
+        Statement,
+    };
     use rstest::rstest;
 
-    use crate::conformance_support::{assert_offers_exactly, created_model, refused};
+    use crate::{
+        conformance_support::{assert_offers_exactly, created_model, refused},
+        statement::parse_statement,
+    };
 
     /// Every statement below up to its topic literal.
     const HEAD: &str = "CREATE KAFKA TOPIC EMITTER publishing FROM events TO kafka_main TOPIC";
@@ -151,5 +172,45 @@ mod tests {
                 "topic '{topic}' is outside the Kafka topic rule"
             );
         }
+    }
+
+    #[rstest]
+    #[case("SET TIMESTAMP input.event_at", true)]
+    #[case("DROP TIMESTAMP", false)]
+    fn targeted_timestamp_edits_follow_the_topic_declaration(
+        #[case] operation: &str,
+        #[case] sets_timestamp: bool,
+    ) {
+        let text = format!("ALTER KAFKA TOPIC EMITTER publishing {operation};");
+        let statement = parse_statement(&text).expect("the declared edit parses");
+        let canonical = statement.to_canonical_plexus().expect("the edit renders");
+        assert_eq!(
+            parse_statement(&canonical).expect("the canonical edit reparses"),
+            statement
+        );
+        let Statement::AlterEmitter(alter) = statement else {
+            panic!("the statement alters its Kafka emitter");
+        };
+        let [AlterEmitterOperation::AlterEnvelope { alteration }] = alter.operations.as_slice()
+        else {
+            panic!("the statement holds one targeted envelope edit");
+        };
+        assert!(matches!(
+            alteration.as_ref(),
+            EmitterEnvelopeAlteration::SetClause {
+                clause: EnvelopeClauseValue::Timestamp(_)
+            } | EmitterEnvelopeAlteration::DropClause {
+                clause: EnvelopeClauseKind::Timestamp
+            }
+        ));
+        assert_eq!(
+            matches!(
+                alteration.as_ref(),
+                EmitterEnvelopeAlteration::SetClause {
+                    clause: EnvelopeClauseValue::Timestamp(_)
+                }
+            ),
+            sets_timestamp
+        );
     }
 }

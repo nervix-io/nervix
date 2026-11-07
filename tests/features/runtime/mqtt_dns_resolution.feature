@@ -28,7 +28,7 @@ Feature: MQTT name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_in MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
@@ -47,8 +47,9 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
-      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -99,7 +100,7 @@ Feature: MQTT name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_in MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{mqtt_tls_dns_addr}}',
@@ -121,7 +122,7 @@ Feature: MQTT name resolution
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
-      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -159,7 +160,7 @@ Feature: MQTT name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_in CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
@@ -178,8 +179,9 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
-      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -241,17 +243,16 @@ Feature: MQTT name resolution
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'mqtt_dns_boundary_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'mqtt_dns_boundary_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'mqtt_dns_boundary_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -265,9 +266,10 @@ Feature: MQTT name resolution
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-mqtt-dns-boundary-{{test_id}}'
       };
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+        ATTACHED
         TO mqtt_sink TOPIC 'mqtt_dns_boundary_out_{{test_id}}'
-          MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 300ms
+          QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec
         INHERIT ALL
@@ -316,7 +318,7 @@ Feature: MQTT name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_in CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
@@ -335,8 +337,9 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
-      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE

@@ -155,6 +155,7 @@ def main() -> int:
     physical_capability_owners = {
         runtime_root / "branch_buffering.rs",
         runtime_root / "domain_clock.rs",
+        runtime_root / "emitter_branch_retention.rs",
         runtime_root / "emitter_retry.rs",
         actual_utc_owner,
     }

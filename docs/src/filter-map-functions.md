@@ -65,14 +65,14 @@ in:
 
 | Context | Window aggregates | `read_header`, `read_headers` | `LOOKUP_HASH_MAP` | `now()`, `uuid_v4()`, `uuid_v7()` |
 | --- | --- | --- | --- | --- |
-| Ingestor `FILTER WHERE` and route `INHERIT`, `SET`, and `WHERE` | No | On a header-capable source | Yes | Yes |
+| Ingestor `FILTER WHERE` and route `INHERIT`, `SET`, and `WHERE` | No | On a header-capable ingestor | Yes | Yes |
 | `BRANCHED BY ... SET` on ingestors and reingestors | No | No | Yes | Yes |
 | Processor `FROM ... WHERE` and `FILTER WHERE`, and the routes of junctions, deduplicators, reorderers, reingestors, inferencers, and WASM processors | No | No | Yes | Yes |
 | Window route `SET` | Yes, and only here | No | No | Yes |
 | Window route `WHERE` | No | No | Yes | Yes |
 | Generator routes, correlator routes, and `CORRELATE WHERE` | No | No | No | Yes |
 | `DEDUPLICATE ON`, reorderer `BY`, and inferencer `INPUTS` | No | No | No | Yes |
-| Emitter `FROM ... WHERE`, route `SET`, `WHERE`, and `INVOKE`, HTTP `METHOD` and `PATH`, and SQS `FIFO GROUP` | No | No | Yes | Yes |
+| Emitter `FROM ... WHERE`, route `SET`, `WHERE`, and `INVOKE`, `KEY` and other computed envelope values, HTTP `METHOD` and `PATH`, and SQS `FIFO GROUP` | No | No | Yes | Yes |
 | Emitter `VALUES` and OpenTelemetry `ATTRIBUTES` | No | No | No | Yes |
 | `ON MESSAGE ERROR SEND TO ... SET` | No | For a failure on a header-capable ingestor | No | Yes |
 | Materialized-state `DEFAULT` | No | No | No | No |
@@ -859,12 +859,12 @@ Header names may be dynamic `STRING` expressions, and a name matches exactly, le
 the names the connector recorded. A null name reads as absent. Each ingestor and emitter declares a
 [header model](connector-contract.md#header-models): what a repeated name keeps, the order names
 travel in, and whether names are recorded in lowercase, as HTTP field names are. Header reads are available on
-`HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `HTTP REQUEST`, `KAFKA TOPIC`, `NATS SUBJECT`,
-`PULSAR TOPIC`, `RABBITMQ QUEUE`, and `SQS QUEUE` ingestors, in their `FILTER WHERE` and route
+`HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `HTTP REQUEST`, `KAFKA TOPIC`, `MQTT TOPIC`,
+`NATS SUBJECT`, `NATS STREAM`, `PULSAR TOPIC`, `RABBITMQ QUEUE`, and `SQS QUEUE` ingestors, in their `FILTER WHERE` and route
 construction, and in an error route's construction for a failure on such an ingestor. Header writes
 are available on HTTP, Kafka, NATS, Pulsar, RabbitMQ, and SQS emitters. Anywhere else a statement
 is rejected when it is validated, with a message such as `function 'read_header' is only available
-to ingestors whose connector supports headers`, `MQTT TOPIC ingestors do not support read_header or
+to ingestors whose connector supports headers`, `REDIS PUBSUB ingestors do not support read_header or
 read_headers`, or `MQTT emitters do not support write_header`.
 
 `write_header` arguments must be statically non-null. The name is a `STRING`, and the value has an
@@ -2187,8 +2187,8 @@ CREATE WIRE JSON SCHEMA access_wire MODE STRICT (
   latency_ms integer
 );
 
-CREATE CODEC access_codec
-  FROM WIRE JSON SCHEMA access_wire
+CREATE WIRE JSON CODEC access_codec
+  FROM WIRE SCHEMA access_wire
   TO SCHEMA access_event;
 
 CREATE SCHEMA access_summary (
@@ -2221,10 +2221,9 @@ CREATE RELAY latency_windows SCHEMA latency_window UNBRANCHED;
 
 CREATE VHOST functions_edge access.example.com;
 
-CREATE ENDPOINT access_ingress
+CREATE HTTP ENDPOINT access_ingress
   ON functions_edge
-  PATH '/access'
-  TYPE HTTP;
+  PATH '/access';
 
 CREATE HTTP ENDPOINT INGESTOR access_intake
   FROM access_ingress MODE NO ACK

@@ -19,9 +19,9 @@ retains its qualification results.
 
 ## From Plexus to an active emitter
 
-The language parses `TO HTTP` and its ordered `METHOD`, `PATH`, `MODE ACK RETRY POLICY`, and body
-selection into semantic Models. The registry validates the complete candidate against the same
-domain's `HTTP CLIENT`, codec, exact expression types, available scopes, sensitivity, source
+The language parses the `HTTP REQUEST EMITTER` head and, after `TO <client>`, its ordered `METHOD`,
+`PATH`, `MODE ACK RETRY POLICY`, and body selection into semantic Models. The registry validates
+the complete candidate against the same domain's `HTTP CLIENT`, codec, exact expression types, available scopes, sensitivity, source
 branches, and error route. The decision layer lowers the validated model into a typed execution
 plan. A running data-plane task receives that plan; it does not read a Model or reparse Plexus.
 The server composes the HTTP connector with the emitter host. These conversions and their
@@ -30,11 +30,13 @@ installation boundary are described in [Execution Plans](./execution-plans.md).
 The emitter has one request/response mode, with an explicit retry policy and exactly one body choice:
 
 ```plexus,ignore
-TO HTTP <client>
-  METHOD <string_expression>
-  PATH <string_expression>
-  MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>
-  (ENCODE USING <codec> | WITHOUT BODY)
+CREATE HTTP REQUEST EMITTER <name>
+  FROM <relay>
+  TO <client>
+    METHOD <string_expression>
+    PATH <string_expression>
+    MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>
+    (ENCODE USING <codec> | WITHOUT BODY)
 ```
 
 `METHOD` and `PATH` are structured expressions, not client settings. HTTP `MODE ACK` has no ACK
@@ -57,8 +59,9 @@ CREATE HTTP CLIENT api CONFIG {
   'timeout_ms' = 5000
 };
 
-CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
+CREATE HTTP REQUEST EMITTER deliver_event
   FROM outgoing
+  ATTACHED
   TO api
     METHOD input.request_method
     PATH input.request_path
@@ -181,7 +184,9 @@ tunnel, the redirects its client follows, transport-generated fields, response p
 `timeout_ms` come from the client transport the HTTP connector's polling ingestor reads too, and
 the declared proxy from the shared `HttpClientConfig`, so one `HTTP CLIENT` means the same
 transport on both sides, as [HTTP client transport](./connector-contract.md#http-client-transport)
-describes. It sees neither graph branches nor upstream ACKs. The [connector chapter's HTTP emitter boundary](./connector-contract.md#emitter-boundary)
+describes. Both directions also use `RustlsClientConfigProvider` for bundled Mozilla roots, native
+roots, additive CA files and the paired client identity; a missing native CA bundle does not
+prevent constructing either transport. It sees neither graph branches nor upstream ACKs. The [connector chapter's HTTP emitter boundary](./connector-contract.md#emitter-boundary)
 defines the shared contract and host loop in detail.
 
 One HTTP request is prepared for each eligible source record, even when `COLLECT FOR` or `FLUSH`
@@ -300,7 +305,7 @@ the status line is `200`.
 | `200`–`299`, including `202` and `204` | Deliver exactly this source record when final headers are complete. `202` does not promise later endpoint processing. |
 | `408`, `425`, `429`, or `500`–`599` | Retain the request and all later work; retry after the host's wait. |
 | `401`, `403`, or `407` | Retain and retry, reporting an authentication or authorization infrastructure cause. |
-| Other `300`–`499`, or `101` | Reject only that record through `ON MESSAGE ERROR`, then continue after the policy completes. Redirect `Location` is never followed; `304` and `409` are not delivery. |
+| Other `300`–`499`, or `101` | Reject only that record through `ON MESSAGE ERROR`, then continue after the policy completes. A redirect the client does not follow is such a status, and its `Location` receives no request; `304` and `409` are not delivery. |
 | DNS, connection, TLS, send, timeout, malformed response, oversized head, or loss before complete final headers | Retain and retry as an infrastructure failure. |
 
 A delivered record leaves the pending set and is never included in a later local retry. A
@@ -324,15 +329,15 @@ and the expression snapshot; it never scales HTTP timeouts, backoff, or `Retry-A
 `FLUSH IMMEDIATE` uses the existing physical minimum batching window.
 
 `ATTACHED` keeps each unresolved record's upstream ACK lease until HTTP delivery or its message
-error policy resolves it. `DETACHED` acknowledges the source at relay fan-out, but still confirms
+error policy resolves it. `DETACHED` acknowledges the ingestor at relay fan-out, but still confirms
 HTTP responses, retries unresolved requests, applies backpressure, and routes terminal errors.
-Source recovery depends on that source's own acknowledged-delivery contract. A lost final response
+Ingestor recovery depends on that ingestor's own acknowledged-delivery contract. A lost final response
 may mean the endpoint already applied the request; retrying it can duplicate the external effect.
 Nervix supplies no idempotency key. The application can send a stable event identifier, as the
 `Idempotency-Key` invocation above does, and arrange endpoint-side deduplication. A generated
-value is stable during a *local* retry because preparation is retained; source replay after a
+value is stable during a *local* retry because preparation is retained; ingestor replay after a
 restart may evaluate it again. [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery)
-defines the wider source/emitter combinations.
+defines the wider ingestor/emitter combinations.
 
 ## Errors and inspection
 
@@ -367,12 +372,14 @@ Method, target, headers, and response bytes are not payload bytes or metric-labe
 Changing the emitter's method, path, client reference, body selection, or retry mode takes an
 `ENTITY_PAUSE`; a `FLUSH`-only change is `DYNAMIC`. Changing source membership or a client
 definition has its existing `DOMAIN_PAUSE` contract. `ALTER HTTP REQUEST EMITTER ... SET TO` restates the
-complete method, path, mode, and body selection. `SET CLIENT`, `SET MODE`, and `SET ENCODE USING`
-retain their current meanings. `DROP ENCODE` cannot select no body; use `SET TO ... WITHOUT BODY`.
+complete method, path, mode, and body selection. `SET METHOD` and `SET PATH` change one request
+field, and `SET CLIENT`, `SET MODE`, and `SET ENCODE USING` retain their current meanings.
+`DROP ENCODE` cannot select no body; use `SET TO ... WITHOUT BODY`.
 The whole retained construction and error scope must validate against that selection. For
 example, an emitter with `INHERIT` cannot switch to `WITHOUT BODY` while retaining that clause.
-Changing construction or header invocations requires a complete `DROP` and `CREATE` replacement
-inside one transaction. A bad candidate or refused commit leaves the active emitter in place.
+The construction and header invocations change in place with `SET INHERIT`, `DROP INHERIT`,
+`ADD SET`, `DROP SET`, `ADD INVOKE`, `DROP INVOKE`, `SET WHERE` and `DROP WHERE`, under the same
+validation and `ENTITY_PAUSE`. A bad candidate or refused commit leaves the active emitter in place.
 
 For example, this replacement changes the first emitter's method and path without replacing its
 codec construction or header invocations:
@@ -389,11 +396,11 @@ SHOW CREATE EMITTER deliver_event;
 DESCRIBE EMITTER deliver_event;
 ```
 
-The retained `INHERIT` still initializes the codec body. A transition to `WITHOUT BODY` would
-require a replacement that also removes `INHERIT`, so the operator uses `DROP` and `CREATE` in one
-transaction for that change. For a destination that cannot drain, the supported operational path
+The retained `INHERIT` still initializes the codec body. A transition to `WITHOUT BODY` also
+removes `INHERIT`, which one `ALTER` writes as `SET TO ... WITHOUT BODY, DROP INHERIT`: the
+candidate is validated once every operation has applied. For a destination that cannot drain, the supported operational path
 is `STOP;`, change the emitter while the domain is stopped, then `START;`, after deciding how the
-source will replay unresolved work.
+ingestor will replay unresolved work.
 
 An entity pause gates intake and drains already admitted requests under their original client,
 resource binding, destination, and prepared bytes. A failed drain leaves the mutation unapplied;
@@ -401,16 +408,16 @@ it does not move pending requests to a new endpoint. `DESCRIBE TRANSACTION` repo
 scope and actual engagement under [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md).
 When a destination cannot be repaired in place, an operator can stop the domain, alter the
 stopped emitter, and start the domain again. That path discards volatile prepared attempts and
-relies on the source's replay contract; it can repeat an effect the destination already applied.
+relies on the ingestor's replay contract; it can repeat an effect the destination already applied.
 The [Control Plane](./control-plane.md) chapter owns mutation and drain decisions.
 
 Graceful node shutdown stops intake, force-flushes buffered HTTP work, and waits for eligible
 requests only within the existing physical drain deadline. Expiry or forced ending cancels an
 in-flight attempt without marking it delivered. Prepared method, target, headers, body, retry
-position, and ACK state are volatile. An attached acknowledged source can redeliver after restart;
-an unacknowledged source cannot recover a record it has lost. The
+position, and ACK state are volatile. An attached acknowledged ingestor can redeliver after restart;
+an unacknowledged ingestor cannot recover a record it has lost. The
 [Shutdown And Recovery](./shutdown.md) chapter owns stop phases, the former-owner fence, and the
-source recovery boundary; this chapter adds no alternate shutdown protocol.
+ingestor recovery boundary; this chapter adds no alternate shutdown protocol.
 
 ## Qualification and practical limits
 
@@ -440,7 +447,7 @@ The receiver assertions require at most one request awaiting a final head for on
 two relays and two branches; a fixture regression distinguishes two concurrent clients. The
 response-body scenarios require the next record to proceed while a response body stalls or holds
 32 MiB, and cancellation scenarios check abandoned connections after timeout, stop, and forced
-drain. Shuttle checks cover cancelled attempts and unresolved membership. Attached-source scenarios
+drain. Shuttle checks cover cancelled attempts and unresolved membership. Attached-ingestor scenarios
 require Kafka offsets to remain uncommitted while a request is pending. The emitter publishes no
 per-emitter memory figure, so these checks establish no fixed per-emitter memory ceiling; retained
 encoded bodies are governed by node memory pressure.

@@ -5,8 +5,8 @@
 //! - **Owns.** The kind of every connector, the union of ingestor Models and the union of emitter Models
 //!   nested connector by entity, the kinds that name each connector and entity pair, the
 //!   alterations of the ingestors that read each pair, the shape of the names an external system
-//!   gives the entities a ingestor reads, and what a pair declares whatever its statement says:
-//!   the header model of each side, the metadata namespace, where a ingestor executes, what an emitter
+//!   gives the entities an ingestor reads, and what a pair declares whatever its statement says:
+//!   the header model of each side, the metadata namespace, where an ingestor executes, what an emitter
 //!   requires of its emitter, and what a body references. Each connector's own module owns its
 //!   client Model, its entity Models, their modes and the rules its external names follow.
 //! - **Depends on.** Validated names, expressions, schema types, and the acknowledgement, retry and
@@ -75,7 +75,7 @@ pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, ingestor::AlteredInges
 /// ingestor or emitter exchanges data with.
 ///
 /// The keyword of a kind is how Plexus spells it, and it is what diagnostics name a client by and
-/// what the phrase naming a ingestor or an emitter starts with. A kind displays as its keyword.
+/// what the phrase naming an ingestor or an emitter starts with. A kind displays as its keyword.
 #[derive(
     Debug,
     Clone,
@@ -136,6 +136,14 @@ impl ConnectorKind {
     /// How Plexus spells this kind.
     pub fn keyword(self) -> &'static str {
         self.into()
+    }
+
+    /// Whether a client of this connector renders the `{{instance}}` placeholder into its
+    /// configuration: an MQTT client's identity template names the ingestor instance that
+    /// connects, and an emitter connects as instance 0. Every other client's templates name only
+    /// its resource mounts.
+    pub const fn renders_client_instance(self) -> bool {
+        matches!(self, Self::Mqtt)
     }
 
     /// What every client of this connector declares. Application sessions reach the `CLIENT`

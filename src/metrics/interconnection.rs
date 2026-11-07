@@ -1,6 +1,6 @@
 //! The interconnection series a node exposes: its transport pools, the execution admission every
-//! variable-size operation passes through, its consensus retention, the reactor delay they all
-//! share, and how many nodes run with timings that differ from the leader's.
+//! variable-size operation passes through, its consensus retention and command history, the reactor
+//! delay they all share, and how many nodes run with timings that differ from the leader's.
 //!
 //! Layer: engines and infrastructure, with the same edge inside it the parent module declares.
 //!
@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
-use nervix_consensus::Observer;
+use nervix_consensus::{CommandExecutionHistory, Observer};
 use nervix_execution::{Executor, MemoryBudgetSnapshot, WorkerClassSnapshot};
 use nervix_interconnect::{
     ConnectionDirection, ConnectionFailureReason, PoolClass, RelayAdmissionOutcome,
@@ -58,6 +58,12 @@ use crate::cluster::PrerequisitesView;
 /// How often the reactor delay probe asks to be woken. Short enough that one blocked poll is
 /// visible in a scrape interval, long enough that the probe itself is not the load.
 const SCHEDULER_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "one SI second contains one billion nanoseconds")
+)]
+const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
 
 /// The live node state the interconnection series are read from.
 ///
@@ -480,6 +486,18 @@ const SERIES: &[SeriesSpec] = &[
         labels: NO_LABELS,
     },
     SeriesSpec {
+        name: "nervix_command_execution_records",
+        help: "Command executions retained in this node's applied consensus state.",
+        kind: SeriesKind::Gauge,
+        labels: &["state"],
+    },
+    SeriesSpec {
+        name: "nervix_command_execution_retry_fence_timestamp_seconds",
+        help: "Durable command retry fence in Unix seconds, when established.",
+        kind: SeriesKind::Gauge,
+        labels: NO_LABELS,
+    },
+    SeriesSpec {
         name: "nervix_cluster_timing_drift_nodes",
         help: "Live nodes whose timing prerequisites differ from the leader's, or -1 while no \
                leader record is known.",
@@ -510,6 +528,7 @@ impl InterconnectionCollector {
         let executor = sources.inner.executor.snapshot();
         let log = sources.inner.consensus.raft_log_retention();
         let snapshots = sources.inner.consensus.snapshot_retention();
+        let history = sources.inner.consensus.command_execution_history();
         let scheduler = sources.inner.scheduler.read();
         let drifting_nodes = sources.drifting_nodes();
 
@@ -518,6 +537,7 @@ impl InterconnectionCollector {
         execution_families(&mut families, &executor);
         scheduler_families(&mut families, &scheduler);
         consensus_families(&mut families, &log, &snapshots);
+        command_execution_families(&mut families, &history);
         cluster_families(&mut families, drifting_nodes);
         families.finish()
     }
@@ -988,6 +1008,18 @@ fn consensus_families(
     unreferenced.sample(&[], snapshots.unreferenced_generations.approx_into());
 }
 
+fn command_execution_families(families: &mut Families, history: &CommandExecutionHistory) {
+    let mut records = families.open("nervix_command_execution_records");
+    records.sample(&[("state", "applying")], history.applying.approx_into());
+    records.sample(&[("state", "finished")], history.finished.approx_into());
+    records.sample(&[("state", "expired")], history.expired.approx_into());
+    let mut fence = families.open("nervix_command_execution_retry_fence_timestamp_seconds");
+    if let Some(timestamp) = history.retry_fence {
+        let nanos: f64 = timestamp.unix_nanos().approx_into();
+        fence.sample(&[], nanos / NANOS_PER_SECOND);
+    }
+}
+
 /// A Raft position that does not exist yet reports as `-1`, which no real index can take, rather
 /// than as a zero that would read as a position the node actually holds.
 fn optional_index(index: Option<u64>) -> f64 {
@@ -1073,6 +1105,7 @@ mod tests {
         execution_families(&mut families, &executor);
         scheduler_families(&mut families, &scheduler);
         consensus_families(&mut families, &log, &snapshots);
+        command_execution_families(&mut families, &CommandExecutionHistory::default());
         cluster_families(&mut families, None);
         families.finish()
     }
@@ -1124,5 +1157,42 @@ mod tests {
         let collector = InterconnectionCollector::new();
         assert_eq!(collector.desc().len(), SERIES.len());
         assert!(collector.collect().is_empty());
+    }
+
+    #[test]
+    fn history_projection_preserves_each_state_and_the_fractional_fence() {
+        let history = CommandExecutionHistory {
+            applying: 2,
+            finished: 3,
+            expired: 4,
+            retry_fence: Some(nervix_models::Timestamp::from_unix_nanos(
+                1_700_000_000_125_000_000,
+            )),
+        };
+        let mut families = Families::new();
+        command_execution_families(&mut families, &history);
+        let families = families.finish();
+        let values = families[0]
+            .get_metric()
+            .iter()
+            .map(|metric| (metric.get_label()[0].value(), metric.get_gauge().value()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![("applying", 2.0), ("finished", 3.0), ("expired", 4.0)]
+        );
+        assert_eq!(
+            families[1].get_metric()[0].get_gauge().value(),
+            1_700_000_000.125
+        );
+    }
+
+    #[test]
+    fn a_history_without_a_durable_fence_exports_only_the_record_counts() {
+        let mut families = Families::new();
+        command_execution_families(&mut families, &CommandExecutionHistory::default());
+        let families = families.finish();
+        assert_eq!(families[0].get_metric().len(), 3);
+        assert!(families[1].get_metric().is_empty());
     }
 }

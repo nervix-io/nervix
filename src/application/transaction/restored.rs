@@ -80,6 +80,10 @@ impl SessionServiceImpl {
             schedule_inputs: &schedule_inputs,
         })?;
         let snapshot = TransactionPlanningSnapshot {
+            parameters: planning_inputs
+                .parameters()
+                .ok_or_else(|| Report::new(TransactionPlanningError::ClusterParametersUnseeded))?
+                .values,
             domain: inputs.state.clone(),
             models,
             resources: inputs.resources.clone(),
@@ -100,6 +104,7 @@ impl SessionServiceImpl {
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {
                         node: ImpactNodeCoverage::all_executions(moved.entity),
+                        unit: moved.unit,
                         source: moved.former_owner,
                         destination: moved.destination,
                         attribution: attribution.clone(),

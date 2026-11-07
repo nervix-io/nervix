@@ -19,8 +19,8 @@ Feature: Branch lifecycle metrics
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA user_id_branch (
@@ -36,12 +36,11 @@ Feature: Branch lifecycle metrics
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT branch_metrics_ingress
+      CREATE HTTP ENDPOINT branch_metrics_ingress
         ON edge
-        PATH '/branch-metrics'
-        TYPE HTTP;
+        PATH '/branch-metrics';
 
-      CREATE HTTP ENDPOINT INGESTOR branch_metrics_source
+      CREATE HTTP ENDPOINT INGESTOR branch_metrics_ingestor
         FROM branch_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -117,8 +116,8 @@ Feature: Branch lifecycle metrics
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA user_id_branch (
@@ -134,12 +133,11 @@ Feature: Branch lifecycle metrics
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT branch_metrics_ingress
+      CREATE HTTP ENDPOINT branch_metrics_ingress
         ON edge
-        PATH '/branch-metrics'
-        TYPE HTTP;
+        PATH '/branch-metrics';
 
-      CREATE HTTP ENDPOINT INGESTOR branch_metrics_source
+      CREATE HTTP ENDPOINT INGESTOR branch_metrics_ingestor
         FROM branch_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications

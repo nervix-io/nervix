@@ -671,7 +671,7 @@ impl TestTls {
         let key = rustls_pki_types::PrivateKeyDer::Pkcs8(
             rustls_pki_types::PrivatePkcs8KeyDer::from(server_key.serialize_der()),
         );
-        nervix_connector::install_rustls_crypto_provider();
+        nervix_crypto::tls::install_default_provider();
         let mut config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(chain, key)
@@ -887,7 +887,7 @@ fn bodyless_post(origin: &str) -> EmitterHttpRequest {
     }
 }
 
-/// A emitter whose requests resolve through a resolver that reads `hosts` and asks only `server`.
+/// An emitter whose requests resolve through a resolver that reads `hosts` and asks only `server`.
 ///
 /// Each try of the resolver outlasts every budget below, so a lookup against a server that never
 /// answers ends exactly when the emitter's budget for it does. The returned directory holds the

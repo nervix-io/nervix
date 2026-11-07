@@ -20,8 +20,7 @@ Feature: Filter selections
         tenant STRING,
         error_message STRING
       );
-      CREATE CODEC reading_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC reading_batch_codec
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_branch (tenant STRING);
@@ -30,8 +29,8 @@ Feature: Filter selections
       CREATE RELAY selected_readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY filter_failures SCHEMA filter_failure UNBRANCHED;
       CREATE VHOST edge filter-selection-{{test_id}}.example.com;
-      CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         FILTER WHERE input.amount / input.divisor > 0

@@ -15,23 +15,22 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
       CREATE SCHEMA remote_hold_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA remote_hold_wire MODE STRICT ( event_id string );
-      CREATE CODEC remote_hold_codec
-        FROM WIRE JSON SCHEMA remote_hold_wire TO SCHEMA remote_hold_event;
+      CREATE WIRE JSON CODEC remote_hold_codec
+        FROM WIRE SCHEMA remote_hold_wire TO SCHEMA remote_hold_event;
       CREATE RELAY remote_hold_records SCHEMA remote_hold_event UNBRANCHED;
       CREATE KAFKA CLIENT remote_hold_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR remote_hold_source
+      CREATE KAFKA TOPIC INGESTOR remote_hold_ingestor
         FROM remote_hold_kafka TOPIC 'remote_hold_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'remote_hold_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'remote_hold_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
           MODE NO ACK
           ON QUIESCE SUSPEND DECODE USING remote_hold_codec
         TO remote_hold_records INHERIT ALL UNBRANCHED
           FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER remote_hold_sink
+      CREATE KAFKA TOPIC EMITTER remote_hold_emitter
         FROM remote_hold_records
         TO remote_hold_kafka TOPIC 'remote_hold_out_{{test_id}}'
           MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING remote_hold_codec
@@ -40,14 +39,14 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
     And these Plexus commands are executed on the leader node
       """
-      RELOCATE INGESTOR remote_hold_source ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR remote_hold_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY remote_hold_records ONTO NODE node-2 IGNORE PREFERENCES;
-      RELOCATE EMITTER remote_hold_sink ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE EMITTER remote_hold_emitter ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=remote_hold_source owner=node-1
+      - domain={{domain}} kind=ingestor name=remote_hold_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -55,7 +54,7 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=emitter name=remote_hold_sink owner=node-2
+      - domain={{domain}} kind=emitter name=remote_hold_emitter owner=node-2
       """
     When node "node-2" fills its relay memory before it charges its next acknowledgement watches
     And these Kafka messages are rapidly published to topic "remote_hold_in_{{test_id}}"
@@ -109,38 +108,37 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
       CREATE SCHEMA full_hold_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA full_hold_wire MODE STRICT ( event_id string );
-      CREATE CODEC full_hold_codec
-        FROM WIRE JSON SCHEMA full_hold_wire TO SCHEMA full_hold_event;
+      CREATE WIRE JSON CODEC full_hold_codec
+        FROM WIRE SCHEMA full_hold_wire TO SCHEMA full_hold_event;
       CREATE RELAY full_hold_first SCHEMA full_hold_event UNBRANCHED;
       CREATE RELAY full_hold_second SCHEMA full_hold_event UNBRANCHED;
       CREATE KAFKA CLIENT full_hold_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR full_hold_first_source
+      CREATE KAFKA TOPIC INGESTOR full_hold_first_ingestor
         FROM full_hold_kafka TOPIC 'full_hold_first_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'full_hold_first_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'full_hold_first_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
           MODE NO ACK
           ON QUIESCE SUSPEND DECODE USING full_hold_codec
         TO full_hold_first INHERIT ALL UNBRANCHED
           FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR full_hold_second_source
+      CREATE KAFKA TOPIC INGESTOR full_hold_second_ingestor
         FROM full_hold_kafka TOPIC 'full_hold_second_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'full_hold_second_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'full_hold_second_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
           MODE NO ACK
           ON QUIESCE SUSPEND DECODE USING full_hold_codec
         TO full_hold_second INHERIT ALL UNBRANCHED
           FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER full_hold_first_sink
+      CREATE KAFKA TOPIC EMITTER full_hold_first_emitter
         FROM full_hold_first
         TO full_hold_kafka TOPIC 'full_hold_out_{{test_id}}'
           MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING full_hold_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER full_hold_second_sink
+      CREATE KAFKA TOPIC EMITTER full_hold_second_emitter
         FROM full_hold_second
         TO full_hold_kafka TOPIC 'full_hold_out_{{test_id}}'
           MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING full_hold_codec
@@ -149,21 +147,21 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
     And these Plexus commands are executed on the leader node
       """
-      RELOCATE INGESTOR full_hold_first_source ONTO NODE node-1 IGNORE PREFERENCES;
-      RELOCATE INGESTOR full_hold_second_source ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR full_hold_first_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE INGESTOR full_hold_second_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY full_hold_first ONTO NODE node-2 IGNORE PREFERENCES;
       RELOCATE RELAY full_hold_second ONTO NODE node-2 IGNORE PREFERENCES;
-      RELOCATE EMITTER full_hold_first_sink ONTO NODE node-2 IGNORE PREFERENCES;
-      RELOCATE EMITTER full_hold_second_sink ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE EMITTER full_hold_first_emitter ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE EMITTER full_hold_second_emitter ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=full_hold_first_source owner=node-1
+      - domain={{domain}} kind=ingestor name=full_hold_first_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=full_hold_second_source owner=node-1
+      - domain={{domain}} kind=ingestor name=full_hold_second_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -175,11 +173,11 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=emitter name=full_hold_first_sink owner=node-2
+      - domain={{domain}} kind=emitter name=full_hold_first_emitter owner=node-2
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=emitter name=full_hold_second_sink owner=node-2
+      - domain={{domain}} kind=emitter name=full_hold_second_emitter owner=node-2
       """
     When node "node-2" fills its relay memory before it charges its next acknowledgement watches
     And these Kafka messages are rapidly published to topic "full_hold_first_in_{{test_id}}"

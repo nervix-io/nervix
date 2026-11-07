@@ -34,16 +34,15 @@ Feature: Numeric classification, math and bit functions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC reading_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC reading_batch_codec
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE RELAY derived_readings SCHEMA derived_reading UNBRANCHED;
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge float-functions-{{test_id}}.example.com;
-      CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TO readings
@@ -126,16 +125,15 @@ Feature: Numeric classification, math and bit functions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC register_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC register_batch_codec
         TO SCHEMA register_sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY register_samples SCHEMA register_sample UNBRANCHED;
       CREATE RELAY decoded_registers SCHEMA decoded_register UNBRANCHED;
       CREATE RELAY register_errors SCHEMA register_error UNBRANCHED;
       CREATE VHOST edge bit-functions-{{test_id}}.example.com;
-      CREATE ENDPOINT register_ingress ON edge PATH '/registers' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR register_source
+      CREATE HTTP ENDPOINT register_ingress ON edge PATH '/registers';
+      CREATE HTTP ENDPOINT INGESTOR register_ingestor
         FROM register_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING register_batch_codec
         TO register_samples

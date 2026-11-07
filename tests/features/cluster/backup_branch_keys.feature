@@ -11,14 +11,14 @@ Feature: Archived branch keys checked against the restored branch declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event ( tenant STRING, shard I32, order_id STRING, amount I64 );
       CREATE WIRE JSON SCHEMA order_wire MODE STRICT ( tenant string, shard integer, order_id string, amount integer );
-      CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_event;
+      CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_event;
       CREATE SCHEMA tenant_shard ( tenant STRING, shard I32 );
       CREATE BRANCH by_tenant_shard SCHEMA tenant_shard TTL 30m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant_shard WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY unique_orders SCHEMA order_event BRANCHED BY by_tenant_shard;
       CREATE VHOST edge backup-branch-keys-{{test_id}}.example.com;
-      CREATE ENDPOINT order_ingress ON edge PATH '/orders' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR order_source FROM order_ingress MODE NO ACK
+      CREATE HTTP ENDPOINT order_ingress ON edge PATH '/orders';
+      CREATE HTTP ENDPOINT INGESTOR order_ingestor FROM order_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
         TO orders INHERIT ALL BRANCHED BY by_tenant_shard SET tenant = message.tenant, shard = message.shard
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -68,7 +68,7 @@ Feature: Archived branch keys checked against the restored branch declarations
     And backup archive "orders.nvxb" is copied to "extra.nvxb" with field "region" added to every branch key under "branch_lifecycle/deduplicator/unique_order_filter"
     And backup archive "orders.nvxb" is copied to "retyped.nvxb" with field "shard" holding a string in every branch key under "branch_lifecycle/deduplicator/unique_order_filter"
     And backup archive "orders.nvxb" is copied to "unbranched.nvxb" with every branch key under "branch_lifecycle/deduplicator/unique_order_filter" unbranched
-    And backup archive "orders.nvxb" is copied to "ingestor.nvxb" with field "shard" removed from every branch key under "branch_lifecycle/ingestor/order_source"
+    And backup archive "orders.nvxb" is copied to "ingestor.nvxb" with field "shard" removed from every branch key under "branch_lifecycle/ingestor/order_ingestor"
     And backup archive "orders.nvxb" is copied to "descriptor.nvxb" with field "shard" holding a string in every branch key under "deduplicator/unique_order_filter"
     And backup archive "orders.nvxb" is copied to "identities.nvxb" with field "shard" holding a string in every branch key under "materialized_relay/orders"
     And the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
@@ -85,7 +85,7 @@ Feature: Archived branch keys checked against the restored branch declarations
     When the CLI restores "domain {{domain}} --resume" from "unbranched.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "does not belong to the branching of deduplicator 'unique_order_filter' in domain '{{domain}}': it is unbranched, where the entity runs in branch 'by_tenant_shard'"
     When the CLI restores "domain {{domain}} --resume" from "ingestor.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "the branch key of lifecycle entry 1 in archive section 'domains/{{domain}}/state/branch_lifecycle/ingestor/order_source/single/branches.rkyv' does not belong to the branching of ingestor 'order_source' in domain '{{domain}}': it is not a key of branch 'by_tenant_shard': the key has no field 'shard'"
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "the branch key of lifecycle entry 1 in archive section 'domains/{{domain}}/state/branch_lifecycle/ingestor/order_ingestor/single/branches.rkyv' does not belong to the branching of ingestor 'order_ingestor' in domain '{{domain}}': it is not a key of branch 'by_tenant_shard': the key has no field 'shard'"
     When the CLI restores "domain {{domain}} --resume --dry-run" from "descriptor.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "/descriptor.rkyv' does not belong to the branching of deduplicator 'unique_order_filter' in domain '{{domain}}': it is not a key of branch 'by_tenant_shard': field 'shard' does not hold a value of its declared type: expected I32, found STRING"
     When the CLI restores "domain {{domain}} --resume" from "identities.nvxb" on node "{{leader}}" reporting JSON

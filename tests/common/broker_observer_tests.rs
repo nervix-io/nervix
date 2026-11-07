@@ -17,12 +17,33 @@ use nervix_primitives::{
 use rstest::rstest;
 
 use crate::{
-    broker_observer::{BrokerMessage, BrokerObserver, BrokerRecordTime, TypedBrokerHeader},
+    broker_observer::{
+        BrokerMessage, BrokerObserver, BrokerRecordTime, PulsarMessageTimes, TypedBrokerHeader,
+    },
     nats_observer::NatsObserver,
     nats_observer_tests::StandInNatsServer,
 };
 
 const BURST: usize = 32_768;
+
+#[nervix_primitives::test(flavor = "current_thread")]
+async fn a_request_observer_refuses_a_delivery_without_a_reply_subject() {
+    let server = StandInNatsServer::start_sequence(1)
+        .await
+        .assured("the request fixture binds an ephemeral loopback port");
+    let observer = NatsObserver::connect(&server.address.to_string(), "observed")
+        .await
+        .assured("the real observing client subscribes");
+    let mut observer = BrokerObserver::nats(observer);
+    let error = timeout(
+        Duration::from_secs(60),
+        observer.answer_nats_request("response", "answer"),
+    )
+    .await
+    .assured("the delivered message is examined within the observation bound")
+    .expect_err("a message without a reply subject cannot be answered");
+    assert_eq!(error.to_string(), "NATS request carries no reply subject");
+}
 
 fn headers() -> Vec<(String, String)> {
     vec![
@@ -180,11 +201,19 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
         data_type: "Number".to_string(),
         value: "7".to_string(),
     }];
+    let pulsar_times = PulsarMessageTimes {
+        event_time: Some(981_173_106_789),
+        deliver_at: Some(981_173_111_789),
+        published_at: 981_173_106_800,
+        received_at: 981_173_111_802,
+    };
     let message = BrokerMessage::from_bytes(b"\xff", headers())
-        .with_key(Some("key".to_string()))
+        .with_key(Some(b"key".to_vec()))
+        .with_partition(Some(2))
         .with_group(Some("group".to_string()))
         .with_time(Some(created))
-        .with_typed_headers(typed_headers.clone());
+        .with_typed_headers(typed_headers.clone())
+        .with_pulsar_times(pulsar_times);
     messages.send(message).await.assured("the channel has room");
     messages
         .send(BrokerMessage::from_bytes(b"appended", Vec::new()).with_time(Some(appended)))
@@ -206,10 +235,12 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
     assert_eq!(first.bytes, b"\xff");
     assert_eq!(first.payload, "\u{fffd}");
     assert_eq!(first.headers, headers());
-    assert_eq!(first.key.as_deref(), Some("key"));
+    assert_eq!(first.key.as_deref(), Some(b"key".as_slice()));
+    assert_eq!(first.partition, Some(2));
     assert_eq!(first.group.as_deref(), Some("group"));
     assert_eq!(first.time, Some(created));
     assert_eq!(first.typed_headers, typed_headers);
+    assert_eq!(first.pulsar_times, Some(pulsar_times));
     let second = observer
         .next_message()
         .await

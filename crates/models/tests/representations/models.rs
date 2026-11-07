@@ -125,19 +125,32 @@ fn assert_archived_count_records(count: usize) {
             crate::archive_round_trip!(&counts, WasmCheckpointCounts),
             counts
         );
-        let inspection = WasmStateInspection {
+        let mut inspection = WasmStateInspection {
             resource: ResourceName::parse("processor").assured("the literal follows the name rule"),
             resource_version: 1,
             file: "processor.wasm".to_string(),
-            default_generation: WasmStateGeneration::FIRST,
-            reset: None,
-            reset_readiness: None,
-            recoveries: Vec::new(),
-            omitted_recoveries: count,
-            checkpoint_counts: counts,
-            checkpoints: Vec::new(),
-            omitted_checkpoints: count,
+            units: vec![nervix_models::WasmUnitStateInspection {
+                unit: nervix_models::Unit::SINGLE,
+                default_generation: WasmStateGeneration::FIRST,
+                reset: None,
+                reset_readiness: None,
+                recoveries: Vec::new(),
+                omitted_recoveries: count,
+                checkpoint_counts: counts,
+                checkpoints: Vec::new(),
+                omitted_checkpoints: count,
+            }],
         };
+        assert_eq!(
+            crate::archive_round_trip!(&inspection, WasmStateInspection),
+            inspection
+        );
+        inspection.units[0].unit = nervix_models::Unit::partition(0);
+        let mut second = inspection.units[0].clone();
+        second.unit = nervix_models::Unit::partition(1);
+        second.default_generation = WasmStateGeneration::try_from(2)
+            .assured("a positive generation identifies the sibling lifetime");
+        inspection.units.push(second);
         assert_eq!(
             crate::archive_round_trip!(&inspection, WasmStateInspection),
             inspection

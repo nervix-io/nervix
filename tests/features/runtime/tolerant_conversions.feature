@@ -33,8 +33,7 @@ Feature: Tolerant conversions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC raw_reading_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC raw_reading_batch_codec
         TO SCHEMA raw_reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY raw_readings SCHEMA raw_reading UNBRANCHED;
@@ -42,8 +41,8 @@ Feature: Tolerant conversions
       CREATE RELAY strict_readings SCHEMA strict_reading UNBRANCHED;
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge tolerant-conversions-{{test_id}}.example.com;
-      CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_reading_batch_codec
         TO raw_readings
@@ -140,16 +139,15 @@ Feature: Tolerant conversions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC conversion_input_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC conversion_input_batch_codec
         TO SCHEMA conversion_input
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY conversion_inputs SCHEMA conversion_input UNBRANCHED;
       CREATE RELAY conversion_outputs SCHEMA conversion_output UNBRANCHED;
       CREATE RELAY conversion_errors SCHEMA conversion_error UNBRANCHED;
       CREATE VHOST edge owned-conversion-{{test_id}}.example.com;
-      CREATE ENDPOINT conversion_ingress ON edge PATH '/conversions' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR conversion_source
+      CREATE HTTP ENDPOINT conversion_ingress ON edge PATH '/conversions';
+      CREATE HTTP ENDPOINT INGESTOR conversion_ingestor
         FROM conversion_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conversion_input_batch_codec
         TO conversion_inputs
@@ -217,16 +215,15 @@ Feature: Tolerant conversions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC routed_value_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC routed_value_batch_codec
         TO SCHEMA routed_value
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY routed_values SCHEMA routed_value UNBRANCHED;
       CREATE RELAY routed_numbers SCHEMA routed_number UNBRANCHED;
       CREATE RELAY routed_errors SCHEMA routed_error UNBRANCHED;
       CREATE VHOST edge conversion-arms-{{test_id}}.example.com;
-      CREATE ENDPOINT routed_ingress ON edge PATH '/routed-values' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR routed_value_source
+      CREATE HTTP ENDPOINT routed_ingress ON edge PATH '/routed-values';
+      CREATE HTTP ENDPOINT INGESTOR routed_value_ingestor
         FROM routed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_value_batch_codec
         TO routed_values
@@ -329,15 +326,14 @@ Feature: Tolerant conversions
       CREATE SCHEMA inferred_measurement (
         result F32
       );
-      CREATE CODEC raw_measurement_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC raw_measurement_batch_codec
         TO SCHEMA raw_measurement
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY raw_measurements SCHEMA raw_measurement UNBRANCHED;
       CREATE RELAY inferred_measurements SCHEMA inferred_measurement UNBRANCHED;
       CREATE VHOST edge infer-tolerant-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/measurements' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_measurement_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/measurements';
+      CREATE HTTP ENDPOINT INGESTOR raw_measurement_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_measurement_batch_codec
         TO raw_measurements

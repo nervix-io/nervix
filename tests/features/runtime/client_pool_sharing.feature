@@ -18,11 +18,11 @@ Feature: Shared database client pools
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -68,11 +68,11 @@ Feature: Shared database client pools
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -120,11 +120,11 @@ Feature: Shared database client pools
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

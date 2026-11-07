@@ -1996,7 +1996,7 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
         }
         CreateKind::Endpoint => {
             let mut controls = vec![ChoiceControl::EndpointVhost];
-            if signals.endpoint.get_untracked().endpoint_type
+            if signals.endpoint.get_untracked().endpoint_type()
                 == Some(nervix_models::EndpointType::Websockets)
             {
                 controls.push(ChoiceControl::EndpointSignaling);

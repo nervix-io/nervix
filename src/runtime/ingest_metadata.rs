@@ -6,7 +6,7 @@
 //!   namespaces programs read them through.
 //! - **Depends on.** Arrow arrays, the vocabulary's metadata declarations, the connector contract's
 //!   metadata rows, value sink and header trait, and explicit execution timestamps.
-//! - **Must not know.** Plexus parsing, source-client lifecycle or persisted control state.
+//! - **Must not know.** Plexus parsing, ingestor-client lifecycle or persisted control state.
 
 #![cfg_attr(
     nervix_lint,
@@ -17,7 +17,7 @@ use std::fmt;
 
 use arrow_array::builder::BinaryBuilder;
 use arrow_buffer::BooleanBuffer;
-use nervix_connector::{IngestMetadataRow, IngestMetadataValues};
+use nervix_connector::{IngestMetadataFailure, IngestMetadataRow, IngestMetadataValues};
 use nervix_models::{IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType};
 
 use super::*;
@@ -31,6 +31,51 @@ pub(super) struct IngestFilterMapMetadataColumns {
     pub(super) integration_fields: RecordBatch,
     pub(super) header_names: ArrayRef,
     pub(super) header_values: ArrayRef,
+    /// The refusal of each message, by its row in these columns, with an invalid or unrepresentable
+    /// value for a read field. It stays empty while every requested value is valid.
+    pub(super) refusals: BTreeMap<usize, IngestMetadataRefusal>,
+}
+
+/// Why a message is refused before routing: a field its ingestor's programs read has a typed
+/// transport failure or a value its declared type cannot hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IngestMetadataRefusal {
+    field: IngestorMetadataField,
+    value: MetadataRefusalValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MetadataRefusalValue {
+    Unrepresentable(String),
+    Invalid(IngestMetadataFailure),
+}
+
+// The typed failure shares the storage budget of a rendered transport value.
+const _: () = assert!(std::mem::size_of::<MetadataRefusalValue>() == std::mem::size_of::<String>());
+
+impl IngestMetadataRefusal {
+    /// The refused field as a message error names it.
+    pub(super) fn field_path(&self) -> FieldPath {
+        FieldPath::new(format!("{INGEST_METADATA_NAMESPACE}.{}", self.field.name()))
+    }
+
+    /// The message error's text: the field, the transport value it holds and the type that cannot
+    /// hold it. Metadata is never sensitive, so the text carries no payload value.
+    pub(super) fn message(&self) -> String {
+        match &self.value {
+            MetadataRefusalValue::Unrepresentable(value) => format!(
+                "{INGEST_METADATA_NAMESPACE}.{} holds {}, which no {} holds",
+                self.field.name(),
+                value,
+                self.field.ty()
+            ),
+            MetadataRefusalValue::Invalid(failure) => format!(
+                "{INGEST_METADATA_NAMESPACE}.{} is invalid: {}",
+                self.field.name(),
+                failure.error()
+            ),
+        }
+    }
 }
 
 pub(super) struct IngestHeaderRow<'a> {
@@ -97,6 +142,11 @@ pub(super) enum IngestMetadataError {
         "a message handed {visited} metadata values for the {declared} fields its entity declares"
     )]
     MissingValues { declared: usize, visited: usize },
+    #[error(
+        "the deferred metadata producer for '{field}' handed over {visited} values; it must hand \
+         over exactly one"
+    )]
+    DeferredValues { field: &'static str, visited: usize },
     #[error("failed to build ingest metadata integration columns")]
     BuildIntegrationColumns,
     #[error(
@@ -204,9 +254,12 @@ enum IngestMetadataColumnBuilder {
     String(StringBuilder),
     Bytes(BinaryBuilder),
     Bool(BooleanBuilder),
+    U8(UInt8Builder),
     U16(UInt16Builder),
+    U32(UInt32Builder),
     I32(Int32Builder),
     I64(Int64Builder),
+    U64(UInt64Builder),
     Datetime(TimestampNanosecondBuilder),
 }
 
@@ -220,9 +273,12 @@ impl IngestMetadataColumnBuilder {
             }
             IngestorMetadataType::Bytes => Self::Bytes(BinaryBuilder::with_capacity(row_bound, 0)),
             IngestorMetadataType::Bool => Self::Bool(BooleanBuilder::with_capacity(row_bound)),
+            IngestorMetadataType::U8 => Self::U8(UInt8Builder::with_capacity(row_bound)),
             IngestorMetadataType::U16 => Self::U16(UInt16Builder::with_capacity(row_bound)),
+            IngestorMetadataType::U32 => Self::U32(UInt32Builder::with_capacity(row_bound)),
             IngestorMetadataType::I32 => Self::I32(Int32Builder::with_capacity(row_bound)),
             IngestorMetadataType::I64 => Self::I64(Int64Builder::with_capacity(row_bound)),
+            IngestorMetadataType::U64 => Self::U64(UInt64Builder::with_capacity(row_bound)),
             IngestorMetadataType::Datetime => {
                 Self::Datetime(TimestampNanosecondBuilder::with_capacity(row_bound))
             }
@@ -235,9 +291,12 @@ impl IngestMetadataColumnBuilder {
             Self::String(_) => IngestorMetadataType::String,
             Self::Bytes(_) => IngestorMetadataType::Bytes,
             Self::Bool(_) => IngestorMetadataType::Bool,
+            Self::U8(_) => IngestorMetadataType::U8,
             Self::U16(_) => IngestorMetadataType::U16,
+            Self::U32(_) => IngestorMetadataType::U32,
             Self::I32(_) => IngestorMetadataType::I32,
             Self::I64(_) => IngestorMetadataType::I64,
+            Self::U64(_) => IngestorMetadataType::U64,
             Self::Datetime(_) => IngestorMetadataType::Datetime,
         }
     }
@@ -247,9 +306,12 @@ impl IngestMetadataColumnBuilder {
             Self::String(builder) => builder.append_null(),
             Self::Bytes(builder) => builder.append_null(),
             Self::Bool(builder) => builder.append_null(),
+            Self::U8(builder) => builder.append_null(),
             Self::U16(builder) => builder.append_null(),
+            Self::U32(builder) => builder.append_null(),
             Self::I32(builder) => builder.append_null(),
             Self::I64(builder) => builder.append_null(),
+            Self::U64(builder) => builder.append_null(),
             Self::Datetime(builder) => builder.append_null(),
         }
     }
@@ -259,9 +321,12 @@ impl IngestMetadataColumnBuilder {
             Self::String(builder) => StdArc::new(builder.finish()),
             Self::Bytes(builder) => StdArc::new(builder.finish()),
             Self::Bool(builder) => StdArc::new(builder.finish()),
+            Self::U8(builder) => StdArc::new(builder.finish()),
             Self::U16(builder) => StdArc::new(builder.finish()),
+            Self::U32(builder) => StdArc::new(builder.finish()),
             Self::I32(builder) => StdArc::new(builder.finish()),
             Self::I64(builder) => StdArc::new(builder.finish()),
+            Self::U64(builder) => StdArc::new(builder.finish()),
             Self::Datetime(builder) => StdArc::new(builder.finish().with_timezone("+00:00")),
         }
     }
@@ -277,6 +342,10 @@ enum MetadataVisitFault {
     },
     /// The message handed over a value beyond its entity's last declared field.
     Excess,
+    Deferred {
+        field: IngestorMetadataField,
+        visited: usize,
+    },
 }
 
 /// Appends each value one message hands over into the column of its field where a program reads
@@ -289,15 +358,14 @@ struct ProjectedMetadataValues<'a> {
     /// It never exceeds the declared field count: a value beyond it is recorded as a fault.
     visited: usize,
     fault: Option<MetadataVisitFault>,
+    /// The first read field whose value the message carried but its type cannot hold.
+    refusal: Option<IngestMetadataRefusal>,
 }
 
 impl ProjectedMetadataValues<'_> {
-    /// The column the next value goes into, typed `ty`, or `None` where no program reads its field
-    /// or the visit already went wrong.
-    fn next_column(
-        &mut self,
-        ty: IngestorMetadataType,
-    ) -> Option<&mut IngestMetadataColumnBuilder> {
+    /// The index among the built columns of the column the next value goes into, typed `ty`, or
+    /// `None` where no program reads its field or the visit already went wrong.
+    fn next_read_column(&mut self, ty: IngestorMetadataType) -> Option<usize> {
         if self.fault.is_some() {
             return None;
         }
@@ -312,23 +380,42 @@ impl ProjectedMetadataValues<'_> {
         let column = column?;
         let builder = self
             .columns
-            .get_mut(column)
+            .get(column)
             .assured("the projection builds one column for every field it reads");
         if builder.ty() != ty {
-            let field = self
-                .projection
-                .read
-                .get(column)
-                .copied()
-                .assured("the projection reads one field for every column it builds");
+            let field = self.read_field(column);
             self.fault = Some(MetadataVisitFault::Type { field, found: ty });
             return None;
         }
+        Some(column)
+    }
+
+    /// The read field whose values the built column `column` holds.
+    fn read_field(&self, column: usize) -> IngestorMetadataField {
+        self.projection
+            .read
+            .get(column)
+            .copied()
+            .assured("the projection reads one field for every column it builds")
+    }
+
+    /// The column the next value goes into, typed `ty`, or `None` where no program reads its field
+    /// or the visit already went wrong.
+    fn next_column(
+        &mut self,
+        ty: IngestorMetadataType,
+    ) -> Option<&mut IngestMetadataColumnBuilder> {
+        let column = self.next_read_column(ty)?;
+        let builder = self
+            .columns
+            .get_mut(column)
+            .assured("the projection builds one column for every field it reads");
         Some(builder)
     }
 
-    /// The outcome of the visit once the message handed over its last value.
-    fn finish(self) -> IngestMetadataResult<()> {
+    /// The outcome of the visit once the message handed over its last value: the refusal of a
+    /// message that handed a read field a value its type cannot hold, or none.
+    fn finish(self) -> IngestMetadataResult<Option<IngestMetadataRefusal>> {
         match self.fault {
             Some(MetadataVisitFault::Type { field, found }) => {
                 Err(Report::new(IngestMetadataError::ValueType {
@@ -342,18 +429,57 @@ impl ProjectedMetadataValues<'_> {
                     declared: self.projection.columns.len(),
                 }))
             }
+            Some(MetadataVisitFault::Deferred { field, visited }) => {
+                Err(Report::new(IngestMetadataError::DeferredValues {
+                    field: field.name(),
+                    visited,
+                }))
+            }
             None if self.visited != self.projection.columns.len() => {
                 Err(Report::new(IngestMetadataError::MissingValues {
                     declared: self.projection.columns.len(),
                     visited: self.visited,
                 }))
             }
-            None => Ok(()),
+            None => Ok(self.refusal),
         }
     }
 }
 
 impl IngestMetadataValues for ProjectedMetadataValues<'_> {
+    fn deferred(&mut self, ty: IngestorMetadataType, emit: &dyn Fn(&mut dyn IngestMetadataValues)) {
+        if self.fault.is_some() {
+            return;
+        }
+        let before = self.visited;
+        let Some(column) = self.projection.columns.get(before).copied() else {
+            self.fault = Some(MetadataVisitFault::Excess);
+            return;
+        };
+        let Some(column) = column else {
+            self.next_read_column(ty);
+            return;
+        };
+        let field = self.read_field(column);
+        if field.ty() != ty {
+            self.next_read_column(ty);
+            return;
+        }
+        emit(self);
+        let expected = before
+            .checked_add(1)
+            .assured("the declared field has a next position");
+        if self.fault.is_none() && self.visited != expected {
+            self.fault = Some(MetadataVisitFault::Deferred {
+                field,
+                visited: self
+                    .visited
+                    .checked_sub(before)
+                    .assured("metadata visitors only advance their cursor"),
+            });
+        }
+    }
+
     fn string(&mut self, value: &str) {
         if let Some(IngestMetadataColumnBuilder::String(builder)) =
             self.next_column(IngestorMetadataType::String)
@@ -393,9 +519,25 @@ impl IngestMetadataValues for ProjectedMetadataValues<'_> {
         }
     }
 
+    fn u8(&mut self, value: u8) {
+        if let Some(IngestMetadataColumnBuilder::U8(builder)) =
+            self.next_column(IngestorMetadataType::U8)
+        {
+            builder.append_value(value);
+        }
+    }
+
     fn u16(&mut self, value: u16) {
         if let Some(IngestMetadataColumnBuilder::U16(builder)) =
             self.next_column(IngestorMetadataType::U16)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn u32(&mut self, value: u32) {
+        if let Some(IngestMetadataColumnBuilder::U32(builder)) =
+            self.next_column(IngestorMetadataType::U32)
         {
             builder.append_value(value);
         }
@@ -412,6 +554,14 @@ impl IngestMetadataValues for ProjectedMetadataValues<'_> {
     fn i64(&mut self, value: i64) {
         if let Some(IngestMetadataColumnBuilder::I64(builder)) =
             self.next_column(IngestorMetadataType::I64)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn u64(&mut self, value: u64) {
+        if let Some(IngestMetadataColumnBuilder::U64(builder)) =
+            self.next_column(IngestorMetadataType::U64)
         {
             builder.append_value(value);
         }
@@ -444,6 +594,42 @@ impl IngestMetadataValues for ProjectedMetadataValues<'_> {
                 .append_null();
         }
     }
+
+    /// A read field's column holds a null for the value, and the message is refused naming the
+    /// first such field; an unread field takes nothing, so its value refuses nothing.
+    fn unrepresentable(&mut self, ty: IngestorMetadataType, value: &dyn fmt::Display) {
+        let Some(column) = self.next_read_column(ty) else {
+            return;
+        };
+        let field = self.read_field(column);
+        self.columns
+            .get_mut(column)
+            .assured("the projection builds one column for every field it reads")
+            .append_null();
+        if self.refusal.is_none() {
+            self.refusal = Some(IngestMetadataRefusal {
+                field,
+                value: MetadataRefusalValue::Unrepresentable(value.to_string()),
+            });
+        }
+    }
+
+    fn invalid(&mut self, ty: IngestorMetadataType, failure: &IngestMetadataFailure) {
+        let Some(column) = self.next_read_column(ty) else {
+            return;
+        };
+        let field = self.read_field(column);
+        self.columns
+            .get_mut(column)
+            .assured("the projection builds one column for every field it reads")
+            .append_null();
+        if self.refusal.is_none() {
+            self.refusal = Some(IngestMetadataRefusal {
+                field,
+                value: MetadataRefusalValue::Invalid(failure.clone()),
+            });
+        }
+    }
 }
 
 /// Arrow builders for one ingest group's metadata columns.
@@ -458,6 +644,9 @@ pub(super) struct IngestMetadataBuilders {
     pub(super) header_names: ListBuilder<StringBuilder>,
     pub(super) header_values: ListBuilder<StringBuilder>,
     pub(super) rows: usize,
+    /// The refusal of each appended message that handed a read field a value its type cannot
+    /// hold, by its row.
+    refusals: BTreeMap<usize, IngestMetadataRefusal>,
 }
 
 // Counted per thread so a test observes only the groups it opened itself, while the rest of
@@ -473,7 +662,7 @@ nervix_primitives::thread_local! {
 impl IngestMetadataBuilders {
     /// Opens a builder set for `projection`, sizing the read fields' columns for `row_bound` rows.
     ///
-    /// Header builders start empty because most sources carry no headers at all.
+    /// Header builders start empty because most ingestors carry no headers at all.
     #[inline(never)]
     pub(super) fn new(projection: Arc<IngestMetadataProjection>, row_bound: usize) -> Self {
         let columns = projection
@@ -491,18 +680,17 @@ impl IngestMetadataBuilders {
             header_names: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
             header_values: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
             rows: 0,
+            refusals: BTreeMap::new(),
         }
     }
 
-    // Keep Arrow's builder machinery behind this boundary. Inlining it into the source collector
+    // Keep Arrow's builder machinery behind this boundary. Inlining it into the ingestor collector
     // doubles that per-message function's machine code and measurably reduces ingest throughput.
     #[inline(never)]
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(
-            reason = "the source supplies its metadata values and transport header visitor; this \
-                      host appends the bounded row metadata"
-        )
+        nervix::dispatch(reason = "the ingestor supplies its metadata values and transport \
+                                   header visitor; this host appends the bounded row metadata")
     )]
     pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
         if self.projection.reads_any() {
@@ -511,9 +699,12 @@ impl IngestMetadataBuilders {
                 columns: &mut self.columns,
                 visited: 0,
                 fault: None,
+                refusal: None,
             };
             row.fields.visit_metadata(&mut values);
-            values.finish()?;
+            if let Some(refusal) = values.finish()? {
+                self.refusals.insert(self.rows, refusal);
+            }
         }
         let (names, values) = (&mut self.header_names, &mut self.header_values);
         row.headers.headers().visit(&mut |name, value| {
@@ -547,6 +738,7 @@ impl IngestMetadataBuilders {
         })?;
         let header_names: ArrayRef = StdArc::new(self.header_names.finish());
         let header_values: ArrayRef = StdArc::new(self.header_values.finish());
+        let refusals = std::mem::take(&mut self.refusals);
         if header_names.len() != rows || header_values.len() != rows {
             return Err(Report::new(IngestMetadataError::HeaderRowCountMismatch {
                 integration_rows: rows,
@@ -559,6 +751,7 @@ impl IngestMetadataBuilders {
                 integration_fields,
                 header_names,
                 header_values,
+                refusals,
             }),
             rows: Arc::new((0..rows).collect()),
         })
@@ -601,6 +794,18 @@ impl IngestFilterMapMetadata {
 
     pub(super) fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    /// Whether any message these columns were built from is refused, selected by this view or not.
+    pub(super) fn refuses_any(&self) -> bool {
+        !self.columns.refusals.is_empty()
+    }
+
+    /// The refusal of the message at `row`, where a field its ingestor's programs read holds a value
+    /// that field's type cannot hold.
+    pub(super) fn refusal(&self, row: usize) -> Option<&IngestMetadataRefusal> {
+        let physical_row = self.rows.get(row)?;
+        self.columns.refusals.get(physical_row)
     }
 
     pub(super) fn row(&self, row: usize) -> Option<Self> {
@@ -1431,7 +1636,7 @@ mod tests {
             client: named("logic_kafka"),
             topic: named("logic_notifications"),
             offset_mode: nervix_models::KafkaOffsetMode::Domain,
-            instances: nonzero!(1u64),
+            instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
             mode: nervix_models::KafkaIngestMode::AckSequential {
                 timeout: "5s".to_string(),
                 retry_policy: RetryPolicy {

@@ -6,7 +6,7 @@
 //!   queued, their fair admission into the ingestor's one acknowledgement window, the ACK root of
 //!   every admitted batch and its terminal outcome, the admission state producers are told, the
 //!   end of their attachments, and the node's byte budget for producer payloads.
-//! - **Depends on.** Typed client source plans, the ingestor's bound routes and quiesce control,
+//! - **Depends on.** Typed client ingestor plans, the ingestor's bound routes and quiesce control,
 //!   the ingest group executor, ACK roots, and Arrow body decoding.
 //! - **Must not know.** Sessions, the session or interconnect wire, Plexus, or how a producer
 //!   reached this node.
@@ -50,7 +50,7 @@ use nervix_models::{
     ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
     ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
     ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    MAX_CLIENT_BATCH_ROWS, SchemaField,
+    SchemaField,
 };
 use nervix_primitives::sync::atomic::AtomicU64;
 
@@ -408,6 +408,7 @@ enum EndpointCommand {
 }
 
 struct AttachCommand {
+    max_batch_rows: NonZeroU32,
     expected_fields: Vec<SchemaField>,
     limits: ClientProducerLimits,
     max_batch_bytes: NonZeroU64,
@@ -436,6 +437,7 @@ struct AttachedProducer {
 
 /// One batch the endpoint hands its admission worker.
 struct AdmissionJob {
+    max_batch_rows: NonZeroU32,
     attachment: ClientAttachmentId,
     submission: ClientSubmissionId,
     body: Bytes,
@@ -534,6 +536,7 @@ impl Attachment {
             submission: batch.submission,
             body: batch.body,
             max_batch_bytes: self.grant.max_batch_bytes,
+            max_batch_rows: self.grant.max_batch_rows,
         }
     }
 
@@ -664,7 +667,10 @@ impl Runtime {
             max_batch_bytes,
             retention,
         } = request;
-        if !limits.is_within_bounds() {
+        let parameters = self.cluster_parameters();
+        if !limits.is_within_bounds()
+            || limits.bytes.get() > parameters.client_producer_session_bytes()
+        {
             return Err(ClientProducerRefusal::InvalidLimits);
         }
         let key = DomainNodeRef::node_in(domain, ModelKind::Ingestor, ingestor);
@@ -687,6 +693,11 @@ impl Runtime {
         };
         let (reply, attached) = oneshot::channel();
         let command = EndpointCommand::Attach(AttachCommand {
+            max_batch_rows: NonZeroU32::new(
+                u32::try_from(parameters.client_batch_rows())
+                    .assured("the committed row count fits its wire representation"),
+            )
+            .assured("the committed row count is positive"),
             expected_fields,
             limits,
             max_batch_bytes,
@@ -739,11 +750,7 @@ impl Runtime {
             &ModelName::from(&ingestor.name),
             branched_templates,
         );
-        let readiness = self
-            .prepare_ingestor_readiness(domain, &ingestor.name, NonZeroU64::MIN)
-            .into_iter()
-            .next()
-            .assured("the client source has one declared instance");
+        let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, Unit::SINGLE);
         let (shutdown_tx, _) = watch::channel(false);
         let (jobs, job_receiver) = mpsc::channel(1);
         let execution = Arc::new(ClientExecution {
@@ -767,7 +774,7 @@ impl Runtime {
             branched_senders: branched_runtime.senders.clone(),
             metrics,
             quiesce: quiesce.clone(),
-            trackers: self.ingestor_ack_root_trackers(domain, &ingestor.name),
+            trackers: self.ingestor_ack_root_trackers(domain, &ingestor.name, Unit::SINGLE),
             ack_timeout: plan.policy.ack_timeout,
         };
         if commands.send(EndpointCommand::Install(execution)).is_err() {
@@ -894,7 +901,11 @@ impl Runtime {
             .collect::<Vec<_>>();
         for key in keys {
             nervix_primitives::task::consume_budget().await;
-            if self.inner.ingestors.contains_key(&key) {
+            if self
+                .inner
+                .ingestors
+                .contains_key(&DomainNodeUnitRef::single(key.clone()))
+            {
                 continue;
             }
             let Some(reason) = self.client_endpoint_end_reason(&key, local_node_id) else {
@@ -963,7 +974,11 @@ impl Runtime {
             return Some(ClientProducerEndReason::DomainStopped);
         };
         let ingestor = IngestorName::from(key.identifier());
-        let Some(plan) = execution.revision.entrypoints.ingestor(&ingestor) else {
+        let Some(plan) = execution
+            .revision
+            .entrypoints
+            .ingestor(&ingestor, Unit::SINGLE)
+        else {
             return Some(ClientProducerEndReason::EndpointRemoved);
         };
         if let IngestorInputPlan::Transport(_) = plan.input {
@@ -1041,13 +1056,20 @@ impl Endpoint {
 
     fn attach(&mut self, attach: AttachCommand) {
         let AttachCommand {
+            max_batch_rows,
             expected_fields,
             limits,
             max_batch_bytes,
             serving,
             reply,
         } = attach;
-        let attached = self.attached_producer(expected_fields, limits, max_batch_bytes, serving);
+        let attached = self.attached_producer(
+            expected_fields,
+            limits,
+            max_batch_bytes,
+            max_batch_rows,
+            serving,
+        );
         if reply.send(attached).is_err() {
             // The open was cancelled before its answer arrived; the new attachment has no
             // producer and is released.
@@ -1064,6 +1086,7 @@ impl Endpoint {
         expected_fields: Vec<SchemaField>,
         limits: ClientProducerLimits,
         max_batch_bytes: NonZeroU64,
+        max_batch_rows: NonZeroU32,
         serving: ProducerServing,
     ) -> Result<AttachedProducer, ClientProducerRefusal> {
         let Some(execution) = self.execution.clone() else {
@@ -1077,8 +1100,7 @@ impl Endpoint {
             batches: limits.batches,
             bytes: limits.bytes,
             max_batch_bytes,
-            max_batch_rows: NonZeroU32::new(MAX_CLIENT_BATCH_ROWS)
-                .assured("the row limit is a non-zero constant"),
+            max_batch_rows,
         };
         let admission_state = self.intake.admission();
         let (events, outcomes) = mpsc::unbounded_channel();
@@ -1840,8 +1862,8 @@ impl ClientIntake {
     async fn admit(&self, job: AdmissionJob) -> AdmissionResult {
         let limits = ClientBatchLimits {
             max_bytes: job.max_batch_bytes,
-            max_rows: NonZeroUsize::new(MAX_CLIENT_BATCH_ROWS.arch_into())
-                .assured("the row limit is a non-zero constant"),
+            max_rows: NonZeroUsize::new(job.max_batch_rows.get().arch_into())
+                .assured("an attachment grants a positive row limit"),
         };
         let decoded = self
             .schema
@@ -1928,7 +1950,7 @@ impl IngestorQuiesceControl {
         Ok((root, completion))
     }
 
-    /// Whether a client source admits a batch under the current publication. An ownership
+    /// Whether a client ingestor admits a batch under the current publication. An ownership
     /// handoff or a shutdown stops intake for good on this execution; every other hold is a
     /// suspension that the release ends.
     pub(in crate::runtime) fn client_intake_state(&self) -> ClientIntakeState {

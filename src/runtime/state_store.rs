@@ -87,21 +87,21 @@ const STATE_SCHEMA_KEY_MARKER: u8 = b's';
     nervix_lint,
     nervix::constant(fixed, reason = "unit identity is part of the stored key format")
 )]
-const STATE_UNIT_KEY_MARKER: u8 = b'u';
+const STATE_UNIT_KEY_MARKER: u8 = b'U';
 
 fn append_unit_key(key: &mut Vec<u8>, unit: Unit) {
     key.push(0);
     key.push(STATE_UNIT_KEY_MARKER);
-    match unit {
-        Unit::Single => {
+    match unit.kind() {
+        nervix_models::UnitKind::Single => {
             key.push(0);
             key.extend_from_slice(&0_u32.to_be_bytes());
         }
-        Unit::Partition(partition) => {
+        nervix_models::UnitKind::Partition(partition) => {
             key.push(1);
             key.extend_from_slice(&partition.to_be_bytes());
         }
-        Unit::Instance(instance) => {
+        nervix_models::UnitKind::Instance(instance) => {
             key.push(2);
             key.extend_from_slice(&instance.to_be_bytes());
         }
@@ -139,7 +139,7 @@ impl fmt::Display for RuntimeStatePlacement {
             self.kind.as_str(),
             self.identifier.as_str()
         )?;
-        if self.unit != Unit::Single {
+        if self.unit != Unit::SINGLE {
             write!(formatter, " unit {:?}", self.unit)?;
         }
         write!(formatter, " in domain '{}'", self.domain.as_str())
@@ -751,6 +751,8 @@ impl PersistedRuntimeStateEntry {
 /// the serializer's error, or the [`StoredStateIssue`] the stored bytes have, as its cause.
 #[derive(Debug, Error)]
 pub(crate) enum RuntimePersistenceError {
+    #[error("runtime settings do not satisfy their definitions")]
+    InvalidRuntimeSettings,
     #[error("runtime state storage has an invalid format; recreate the node state directory")]
     InvalidStorageFormat,
     #[error("checkpoint placement exceeds the bounded storage key size")]
@@ -956,10 +958,8 @@ impl LatestSnapshotWriter {
             let placement_key = namespace.key(placement)?;
             // A periodic encode can finish after the backup's forced publication. Preserve the
             // greater revision even when storage workers complete in the opposite order.
-            if self
-                .latest_lsm(placement)?
-                .is_some_and(|current| current > lsm || require_newer && current == lsm)
-            {
+            let current_lsm = self.latest_lsm(placement)?;
+            if current_lsm.is_some_and(|current| current > lsm || require_newer && current == lsm) {
                 return Ok(false);
             }
             let entry = PersistedRuntimeStateEntry {
@@ -967,16 +967,21 @@ impl LatestSnapshotWriter {
                 payload: payload.to_vec(),
             };
             let encoded = StoredCheckpoint::Inline(entry).encode()?;
-            self.latest
-                .insert(placement_key.clone(), encoded)
-                .map_err(|cause| {
-                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
-                })?;
-            self.lsm_index
-                .insert(index_key(&placement_key, lsm), placement_key)
-                .map_err(|cause| {
-                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
-                })?;
+            let mut batch = self.db.batch();
+            batch.insert(&self.latest, placement_key.clone(), encoded);
+            if let Some(previous_lsm) = current_lsm
+                && previous_lsm != lsm
+            {
+                batch.remove(&self.lsm_index, index_key(&placement_key, previous_lsm));
+            }
+            batch.insert(
+                &self.lsm_index,
+                index_key(&placement_key, lsm),
+                placement_key,
+            );
+            batch.commit().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })?;
             Ok(true)
         })
     }
@@ -2100,6 +2105,35 @@ impl RuntimeStateStore {
         Ok(Some(decoded))
     }
 
+    /// The units with a current checkpoint for this exact entity and state kind. Reading only
+    /// keys keeps inspection independent of the size of the retained checkpoints.
+    pub(in crate::runtime) fn stored_units(
+        &self,
+        domain: &DomainName,
+        state: RuntimeStateKind,
+        kind: ModelKind,
+        identifier: &ModelName,
+    ) -> error_stack::Result<Vec<Unit>, RuntimePersistenceError> {
+        let view = self.db.snapshot();
+        let namespace = backup::active_namespace(&view, &self.restore_publications, domain)?;
+        let mut prefix = namespace.prefix(domain);
+        prefix.extend_from_slice(domain.as_str().as_bytes());
+        prefix.extend_from_slice(&[0, u8::from(state), 0]);
+        prefix.extend_from_slice(kind.as_str().as_bytes());
+        prefix.push(0);
+        prefix.extend_from_slice(identifier.as_str().as_bytes());
+        prefix.push(0);
+        let mut units = BTreeSet::new();
+        for item in view.prefix(&self.latest, prefix) {
+            let key = item
+                .key()
+                .change_context(RuntimePersistenceError::ReadValue)?;
+            let (_, placement) = physical_placement(&key)?;
+            units.insert(placement.unit);
+        }
+        Ok(units.into_iter().collect())
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -2241,6 +2275,52 @@ impl RuntimeStateStore {
     }
 }
 
+/// What one domain's selected namespace holds in a runtime state store: the checkpoints it selects,
+/// one for every placement it stores, and the revision-index entries kept beside them.
+#[cfg(feature = "testing")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredRevisionIndex {
+    /// The selected checkpoints, one for every stored placement.
+    pub checkpoints: usize,
+    /// The revision-index entries beside those checkpoints.
+    pub index_entries: usize,
+}
+
+#[cfg(feature = "testing")]
+impl RuntimeStateStore {
+    /// Counts what `domain`'s selected namespace holds, reading both counts from one view.
+    pub(in crate::runtime) fn stored_revision_index(
+        &self,
+        domain: &DomainName,
+    ) -> error_stack::Result<StoredRevisionIndex, RuntimePersistenceError> {
+        let view = self.db.snapshot();
+        let namespace = backup::active_namespace(&view, &self.restore_publications, domain)?;
+        let prefix = namespace.prefix(domain);
+        let checkpoints = Self::count_keys(&view, &self.latest, &prefix)?;
+        let index_entries = Self::count_keys(&view, &self.lsm_index, &prefix)?;
+        Ok(StoredRevisionIndex {
+            checkpoints,
+            index_entries,
+        })
+    }
+
+    fn count_keys(
+        view: &fjall::Snapshot,
+        keyspace: &Keyspace,
+        prefix: &[u8],
+    ) -> error_stack::Result<usize, RuntimePersistenceError> {
+        let mut count = 0_usize;
+        for item in view.prefix(keyspace, prefix) {
+            item.key()
+                .change_context(RuntimePersistenceError::ReadValue)?;
+            count = count
+                .checked_add(1)
+                .assured("a database holds fewer keys than a usize counts");
+        }
+        Ok(count)
+    }
+}
+
 /// The placement a stored runtime-state key encodes: which state and lifetime it is, including the
 /// schema fingerprint of schema-bound state, which model owns it, and the branch it belongs to.
 pub(in crate::runtime) struct StoredPlacement {
@@ -2310,24 +2390,39 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
     if key.get(unit_start) != Some(&STATE_UNIT_KEY_MARKER) {
         return Err(StoredStateIssue::KeyUnitMarker.decode_failure());
     }
+    let tag = key.get(unit_start + 1).copied();
+    let ordinal_bytes = match tag {
+        Some(0 | 1) => 4,
+        Some(2) => 8,
+        _ => return Err(StoredStateIssue::KeyUnitInvalid.decode_failure()),
+    };
     let unit_end = unit_start
-        .checked_add(7)
-        .verified("an index into an allocated key leaves room for a seven-byte unit segment");
+        .checked_add(3 + ordinal_bytes)
+        .verified("the checked unit segment fits an allocated key");
     let unit_segment = key
         .get(unit_start..unit_end)
         .ok_or_else(|| StoredStateIssue::KeyUnitTruncated.decode_failure())?;
-    if unit_segment[6] != 0 {
+    if unit_segment[2 + ordinal_bytes] != 0 {
         return Err(StoredStateIssue::KeyUnitSeparator.decode_failure());
     }
-    let ordinal = u32::from_be_bytes(
-        unit_segment[2..6]
-            .try_into()
-            .verified("the checked unit segment contains four ordinal bytes"),
-    );
-    let unit = match (unit_segment[1], ordinal) {
-        (0, 0) => Unit::Single,
-        (1, partition) => Unit::Partition(partition),
-        (2, instance) => Unit::Instance(instance),
+    let ordinal = &unit_segment[2..2 + ordinal_bytes];
+    let unit = match tag {
+        Some(0) if ordinal == [0; 4] => Unit::SINGLE,
+        Some(1) => Unit::partition(u32::from_be_bytes(
+            ordinal
+                .try_into()
+                .verified("a partition ordinal has four bytes"),
+        )),
+        Some(2) => Unit::try_instance(u64::from_be_bytes(
+            ordinal
+                .try_into()
+                .verified("an instance ordinal has eight bytes"),
+        ))
+        .map_err(|cause| {
+            Report::new(cause)
+                .change_context(StoredStateIssue::KeyUnitInvalid)
+                .change_context(RuntimePersistenceError::DecodeState)
+        })?,
         _ => return Err(StoredStateIssue::KeyUnitInvalid.decode_failure()),
     };
     let lifetime_start = unit_end;

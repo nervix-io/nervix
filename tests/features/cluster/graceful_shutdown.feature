@@ -155,23 +155,23 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA handoff_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA handoff_wire MODE STRICT ( event_id integer );
-      CREATE CODEC handoff_codec
-        FROM WIRE JSON SCHEMA handoff_wire TO SCHEMA handoff_event;
+      CREATE WIRE JSON CODEC handoff_codec
+        FROM WIRE SCHEMA handoff_wire TO SCHEMA handoff_event;
       CREATE RELAY handoff_records SCHEMA handoff_event UNBRANCHED CAPACITY 1;
       CREATE KAFKA CLIENT handoff_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR handoff_source
+      CREATE KAFKA TOPIC INGESTOR handoff_ingestor
         FROM handoff_kafka TOPIC 'shutdown_handoff_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'shutdown_handoff_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_handoff_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING handoff_codec
         TO handoff_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER handoff_output FROM handoff_records
+      CREATE KAFKA TOPIC EMITTER handoff_output FROM handoff_records
+        ATTACHED
         TO handoff_kafka TOPIC 'shutdown_handoff_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_codec
@@ -195,7 +195,7 @@ Feature: Graceful shutdown
     Given ownership handoff for domain "{{domain}}" pauses after requesting flush
     When node "node-1" begins stopping
     Then the ownership handoff flush pause for domain "{{domain}}" is reached
-    And within "5s" node "node-2" eventually reports describe ingestor "handoff_source" as "quiesce state: shutdown"
+    And within "5s" node "node-2" eventually reports describe ingestor "handoff_ingestor" as "quiesce state: shutdown"
     When emitter "handoff_output" leaves stall mode
     And the ownership handoff flush pause for domain "{{domain}}" is released
     And node "node-1" is stopped
@@ -212,11 +212,11 @@ Feature: Graceful shutdown
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "ingestor" "handoff_source" is saved as placeholder "handoff_source_destination"
+    Then the last cluster status owner for scheduled "ingestor" "handoff_ingestor" is saved as placeholder "handoff_source_destination"
     And the last cluster status owner for scheduled "emitter" "handoff_output" is saved as placeholder "handoff_emitter_destination"
     And the last command output contains
       """
-      kind=ingestor name=handoff_source owner={{handoff_source_destination}} replicas=- transition_from=node-1 state_recovery=complete
+      kind=ingestor name=handoff_ingestor unit=instance:0 owner={{handoff_source_destination}} replicas=- transition_from=node-1 state_recovery=complete
       """
     And the last command output contains
       """
@@ -239,23 +239,23 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA flush_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA flush_wire MODE STRICT ( event_id integer );
-      CREATE CODEC flush_codec
-        FROM WIRE JSON SCHEMA flush_wire TO SCHEMA flush_event;
+      CREATE WIRE JSON CODEC flush_codec
+        FROM WIRE SCHEMA flush_wire TO SCHEMA flush_event;
       CREATE RELAY flush_records SCHEMA flush_event UNBRANCHED CAPACITY 1;
       CREATE KAFKA CLIENT flush_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR flush_source
+      CREATE KAFKA TOPIC INGESTOR flush_ingestor
         FROM flush_kafka TOPIC 'shutdown_flush_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'shutdown_flush_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_flush_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING flush_codec
         TO flush_records INHERIT ALL UNBRANCHED
           FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER flush_output FROM flush_records
+      CREATE KAFKA TOPIC EMITTER flush_output FROM flush_records
+        ATTACHED
         TO flush_kafka TOPIC 'shutdown_flush_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING flush_codec
@@ -264,16 +264,16 @@ Feature: Graceful shutdown
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    Given ingestor "flush_source" pauses before polling its route
+    Given ingestor "flush_ingestor" pauses before polling its route
     When these Kafka messages are rapidly published to topic "shutdown_flush_in_{{test_id}}"
       """
       {"event_id":1}
       """
-    Then ingestor "flush_source" reaches the route poll pause
+    Then ingestor "flush_ingestor" reaches the route poll pause
     Given ownership handoff for domain "{{domain}}" pauses after requesting flush
     When node "node-1" begins stopping
     Then the ownership handoff flush pause for domain "{{domain}}" is reached
-    When ingestor "flush_source" leaves the route poll pause
+    When ingestor "flush_ingestor" leaves the route poll pause
     And the ownership handoff flush pause for domain "{{domain}}" is released
     And node "node-1" is stopped
     Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
@@ -338,16 +338,16 @@ Feature: Graceful shutdown
         transaction_id string,
         amount integer
       );
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge follower-drain-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/follower-drain' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/follower-drain';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
@@ -480,14 +480,14 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA shutdown_ack_event ( id I64 );
       CREATE WIRE JSON SCHEMA shutdown_ack_wire MODE STRICT ( id integer );
-      CREATE CODEC shutdown_ack_codec
-        FROM WIRE JSON SCHEMA shutdown_ack_wire
+      CREATE WIRE JSON CODEC shutdown_ack_codec
+        FROM WIRE SCHEMA shutdown_ack_wire
         TO SCHEMA shutdown_ack_event;
       CREATE RELAY shutdown_ack_input SCHEMA shutdown_ack_event UNBRANCHED;
       CREATE RELAY shutdown_ack_output SCHEMA shutdown_ack_event UNBRANCHED;
       CREATE VHOST edge shutdown-ack-{{test_id}}.example.com;
-      CREATE ENDPOINT shutdown_ack_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR shutdown_ack_source
+      CREATE HTTP ENDPOINT shutdown_ack_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR shutdown_ack_ingestor
         FROM shutdown_ack_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shutdown_ack_codec
         TO shutdown_ack_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -498,23 +498,23 @@ Feature: Graceful shutdown
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER shutdown_ack_output_sink FROM shutdown_ack_output
+      CREATE ZEROMQ PUSH EMITTER shutdown_ack_output_emitter FROM shutdown_ack_output
         TO shutdown_ack_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING shutdown_ack_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE PLACEMENT keep_shutdown_ack_downstream_local
-        FROM shutdown_ack_route TO shutdown_ack_output_sink REQUIRE COLOCATION;
+        FROM shutdown_ack_route TO shutdown_ack_output_emitter REQUIRE COLOCATION;
       START;
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       SHOW CLUSTER STATUS;
       """
-    Then node "node-1" eventually reports status containing "kind=ingestor name=shutdown_ack_source owner=- replicas=node"
+    Then node "node-1" eventually reports status containing "kind=ingestor name=shutdown_ack_ingestor owner=- replicas=node"
     When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
-    Then the first replica for scheduled "ingestor" "shutdown_ack_source" in the last cluster status is saved as placeholder "shutdown_ack_source_owner"
+    Then the first replica for scheduled "ingestor" "shutdown_ack_ingestor" in the last cluster status is saved as placeholder "shutdown_ack_source_owner"
     And a node other than placeholder "shutdown_ack_source_owner" is saved as placeholder "shutdown_ack_downstream_owner"
     When these Plexus commands are executed on the leader node
       """
@@ -551,14 +551,14 @@ Feature: Graceful shutdown
       """
       CREATE SCHEMA held_event ( sequence I64, tenant STRING );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer, tenant string );
-      CREATE CODEC held_event_codec
-        FROM WIRE JSON SCHEMA held_event_wire
+      CREATE WIRE JSON CODEC held_event_codec
+        FROM WIRE SCHEMA held_event_wire
         TO SCHEMA held_event;
       CREATE RELAY held_ingested SCHEMA held_event UNBRANCHED;
       CREATE RELAY held_routed SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-shutdown-{{test_id}}.example.com;
-      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TIMESTAMP NOW
@@ -617,11 +617,11 @@ Feature: Graceful shutdown
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE WIRE JSON CODEC held_event_codec FROM WIRE SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-finish-{{test_id}}.example.com;
-      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TIMESTAMP NOW
@@ -690,20 +690,19 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA shutdown_order ( order_id I64, tenant STRING );
       CREATE WIRE JSON SCHEMA shutdown_order_wire MODE STRICT ( order_id integer, tenant string );
-      CREATE CODEC shutdown_order_codec
-        FROM WIRE JSON SCHEMA shutdown_order_wire
+      CREATE WIRE JSON CODEC shutdown_order_codec
+        FROM WIRE SCHEMA shutdown_order_wire
         TO SCHEMA shutdown_order;
       CREATE SCHEMA shutdown_tenant ( tenant STRING );
       CREATE BRANCH by_shutdown_tenant SCHEMA shutdown_tenant TTL 5m;
       CREATE RELAY shutdown_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE RELAY shutdown_unique_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE KAFKA CLIENT shutdown_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR shutdown_order_source
+      CREATE KAFKA TOPIC INGESTOR shutdown_order_ingestor
         FROM shutdown_kafka TOPIC 'shutdown_orders_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_orders_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_orders_{{test_id}}' START AT EARLIEST
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING shutdown_order_codec
@@ -777,22 +776,21 @@ Feature: Graceful shutdown
     And a 1 node nervix cluster is started
     And Kafka topic "shutdown_confirm_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "shutdown_confirm_out_{{test_id}}" is observed
-    And the transport of ingestor "confirm_source" takes "10s" to confirm its acknowledgements
+    And the transport of ingestor "confirm_ingestor" takes "10s" to confirm its acknowledgements
     When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA confirm_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA confirm_wire MODE STRICT ( event_id integer );
-      CREATE CODEC confirm_codec
-        FROM WIRE JSON SCHEMA confirm_wire TO SCHEMA confirm_event;
+      CREATE WIRE JSON CODEC confirm_codec
+        FROM WIRE SCHEMA confirm_wire TO SCHEMA confirm_event;
       CREATE RELAY confirm_records SCHEMA confirm_event UNBRANCHED;
       CREATE KAFKA CLIENT confirm_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR confirm_source
+      CREATE KAFKA TOPIC INGESTOR confirm_ingestor
         FROM confirm_kafka TOPIC 'shutdown_confirm_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'shutdown_confirm_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_confirm_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING confirm_codec
@@ -827,7 +825,7 @@ Feature: Graceful shutdown
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_confirm_handoff_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "shutdown_confirm_handoff_out_{{test_id}}" is observed
-    And the transport of ingestor "handoff_confirm_source" takes "10s" to confirm its acknowledgements
+    And the transport of ingestor "handoff_confirm_ingestor" takes "10s" to confirm its acknowledgements
     When these Plexus commands are executed on the leader node
       """
       CORDON NODE node-2;
@@ -835,16 +833,15 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA handoff_confirm_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA handoff_confirm_wire MODE STRICT ( event_id integer );
-      CREATE CODEC handoff_confirm_codec
-        FROM WIRE JSON SCHEMA handoff_confirm_wire TO SCHEMA handoff_confirm_event;
+      CREATE WIRE JSON CODEC handoff_confirm_codec
+        FROM WIRE SCHEMA handoff_confirm_wire TO SCHEMA handoff_confirm_event;
       CREATE RELAY handoff_confirm_records SCHEMA handoff_confirm_event UNBRANCHED;
       CREATE KAFKA CLIENT handoff_confirm_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR handoff_confirm_source
+      CREATE KAFKA TOPIC INGESTOR handoff_confirm_ingestor
         FROM handoff_confirm_kafka TOPIC 'shutdown_confirm_handoff_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'shutdown_confirm_handoff_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_confirm_handoff_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING handoff_confirm_codec
@@ -891,17 +888,16 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA refused_stop_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA refused_stop_wire MODE STRICT ( event_id integer );
-      CREATE CODEC refused_stop_codec
-        FROM WIRE JSON SCHEMA refused_stop_wire TO SCHEMA refused_stop_event;
+      CREATE WIRE JSON CODEC refused_stop_codec
+        FROM WIRE SCHEMA refused_stop_wire TO SCHEMA refused_stop_event;
       CREATE RELAY refused_stop_records SCHEMA refused_stop_event UNBRANCHED;
       CREATE KAFKA CLIENT refused_stop_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
-        'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '10000'
       };
-      CREATE KAFKA TOPIC INGESTOR refused_stop_source
+      CREATE KAFKA TOPIC INGESTOR refused_stop_ingestor
         FROM refused_stop_kafka TOPIC 'refused_stop_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'refused_stop_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'refused_stop_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING refused_stop_codec
@@ -927,7 +923,7 @@ Feature: Graceful shutdown
       """
     When these Plexus commands are executed on the leader node
       """
-      DESCRIBE INGESTOR refused_stop_source;
+      DESCRIBE INGESTOR refused_stop_ingestor;
       """
     Then the last command output owner is saved as placeholder "refused_stop_owner"
     When node "{{refused_stop_owner}}" is gracefully stopped
@@ -959,16 +955,16 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA eligible_event ( sequence I64, tenant STRING );
       CREATE WIRE JSON SCHEMA eligible_event_wire MODE STRICT ( sequence integer, tenant string );
-      CREATE CODEC eligible_event_codec
-        FROM WIRE JSON SCHEMA eligible_event_wire
+      CREATE WIRE JSON CODEC eligible_event_codec
+        FROM WIRE SCHEMA eligible_event_wire
         TO SCHEMA eligible_event;
       CREATE RELAY eligible_ingested SCHEMA eligible_event UNBRANCHED;
       CREATE RELAY eligible_routed SCHEMA eligible_event UNBRANCHED;
       CREATE RELAY handoff_input SCHEMA eligible_event UNBRANCHED;
       CREATE RELAY handoff_output SCHEMA eligible_event UNBRANCHED;
       CREATE VHOST edge eligible-shutdown-{{test_id}}.example.com;
-      CREATE ENDPOINT eligible_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR eligible_source
+      CREATE HTTP ENDPOINT eligible_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR eligible_ingestor
         FROM eligible_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING eligible_event_codec
         TO eligible_ingested
@@ -1034,18 +1030,17 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA everyone_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA everyone_event_wire MODE STRICT ( event_id integer );
-      CREATE CODEC everyone_event_codec
-        FROM WIRE JSON SCHEMA everyone_event_wire
+      CREATE WIRE JSON CODEC everyone_event_codec
+        FROM WIRE SCHEMA everyone_event_wire
         TO SCHEMA everyone_event;
       CREATE RELAY everyone_ingested SCHEMA everyone_event UNBRANCHED;
       CREATE RELAY everyone_routed SCHEMA everyone_event UNBRANCHED;
       CREATE KAFKA CLIENT everyone_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR everyone_source
+      CREATE KAFKA TOPIC INGESTOR everyone_ingestor
         FROM everyone_kafka TOPIC 'shutdown_everyone_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_everyone_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_everyone_{{test_id}}' START AT EARLIEST
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING everyone_event_codec
@@ -1068,7 +1063,7 @@ Feature: Graceful shutdown
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE PLACEMENT everyone_together FROM everyone_source TO everyone_output REQUIRE COLOCATION;
+      CREATE PLACEMENT everyone_together FROM everyone_ingestor TO everyone_output REQUIRE COLOCATION;
       START;
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -1113,15 +1108,14 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA peer_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA peer_wire MODE STRICT ( event_id integer );
-      CREATE CODEC peer_codec FROM WIRE JSON SCHEMA peer_wire TO SCHEMA peer_event;
+      CREATE WIRE JSON CODEC peer_codec FROM WIRE SCHEMA peer_wire TO SCHEMA peer_event;
       CREATE RELAY peer_records SCHEMA peer_event UNBRANCHED;
       CREATE KAFKA CLIENT peer_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR peer_source
+      CREATE KAFKA TOPIC INGESTOR peer_ingestor
         FROM peer_kafka TOPIC 'terminating_peer_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'terminating_peer_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'terminating_peer_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING peer_codec
@@ -1165,7 +1159,7 @@ Feature: Graceful shutdown
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=peer_source owner=node-1
+      - domain={{domain}} kind=ingestor name=peer_ingestor unit=instance:0 owner=node-1
       """
     When these Plexus commands are executed on the leader node
       """
@@ -1194,16 +1188,15 @@ Feature: Graceful shutdown
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA unactivated_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA unactivated_wire MODE STRICT ( event_id integer );
-      CREATE CODEC unactivated_codec
-        FROM WIRE JSON SCHEMA unactivated_wire TO SCHEMA unactivated_event;
+      CREATE WIRE JSON CODEC unactivated_codec
+        FROM WIRE SCHEMA unactivated_wire TO SCHEMA unactivated_event;
       CREATE RELAY unactivated_records SCHEMA unactivated_event UNBRANCHED;
       CREATE KAFKA CLIENT unactivated_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR unactivated_source
+      CREATE KAFKA TOPIC INGESTOR unactivated_ingestor
         FROM unactivated_kafka TOPIC 'unactivated_handoff_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'unactivated_handoff_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'unactivated_handoff_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING unactivated_codec
@@ -1228,7 +1221,7 @@ Feature: Graceful shutdown
     Given ownership handoff for domain "{{domain}}" pauses before activation
     When these Plexus commands begin executing in the background
       """
-      RELOCATE INGESTOR unactivated_source ONTO NODE node-2 IGNORE PREFERENCES;
+      RELOCATE INGESTOR unactivated_ingestor ONTO NODE node-2 IGNORE PREFERENCES;
       """
     Then the ownership handoff activation pause for domain "{{domain}}" is reached
     When node "node-2" is stopped
@@ -1245,7 +1238,7 @@ Feature: Graceful shutdown
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=unactivated_source owner=node-2
+      - domain={{domain}} kind=ingestor name=unactivated_ingestor unit=instance:0 owner=node-2
       """
     When these Plexus commands are executed on the leader node
       """
@@ -1294,11 +1287,11 @@ Feature: Graceful shutdown
       CREATE SCHEMA tenant_total ( tenant STRING, total I64 );
       CREATE WIRE JSON SCHEMA tenant_amount_wire MODE STRICT ( amount integer, tenant string );
       CREATE WIRE JSON SCHEMA tenant_total_wire MODE STRICT ( tenant string, total integer );
-      CREATE CODEC tenant_amount_codec
-        FROM WIRE JSON SCHEMA tenant_amount_wire
+      CREATE WIRE JSON CODEC tenant_amount_codec
+        FROM WIRE SCHEMA tenant_amount_wire
         TO SCHEMA tenant_amount;
-      CREATE CODEC tenant_total_codec
-        FROM WIRE JSON SCHEMA tenant_total_wire
+      CREATE WIRE JSON CODEC tenant_total_codec
+        FROM WIRE SCHEMA tenant_total_wire
         TO SCHEMA tenant_total;
       CREATE SCHEMA generated_tenant ( tenant STRING );
       CREATE BRANCH by_generated_tenant SCHEMA generated_tenant TTL 5m;
@@ -1306,8 +1299,8 @@ Feature: Graceful shutdown
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_totals SCHEMA tenant_total BRANCHED BY by_generated_tenant;
       CREATE VHOST edge generated-shutdown-{{test_id}}.example.com;
-      CREATE ENDPOINT tenant_amount_ingress ON edge PATH '/amounts' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR tenant_amount_source
+      CREATE HTTP ENDPOINT tenant_amount_ingress ON edge PATH '/amounts';
+      CREATE HTTP ENDPOINT INGESTOR tenant_amount_ingestor
         FROM tenant_amount_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tenant_amount_codec
         TO tenant_amounts
@@ -1371,20 +1364,19 @@ Feature: Graceful shutdown
       """
       CREATE SCHEMA wait_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
-      CREATE CODEC wait_event_codec
-        FROM WIRE JSON SCHEMA wait_event_wire
+      CREATE WIRE JSON CODEC wait_event_codec
+        FROM WIRE SCHEMA wait_event_wire
         TO SCHEMA wait_event;
       CREATE RELAY wait_state SCHEMA wait_event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
       CREATE KAFKA CLIENT wait_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR wait_event_source
+      CREATE KAFKA TOPIC INGESTOR wait_event_ingestor
         FROM wait_kafka TOPIC 'shutdown_waiting_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_waiting_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_waiting_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
@@ -1395,8 +1387,8 @@ Feature: Graceful shutdown
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE VHOST edge wait-state-{{test_id}}.example.com;
-      CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wait_state_source
+      CREATE HTTP ENDPOINT wait_state_ingress ON edge PATH '/state';
+      CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
         TO wait_state
@@ -1463,17 +1455,16 @@ Feature: Graceful shutdown
       """
       CREATE SCHEMA stalled_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA stalled_event_wire MODE STRICT ( event_id integer );
-      CREATE CODEC stalled_event_codec
-        FROM WIRE JSON SCHEMA stalled_event_wire
+      CREATE WIRE JSON CODEC stalled_event_codec
+        FROM WIRE SCHEMA stalled_event_wire
         TO SCHEMA stalled_event;
       CREATE RELAY stalled_events SCHEMA stalled_event UNBRANCHED;
       CREATE KAFKA CLIENT stalled_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR stalled_source
+      CREATE KAFKA TOPIC INGESTOR stalled_ingestor
         FROM stalled_kafka TOPIC 'shutdown_stalled_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_stalled_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_stalled_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING stalled_event_codec
@@ -1536,8 +1527,8 @@ Feature: Graceful shutdown
         amount integer
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
@@ -1552,12 +1543,11 @@ Feature: Graceful shutdown
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
 
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound

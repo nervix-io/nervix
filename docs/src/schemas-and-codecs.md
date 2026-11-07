@@ -43,9 +43,9 @@ type is recursive, so fixed and variable axes can be mixed, for example
 axis must have a positive length no greater than 2147483647, the largest length
 an Arrow `FixedSizeList` carries, fixed arrays must contain exactly that many
 elements at runtime, and dense multidimensional values must retain their nested
-shape. JSON and CBOR represent both with nested JSON-style arrays. AVRO uses
-nested array schemas with item types inferred recursively from the internal
-schema.
+shape. JSON and CBOR represent both with nested arrays. An AVRO wire schema
+declares the item type of each array level, and Nervix writes exactly that item
+schema; see [List Fields](#list-fields).
 
 Append `OPTIONAL` to either an internal schema field or a wire schema field when the value may be absent. Optional fields are omitted from runtime records and emitted JSON payloads when no value is present.
 
@@ -72,8 +72,8 @@ CBOR wire schema:
 ```plexus
 CREATE IF NOT EXISTS WIRE CBOR SCHEMA notification_wire MODE LOOSE (
   user_id integer,
-  created_at string,
-  payload string OPTIONAL
+  created_at text,
+  payload bytes OPTIONAL
 );
 ```
 
@@ -83,20 +83,95 @@ AVRO wire schema:
 CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
   user_id LONG,
   created_at STRING,
-  payload STRING OPTIONAL
+  payload STRING OPTIONAL,
+  latencies array<double> OPTIONAL
 );
 ```
 
 JSON, CBOR, and AVRO wire schemas must declare at least one field.
-JSON and CBOR also accept exact numeric and datetime wire types (`U8` through `I64`, `F32`,
-`F64`, and `DATETIME`) alongside the generic JSON types. The exact variants retain their type in
-the canonical definition and in completion suggestions. A codec binds an exact wire type only to
-the internal type of the same name: a `U8` wire field to a `U8` field, and a `DATETIME` wire field,
-whose value is RFC 3339 text, to a `DATETIME` field without an `ENCODE ... AS RFC3339` rule.
+
+JSON fields declare `string`, `number`, `integer`, `boolean`, or `array`. CBOR fields declare
+`integer`, `float`, `boolean`, `text`, `bytes`, or `array`. AVRO fields declare
+`boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, or `array<item>`, where `item` is
+any AVRO type of this list, arrays included: `array<long>`, `array<array<double>>`. A JSON or CBOR
+`array` is bare, because neither format types the items of an array; an AVRO array always names its
+item type, because the Avro schema it describes does. Keywords are case-insensitive; canonical
+definitions print the types in uppercase, such as `ARRAY<ARRAY<DOUBLE>>`.
+
+| Wire type | Internal type |
+| --- | --- |
+| JSON `integer` | `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` |
+| JSON `number` | `F32`, `F64` |
+| CBOR `integer` | `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` |
+| CBOR `float` | `F32`, `F64` |
+| JSON, CBOR or AVRO `boolean` | `BOOL` |
+| CBOR `text` | `STRING`; `DATETIME` with `ENCODE field AS RFC3339` |
+| CBOR `bytes` | `BYTES`, without an encoding rule |
+| JSON or AVRO `string` | `STRING`; `DATETIME` with `ENCODE field AS RFC3339`; `BYTES` with `ENCODE field AS BASE64` |
+| AVRO `int` | `I32` |
+| AVRO `long` | `I64` |
+| AVRO `float` | `F32` |
+| AVRO `double` | `F64` |
+| AVRO `bytes` | `BYTES`, without an encoding rule |
+| JSON or CBOR `array` | `ARRAY` or `VEC` of any depth whose innermost elements bind as described in [List Fields](#list-fields) |
+| AVRO `array<item>` | `ARRAY` or `VEC` nested exactly as deep as the declared arrays, whose innermost element type `item` binds as an AVRO field of that type would |
+
+Integer decoding checks the internal type's range. AVRO bindings are exact at every depth: for
+example, an `int` field binds an `I32` field, and an `array<int>` field binds a `VEC<I32>` or an
+`ARRAY<I32, n>`. Encoding rules declare a text representation explicitly; they do not choose
+between runtime encoding modes.
+
+### List Fields
+
+A list field's elements are bound the way a scalar field of the innermost element type is, in
+every format. A codec's `ENCODE <field> AS RFC3339` or `ENCODE <field> AS BASE64` rule on a list
+field governs its innermost scalar elements, at any nesting depth, and only those elements:
+
+| Innermost internal element | JSON `array` element | CBOR `array` element | AVRO innermost item |
+| --- | --- | --- | --- |
+| `U8` through `U64`, `I8` through `I64` | integer | integer | `int` for `I32`, `long` for `I64`; no item binds the other widths |
+| `F32`, `F64` | number | float | `float` for `F32`, `double` for `F64` |
+| `BOOL` | boolean | boolean | `boolean` |
+| `STRING` | string | text | `string` |
+| `DATETIME` | RFC 3339 string, with `ENCODE <field> AS RFC3339` | RFC 3339 text, with `ENCODE <field> AS RFC3339` | `string`, with `ENCODE <field> AS RFC3339` |
+| `BYTES` | base64 string, with `ENCODE <field> AS BASE64` | byte string, without a rule | `bytes` without a rule, or `string` with `ENCODE <field> AS BASE64` |
+
+```plexus
+CREATE SCHEMA capture (stamps VEC<DATETIME>, chunks VEC<BYTES>, matrix ARRAY<F64, 2, 3>);
+CREATE WIRE JSON SCHEMA capture_json MODE STRICT (stamps array, chunks array, matrix array);
+CREATE WIRE JSON CODEC capture_json_codec FROM WIRE SCHEMA capture_json TO SCHEMA capture
+  ENCODE stamps AS RFC3339, chunks AS BASE64;
+CREATE WIRE AVRO SCHEMA capture_avro MODE STRICT (
+  stamps array<string>,
+  chunks array<bytes>,
+  matrix array<array<double>>
+);
+CREATE WIRE AVRO CODEC capture_avro_codec FROM WIRE SCHEMA capture_avro TO SCHEMA capture
+  ENCODE stamps AS RFC3339;
+```
+
+Validation refuses a codec, naming the codec and the field, when a list element has no exact
+binding: an AVRO item type other than the element's, an AVRO array nested more or less deeply than
+the internal `ARRAY` and `VEC` layers, a `DATETIME` or `BYTES` element that travels as text without
+its rule, or a `BASE64` rule on elements the format carries as native bytes. The decoder checks
+every element against the representation its type and rule require, and the encoder writes each
+element in that representation, so the shapes and fixed lengths of the internal type hold on both
+paths.
+
+CBOR uses its own six wire types. Its decoder walks `ciborium::Value` directly into typed Arrow
+builders. An integer is range-checked for its internal width; a float is decoded as a CBOR float,
+including non-finite values. `DATETIME` uses RFC 3339 text under an
+explicit codec rule. CBOR byte strings carry `BYTES` directly. A tagged item, non-text map key,
+duplicate map key, or null in a required field is a decode error. `OPTIONAL` permits a missing or
+null field.
+`MODE STRICT` rejects undeclared fields, and `MODE LOOSE`
+ignores them after validating their CBOR structure.
 
 The web console's **Create** menu provides structured editors for internal schemas and each of
 these three declared wire formats. Internal collection controls build nested `ARRAY` and `VEC`
-types from an exact scalar type. Field order, `OPTIONAL`, `SENSITIVE`, wire mode, and exact format
+types from an exact scalar type. The AVRO form builds `array<item>` the same way, wrapping the
+item type it picks in one array per level, and the JSON and CBOR forms offer their bare `array`.
+Field order, `OPTIONAL`, `SENSITIVE`, wire mode, and exact format
 are preserved in the completed Model and its canonical command. See [Web Console](client-tools-web-console.md).
 
 SYSLOG is different: it is a predefined singleton wire schema whose shape comes from the syslog
@@ -104,7 +179,7 @@ protocol. It has no user-defined name, `CREATE WIRE` declaration, mode, field li
 `DROP` lifecycle. A codec references it directly:
 
 ```plexus
-CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
 ```
 
 Its fixed field contract is documented in [Syslog](syslog.md).
@@ -172,9 +247,10 @@ ALTER WIRE JSON SCHEMA notification_wire
 ALTER SCHEMA notification
   ALTER FIELD user_id SET TYPE F64;
 DROP CODEC notification_codec;
-CREATE CODEC notification_codec
-  FROM WIRE JSON SCHEMA notification_wire
-  TO SCHEMA notification;
+CREATE WIRE JSON CODEC notification_codec
+  FROM WIRE SCHEMA notification_wire
+  TO SCHEMA notification
+  ENCODE created_at AS RFC3339;
 COMMIT;
 ```
 
@@ -201,29 +277,53 @@ that they must be recreated against the current schema.
 
 A codec maps one transport payload format to one internal schema.
 
-```plexus
-CREATE IF NOT EXISTS CODEC notification_codec
-  FROM WIRE JSON SCHEMA notification_wire
-  TO SCHEMA notification;
-```
+Its declaration head names the family and format before `CODEC` and the codec's name. Choose
+the head for the payload contract:
+
+| Head after `CREATE [IF NOT EXISTS]` | Body before the shared `TO SCHEMA <schema>` clause |
+| --- | --- |
+| `WIRE JSON CODEC <name>` | `FROM WIRE SCHEMA <json_wire_schema>` |
+| `WIRE CBOR CODEC <name>` | `FROM WIRE SCHEMA <cbor_wire_schema>` |
+| `WIRE AVRO CODEC <name>` | `FROM WIRE SCHEMA <avro_wire_schema>` |
+| `JAQ JSON\|YAML\|TOML\|XML\|CBOR CODEC <name>` | No source clause; directed JAQ transformations follow `TO SCHEMA` |
+| `PROTOBUF CODEC <name>` | `USING RESOURCE <resource> VERSION <n>\|LATEST CONFIG {...} MESSAGE '<message>' [BATCH MESSAGE '<message>']` |
+| `SYSLOG CODEC <name>` | No source clause; the wire contract is predefined |
+
+`WIRE JSON CODEC` binds a declared JSON wire schema and maps its fields directly.
+`JAQ JSON CODEC` reads JSON values and runs the declared JAQ programs. The same distinction applies to
+CBOR. After `FROM WIRE SCHEMA`, completion offers only wire schemas of the format in the head.
+The console's codec form presents these family and format choices and previews the same
+declaration that `SHOW CREATE CODEC <name>` returns.
 
 Schemaful codecs are type-strict. A JSON `string` wire field does not implicitly decode
 into an internal `DATETIME` field. Declare the wire conversion explicitly:
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_codec
-  FROM WIRE JSON SCHEMA notification_wire
+CREATE IF NOT EXISTS WIRE JSON CODEC notification_codec
+  FROM WIRE SCHEMA notification_wire
   TO SCHEMA notification
   ENCODE created_at AS RFC3339;
 ```
 
 `created_at` is the internal schema field name. The matching wire field must be a
-string, and the internal field must be `DATETIME`.
+string, and the internal field must be `DATETIME`, or a list of `DATETIME` elements whose wire
+field carries them as text ([List Fields](#list-fields)).
 
-For an internal `BYTES` field, declare `BYTES` in the JSON or CBOR wire schema. Its wire value is
-a canonical RFC 4648 standard base64 string with padding; malformed or unpadded text is a decode
-error. AVRO `BYTES` fields use Avro's native byte sequence. A wire `STRING` field cannot bind an
-internal `BYTES` field. Nested `ARRAY` and `VEC` byte elements use the same representation.
+For an internal `BYTES` field carried as a JSON or AVRO `string`, declare its text representation:
+
+```plexus
+CREATE SCHEMA binary_event (payload BYTES);
+CREATE WIRE JSON SCHEMA binary_wire MODE STRICT (payload string);
+CREATE WIRE JSON CODEC binary_codec FROM WIRE SCHEMA binary_wire TO SCHEMA binary_event
+  ENCODE payload AS BASE64;
+```
+
+`BASE64` uses the RFC 4648 standard alphabet with padding and requires canonical text on decode.
+Malformed, unpadded, or noncanonical text is a decode error. AVRO `bytes` and CBOR `bytes` fields
+use their formats' native byte sequences and accept no encoding rule. A list of `BYTES` elements
+follows the same rules element by element: base64 strings under `ENCODE <field> AS BASE64` in a
+JSON `array` or an AVRO `array<string>`, and native byte sequences, without a rule, in a CBOR
+`array` or an AVRO `array<bytes>`.
 
 Live `WIRE JSON` ingestion copies each connector-owned payload into mutable scratch retained by
 the open ingest group, then parses it with simd-json using parser buffers retained beside that
@@ -248,13 +348,11 @@ or more JSON objects, and each object is decoded into the internal schema as one
 ([Unfolding Payloads](#unfolding-payloads)):
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_cbor
-  FROM CBOR
+CREATE IF NOT EXISTS JAQ CBOR CODEC notification_cbor
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS ON INGESTION '.';
 
-CREATE IF NOT EXISTS CODEC notification_xml
-  FROM XML
+CREATE IF NOT EXISTS JAQ XML CODEC notification_xml
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS
     ON INGESTION '{user_id: (.c[] | select(.t == "user_id").c[0] | tonumber)}';
@@ -263,8 +361,7 @@ CREATE IF NOT EXISTS CODEC notification_xml
 Protobuf codecs compile `.proto` files from an uploaded resource, decode or encode the selected message with `prost-reflect`, and use JAQ to translate between the protobuf JSON view and the internal schema:
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_proto
-  FROM PROTOBUF
+CREATE IF NOT EXISTS PROTOBUF CODEC notification_proto
   USING RESOURCE proto_bundle VERSION 1
   CONFIG {'file' = 'notification.proto', 'include' = '.'}
   MESSAGE 'nervix.test.Notification'
@@ -280,8 +377,7 @@ A protobuf codec that a [batching emitter](emitters.md#batching) encodes through
 a batch is published as, after `MESSAGE`:
 
 ```plexus,ignore
-CREATE CODEC notification_proto
-  FROM PROTOBUF
+CREATE PROTOBUF CODEC notification_proto
   USING RESOURCE proto_bundle VERSION 1
   CONFIG {'file' = 'notification.proto', 'include' = '.'}
   MESSAGE 'nervix.test.Notification'
@@ -325,14 +421,17 @@ values, and nulls of optional fields. The formats themselves set the bounds of t
 
 - JSON has no number for a NaN or an infinity. `WIRE JSON` writes a non-finite float as `null`,
   which reads back as a null of an optional field and refuses a required field or a list element.
-  `WIRE CBOR` writes the float itself but reads every value through the same JSON model, so it reads
-  a non-finite float as a null.
-- A JSON or CBOR number read into an `F32` field becomes the nearest `F32`, and the shortest
+  `WIRE CBOR` reads and writes native CBOR floats, including non-finite values.
+- A JSON number read into an `F32` field becomes the nearest `F32`, and the shortest
   decimal a writer prints for an `F32` reads back as that same `F32`, also where the number lies
   exactly halfway between two of them once read as a 64-bit float. A number beyond the type's range
-  rounds to an infinity. Every finite float the codec writes reads back to its exact bits.
-- `WIRE AVRO` keeps every float bit pattern. It writes an unsigned element of an `ARRAY` or `VEC` as
-  an Avro `long`, so an element above 9223372036854775807 fails to encode.
+  rounds to an infinity. Every finite float the codec writes reads back to its exact bits. A CBOR
+  float narrows directly to `F32` when that is the internal field type. Ciborium widens an `F32`
+  before writing CBOR, so an `F32` signaling NaN becomes a quiet NaN with the same sign and payload;
+  other `F32` bits are preserved.
+- `WIRE AVRO` keeps every float bit pattern. An array element travels as exactly the item type its
+  wire schema declares, which binds exactly one internal element type, so every element the codec
+  writes reads back unchanged.
 - A datetime travels as RFC 3339 text in UTC; text written with another offset reads as the same
   instant.
 - A `WIRE AVRO` payload is one raw Avro datum, without an object container or a schema registry
@@ -364,8 +463,7 @@ JAQ-backed codecs must declare a JAQ transform. The concise
 Nervix embeds and summarizes the Nervix-specific boundary:
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_codec
-  FROM JSON
+CREATE IF NOT EXISTS JAQ JSON CODEC notification_codec
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS
     ON INGESTION '.payload'
@@ -374,19 +472,21 @@ CREATE IF NOT EXISTS CODEC notification_codec
 
 Semantics:
 
-- no-wire codecs must use `FROM JSON|YAML|TOML|XML|CBOR ... WITH JAQ ...`
+- JAQ-native codecs use a `JAQ JSON|YAML|TOML|XML|CBOR CODEC` head and declare
+  `WITH JAQ TRANSFORMATIONS` after `TO SCHEMA`
 - protobuf codecs must use
-  `FROM PROTOBUF USING RESOURCE ... VERSION <n> | LATEST CONFIG {...} MESSAGE ... [BATCH MESSAGE ...] WITH JAQ ...`
-- codecs using declared wire schemas must use `FROM WIRE JSON|CBOR|AVRO SCHEMA ...` and do not
+  `PROTOBUF CODEC ... USING RESOURCE ... VERSION <n>|LATEST CONFIG {...} MESSAGE ... [BATCH MESSAGE ...] TO SCHEMA ... WITH JAQ TRANSFORMATIONS ...`
+- codecs using declared wire schemas use a `WIRE JSON|CBOR|AVRO CODEC` head with
+  `FROM WIRE SCHEMA ... TO SCHEMA ...` and do not
   carry JAQ transforms
-- codecs using the predefined SYSLOG wire schema must use `FROM SYSLOG TO SCHEMA ...` and do not
+- codecs using the predefined SYSLOG wire schema use `SYSLOG CODEC ... TO SCHEMA ...` and do not
   carry JAQ transformations or field encoding rules
 - `WITH JAQ TRANSFORMATIONS` requires `ON INGESTION`, `ON EMITTING`, or both in that order, and
   `ON EMITTING` may be followed by `ON EMITTING BATCH` ([Batch Transformations](#batch-transformations))
 - `ON INGESTION` runs on every value the parsed native or protobuf payload holds and may yield zero or more JSON objects, each of which becomes one message compatible with the internal schema ([Unfolding Payloads](#unfolding-payloads))
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value
 
-JAQ-backed encode/decode runs on the node's extension workers, so an expensive or non-terminating transform never stalls an async ingestor or emitter task and never holds the workers that relay bodies are encoded and decoded on. A node whose extension workers cannot take a payload now refuses it without judging it: an ingested payload fails its dispatch rather than its decode, and an emitter keeps the rows and retries them. A payload no sender can present again is not refused when its source can wait: a payload an ingestor's quiesce buffer retained waits in the buffer, and a paced poll, or a payload a source that survives a held loop handed over without an acknowledgement, waits until the extension workers take it ([When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full)).
+JAQ-backed encode/decode runs on the node's extension workers, so an expensive or non-terminating transform never stalls an async ingestor or emitter task and never holds the workers that relay bodies are encoded and decoded on. A node whose extension workers cannot take a payload now refuses it without judging it: an ingested payload fails its dispatch rather than its decode, and an emitter keeps the rows and retries them. A payload no sender can present again is not refused when its ingestor can wait: a payload an ingestor's quiesce buffer retained waits in the buffer, and a paced poll, or a payload an ingestor that survives a held loop handed over without an acknowledgement, waits until the extension workers take it ([When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full)).
 JAQ JSON output intentionally preserves object member declaration order. The serde JSON
 `preserve_order` feature exists for that public JAQ behavior; schemaful `WIRE JSON` ingestion does
 not depend on serde JSON object storage.
@@ -397,8 +497,7 @@ A JAQ-backed codec — JAQ-native or protobuf — may declare a third transforma
 declare a [batching clause](emitters.md#batching):
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_envelope
-  FROM JSON
+CREATE IF NOT EXISTS JAQ JSON CODEC notification_envelope
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS
     ON EMITTING '{id: .user_id, action: .action}'
@@ -484,8 +583,7 @@ semantics apply unchanged: `.[]` unfolds an array into one message per element, 
 several messages, and `select` or `empty` yields no message for the values it rejects.
 
 ```plexus
-CREATE IF NOT EXISTS CODEC order_lines_codec
-  FROM JSON
+CREATE IF NOT EXISTS JAQ JSON CODEC order_lines_codec
   TO SCHEMA order_line
   WITH JAQ TRANSFORMATIONS ON INGESTION '.lines[] | select(.quantity > 0)';
 ```
@@ -506,10 +604,10 @@ is at fault. It never quotes payload values, so a mismatched field is described 
 and a program evaluation error omits the evaluator's message, which is logged at `trace` level
 instead.
 
-The messages of one payload join one [source ingest group](ingestors.md) together, so they share its
-domain execution snapshot, and every one of them sees the payload's source metadata and headers.
+The messages of one payload join one [ingest group](ingestors.md) together, so they share its
+domain execution snapshot, and every one of them sees the payload's ingestor metadata and headers.
 Each message is filtered, constructed, branched, routed, and error-handled on its own, and ingestor
-metrics count messages. Source acknowledgement stays per payload: a payload is acknowledged once
+metrics count messages. Ingestor acknowledgement stays per payload: a payload is acknowledged once
 every message it unfolded into has been acknowledged, a negative acknowledgement of any of them
 negatively acknowledges the whole payload so that its already acknowledged messages are delivered
 again with it, and a payload that unfolds into no messages is acknowledged as soon as it decodes.

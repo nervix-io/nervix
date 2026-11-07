@@ -53,7 +53,6 @@ use super::{
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
     subscription::{SessionSubscriptions, SubscriptionInterests, SubscriptionSampler},
     tls::HttpsListenerCertificates,
-    transaction::TransactionLimits,
 };
 use crate::{
     ConfiguredFaultInjection, cluster, registry::Registry, resource::ResourceStore,
@@ -259,6 +258,7 @@ fn test_session_service(
     registry: Arc<Registry>,
     resource_store: StdArc<ResourceStore>,
     interconnect: Transport,
+    application_progress: super::completion::ApplicationProgressState,
     runtime: Runtime,
 ) -> SessionServiceImpl {
     let https_certificates = HttpsListenerCertificates::new(
@@ -266,8 +266,14 @@ fn test_session_service(
         &ConfiguredFaultInjection::default(),
         &cluster,
     );
+    let parameters = consensus
+        .observer()
+        .cluster_parameters()
+        .expect("the fixture committed its initial parameter record before building its service");
+    runtime.install_cluster_parameters(parameters.values);
+    registry.install_cluster_parameters(parameters.values);
+    runtime.set_construction_parameters(parameters);
     let subscription_interests = SubscriptionInterests::new(cluster.clone(), runtime.metrics());
-    let transaction_limits = TransactionLimits::default();
     let client_producers = super::client_producers::ClientProducerRouter::new(
         runtime.clone(),
         interconnect.clone(),
@@ -278,6 +284,7 @@ fn test_session_service(
         interconnect.clone(),
         consensus.proposer().local_node_id().clone(),
     );
+    let traffic = super::client_traffic::ClientTraffic::new(runtime.metrics().client_traffic());
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             cluster: cluster.clone(),
@@ -288,7 +295,11 @@ fn test_session_service(
             https_certificates,
             runtime,
             runtime_admission: Arc::new(super::runtime_admission::RuntimeAdmission::new()),
-            replica_count: 0,
+            initialization: {
+                let state = Arc::new(super::node_initialization::NodeInitialization::default());
+                state.complete();
+                state
+            },
             admission_shutdown: CancellationToken::new(),
             drain_support_shutdown: CancellationToken::new(),
             events: SessionEvents::new(16),
@@ -297,21 +308,20 @@ fn test_session_service(
             client_producers,
             client_consumers,
             interconnect,
+            domain_clock_attachments: super::domain_clock::DomainClockAttachments::new(
+                application_progress.identity(),
+            )
+            .0,
+            application_progress,
             service_tasks: super::service_tasks::ServiceTasks::default(),
-            auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-            failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
-            transaction_idle_timeout: transaction_limits.idle_timeout(),
-            transaction_tombstone_retention: transaction_limits.tombstone_retention(),
-            transaction_max_statements: transaction_limits.max_statements(),
-            transaction_max_source_bytes: transaction_limits.max_source_bytes(),
-            transaction_max_open: transaction_limits.max_open(),
+            authentication_pacing: SessionServiceImpl::new_authentication_pacing(),
+            traffic,
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
-            command_execution_policy: super::command_execution::CommandExecutionPolicy::default(),
             command_executions: super::command_execution::CommandExecutionOwners::default(),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
             transaction_recovery: Default::default(),
             ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
-            resource_upload_executions: DashMap::with_hasher(RandomState::new()),
+            resource_upload_executions: Default::default(),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             retained_backups: Default::default(),
             captured_backup_sections: Default::default(),
@@ -368,7 +378,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
                     client: named("kafka_main"),
                     topic: named("notifications"),
                     offset_mode: KafkaOffsetMode::Domain,
-                    instances: nonzero!(1u64),
+                    instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                     mode: nervix_models::KafkaIngestMode::AckSequential {
                         timeout: "5s".to_string(),
                         retry_policy: nervix_models::RetryPolicy {
@@ -498,8 +508,10 @@ pub(in crate::application) fn placement_group(
     primary_node: &ClusterNodeName,
 ) -> PlacementGroupSchedule {
     PlacementGroupSchedule {
-        unit: nervix_models::Unit::Single,
-        members,
+        members: members
+            .into_iter()
+            .map(|node| nervix_models::NodeUnitRef::new(node, nervix_models::Unit::SINGLE))
+            .collect(),
         primary_node: Some(primary_node.clone()),
     }
 }
@@ -669,6 +681,11 @@ pub(in crate::application) async fn build_test_service_inner(
         leading,
         "the single-node test consensus did not elect node '{expected_leader}'"
     );
+    consensus
+        .proposer()
+        .seed_cluster_parameters(nervix_models::ClusterParameterValues::default())
+        .await
+        .assured("the elected fixture leader commits its initial policy");
     if create_default_domain_flag {
         create_test_domain(&consensus.proposer(), "default").await;
     }
@@ -691,6 +708,8 @@ pub(in crate::application) async fn build_test_service_inner(
         .await
         .expect("cluster should start"),
     );
+    let application_progress =
+        super::completion::ApplicationProgressState::new(cluster.local_node_identity().await);
     let service = test_session_service(
         cluster,
         &consensus,
@@ -700,8 +719,19 @@ pub(in crate::application) async fn build_test_service_inner(
                 .expect("resource store should open"),
         ),
         interconnect,
+        application_progress.clone(),
         runtime,
     );
+    // The node's authoritative writer: the service's barriers read this incarnation's applied
+    // revision from its progress record.
+    service
+        .inner
+        .service_tasks
+        .spawn(super::completion::record_authoritative_progress(
+            application_progress,
+            consensus.observer(),
+            CancellationToken::new(),
+        ));
     (
         TestService {
             service,

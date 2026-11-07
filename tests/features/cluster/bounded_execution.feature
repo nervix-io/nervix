@@ -74,15 +74,14 @@ Feature: Bounded execution and transient memory
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_in FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
-      CREATE CODEC notification_out
-        FROM JSON
+      CREATE WIRE JSON CODEC notification_in FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
+      CREATE JAQ JSON CODEC notification_out
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON EMITTING '{payload: .}';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge transformed-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/notifications' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR notification_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
+      CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_in
         TO notifications
@@ -129,14 +128,14 @@ Feature: Bounded execution and transient memory
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retained_event ( seq I64 );
-      CREATE CODEC retained_codec FROM JSON TO SCHEMA retained_event
+      CREATE JAQ JSON CODEC retained_codec TO SCHEMA retained_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
-      CREATE CODEC delivery_codec FROM JSON TO SCHEMA retained_event
+      CREATE JAQ JSON CODEC delivery_codec TO SCHEMA retained_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY retained_events SCHEMA retained_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-retained-unfolding.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR retained_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR retained_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retained_codec
         TO retained_events INHERIT ALL UNBRANCHED
@@ -147,10 +146,10 @@ Feature: Bounded execution and transient memory
     Given the entity gate for domain "{{domain}}" pauses after engagement
     When these Plexus commands begin executing in the background
       """
-      ALTER HTTP ENDPOINT INGESTOR retained_source SET DECODE USING delivery_codec;
+      ALTER HTTP ENDPOINT INGESTOR retained_ingestor SET DECODE USING delivery_codec;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
-    And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "status: quiesced"
+    And within "10s" node "node-1" eventually reports describe ingestor "retained_ingestor" as "status: quiesced"
     When http payload is posted to node "node-1" with host "http-{{test_id}}-retained-unfolding.example.com" path "/events"
       """
       {"seq":1}
@@ -163,12 +162,12 @@ Feature: Bounded execution and transient memory
       """
       {"seq":3}
       """
-    Then within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "nervix_ingestor_quiesce_buffered_records: 3"
+    Then within "10s" node "node-1" eventually reports describe ingestor "retained_ingestor" as "nervix_ingestor_quiesce_buffered_records: 3"
     When extension execution is saturated on every node
     And the entity gate pause for domain "{{domain}}" is released
     Then the background Plexus execution succeeds
-    And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "status: running"
-    And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "nervix_ingestor_quiesce_buffered_records: 3"
+    And within "10s" node "node-1" eventually reports describe ingestor "retained_ingestor" as "status: running"
+    And within "10s" node "node-1" eventually reports describe ingestor "retained_ingestor" as "nervix_ingestor_quiesce_buffered_records: 3"
     When extension execution is released on every node
     Then within "30s" the relay subscription receives payloads in order
       """
@@ -176,7 +175,7 @@ Feature: Bounded execution and transient memory
       "seq":2
       "seq":3
       """
-    And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "nervix_ingestor_quiesce_buffered_records: 0"
+    And within "10s" node "node-1" eventually reports describe ingestor "retained_ingestor" as "nervix_ingestor_quiesce_buffered_records: 0"
 
     Examples:
       | cluster_size |
@@ -191,14 +190,14 @@ Feature: Bounded execution and transient memory
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA polled_event ( user_id I64 );
-      CREATE CODEC polled_codec FROM JSON TO SCHEMA polled_event
+      CREATE JAQ JSON CODEC polled_codec TO SCHEMA polled_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY polled_events SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT polled_http CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
         'timeout_ms' = 5000
       };
-      CREATE HTTP REQUEST INGESTOR polled_source
+      CREATE HTTP REQUEST INGESTOR polled_ingestor
         FROM polled_http METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING polled_codec
         TO polled_events INHERIT ALL UNBRANCHED

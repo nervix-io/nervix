@@ -163,7 +163,11 @@ never changes the version an existing binding uses. See
 [Resource Versions And Bindings](./resource-versions.md#version-lifecycle) for installation,
 transfer between nodes, and completion.
 
-The per-version limits are configured with `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES`, `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES`, and `NERVIX_RESOURCE_MAX_FILE_COUNT`. Their defaults are 4 GiB, 16 GiB, and 1,000,000 files. Every node enforces them for each version it installs.
+The per-version limits are committed cluster parameters, with defaults of 4 GiB, 16 GiB, and
+1,000,000 files. `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES`, `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES`, and
+`NERVIX_RESOURCE_MAX_FILE_COUNT` are seeds only for the first bootstrap of a new cluster. Later
+starts omit them. Change the limits with `ALTER CLUSTER SET`, as [Node Settings](node-settings.md#committed-parameter-changes)
+describes. Every node enforces the committed limits for each version it installs.
 
 ## TLS Bundles
 
@@ -267,4 +271,4 @@ Client types that currently support TLS-oriented configuration through mounted r
 
 A `ZEROMQ` client has no TLS: its driver offers plain `tcp://` and `ipc://` transports and no ZMTP security mechanism. Its `CONFIG` values are still rendered over its `MOUNT`, for its ingestors and its emitters alike.
 
-Pulsar currently supports mounted `tls_ca_file` server trust configuration, but not mounted client certificate authentication.
+A `PULSAR` client mounts `tls_ca_file`, `tls_cert_file` and `tls_key_file` on a `pulsar+ssl://...` address, for its ingestors and its emitters alike.

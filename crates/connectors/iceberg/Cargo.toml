@@ -11,6 +11,7 @@ workspace = true
 [features]
 default = []
 shuttle = [
+  "nervix-connector-fake/shuttle",
   "nervix-connector/shuttle",
   "nervix-execution/shuttle",
   "nervix-primitives/shuttle",
@@ -43,6 +44,7 @@ opendal = { workspace = true, features = [
   "services-gcs",
   "services-s3",
 ] }
+opendal-http-transport-reqwest = { workspace = true }
 parquet = { workspace = true }
 reqwest = { workspace = true }
 reqwest_iceberg = { workspace = true }
@@ -59,6 +61,7 @@ uuid = { workspace = true, features = ["v7"] }
 [dev-dependencies]
 bolero = { workspace = true }
 http = { workspace = true }
+nervix-connector-fake = { workspace = true }
 nervix-primitives = { workspace = true, features = ["test-util"] }
 nervix-test-environment = { workspace = true }
 reqsign-core = { workspace = true }

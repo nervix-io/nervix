@@ -39,7 +39,7 @@ counters.
 | --- | --- |
 | `just test-coverage` (`scenarios-build` and `tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
 | `just test-scenarios-coverage` (`scenarios-build` and the `scenarios` shards) | The public Cucumber suite, including the server it links and its instrumented CLI, report tool, paced Rust driver and shared binding. Each shard exports the same report/root pair for its share of the suite, and the paced Python drivers' `python.lcov` when it ran them, as `coverage-scenarios-<I>`. |
-| `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects, and the `nervix-lint-report` unit tests with the five `typed-*` properties, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
+| `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects; the `nervix-lint-report` unit tests and its five properties; and the Rust analysis runner's unit/process tests and six representation properties, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
 | `coverage-native-extras bench-smoke` (`extra-tests`) | The smoke recipe's benchmark bodies in test mode. Other Cargo benchmark test targets run in `test-coverage`. Instrumented timings are not performance evidence. |
 | `coverage-native-extras test-primitives-ordinary` (`extra-tests`) | The primitive boundary's native ordinary conformance checks. Other conformance modes remain separate. |
 | Language completion walk (`extra-tests`) | The composed grammar's completion reachability check for Plexus, the Nervix graph definition language, collected under the current `plexus-completion-walk` recipe. |
@@ -63,25 +63,70 @@ the downloaded artifact:
 | `coverage-ci-selection` | Exact-source suite and Bolero call selection |
 | `coverage-wasm-bindgen` | The console build's wasm-bindgen CLI selection, installation and verification |
 | `coverage-model-runner` | Native collector supervision, command and artifact accounting |
-| `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification, the native collector, the Bolero runner and its coverage export, and the console build script |
+| `coverage-typed-ratchet-python` | The remaining source checks, the native collector, the Bolero runner and its coverage export, and the console build script; the Rust audit is collected by the native typed-ratchet producer |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
+
+The Python paced driver runs with the wheel installed in its own CPython 3.12 environment.
+Scenario coverage builds its Rust extension with the same LLVM flags as the Rust driver, keeps
+Cargo's `libnervix_client_python.so` beside the suite for object discovery, and carries the wheel
+with its `nervix_client` module in the scenario archive.
+The restore recipe and prepared-suite runner install that wheel and the Python coverage runtime
+before scenarios start, preserving the extension's instrumentation. The existing
+`target/paced-simulation/python.lcov` remains an ordinary Python coverage input; Rust
+execution inside the package contributes to the ordinary scenario report.
+
+The collector's real toolchain fixtures and Deloxide's real process supervision tests run in
+separate Python interpreters, so each supervisor retains ownership of its own children.
+`coverage-model-runner` appends both executions into one branch coverage file before exporting it.
 
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
 register it in CI by itself. Focused Backup, Visual Create, client and runtime recipes export local
 ordinary reports for `coverage-patch`, using the same normalization as the workspace merge.
+`just coverage-ratchet-runner` measures the Rust analysis runner's unit and wrapper process tests
+and the report owner's unit tests, including authored macro provenance,
+in a local tooling report for patch review; it is not a new CI producer or evidence that every
+ordinary workspace member was measured. The existing typed-ratchet native producer collects these
+tests with the compiler qualification in CI.
+The assertion tests build in `typed-ratchet/tests`, separately from the executable in
+`typed-ratchet/source`, so building a test cannot replace an executable the producer already ran.
+The collected runner gives Cargo children the build-time `/dev/null` profile path, keeping build
+scripts out of runtime collection. Cargo's wrapper entry collects itself through the native
+collector's `exec` operation and re-enters explicit `wrap` once; the driver has its own collected
+execution. Both retain runtime profiles without propagating that path to unrelated Cargo builds.
+`just coverage-web-console <output> <test arguments...>` measures selected native console owner
+tests, preserving each argument. It does not instrument the browser asset; public console
+scenarios execute that asset separately and measure the native server and harness they exercise.
 `just coverage-otel` appends the OTEL and related connector-admission scenarios to current-source
 ordinary profiles, with the browser build and configured ORT environment. It exports a local
 focused report, rather than a CI merge input. Start a new source generation with
 `just coverage-clean-workspace`; owner collections and this focused recipe can then append to it.
+The focused `coverage-scenarios` and `coverage-scenarios-append` recipes preserve each scenario
+argument, including spaces, regular-expression pipes, literal shell characters and empty values.
+Quote a name filter or input glob as one argument; pass separate options as separate arguments.
+They retain the instrumented CLI, report tool, paced driver, native Python extension, formatter and ORT
+environment. The first starts a fresh measurement; the append variant retains current profiles
+with `--no-clean`. `just test-scenario-arguments` checks these boundaries through the actual recipe
+bodies with recording builders and Cargo, without compiling or starting services.
 Checks [outside collected counters](#verification-outside-collected-counters) retain their own
 verdicts, including Deloxide supervision and compiler-cache qualification.
 
-The `diagnostic-evidence` job runs `just coverage-deadlock` and retains the `diagnostic-evidence`
-artifact separately. It collects `test-deadlock-evidence-order` in `deloxide-order` mode and
-`test-deadlock-report`, which exercises the local report CLI, in ordinary mode. Their combined
-`target/deadlock.lcov` and individual completion records describe diagnostic tooling coverage;
-neither collection is an input to the ordinary workspace merge, including the ordinary report-tool
-collection. Its ordinary mode alone does not register it as a workspace-report producer.
+The `diagnostic-evidence` job collects `test-deadlock-report`, which exercises the local report CLI
+in ordinary mode, and retains its `target/deadlock.lcov` and canonical completion record separately.
+This collection describes diagnostic tooling coverage and is not an input to the ordinary workspace
+merge. Its ordinary mode alone does not register it as a workspace-report producer.
+
+The temporary CI execution policy disables Deloxide and fuzz targets for every trigger. Labels,
+scheduled or manual runs and reruns cannot enable them; re-enabling either requires an explicit
+user decision and a corresponding source change. CI's `extra-primitives` selection collects ordinary,
+Shuttle, Loom and Turmoil conformance; its documentation and browser checks omit diagnostic modes.
+The full union derives the required producers from this policy as well as the event and labels:
+it requires the ordinary workspace report, ordinary diagnostic report and selected permitted modes,
+and rejects unexpected diagnostic or sanitizer collections. It never fabricates their completion or
+reuses different-source counters. Ordinary report integrity and the complexity gate remain mandatory.
+
+Local collections retain their declared modes. `just coverage-deadlock` locally composes
+`test-deadlock-evidence-order` in `deloxide-order` mode with `test-deadlock-report` in ordinary mode.
+Their combined report remains separate from the ordinary workspace merge.
 
 ## Native Collection
 
@@ -244,7 +289,15 @@ binaries after building beside the suite in directories of their own, and `test-
 the `scenarios-build` job, in one target directory, publishes its cache and packs one archive for
 each. The `tests` job restores
 [its archive](./integration-test-lifecycle.md#unit-test-archive) and runs `test-coverage-run`, which
-starts each test executable directly. The scenario suite runs in
+starts each test executable directly.
+The all-features workspace build includes the embedded JVM tests. Its preparation builds the
+Java 21 jar with its native library and the Java boundary fixtures. The unit-test archive carries
+that jar and every fixture class, including nested classes; packing refuses missing entry classes.
+The build and restored-test jobs provision Java 21. The restored runner loads those inputs and
+registers the instrumented executable's JNI methods, so their counters belong to the ordinary
+workspace report; the runner does not rebuild the jar, fixtures or Rust code.
+
+The scenario suite runs in
 [shards](./integration-test-lifecycle.md#scenario-shards): each shard restores its archive and runs
 `test-scenarios-coverage-shard`, which runs its share of the suite and exports the pair from that
 share's profiles, compiling nothing. `just coverage-report-workspace` writes the same pair from the
@@ -263,8 +316,13 @@ just coverage-merge coverage-inputs/tests coverage-inputs/coverage-scenarios-1 \
 It names one input for each shard that `SCENARIO_SHARDS` runs, so a shard whose report is missing
 fails the merge as a missing input. Native extras are a required input when the selected extra-tests
 job succeeds and a label selected a coverage-producing step; a missing download fails the merge.
+When only `extra-runners` selects coverage, those extras are Python tooling reports. The merge
+names that artifact with `--python-input coverage-inputs/coverage-native-extras`. A Rust-producing
+label instead names it as an ordinary input, including when `extra-runners` is also present, so a
+lost Rust export cannot be hidden by a surviving Python report. The full union downloads native
+extras only for a Rust-producing label; tooling-only counters already belong to its ordinary input.
 Extra jobs that collect no coverage, such as Miri, require no report. The extra-tests job publishes
-that selection once; both coverage jobs use it. Every download names one exact artifact and its destination directory, because
+both coverage selections once; the coverage jobs use them. Every download names one exact artifact and its destination directory, because
 `download-artifact` v8 extracts a single match directly into the supplied path. Workflow contract
 tests keep the scenario and Deloxide downloads aligned with their producer matrices. The merge sums
 the counters of every report that measured a file, so the shards' reports add up to the suite's.
@@ -276,6 +334,12 @@ collection below `native-coverage`. A collection of another mode describes model
 execution, so it is never read: the Shuttle, Loom, Turmoil and Deloxide primitive conformance
 collections in the native extras artifact are recorded as left out. The reports of the `shuttle`,
 `loom`, `turmoil`, `deloxide` and Bolero fuzz jobs are not inputs at all.
+
+An explicitly declared `--python-input` must contain at least one `python.lcov` report and no Rust
+workspace export or native collection. It uses the same root metadata, tracked-source mapping and
+report validation as every input. Ordinary inputs still require a Rust export or complete ordinary
+collection. Python-only inputs never waive the merged report's requirement to measure every Rust
+workspace member. The merge record names each input's declared kind.
 
 The Deloxide lane selections retain their reports, completion records and lane evidence in
 `deloxide-<selection>` artifacts. Live Bolero sanitizer campaigns publish each shard's source
@@ -308,7 +372,8 @@ others.
 
 The merge fails with a message naming what to fix when:
 
-- an input is missing, or holds neither a workspace export nor a complete ordinary collection;
+- an input is missing, or a Rust input holds neither a workspace export nor a complete ordinary collection;
+- a Python-only input holds no tooling report or contains Rust coverage;
 - an input has no root metadata;
 - none of a report's records lies below its producer's checkout root;
 - a report contributes no record of a tracked file;
@@ -340,7 +405,7 @@ just coverage-patch origin/main
 
 `functions_over_complexity_30` is the number of functions the pinned cargo-crap analyzer scores
 above cyclomatic complexity 30. Exactly 30 is outside the count; 31 is inside. The analyzer's
-version is declared once in `scripts/cargo_crap.py` and built through kache by
+version is declared once in `nervix-ratchet crap` and built through kache by
 `just install-cargo-crap`. The ratchet and advisory CRAP report use that same build. Another
 version, an incomplete source walk, a parsing warning, or an analysis with no measured function
 fails the count; it never reads as zero. The [source eligibility and analyzer limits](./architecture-enforcement.md#function-complexity)
@@ -367,7 +432,7 @@ The retained run identities and comparison evidence belong to the Coverage Integ
 ## Advisory CRAP Report
 
 `just check-coverage` publishes an advisory CRAP report over the merged ordinary workspace report.
-It runs the pinned cargo-crap, the version `scripts/cargo_crap.py` declares for the complexity count
+It runs the pinned cargo-crap, the version `nervix-ratchet crap` declares for the complexity count
 too, over the whole repository root. The root package's directory holds every workspace member,
 and the Cargo projects nested in it, such as the lint workspace, are walked as well, because some
 ordinary producers measure them. No default exclusion applies, so test, bench and example sources
@@ -473,8 +538,8 @@ measured Python coverage for CI.
 ## The Full Workspace Union
 
 The full workspace union combines every coverage producer one CI run selects into one line-coverage
-report: the ordinary workspace report, the modeled and diagnostic native collections, and the live
-fuzz campaigns a pull request carrying `fuzz` requests. It reads the ordinary report unchanged. The
+report: the ordinary workspace report, the permitted modeled collections and the ordinary diagnostic
+report-tool collection. The temporary CI policy excludes Deloxide and live fuzz campaigns. It reads the ordinary report unchanged. The
 [CRAP report](#advisory-crap-report) and patch line coverage keep reading the ordinary report
 alone, so modeled execution never changes either of them.
 
@@ -525,19 +590,19 @@ job's result. It decides which producers the union requires:
 | Producer | Job and artifact | Required |
 | --- | --- | --- |
 | The ordinary workspace report | `coverage`, `coverage-merged` | Whenever the tested diff requires the suites |
-| `test-primitives-shuttle`, `test-primitives-loom`, `test-primitives-turmoil` and `test-primitives-deloxide` | `extra-tests`, `coverage-native-extras` | For a pull request labeled `extra-primitives` |
-| `test-deadlock-evidence-order` and `test-deadlock-report` | `diagnostic-evidence`, `diagnostic-evidence` | Whenever the tested diff requires the suites |
+| `test-primitives-shuttle`, `test-primitives-loom`, `test-primitives-turmoil` | `extra-tests`, `coverage-native-extras` | For a pull request labeled `extra-primitives` |
+| `test-deadlock-report` | `diagnostic-evidence`, `diagnostic-evidence` | Whenever the tested diff requires the suites |
 | `test-shuttle` | `shuttle`, `coverage-shuttle` | For a pull request labeled `shuttle` |
 | `test-loom` | `loom`, `coverage-loom` | For a pull request labeled `loom` |
 | `test-turmoil` | `turmoil`, `coverage-turmoil` | For a pull request labeled `turmoil` |
-| `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` | `deloxide`, `deloxide-<selection>` | For a pull request labeled `deloxide` |
-| `bolero-fuzz`, the combined live campaign | `bolero`, `coverage-bolero-fuzz` | For a pull request labeled `fuzz` |
+| `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` | `deloxide`, `deloxide-<selection>` | Disabled by temporary CI policy; available locally |
+| `bolero-fuzz`, the combined live campaign | `bolero`, `coverage-bolero-fuzz` | Disabled by temporary CI policy; available locally |
 | The Bolero call's selection record | `bolero`, `bolero-selection` | Whenever the run calls Bolero |
 
 Every required producer job must have succeeded, and every other one must have been skipped. The
 Bolero selection record must show that the randomized properties passed exactly when
-`bolero-random` requested them and that the sanitizer campaigns ran exactly when `fuzz` requested
-them. Without the label, the recorded deliberate skip of that mode is valid and supplies no report.
+`bolero-random` requested them and that sanitizer campaigns were deliberately skipped under the
+temporary CI policy. That skip supplies no execution or coverage evidence.
 A job that a later attempt of the run did not rerun keeps its earlier attempt's verdict and
 artifacts, so a collection of any attempt up to the current one is the run's.
 
@@ -545,9 +610,9 @@ The event and tested source decide eligibility together:
 
 | Selection | Randomized properties | Live sanitizer coverage | Full union |
 | --- | --- | --- | --- |
-| Code or test PR | Required with `bolero-random`; deliberately skipped otherwise | Required for the complete tested inventory with `fuzz`; deliberately skipped otherwise, with no fuzz report | Required, with the label-selected producers |
-| Verified prose-only PR carrying `bolero-random` or `fuzz` | Required with `bolero-random`; deliberately skipped otherwise | Required for the complete tested inventory with `fuzz`; deliberately skipped otherwise | Skipped; each requested run keeps its own report and verdict |
-| Verified prose-only PR carrying neither label | Entire Bolero call excluded | No campaign or report | Skipped; no union evidence |
+| Code or test PR | Required with `bolero-random`; deliberately skipped otherwise | Disabled by temporary CI policy, with no fuzz report | Required, with the label-selected producers |
+| Verified prose-only PR carrying `bolero-random` | Required with `bolero-random`; deliberately skipped otherwise | Disabled by temporary CI policy | Skipped; each requested run keeps its own report and verdict |
+| Verified prose-only PR without `bolero-random` | Entire Bolero call excluded | No campaign or report | Skipped; no union evidence |
 | Manual Bolero workflow | Required | Deliberately skipped | No Check union is launched by this standalone workflow |
 
 Check runs on PR open, reopen, push and label changes. Each event records its own label snapshot;
@@ -566,11 +631,11 @@ Each input is validated before its lines join the union:
 - A native collection is complete; at the tested revision, with an unmodified working tree; from
   this run; and in its producer's declared mode, attempt directory and source policy. A Shuttle or
   Loom collection selected the canonical inventory unfiltered and its `models.json` is complete. A
-  Deloxide lane collection's `lane.json` records a complete run.
+  local Deloxide lane collection's `lane.json` records a complete run.
 - The ordinary report's merge record is complete at the tested revision, and so is every ordinary
   collection it merged. The native extras artifact holds those collections too, and they count once.
-- The fuzz campaign combines this run's shards, tested this revision for this event and label
-  snapshot, and ran every target of the tested inventory once.
+- A selected local fuzz campaign records the current revision, tested inventory and complete target
+  accounting. CI rejects sanitizer inputs under the temporary policy.
 - Each report's sources map onto the files the tested revision tracks exactly as the ordinary merge
   maps them. A line beyond the end of its file shows that a report describes another revision.
 

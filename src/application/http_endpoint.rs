@@ -15,7 +15,6 @@
 
 use std::{convert::Infallible, net::SocketAddr, time::Duration};
 
-use error_stack::{Report, ResultExt};
 use futures_util::SinkExt;
 use http_body_util::{BodyExt, Either, Empty, Full};
 use hyper::{
@@ -39,7 +38,6 @@ use nervix_connector_websockets::{
 };
 use nervix_models::EndpointType;
 use nervix_primitives::{
-    net::TcpListener,
     sync::{Arc, CancellationToken},
     task::JoinSet,
 };
@@ -55,7 +53,10 @@ use tokio_tungstenite::{
 };
 use tracing::warn;
 
-use super::{AppError, service_tasks::ServiceTasks, tls::HttpsListenerCertificates};
+use super::{
+    node_initialization::NodeInitialization, public_listener::PublicListener,
+    service_tasks::ServiceTasks, tls::HttpsListenerCertificates,
+};
 use crate::runtime::{
     EndpointDispatchOutcome, EndpointRequestOutcome, EndpointResolution,
     HttpEndpointRequestMetadata, ResolvedEndpointRoute, Runtime, WebsocketsEndpointFrameMetadata,
@@ -246,7 +247,7 @@ impl EndpointWebsocketConnection {
             };
             if let Err(error) = session_result {
                 warn!(
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     host,
                     path = self.path.as_str(),
                     "websocket signaling failed"
@@ -378,14 +379,25 @@ impl IngestMessageHeaders for HyperRequestHeaders<'_> {
 
 async fn handle_http_request(
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
+    request_tasks: ServiceTasks,
+    shutdown: CancellationToken,
+    remote_addr: SocketAddr,
+    request: HyperRequest<HyperIncoming>,
+) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
+    if shutdown.is_cancelled() || !initialization.is_ready() {
+        return Ok(endpoint_rejection_response(None).map(Either::Left));
+    }
+    dispatch_http_request(runtime, request_tasks, shutdown, remote_addr, request).await
+}
+
+async fn dispatch_http_request(
+    runtime: Runtime,
     request_tasks: ServiceTasks,
     shutdown: CancellationToken,
     remote_addr: SocketAddr,
     mut request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
-    if shutdown.is_cancelled() {
-        return Ok(endpoint_rejection_response(None).map(Either::Left));
-    }
     let mut host = String::new();
     if let Some(value) = request.headers().get(HOST)
         && let Ok(value) = value.to_str()
@@ -499,6 +511,7 @@ async fn serve_endpoint_connection<S>(
     stream: S,
     remote_addr: SocketAddr,
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     shutdown: CancellationToken,
 ) -> Result<(), hyper::Error>
@@ -512,6 +525,7 @@ where
             service_fn(move |request| {
                 handle_http_request(
                     runtime.clone(),
+                    initialization.clone(),
                     request_tasks.clone(),
                     request_shutdown.clone(),
                     remote_addr,
@@ -532,26 +546,23 @@ where
 
 pub(in crate::application) async fn serve_http(
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
-    listener: TcpListener,
+    mut listener: PublicListener,
     shutdown: CancellationToken,
-) -> Result<(), Report<AppError>> {
+) {
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = nervix_primitives::select! {
+        nervix_primitives::task::consume_budget().await;
+        let (stream, remote_addr) = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
-            accepted = listener.accept() => {
-                accepted.change_context(AppError::ServeHttp)
-            }
+            accepted = listener.accept() => accepted,
         };
-        let (stream, remote_addr) = accepted?;
-        stream
-            .set_nodelay(true)
-            .change_context(AppError::ServeHttp)?;
         let runtime = runtime.clone();
+        let initialization = initialization.clone();
         let request_tasks = request_tasks.clone();
         let request_shutdown = shutdown.clone();
         connection_tasks.spawn(async move {
@@ -559,6 +570,7 @@ pub(in crate::application) async fn serve_http(
                 stream,
                 remote_addr,
                 runtime,
+                initialization,
                 request_tasks,
                 request_shutdown,
             )
@@ -569,32 +581,28 @@ pub(in crate::application) async fn serve_http(
         });
     }
     while connection_tasks.join_next().await.is_some() {}
-    Ok(())
 }
 
 pub(in crate::application) async fn serve_https(
     runtime: Runtime,
+    initialization: Arc<NodeInitialization>,
     request_tasks: ServiceTasks,
     certificates: HttpsListenerCertificates,
-    listener: TcpListener,
+    mut listener: PublicListener,
     shutdown: CancellationToken,
-) -> Result<(), Report<AppError>> {
+) {
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = nervix_primitives::select! {
+        nervix_primitives::task::consume_budget().await;
+        let (stream, remote_addr) = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
-            accepted = listener.accept() => {
-                accepted.change_context(AppError::ServeHttps)
-            }
+            accepted = listener.accept() => accepted,
         };
-        let (stream, remote_addr) = accepted?;
-        stream
-            .set_nodelay(true)
-            .change_context(AppError::ServeHttps)?;
         let runtime = runtime.clone();
+        let initialization = initialization.clone();
         let request_tasks = request_tasks.clone();
         let request_shutdown = shutdown.clone();
         let certificates = certificates.clone();
@@ -614,6 +622,7 @@ pub(in crate::application) async fn serve_https(
                         tls_stream,
                         remote_addr,
                         runtime,
+                        initialization,
                         request_tasks,
                         request_shutdown,
                     )
@@ -629,7 +638,6 @@ pub(in crate::application) async fn serve_https(
         });
     }
     while connection_tasks.join_next().await.is_some() {}
-    Ok(())
 }
 
 #[cfg(test)]

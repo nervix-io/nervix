@@ -553,7 +553,7 @@ impl EmitterConnectorState {
         label: &str,
         context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
-        buffer: &EmitterBatchBuffer,
+        buffer: &mut EmitterBatchBuffer,
         reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         let mut reason = reason;
@@ -605,7 +605,7 @@ impl EmitterConnectorState {
         &mut self,
         context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
-        buffer: &EmitterBatchBuffer,
+        buffer: &mut EmitterBatchBuffer,
         reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         match self {
@@ -626,7 +626,11 @@ impl EmitterConnectorState {
         if buffer.is_empty() {
             return Ok(None);
         }
-        self.check_fault_injection(context, control)?;
+        let attempt = context.interactions.begin(EmitterAttemptOperation::Publish);
+        if let Err(error) = self.check_fault_injection(context, control) {
+            attempt.finish(error.current_context().attempt_outcome());
+            return Err(error);
+        }
         let pending_acks = buffer.pending_acks();
         {
             let _confirmation_wait =
@@ -639,10 +643,19 @@ impl EmitterConnectorState {
             )
             .await;
             buffer.report_staged_messages(self.staged_messages());
-            published.map_err(|()| emitter_stop_deadline_elapsed())??;
+            let published = match published {
+                Ok(result) => result,
+                Err(()) => Err(emitter_stop_deadline_elapsed()),
+            };
+            let outcome = match &published {
+                Ok(()) => EmitterAttemptOutcome::Succeeded,
+                Err(error) => error.current_context().attempt_outcome(),
+            };
+            attempt.finish(outcome);
+            published?;
         }
         // Every buffered row is resolved now, and the rows the emitter delivered are sent, however
-        // many attempts delivered them. A emitter that stages what it accepts has not published those
+        // many attempts delivered them. An emitter that stages what it accepts has not published those
         // rows yet, so its commit counts them as sent and this write counts none.
         let report = buffer.delivered_report();
         buffer.clear();
@@ -746,7 +759,7 @@ impl OpenEmitterConnector {
         &mut self,
         context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
-        buffer: &EmitterBatchBuffer,
+        buffer: &mut EmitterBatchBuffer,
         reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         let Some(staged) = self.connector.lifecycle().staged_commit() else {
@@ -756,8 +769,14 @@ impl OpenEmitterConnector {
         if !reason.forces_commit() && !self.commit_is_due(context, staged)? {
             return Ok(None);
         }
+        let attempt = context.interactions.begin(EmitterAttemptOperation::Commit);
         let acks = self.pending_acks(buffer);
         let committed = {
+            let mut in_flight = context.interactions.work();
+            in_flight.set(
+                crate::metrics::EmitterWorkKind::InFlight,
+                self.connector.lifecycle().staged_messages(),
+            );
             let _confirmation_wait =
                 EmitterConfirmationWaitGuard::begin(&context.confirmation_waits);
             let commit = Box::pin(self.connector.lifecycle_mut().commit());
@@ -769,7 +788,13 @@ impl OpenEmitterConnector {
             .map_err(|()| emitter_stop_deadline_elapsed())?
         };
         buffer.report_staged_messages(self.connector.lifecycle().staged_messages());
-        let committed = committed.map_err(emitter_publish_failure)?;
+        let committed = committed.map_err(emitter_publish_failure);
+        let outcome = match &committed {
+            Ok(_) => EmitterAttemptOutcome::Succeeded,
+            Err(error) => error.current_context().attempt_outcome(),
+        };
+        attempt.finish(outcome);
+        let committed = committed?;
         // The commit published everything staged, so the next rows staged start a cadence of
         // their own.
         self.commit_cadence.clear();
@@ -931,6 +956,21 @@ pub(super) fn emitter_publish_failure(
     }
 }
 
+impl EmitterRuntimeError {
+    /// The host's existing decision projected into the bounded observation label.
+    fn attempt_outcome(&self) -> EmitterAttemptOutcome {
+        if let Self::InvalidConnectorConfig = self {
+            return EmitterAttemptOutcome::Misconfigured;
+        }
+        if self.is_retryable_publish_failure()
+            || matches!(self, Self::StopDeadlineElapsed | Self::ShutdownWhileStalled)
+        {
+            return EmitterAttemptOutcome::Transient;
+        }
+        EmitterAttemptOutcome::Violation
+    }
+}
+
 pub(super) async fn finish_rejected_records(
     context: &EmitterConnectorContext,
     batches: &mut [EmitterPublishBatch],
@@ -1019,6 +1059,8 @@ pub(super) async fn finish_rejected_records(
 mod tests {
     use nervix_connector::{EmitterRecordId, ParsedRetryPolicy};
 
+    mod interaction_metrics;
+
     use super::*;
     use crate::runtime::test_fixtures::{
         emitter_context, input_batch, input_batch_with, input_value, test_domain_clock_authority,
@@ -1102,6 +1144,7 @@ mod tests {
     fn staging_emitter(
         cadence: Duration,
         size_boundary: u64,
+        commit_failure: Option<EmitterWriteError>,
     ) -> super::super::emitter_values::MappedRowEmitter {
         let emitter = crate::runtime::test_fixtures::named("staging");
         let values = [nervix_models::EmitterValueMapping {
@@ -1126,12 +1169,15 @@ mod tests {
             },
         )
         .assured("the fixture's input field is available to the mapping");
-        let publisher = nervix_connector_fake::FakeEmitter::<nervix_connector_fake::Rows>::new(
+        let mut publisher = nervix_connector_fake::FakeEmitter::<nervix_connector_fake::Rows>::new(
             nervix_connector_fake::PublishScript::Repeat(
                 nervix_connector_fake::PublishAnswer::ConfirmAll,
             ),
         )
         .staging(cadence, size_boundary);
+        if let Some(error) = commit_failure {
+            publisher.commit_errors.push_back(Report::new(error));
+        }
         super::super::emitter_values::MappedRowEmitter::new(Box::new(publisher), projection)
     }
 
@@ -1181,7 +1227,7 @@ mod tests {
         let context = emitter_context();
         let cadence = Duration::from_millis(20);
         let mut connector =
-            EmitterConnectorState::opened(Box::new(staging_emitter(cadence, u64::MAX)));
+            EmitterConnectorState::opened(Box::new(staging_emitter(cadence, u64::MAX, None)));
         let mut buffer = releasing_buffer();
 
         let before = context
@@ -1254,8 +1300,11 @@ mod tests {
             backoff: &mut backoff,
         };
         let context = emitter_context();
-        let mut connector =
-            EmitterConnectorState::opened(Box::new(staging_emitter(Duration::from_secs(60), 1)));
+        let mut connector = EmitterConnectorState::opened(Box::new(staging_emitter(
+            Duration::from_secs(60),
+            1,
+            None,
+        )));
         let mut buffer = releasing_buffer();
 
         let published = publish(
@@ -1297,6 +1346,7 @@ mod tests {
         let mut connector = EmitterConnectorState::opened(Box::new(staging_emitter(
             Duration::from_secs(60),
             u64::MAX,
+            None,
         )));
         let mut buffer = releasing_buffer();
         let published = publish(

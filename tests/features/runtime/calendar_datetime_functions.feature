@@ -36,16 +36,16 @@ Feature: Calendar, time zone and formatted datetime functions
         origin string,
         months integer
       );
-      CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+      CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event
         ENCODE occurred_at AS RFC3339,
                origin AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY local_events SCHEMA local_event UNBRANCHED;
       CREATE VHOST edge calendar-functions-{{test_id}}.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP NOW
@@ -153,8 +153,7 @@ Feature: Calendar, time zone and formatted datetime functions
         route STRING,
         error_message STRING
       );
-      CREATE CODEC reading_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC reading_batch_codec
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
@@ -163,8 +162,8 @@ Feature: Calendar, time zone and formatted datetime functions
       CREATE RELAY logged_readings SCHEMA logged_reading UNBRANCHED;
       CREATE RELAY parse_errors SCHEMA parse_error UNBRANCHED;
       CREATE VHOST edge datetime-parsing-{{test_id}}.example.com;
-      CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TO readings

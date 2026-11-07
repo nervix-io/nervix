@@ -11,7 +11,7 @@ Runnable end-to-end graphs live under `examples/`:
 - `examples/wasm-processors/wasm-dual.plexus` wires Rust and Go guests into set-only multi-route WASM
   processors.
 - `examples/paced-simulation/paced_simulation.plexus` is the graph of two runnable applications, a
-  Rust driver and a Python driver over the shared C binding, that pace a sensor simulation by the
+  Rust driver and a Python driver over the native Python package, that pace a sensor simulation by the
   domain clock through client ingestors and attached client emitters. [Paced Simulation
   Drivers](paced-simulation-drivers.md) describes the graph and how to run both programs.
 
@@ -39,8 +39,8 @@ CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
   payload string OPTIONAL
 );
 
-CREATE CODEC notification_codec
-  FROM WIRE JSON SCHEMA notification_wire
+CREATE WIRE JSON CODEC notification_codec
+  FROM WIRE SCHEMA notification_wire
   TO SCHEMA notification
   ENCODE created_at AS RFC3339;
 
@@ -56,7 +56,7 @@ CREATE KAFKA CLIENT kafka_main
 CREATE KAFKA TOPIC INGESTOR kafka_notifications
   FROM kafka_main
   TOPIC 'notifications'
-  OFFSET BY CONSUMER GROUP 'nervix_consumer'
+  OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING notification_codec
   TO notifications
@@ -120,6 +120,10 @@ CREATE INFERENCER score_message
 
 The `INPUTS` mapping may read the original row. Route construction sees immutable generated model
 output, the branch, and declared materialized state, but not `input` or `message`.
+
+For a model with state input and successor output ports, add `STATE` between `INPUTS` and
+`OUTPUT SCHEMA`. [State tensors](processors.md#state-tensors) contains a complete running-sum
+declaration with independent state per branch, its initialization rules and its volatile lifetime.
 
 ## Window construction
 

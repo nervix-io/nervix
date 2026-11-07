@@ -57,12 +57,12 @@ Feature: LOOKUP_HASH_MAP filter-map function
         region_name string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
 
-      CREATE CODEC title_lookup_codec
-        FROM WIRE JSON SCHEMA title_lookup_wire
+      CREATE WIRE JSON CODEC title_lookup_codec
+        FROM WIRE SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
       CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
@@ -76,12 +76,11 @@ Feature: LOOKUP_HASH_MAP filter-map function
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/enrich'
-        TYPE HTTP;
+        PATH '/enrich';
 
-      CREATE HTTP ENDPOINT INGESTOR source_logs
+      CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs
@@ -200,12 +199,12 @@ Feature: LOOKUP_HASH_MAP filter-map function
         normalized_title string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
 
-      CREATE CODEC title_lookup_codec
-        FROM WIRE JSON SCHEMA title_lookup_wire
+      CREATE WIRE JSON CODEC title_lookup_codec
+        FROM WIRE SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
       CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
@@ -334,12 +333,12 @@ Feature: LOOKUP_HASH_MAP filter-map function
         region_name string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
 
-      CREATE CODEC title_lookup_codec
-        FROM WIRE JSON SCHEMA title_lookup_wire
+      CREATE WIRE JSON CODEC title_lookup_codec
+        FROM WIRE SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
       CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
@@ -355,12 +354,11 @@ Feature: LOOKUP_HASH_MAP filter-map function
 
       CREATE VHOST edge http-lookup-routes-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/lookup-routes'
-        TYPE HTTP;
+        PATH '/lookup-routes';
 
-      CREATE HTTP ENDPOINT INGESTOR source_logs
+      CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs
@@ -477,12 +475,12 @@ Feature: LOOKUP_HASH_MAP filter-map function
         region_name string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
 
-      CREATE CODEC title_lookup_codec
-        FROM WIRE JSON SCHEMA title_lookup_wire
+      CREATE WIRE JSON CODEC title_lookup_codec
+        FROM WIRE SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
       CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
@@ -496,12 +494,11 @@ Feature: LOOKUP_HASH_MAP filter-map function
 
       CREATE VHOST edge http-lookup-failure-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/lookup-failure'
-        TYPE HTTP;
+        PATH '/lookup-failure';
 
-      CREATE HTTP ENDPOINT INGESTOR source_logs
+      CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs

@@ -189,7 +189,7 @@ Feature: Web console backup and restore
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
-      CREATE CODEC zip_code_entry_codec FROM WIRE JSON SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
+      CREATE WIRE JSON CODEC zip_code_entry_codec FROM WIRE SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
       CREATE HASH MAP zip_codes_by_zip KEY zip FROM RESOURCE zip_codes VERSION 1 PATH 'lookup.jsonl' DECODE USING zip_code_entry_codec;
       """
     Then the current leader node is saved as placeholder "leader"
@@ -233,6 +233,90 @@ Feature: Web console backup and restore
       | 1            |
       | 3            |
 
+  @console_restore_lost_reply
+  Scenario Outline: A console restore whose reply was lost after it applied stays unknown when a later attempt cannot read the archive
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "source.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".backup-menu-button" is clicked
+    And selector ".backup-tab[data-tab='restore']" is clicked
+    And selector ".restore-file" is given backup archive "source.nvxb"
+    And selector ".restore-domain" is filled with "{{domain}}"
+    And selector ".restore-target" is filled with "{{domain}}_copy"
+    And selector ".restore-dry-run" is clicked
+    Then selector ".restore-status" contains "dry run planned"
+    Given the web console's next restore attempt loses its reply, after which its archive file cannot be read
+    When selector ".restore-submit" is clicked
+    Then the web console's lost restore reply completed the restore, whose execution reference is saved as placeholder "restore_reference"
+    And selector ".restore-status" contains "the outcome of restore '{{restore_reference}}' is unknown"
+    And selector ".restore-error" contains "the browser could not read the archive file"
+    When these Plexus commands are executed on the leader node
+      """
+      LIST DOMAINS;
+      """
+    Then the last command output contains
+      """
+      {{domain}}_copy pace=UNPACED status=STOPPED
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @console_restore_unrecorded_failure
+  Scenario Outline: A console restore whose completed reply was lost stays unknown after an unrecorded request failure
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "source.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".backup-menu-button" is clicked
+    And selector ".backup-tab[data-tab='restore']" is clicked
+    And selector ".restore-file" is given backup archive "source.nvxb"
+    And selector ".restore-domain" is filled with "{{domain}}"
+    And selector ".restore-target" is filled with "{{domain}}_copy"
+    And selector ".restore-dry-run" is clicked
+    Then selector ".restore-status" contains "dry run planned"
+    Given the web console's next restore attempt loses its reply, after which a later attempt receives an unrecorded request failure
+    When selector ".restore-submit" is clicked
+    Then the web console's completed restore reply is lost and its unrecorded failure is substituted, with execution reference saved as placeholder "restore_reference"
+    And selector ".restore-status" contains "the outcome of restore '{{restore_reference}}' is unknown"
+    And selector ".restore-error" contains "the later restore request failed before admission"
+    And selector ".terminal" contains "RESTORE at 0..7: the later request's structured diagnostic"
+    And repeating the console restore from archive "source.nvxb" recovers its recorded outcome
+    When these Plexus commands are executed on the leader node
+      """
+      LIST DOMAINS;
+      """
+    Then the last command output contains
+      """
+      {{domain}}_copy pace=UNPACED status=STOPPED
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @console_restore_warnings
   Scenario Outline: A console restore lists the archived state it skipped beside its result
     Given a <cluster_size> node nervix cluster is started
@@ -242,15 +326,15 @@ Feature: Web console backup and restore
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( tenant STRING, latency I64 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( tenant string, latency integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA metric_summary ( tenant STRING, samples I64, latency_p0 F64 OPTIONAL );
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant;
       CREATE VHOST edge console-restore-warnings-{{test_id}}.example.com;
-      CREATE ENDPOINT metric_ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR metric_source FROM metric_ingress MODE NO ACK
+      CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -315,7 +399,8 @@ Feature: Web console backup and restore
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     When selector ".prompt-row input" is filled with "BACKUP DOMAIN {{domain}} TO 'typed.nvxb';"
@@ -357,7 +442,8 @@ Feature: Web console backup and restore
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     Given leadership moves from node "{{leader}}" to node "{{follower}}" under its next durably admitted command
@@ -401,7 +487,8 @@ Feature: Web console backup and restore
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     Given command response delivery on every node pauses after execution
@@ -448,7 +535,8 @@ Feature: Web console backup and restore
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     When leadership is transferred from node "{{leader}}" to node "{{follower}}"

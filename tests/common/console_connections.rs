@@ -7,7 +7,9 @@
 //!   leaders the frames of that record report, and what a record shows: whether the page ever held
 //!   two session connections at once, whether its session started where the page was opened and
 //!   followed its leader redirect, whether every later connection reached a node reported to the
-//!   page as the leader, and whether its session connected again where it lost its connection.
+//!   page as the leader, which node first served its session as leader, and whether its session
+//!   connected again where it lost its connection, and observations of its session identities
+//!   and domain, clock and subscription setup replies.
 //! - **Depends on.** The console WebSocket paths, codecs and messages of the client wire contract,
 //!   and URL parsing.
 //! - **Must not know.** How the console drives its session, or how a node serves it.
@@ -37,16 +39,18 @@ use std::{collections::BTreeMap, fmt};
 
 use bytes::Bytes;
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_client_wire::{
-    BackupDownloadMessage, CommandDisposition, LeaderRedirect, Leadership, NodeEndpoints, Reply,
-    ReplyBody, RestoreDisposition, RestoreReply, ServerEvent, ServerMessage, SessionEndReason,
-    SessionLimits,
+    BackupDownloadMessage, CommandDisposition, DomainClockAttachDisposition, LeaderRedirect,
+    Leadership, NodeEndpoints, Reply, ReplyBody, RestoreDisposition, RestoreReply, ServerEvent,
+    ServerMessage, SessionEndReason, SessionLimits,
     websocket::{
         CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH,
         ClientBackupDownloadWebSocketCodec, ClientRestoreWebSocketCodec, ClientWebSocketCodec,
         WebSocketData,
     },
 };
+use nervix_models::{ClusterNodeName, DomainName};
 use serde::Deserialize;
 use url::Url;
 
@@ -232,7 +236,7 @@ impl RecordedConnection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReportedLeader {
     /// The node the connection reached: the leader that serves the console's session.
-    Serving,
+    Serving(ClusterNodeName),
     /// The node whose web console a redirect names.
     Redirect(Url),
 }
@@ -262,7 +266,7 @@ impl ReportedLeader {
     /// The leader a leadership observation names: the serving node itself, or the remote leader.
     fn of_leadership(leadership: Leadership) -> Option<Self> {
         match leadership {
-            Leadership::ServingNode(_) => Some(Self::Serving),
+            Leadership::ServingNode(node) => Some(Self::Serving(node)),
             Leadership::Remote(leader) => Self::at_console(leader),
             Leadership::Unknown => None,
         }
@@ -415,6 +419,26 @@ pub(crate) struct ConsoleConnectionRecord {
     losses: Vec<u64>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ClockAttachmentEvidenceError {
+    #[error("session connection {connection} has an unreadable frame")]
+    Unreadable { connection: usize },
+    #[error("session connection {connection} acknowledged clock '{domain}' more than once")]
+    Repeated {
+        connection: usize,
+        domain: DomainName,
+    },
+}
+
+/// Public session connections and setup replies observed before or after a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConsoleSetupObservation {
+    pub(crate) connections: Vec<u64>,
+    pub(crate) domain_selections: usize,
+    pub(crate) clock_attachments: usize,
+    pub(crate) subscriptions: usize,
+}
+
 /// The two kinds of stream the backup controls open beside the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackupStream {
@@ -490,9 +514,132 @@ pub(crate) enum ConnectionRecordViolation {
 }
 
 impl ConsoleConnectionRecord {
+    /// For a scene with one automatic clock selection per connection, counts the distinct
+    /// sessions that acknowledged it. A second acknowledgement on one connection is a defect even
+    /// when its request identity repeats. Scenes that issue manual attaches use their own oracle.
+    pub(crate) fn clock_attachment_count(
+        &self,
+        domain: &DomainName,
+    ) -> error_stack::Result<usize, ClockAttachmentEvidenceError> {
+        let codec = ClientWebSocketCodec::new(SessionLimits::DEFAULT);
+        let mut count = 0_usize;
+        for (number, connection) in self.numbered() {
+            if connection.purpose != ConnectionPurpose::Session {
+                continue;
+            }
+            let mut attached = false;
+            for frame in &connection.frames {
+                let data = WebSocketData::Binary(Bytes::copy_from_slice(&frame.bytes));
+                let frame = codec.decode(data).map_err(|error| {
+                    error.change_context(ClockAttachmentEvidenceError::Unreadable {
+                        connection: number,
+                    })
+                })?;
+                let message = ServerMessage::decode(&frame).map_err(|error| {
+                    error.change_context(ClockAttachmentEvidenceError::Unreadable {
+                        connection: number,
+                    })
+                })?;
+                let ServerMessage::Reply(Reply {
+                    body: ReplyBody::DomainClockAttach(outcome),
+                    ..
+                }) = message
+                else {
+                    continue;
+                };
+                let DomainClockAttachDisposition::Attached {
+                    domain: acknowledged,
+                    ..
+                } = outcome.disposition
+                else {
+                    continue;
+                };
+                if &acknowledged != domain {
+                    continue;
+                }
+                if attached {
+                    return Err(Report::new(ClockAttachmentEvidenceError::Repeated {
+                        connection: number,
+                        domain: domain.clone(),
+                    }));
+                }
+                attached = true;
+            }
+            if attached {
+                count = count
+                    .checked_add(1)
+                    .assured("connections are held in memory and cannot number usize::MAX");
+            }
+        }
+        Ok(count)
+    }
+
+    /// Reads setup replies through the public codec. Comparing observations after a command
+    /// proves both that the same connection survived and that existing intent was not restored.
+    pub(crate) fn setup_observation(
+        &self,
+    ) -> Result<ConsoleSetupObservation, Report<FrameReadFailure>> {
+        let codec = ClientWebSocketCodec::new(SessionLimits::DEFAULT);
+        let mut observation = ConsoleSetupObservation {
+            connections: Vec::new(),
+            domain_selections: 0,
+            clock_attachments: 0,
+            subscriptions: 0,
+        };
+        for connection in &self.connections {
+            if connection.purpose != ConnectionPurpose::Session {
+                continue;
+            }
+            observation.connections.push(connection.opened);
+            for frame in &connection.frames {
+                let data = WebSocketData::Binary(Bytes::copy_from_slice(&frame.bytes));
+                let verified = codec
+                    .decode(data)
+                    .map_err(|error| error.change_context(FrameReadFailure::NotFrame))?;
+                let message = ServerMessage::decode(&verified)
+                    .map_err(|error| error.change_context(FrameReadFailure::NotMessage))?;
+                if let ServerMessage::Reply(reply) = message {
+                    match reply.body {
+                        ReplyBody::DomainSelection(_) => observation.domain_selections += 1,
+                        ReplyBody::DomainClockAttach(_) => observation.clock_attachments += 1,
+                        ReplyBody::Subscribe(_) => observation.subscriptions += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(observation)
+    }
+
     /// Every connection with its place in the record, the first being 1.
     fn numbered(&self) -> impl Iterator<Item = (usize, &RecordedConnection)> {
         (1_usize..).zip(&self.connections)
+    }
+
+    /// The first node that told the page it serves its session as leader. Redirects name a
+    /// possible destination, while this report establishes which node actually served it.
+    pub(crate) fn first_serving_node(
+        &self,
+    ) -> Result<Option<ClusterNodeName>, Report<UnreadableFrame>> {
+        // Connections and frames are a sequence of browser events, in their recorded order.
+        for (number, connection) in self.numbered() {
+            if connection.purpose != ConnectionPurpose::Session {
+                continue;
+            }
+            for frame in &connection.frames {
+                let reported = connection.purpose.reported_leader(frame).map_err(|error| {
+                    error.change_context(UnreadableFrame {
+                        connection: number,
+                        purpose: connection.purpose.clone(),
+                        received: frame.received,
+                    })
+                })?;
+                if let Some(ReportedLeader::Serving(node)) = reported {
+                    return Ok(Some(node));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The consoles of the nodes reported to the page as the leader on its connections, each with

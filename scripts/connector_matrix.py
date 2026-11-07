@@ -169,6 +169,7 @@ def entity_rows(row, side, notes):
             ("Options in statement order", option_text(row["options"])), ("Headers", headers)]
     if side == "ingest":
         rows.extend([
+            ("Instancing", row["instancing"]),
             ("Quiesce (complete bodies after ON QUIESCE)", "\n".join(row["quiesce"])),
             ("Metadata", "\n".join(row["metadata"]) or absent(notes, row, "metadata")),
             ("Every live node", "yes" if row["every_node"] else "no; scheduled owner"),
@@ -279,9 +280,19 @@ def render_matrix(surface, notes):
              key["file"])
             for key in client["keys"]
         ], ("CONFIG key", "Presence", "Value", "Owner", "Confidential", "File role")))
-        namespaces = ", ".join(client["namespaces"]) or "none; only declared keys are accepted"
+        secret_keys = client["secret_keys"]
+        only_declared = "none" if secret_keys else "none; only declared keys are accepted"
+        namespaces = ", ".join(client["namespaces"]) or only_declared
         reserved = ", ".join(f"`{key}`" for key in client["reserved"]) or "none"
         lines.append(f"Delegated property namespaces: {namespaces}. Reserved keys: {reserved}.\n")
+        lines.extend(
+            f"`{key['key']}` is set by a statement: write {key['clause']}.\n"
+            for key in client["statement_keys"]
+        )
+        if secret_keys:
+            lines.append(f"Secret keys an operator names: `{secret_keys}`, each a confidential "
+                         "string a statement reads by its whole key. Nervix owns them; no driver "
+                         "reads them, and every other key must be declared.\n")
         lines.extend(driver_names(client))
         readers = readers_text(surface, client)
         if readers:
@@ -374,8 +385,8 @@ def documents(root, surface, notes, policy):
             for row in surface[side]:
                 for option in row["options"]:
                     if option["keywords"] == "INSTANCES":
-                        rows.append((row["entity"], option["presence"]))
-            text = region(text, "instancing", table(rows, ("Entity", "INSTANCES")))
+                        rows.append((row["entity"], row["instancing"], option["presence"]))
+            text = region(text, "instancing", table(rows, ("Entity", "Capability", "INSTANCES")))
         text = region(text, f"{side}-headers", side_headers(surface, side))
         output[path] = text
     path = "docs/src/connector-contract.md"

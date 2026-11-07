@@ -115,7 +115,7 @@ An operation waiting for a turn holds no place in the class's queue. A place in 
 every byte the class releases until it is satisfied, so a storage operation waiting there would
 hold the class's remaining room for itself until the store's own earlier working set ended. Storage
 operations instead wait for each other at the turn, and the rest of the class stays with its other
-work: a source's control call, a replication frame being encoded and a follower's answer find room
+work: an ingestor's control call, a replication frame being encoded and a follower's answer find room
 beside the working set the store holds. A working set returns its bytes before its turn passes, so
 the next one is admitted without waiting in the class.
 
@@ -238,6 +238,29 @@ Submissions and answers stay in log order. A conflict, higher vote, partial acce
 failure, or liveness failure ends that stream generation after its first result. Raft resumes from
 the last progress the follower confirmed.
 
+A batch the leader cannot write to the stream, because its encoding exceeds the operation limit,
+the node's executor refuses to encode it, or the transport fails while sending it, is a stream
+failure too. The batches submitted before it still receive their answers, and then the generation
+ends with that failure. It never ends as if its input were exhausted while that input still held
+unsent requests: OpenRaft takes an answer stream that ends without an error to mean that every
+request it sent was answered, and would send the unanswered rest again from the follower's last
+confirmed position under the same in-flight request. A new leader that has not yet confirmed any
+position would then acknowledge its probe below the probe's own start, which OpenRaft treats as a
+broken invariant: in a debug build its Raft core panics, and every later write on that node fails
+with `raft write failed: panicked`.
+
+The three-node failed-submission regression transfers leadership with a retained log and a
+lagging follower. It arms the successor before the transfer, then fails exactly its next nonempty
+submission to that follower at the sender's failure boundary. Empty management probes and other
+followers continue; the selected follower's later traffic also continues. The captured request
+must start above the first replay batch's end. With OpenRaft's initial midpoint
+`floor(searching_end / 16) * 8` and a 256-entry batch, 528 retained entries are the first history
+whose probe's previous index, 263, exceeds a replay's index 255. The scenario checks the actual
+boundary, transaction attachment and commit, follower catch-up, subsequent writes, and a strict
+read confirmed by the successor. These progress assertions also apply when debug assertions are
+disabled. The one-shot control and captured request are in-memory test state; ordinary builds
+retain only an inert zero-sized control.
+
 The leader permits at most 16 unacknowledged batches for one follower. It also waits whenever its
 unacknowledged bytes plus the next 1 MiB target would exceed 16 MiB. Because one complete command
 may cross the target, measured outstanding bytes may exceed that target budget by the excess of one
@@ -265,16 +288,28 @@ the applied domain backlog within its assertion bound and the bytes carried by t
 Append stream openings observe actual data-stream setup; initial empty probes do not open those
 streams. A data-setup attempt includes its prefix check, even when that check fails before a stream
 can open. Native transport regressions cover finite probes, the transition to data, ordered empty
-commit updates and rejected probes. The public catch-up scenarios retain their stream-count and
+commit updates, rejected probes and a batch the stream cannot submit after an answered one. The
+public catch-up scenarios retain their stream-count and
 time assertions and change no product deadline.
 
-Heartbeats keep the shorter deadline derived from the configured heartbeat interval, capped at five
-seconds. With the default 250 ms heartbeat, the current soft deadline is 187.5 ms. Replication
-answers also prove leader contact, so sustained writes suppress redundant heartbeats for an
-automatically derived window. The window is no longer than the heartbeat interval or half the gap
-between that interval and the minimum election timeout, which, with the election timeouts derived
-at six heartbeats, is one heartbeat interval. This keeps the heartbeat interval plus the
-suppression window below the minimum election timeout.
+One heartbeat request remains in flight per follower. Its worker and management request wait up to
+the leader lease, the maximum election timeout (twelve heartbeat intervals, three seconds at the
+default 250 ms heartbeat). An acknowledgement received inside that bound renews the lease by the
+request's sending time. An answer that exceeds that request's lease-sized deadline is discarded;
+the lease check still uses the acknowledged request's sending time. Initial empty replication
+probes retain the shorter soft request deadline, capped at five seconds; they do not maintain the
+heartbeat worker's lease. Replication answers also prove leader contact, so sustained writes
+suppress redundant heartbeats for an automatically derived window. The window is no longer than the
+heartbeat interval or half the gap between that interval and the minimum election timeout, which,
+with the election timeouts derived at six heartbeats, is one heartbeat interval. This keeps the
+heartbeat interval plus the suppression window below the minimum election timeout. The heartbeat
+scheduling interval and both election timeouts are unchanged by the longer answer wait.
+
+Nervix pins the maintained OpenRaft alpha.33 worker correction because that worker owns an
+independent response timeout. Extending only the interconnect request would still lose the answer
+when the worker stopped waiting after one heartbeat interval. The pin keeps the worker and
+interconnect response waits within the same lease-sized bound while retaining the registry runtime
+and macro support crates.
 
 The independent paths matter when a follower has slow storage: its append answer may take much
 longer than a heartbeat deadline, while management traffic still prevents an election. Changing the
@@ -286,7 +321,7 @@ When only a bare quorum of voters is reachable, such as two of three while the t
 commit needs all of them and the leader's link to each. When such a link loses packets but stays up,
 TCP recovers them by retransmission under the host kernel's retransmission timeout, which grows
 exponentially while the losses continue; Nervix does not tune it. An exchange whose deadline passes
-before its retransmission arrives fails and is retried: a heartbeat at its soft deadline, and an
+before its retransmission arrives fails and is retried: a heartbeat at the leader lease, and an
 append stream at its five-second setup or progress bound. Commits can therefore stall, leadership
 can move between the reachable voters, and a control command, which needs several commits in
 sequence, can time out.
@@ -323,9 +358,24 @@ older voter's run the same way, without changing the membership.
 [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
 publishes and what a refused node does. Each membership reconciliation gives a blocking learner
 catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
-learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
-learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
-tries again while ordinary replication continues.
+learner caught up; the membership change has its own ten-second bound. A catch-up timeout leaves
+the node a learner. A failed reconciliation records `raft membership reconciliation failed`, and
+the one-second reconciliation loop tries again while ordinary replication continues.
+
+A voter change first commits a joint configuration and then commits its uniform target. The joint
+configuration requires a majority of each constituent voter set; its union is not a uniform quorum.
+If the second step is refused or interrupted, reconciliation finishes the recorded target before
+planning another admission or address update. It preserves existing learners and completes the
+removal of voters excluded by a `DROP NODE`, rather than deriving a replacement target from the
+joint union or from gossip. The maintained OpenRaft completion operation checks the effective
+membership and proposes its continuation in one synchronous Core turn. A read before the request
+is only an observation: another request or a peer update can finish that transition before Core
+handles completion. An already uniform Core returns its effective and committed records without
+proposing an entry. A still-joint Core flattens its current target through the ordinary membership
+commitment, leader and lease gates, preserving independent learners and the existing removed-voter
+policy. Nervix then waits for the returned uniform membership to be committed. A timed wait counts as
+success only when the observed configuration is committed and uniform. Leadership changes and
+retries can continue the same committed joint transition.
 
 When discovery reports a different interconnect endpoint for an existing member, reconciliation
 replaces that member's recorded Raft address. A returning voter keeps its voter role; it is not
@@ -334,9 +384,13 @@ reconciliation passes propose no further address change. The stored address supp
 contact hints; Raft traffic resolves the authenticated node identity through the interconnect.
 
 The consensus event stream and `info` log record `raft add learner`, `raft wait for learner`,
-`raft update address`, `raft promote voters`, and `raft membership updated` transitions.
+`raft update address`, `raft promote voters`, and `raft membership updated` transitions. Every
+report on the consensus event stream reaches the node's sessions as a `Leadership` notice.
 `SHOW CLUSTER STATUS` reports the local `raft.last_log_index`, `raft.last_applied`, and each member's
-learner or voter role and recorded address.
+learner or voter role and recorded address. `raft.membership_joint` says whether the effective
+configuration still requires multiple majorities; `raft.membership_committed` says whether that
+effective configuration is committed. A converged voter list requires `membership_joint: false`
+and `membership_committed: true`, as well as the expected voter identities.
 
 ## Bounded Log Reading
 
@@ -346,10 +400,10 @@ one oversized first entry travels alone. The reader releases the ordered storage
 chunks and retains the chunk's working set, its memory charge and the store's Commands turn, until
 its entries have been handed to the consumer. Handing out the final entry releases the exhausted
 iterator allocation, its charge and its turn before that poll returns. A consumer that parks with
-its final entry therefore holds no empty chunk that could keep another reader or a source control
+its final entry therefore holds no empty chunk that could keep another reader or an ingestor control
 call out of the Commands class. A chunk that still holds entries, such as a replication stream's
 while its follower has not answered, keeps its working set; another reader or storage operation
-then waits for the turn rather than in the Commands class, so a source control call still finds
+then waits for the turn rather than in the Commands class, so an ingestor control call still finds
 room. The reader retains an explicit exhausted boundary, without the allocation, so a subsequent
 chunk still yields before requesting the ordered storage worker.
 
@@ -456,18 +510,34 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_redis_subscription_logs`,
-`raft_redis_subscription_meta`, `raft_redis_subscription_state`, and
-`raft_redis_subscription_snapshots`. Opening it validates the complete keyspace namespace before
-reading any records. This namespace identifies the current Model shape, including an owned Pulsar
-subscription's required start position, the serialized Sentry platform field, an ingestor's
-`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
-quality of service an MQTT TOPIC ingestor writes beside its delivery mode, and a `REDIS PUBSUB`
-ingestor's `CHANNEL` or `PATTERN` subscription. Its state metadata requires the current
-`RestoredLifecycle` encoding, including the durable restore installation gate and the unit-keyed
-committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
-are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
-and snapshot installation therefore retain their complete magnitudes. See
+The current emitter Models carry explicit key expressions, source-partition routing and
+expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
+`raft_kind_key_logs`, `raft_kind_key_meta`, `raft_kind_key_state`, and
+`raft_kind_key_snapshots`. Opening it validates the complete keyspace namespace before reading
+any records. This namespace identifies the current Model shape, including the separate JSON
+and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
+subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+consumer group's required start position, the serialized Sentry platform field, an ingestor's
+`TIMESTAMP AT metadata.<field>` source, the separate `NATS STREAM` ingestor and emitter entities, an SQS QUEUE emitter's `SEND` request shape, the receive
+count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
+MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
+writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
+whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
+whose signaling data exists only on its WebSockets variant, and the branch partition count every
+resolved branch declaration of the committed schedule carries. It identifies
+the current statement shape as well, which the statements a transaction keeps are stored in:
+`ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+changes one part of its entity's body, an envelope clause or the properties, or one part of a
+construction where it stands. Its state metadata requires the current `ClusterState` encoding, 14,
+including committed cluster parameters, the durable restore installation gate and the unit-keyed
+committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
+The current shape also requires inferencer state bindings and their initial expressions,
+typed ingestor instancing, exact-unit placement-group members
+and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions,
+progress, outcomes, and plan, report and topology
+headers are archived as fixed-width 64-bit values with checked native decoding. Log replay, state
+recovery and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
 
 The committed domain schedule stores the current unit map on every scheduled node. Each unit owns
@@ -525,6 +595,28 @@ contact hints; current peer identity, incarnation, and endpoint still come from 
 
 ## Observability
 
+The command-history observer projects the applying, finished and expired index lengths and the
+optional durable retry fence from one applied state revision. Scrapes read those indexes without
+scanning records or changing retention. Every node exposes its own applied counts and fence;
+admission refusal events are counted only by the application process that handles the refusal,
+never by follower application or replay. See [Command Execution History](./metrics-and-observability.md#command-execution-history).
+
+Opening a consensus node establishes a `consensus_node` trace span with its cluster name, typed
+node name and concrete local interconnect address. OpenRaft captures that context when it starts
+its core. Parallel isolated clusters may use the same node names; the listener address distinguishes
+their core events in a shared log. The span belongs to that consensus lifetime and exposes no
+command, record or credential values.
+The unary append, vote and pre-vote receivers also establish trace-level contexts with the same
+local node and listener address. When detailed tracing is selected, their existing OpenRaft API
+events distinguish arrival at the Raft API from processing by that node's core. The annotations
+change no request, deadline or retry policy.
+Vote and pre-vote clients emit trace-level send and completion events with the local endpoint,
+peer, vote, request deadline, elapsed transport time and result. The elapsed measurement spans
+encoding, connection admission, the exchange and response decoding. An outer OpenRaft timeout may
+cancel the request before its completion event; its timeout event remains the outcome in that
+case. These infrequent requests take one additional monotonic-clock reading when they begin;
+completion timing and result formatting are evaluated only when their trace event is enabled.
+
 Durable record decoding and recovered catalog checks preserve decoding or nested report causes
 inside the standard-error carrier that the storage trait accepts. The carrier's ordinary rendering
 includes the entire chain when a later report names the I/O error as its context. Transaction
@@ -561,7 +653,7 @@ environment variables:
 
 | Argument | Environment | Default | Effect |
 | --- | --- | --- | --- |
-| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for their soft deadline, and for the randomized follower election timeout, which runs from six to twelve heartbeat intervals, `1.5s` to `3s` by default. It does not set the append-stream idle bound. |
+| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for the randomized follower election timeout, which runs from six to twelve heartbeat intervals, `1.5s` to `3s` by default. The maximum election timeout also bounds each heartbeat answer and the leader lease. It does not set the append-stream idle bound. |
 | `--raft-snapshot-entry-threshold` | `NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD` | `10000` | Applied entries since the last completed snapshot that request the next build. |
 | `--raft-snapshot-byte-threshold` | `NERVIX_RAFT_SNAPSHOT_BYTE_THRESHOLD` | `64MiB` | Appended entry bytes since the last completed snapshot that request the next build. |
 | `--raft-covered-log-entries-retained` | `NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED` | `1000` | Newest snapshot-covered entries retained for log catch-up. |
@@ -620,3 +712,20 @@ cross that boundary. The current state encoding requires these records and rejec
 whose encoding does not match, requiring recreation under the alpha persistence contract. The current encoding also requires a restore's explicit lifecycle policy and its
 installed-state effect's clock. RESUME changes the domain to running and removes its complete-set
 installation gate in that single applied effect; it preserves the archived generation and mapping.
+
+## Cluster Parameter Publication
+
+Current state metadata includes the optional committed cluster parameter record; absence is only
+the unseeded bootstrap state. The first bootstrap submits the complete seed through Raft. Later
+parameter commands atomically compare their policy/model/resource snapshot, replace the record
+and record durable command progress. Their apply advances the coherent runtime revision and its
+existing schedule notification. Model planning inputs include the parameter record. Every new
+model or schedule publication compares that complete record, including its revision, inside the
+serialized state-machine application before changing the graph. A parameter publication that
+applies first therefore conflicts with a plan captured before it, even if another publication
+restores the same values. Transaction commit admission, new step effects, and rollback use this
+same fence; an idempotent retry only rejoins retained progress and never reapplies its effect.
+
+The metadata encoding has one current identity. Data from a different stored shape fails decoding
+with a typed error asking for node-state recreation. Parameter durations and numeric bounds are
+validated on archive recovery as well as construction. No migration or second decoder is present.

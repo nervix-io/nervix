@@ -16,7 +16,7 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
         'addr' = 'redis://{{redis_peer}}',
@@ -55,10 +55,10 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge stalled-redis-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -106,7 +106,7 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
@@ -144,7 +144,7 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
@@ -183,7 +183,7 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
@@ -221,7 +221,7 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
@@ -265,10 +265,10 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge stalled-rabbitmq-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -339,7 +339,7 @@ Feature: Stalled peers
     When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_forwarder CONFIG {
         'protocol' = 'tls',
@@ -379,11 +379,11 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA syslog_event_wire MODE STRICT (
         facility integer, severity integer, message string
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA syslog_event_wire TO SCHEMA syslog_event;
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA syslog_event_wire TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge stalled-syslog-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING event_codec
@@ -428,7 +428,7 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE WEBSOCKETS CLIENT ws_main CONFIG {
         'endpoint' = 'ws://{{websocket_peer}}/stalled',
@@ -465,7 +465,7 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE HTTP CLIENT poll_source CONFIG {
         'endpoint' = 'http://{{http_peer}}/notifications',
@@ -501,8 +501,8 @@ Feature: Stalled peers
     When these Plexus commands are executed
       """
       CREATE SCHEMA sample (value F64);
-      CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (value number);
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE (value number);
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://{{prometheus_peer}}',
@@ -539,11 +539,11 @@ Feature: Stalled peers
       """
       CREATE SCHEMA error_event (message STRING, level STRING);
       CREATE WIRE JSON SCHEMA error_event_wire MODE STRICT (message string, level string);
-      CREATE CODEC error_event_codec FROM WIRE JSON SCHEMA error_event_wire TO SCHEMA error_event;
+      CREATE WIRE JSON CODEC error_event_codec FROM WIRE SCHEMA error_event_wire TO SCHEMA error_event;
       CREATE RELAY errors SCHEMA error_event UNBRANCHED;
       CREATE VHOST edge stalled-sentry-{{test_id}}.example.com;
-      CREATE ENDPOINT error_ingress ON edge PATH '/errors' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR error_source
+      CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
+      CREATE HTTP ENDPOINT INGESTOR error_ingestor
         FROM error_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING error_event_codec
         TO errors INHERIT ALL UNBRANCHED
@@ -587,10 +587,10 @@ Feature: Stalled peers
       """
       CREATE SCHEMA event (seq I64, body STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer, body string);
-      CREATE CODEC ingest_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC ingest_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge stalled-otel-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -642,10 +642,10 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge stalled-clickhouse-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -726,10 +726,10 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge stalled-sqs-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -789,7 +789,7 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_peer}}',
@@ -848,7 +848,7 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE ZEROMQ CLIENT zeromq_main CONFIG {
         'addr' = 'tcp://{{zeromq_peer}}',
@@ -888,10 +888,10 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64, message STRING);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, message string);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge stalled-zeromq-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING notification_codec
@@ -958,10 +958,10 @@ Feature: Stalled peers
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge stalled-nats-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

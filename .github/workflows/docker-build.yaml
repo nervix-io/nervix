@@ -27,7 +27,7 @@ env:
   LC_ALL: C.UTF-8
   # scripts/kache_remote.py lets each job's local store hold a quarter of its cache volume, so a
   # runner's disk still sets the store's budget.
-  KACHE_VERSION: "1.2.2"
+  KACHE_VERSION: "2.0.0"
   KACHE_REMOTE_KEY_LISTING: "false"
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
   KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
@@ -157,11 +157,8 @@ jobs:
   build-diagnostic:
     name: build-diagnostic-deloxide-order-amd64
     needs: meta
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (contains(github.event.pull_request.labels.*.name, 'chaos') ||
-        contains(github.event.pull_request.labels.*.name, 'chaos-soak'))
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     # The diagnostic server's workspace crates compile with the detector's features, which the
     # release image's cache does not hold. Like the release builds, it takes the 32 GB machine.
     runs-on: boat-xlarge
@@ -501,10 +498,10 @@ jobs:
               core.setFailed('successful benchmark job did not publish a comparison');
             }
 
-  # The external chaos runner against the images built above, through the same `just chaos suite`
-  # command a developer runs: the release image and the Deloxide diagnostic image of the same
-  # revision, each refused by the suite unless its labels name that kind and revision. A pull
-  # request runs the smoke suite with the `chaos` label and the soak suite with `chaos-soak`.
+  # The external chaos runner uses the release image through the same `just chaos suite` command
+  # a developer runs. Image labels must name the requested kind and revision. A pull request runs
+  # smoke with `chaos` and soak with `chaos-soak`; diagnostic builds and callers stay disabled
+  # under the temporary CI policy.
   chaos-smoke:
     name: chaos-smoke
     needs: [meta, build-arch]
@@ -525,10 +522,8 @@ jobs:
   chaos-smoke-diagnostic:
     name: chaos-smoke-diagnostic
     needs: [meta, build-diagnostic]
-    if: >-
-      github.event_name == 'pull_request' &&
-      contains(github.event.pull_request.labels.*.name, 'chaos') &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     permissions:
       contents: read
       packages: read
@@ -559,10 +554,8 @@ jobs:
   chaos-soak-diagnostic:
     name: chaos-soak-diagnostic
     needs: [meta, build-diagnostic]
-    if: >-
-      github.event_name == 'pull_request' &&
-      contains(github.event.pull_request.labels.*.name, 'chaos-soak') &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     permissions:
       contents: read
       packages: read

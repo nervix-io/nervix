@@ -23,12 +23,13 @@ use nervix_client_wire::{
     RestoreUploadFailure, VerifiedFrame,
 };
 use nervix_models::{Statement, UserName};
-use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
+use nervix_plexus::client_statement::ClientStatement;
 
 use super::outcome::command_outcome;
 use crate::application::{
     restore::{RestoreAnswer, RestoreRequest, RestoreStreamPart, StagingRefusal},
     session_service::SessionServiceImpl,
+    statement_grammar::with_statement_grammar,
 };
 
 /// The reply to a stream refused before its restore ran.
@@ -109,7 +110,16 @@ impl SessionServiceImpl {
             }
         };
         let request_id = Some(start.request_id);
-        let restore = match parse_client_statement(&start.statement) {
+        if let Err(error) = self.available_cluster_parameters() {
+            return Ok(refused(
+                request_id,
+                RestoreUploadFailure::StagingFailed,
+                format!("{error:#}"),
+            ));
+        }
+
+        let parsed = with_statement_grammar(|grammar| grammar.parse_statement(&start.statement));
+        let restore = match parsed {
             Ok(ClientStatement::Server(Statement::Restore(restore))) => restore,
             Ok(_) => {
                 return Ok(refused(

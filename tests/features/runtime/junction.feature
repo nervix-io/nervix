@@ -23,8 +23,8 @@ Feature: Relay junction
         source string,
         raw string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA user_id_branch TTL 5m;
@@ -33,15 +33,13 @@ Feature: Relay junction
         CREATE RELAY ss10 SCHEMA notification_projection BRANCHED BY by_source_one;
         CREATE RELAY ss20 SCHEMA notification_projection BRANCHED BY by_source_one;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress_one
+        CREATE HTTP ENDPOINT ingress_one
         ON edge
-        PATH '/ingest-a'
-        TYPE HTTP;
-        CREATE ENDPOINT ingress_two
+        PATH '/ingest-a';
+        CREATE HTTP ENDPOINT ingress_two
         ON edge
-        PATH '/ingest-b'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_one
+        PATH '/ingest-b';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
@@ -51,7 +49,7 @@ Feature: Relay junction
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR source_two
+      CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
@@ -124,8 +122,8 @@ Feature: Relay junction
         tenant string,
         source string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA tenant_branch TTL 5m;
@@ -133,15 +131,13 @@ Feature: Relay junction
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress_one
+        CREATE HTTP ENDPOINT ingress_one
         ON edge
-        PATH '/branch-a'
-        TYPE HTTP;
-        CREATE ENDPOINT ingress_two
+        PATH '/branch-a';
+        CREATE HTTP ENDPOINT ingress_two
         ON edge
-        PATH '/branch-b'
-        TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR source_one
+        PATH '/branch-b';
+        CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
@@ -151,7 +147,7 @@ Feature: Relay junction
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_two
+        CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
@@ -218,8 +214,8 @@ Feature: Relay junction
         user_id integer,
         source string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_state_source SCHEMA user_id_branch TTL 5m;
@@ -230,19 +226,16 @@ Feature: Relay junction
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_state_source;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_state_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT state_ingress
+        CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/state'
-        TYPE HTTP;
-        CREATE ENDPOINT ingress_one
+        PATH '/state';
+        CREATE HTTP ENDPOINT ingress_one
         ON edge
-        PATH '/ingest-a'
-        TYPE HTTP;
-        CREATE ENDPOINT ingress_two
+        PATH '/ingest-a';
+        CREATE HTTP ENDPOINT ingress_two
         ON edge
-        PATH '/ingest-b'
-        TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR state_source
+        PATH '/ingest-b';
+        CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO state_notifications
@@ -252,7 +245,7 @@ Feature: Relay junction
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_one
+        CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
@@ -262,7 +255,7 @@ Feature: Relay junction
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_two
+        CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
@@ -368,8 +361,8 @@ Feature: Relay junction
         source string,
         note string OPTIONAL
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_default_state SCHEMA user_id_branch TTL 5m;
@@ -379,11 +372,10 @@ Feature: Relay junction
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_default_state;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_default_state;
         CREATE VHOST edge http-junction-default-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/junction-default'
-        TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR source_one
+        PATH '/junction-default';
+        CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
@@ -444,8 +436,8 @@ Feature: Relay junction
         source string,
         note string OPTIONAL
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_optional_default SCHEMA user_id_branch TTL 5m;
@@ -455,11 +447,10 @@ Feature: Relay junction
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_optional_default;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_optional_default;
         CREATE VHOST edge http-junction-optional-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/junction-optional'
-        TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR source_one
+        PATH '/junction-optional';
+        CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1

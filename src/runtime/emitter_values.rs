@@ -24,7 +24,7 @@ use nervix_connector::{
     MappedEmitterRows, RowEmitter, RowRequestEmitter,
 };
 
-use super::*;
+use super::{emitter_record_writes::PreparedContent as _, *};
 
 /// Why an emitter's `VALUES` mapping did not compile. The VM's own failure is beneath, and the
 /// emitter that starts the emitter names itself and its domain in the contexts above.
@@ -173,7 +173,7 @@ impl MappedRowEmitter {
         let mut carriers = Vec::with_capacity(run.carriers.len());
         let mut rows = 0_usize;
         for projected in &run.carriers {
-            // A emitter that resolves acknowledgements on its own commit boundary takes the ones its
+            // An emitter that resolves acknowledgements on its own commit boundary takes the ones its
             // write carries, so the host stops owning them the moment the write accepts the rows.
             let retained = match acknowledgements {
                 DeliveredAcknowledgements::Connector => {
@@ -193,7 +193,11 @@ impl MappedRowEmitter {
             target_columns: self.projection.target_columns(),
             carriers,
         };
-        let outcome = self.connector.publish(write).await;
+        let outcome = {
+            let mut in_flight = context.interactions.work();
+            in_flight.set(crate::metrics::EmitterWorkKind::InFlight, rows.arch_into());
+            self.connector.publish(write).await
+        };
         let outcome = context.received_outcome(rows, outcome);
         RowAnswers::from(outcome)
             .apply(context, batches, acknowledgements)
@@ -318,7 +322,10 @@ impl EmitterConnector for MappedRequestEmitter {
                 occurred_at,
             )?;
             for request in checked.requests {
+                let messages = request.members.len().arch_into();
+                let bytes = request.content.prepared_bytes().arch_into();
                 row_requests.retain(request, batches)?;
+                context.interactions.record_payload(messages, bytes, bytes);
             }
             finish_rejected_records(
                 context,
@@ -547,7 +554,7 @@ impl MappedValuesProjection {
     /// The mapped columns named by their target columns in mapping order, each nullable exactly
     /// when its expression can produce a null for a row the mapping does not reject. A row whose
     /// mapping fails holds a null in place of the value it could not produce, which is why the
-    /// mapped batch's own schema keeps every column nullable; a emitter that requires a value in a
+    /// mapped batch's own schema keeps every column nullable; an emitter that requires a value in a
     /// column checks the mapping against these columns before its first batch arrives.
     pub(in crate::runtime) fn value_schema(&self) -> StdArc<arrow_schema::Schema> {
         let output_fields = self.program.program.output_schema.fields();

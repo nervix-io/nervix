@@ -32,8 +32,8 @@ Feature: Narrow schedule activation on ownership change
         amount integer
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -50,12 +50,11 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/narrow'
-        TYPE HTTP;
+        PATH '/narrow';
 
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
@@ -213,8 +212,8 @@ Feature: Narrow schedule activation on ownership change
         transaction_id string
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -231,12 +230,11 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/gauge'
-        TYPE HTTP;
+        PATH '/gauge';
 
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
@@ -352,8 +350,8 @@ Feature: Narrow schedule activation on ownership change
         source string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -374,17 +372,15 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT state_ingress
+      CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/wait-state'
-        TYPE HTTP;
+        PATH '/wait-state';
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/wait-ingest'
-        TYPE HTTP;
+        PATH '/wait-ingest';
 
-      CREATE HTTP ENDPOINT INGESTOR state_source
+      CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO tenant_state
@@ -395,7 +391,7 @@ Feature: Narrow schedule activation on ownership change
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming
@@ -536,8 +532,8 @@ Feature: Narrow schedule activation on ownership change
         latency integer
       );
 
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -554,12 +550,11 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/window'
-        TYPE HTTP;
+        PATH '/window';
 
-      CREATE HTTP ENDPOINT INGESTOR metric_source
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
@@ -673,8 +668,8 @@ Feature: Narrow schedule activation on ownership change
         transaction_id string
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -693,12 +688,11 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/group'
-        TYPE HTTP;
+        PATH '/group';
 
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
@@ -869,8 +863,8 @@ Feature: Narrow schedule activation on ownership change
         source string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -887,17 +881,15 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT state_ingress
+      CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/move-state'
-        TYPE HTTP;
+        PATH '/move-state';
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/move-ingest'
-        TYPE HTTP;
+        PATH '/move-ingest';
 
-      CREATE HTTP ENDPOINT INGESTOR state_source
+      CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO tenant_state
@@ -908,7 +900,7 @@ Feature: Narrow schedule activation on ownership change
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming
@@ -1018,13 +1010,12 @@ Feature: Narrow schedule activation on ownership change
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'offset_replica_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
@@ -1041,8 +1032,8 @@ Feature: Narrow schedule activation on ownership change
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "ingestor" "metric_source" is saved as placeholder "offset_owner"
-    And the first replica for scheduled "ingestor" "metric_source" in the last cluster status is saved as placeholder "offset_replica"
+    Then the last cluster status owner for scheduled "ingestor" "metric_ingestor" is saved as placeholder "offset_owner"
+    And the first replica for scheduled "ingestor" "metric_ingestor" in the last cluster status is saved as placeholder "offset_replica"
     When these Plexus commands are executed on node "{{offset_owner}}"
       """
       CREATE SUBSCRIPTION raw_metrics_subscription TO raw_metrics;
@@ -1057,8 +1048,8 @@ Feature: Narrow schedule activation on ownership change
       """
     When node "{{offset_replica}}" is stopped
     Then node "{{offset_owner}}" eventually observes a stable leader
-    And within "30s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_source" replicas without placeholder "offset_replica"
-    And within "5s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_source" owner equals placeholder "offset_owner"
+    And within "30s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_ingestor" replicas without placeholder "offset_replica"
+    And within "5s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_ingestor" owner equals placeholder "offset_owner"
     When Kafka message is published to topic "offset_replica_{{test_id}}"
       """
       {"value":2,"tenant":"alpha"}
@@ -1075,4 +1066,4 @@ Feature: Narrow schedule activation on ownership change
     When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{offset_owner}}" into "offsets.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When the CLI describes backup archive "offsets.nvxb" as json through node "{{offset_owner}}"
-    Then the described backup records Kafka domain offset 3 for ingestor "metric_source"
+    Then the described backup records Kafka domain offset 3 for ingestor "metric_ingestor"

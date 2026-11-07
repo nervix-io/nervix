@@ -924,15 +924,14 @@ impl BackupSignals {
         reference: CommandExecutionReference,
         failure: &Report<RestoreStreamError>,
     ) {
-        let error = failure.current_context();
-        if error.leaves_outcome_unknown() {
-            let reason = format!("{error}; the outcome of restore '{reference}' is unknown");
+        if failure.current_context().leaves_outcome_unknown() {
+            let reason = format!("{failure:#}; the outcome of restore '{reference}' is unknown");
             self.line(TermLine::error(reason.clone()));
             self.restore
                 .set(RestoreProgress::Unknown { reference, reason });
             return;
         }
-        let reason = error.to_string();
+        let reason = format!("{failure:#}");
         self.line(TermLine::error(reason.clone()));
         self.restore.set(RestoreProgress::Refused { reason });
     }
@@ -969,11 +968,42 @@ pub(crate) struct RestoreConclusion {
 }
 
 impl RestoreConclusion {
+    /// Keeps a later request's complete diagnostics beneath the earlier restore's uncertainty.
+    /// The existing renderer consumes the owned outcome, releasing its input as it renders.
+    fn uncertain(mut outcome: CommandOutcome, statement: &str) -> Self {
+        let reference = outcome.execution_reference.clone();
+        let reference_prefix = "; the outcome of restore '";
+        let reference_suffix = "' is unknown";
+        outcome.message.reserve_exact(
+            reference_prefix.len() + reference.as_str().len() + reference_suffix.len(),
+        );
+        outcome.message.push_str(reference_prefix);
+        outcome.message.push_str(reference.as_str());
+        outcome.message.push_str(reference_suffix);
+        let reason = outcome.message.clone();
+        // A statement list has its own message lines; keep them all beneath the uncertainty.
+        let heading = if outcome.statements.is_empty() {
+            None
+        } else {
+            Some(TermLine::error(std::mem::take(&mut outcome.message)))
+        };
+        let mut lines = command_outcome_lines(outcome, statement);
+        if let Some(heading) = heading {
+            lines.insert(0, heading);
+        }
+        Self {
+            lines,
+            progress: RestoreProgress::Unknown { reference, reason },
+            plan_domain: None,
+        }
+    }
+
     /// The conclusion of a restore of `statement` in `mode`, whose dry run planned draft revision
     /// `revision`. The outcome renders as the dispatcher renders every command's.
     pub(crate) fn of(end: RestoreEnd, statement: &str, mode: RestoreMode, revision: u64) -> Self {
         let outcome = match end {
             RestoreEnd::Outcome(outcome) => *outcome,
+            RestoreEnd::Unresolved(outcome) => return Self::uncertain(*outcome, statement),
             RestoreEnd::Refused { failure, message } => {
                 let reason = format!("restore refused ({failure:?}): {message}");
                 return Self {

@@ -11,14 +11,14 @@ Feature: Altering ingestors
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC event_codec_v2 FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec_v2 FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY audit SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-roundtrip.example.com;
-      CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
+      CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
@@ -26,7 +26,7 @@ Feature: Altering ingestors
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      ALTER HTTP ENDPOINT INGESTOR event_source
+      ALTER HTTP ENDPOINT INGESTOR event_ingestor
         SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB,
         SET DECODE USING event_codec_v2,
         SET TIMESTAMP NOW,
@@ -36,11 +36,11 @@ Feature: Altering ingestors
         ADD ROUTE TO audit INHERIT ALL UNBRANCHED
           FLUSH EACH 10ms MAX BATCH SIZE 512KiB ON MESSAGE ERROR LOG,
         SET GENERAL ERROR IGNORE;
-      SHOW CREATE INGESTOR event_source;
+      SHOW CREATE INGESTOR event_ingestor;
       """
     Then the last command output contains
       """
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
         DECODE USING event_codec_v2
         TIMESTAMP NOW
@@ -76,12 +76,12 @@ Feature: Altering ingestors
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-swap.example.com;
-      CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
+      CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
@@ -100,7 +100,7 @@ Feature: Altering ingestors
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER HTTP ENDPOINT INGESTOR event_source
+      ALTER HTTP ENDPOINT INGESTOR event_ingestor
         SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB;
       """
     Then the last command output contains
@@ -136,18 +136,18 @@ Feature: Altering ingestors
       """
       CREATE SCHEMA buffered_event ( seq I64 );
       CREATE WIRE JSON SCHEMA buffered_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC buffered_event_codec
-        FROM WIRE JSON SCHEMA buffered_event_wire TO SCHEMA buffered_event;
-      CREATE CODEC buffered_event_codec_v2
-        FROM WIRE JSON SCHEMA buffered_event_wire TO SCHEMA buffered_event;
+      CREATE WIRE JSON CODEC buffered_event_codec
+        FROM WIRE SCHEMA buffered_event_wire TO SCHEMA buffered_event;
+      CREATE WIRE JSON CODEC buffered_event_codec_v2
+        FROM WIRE SCHEMA buffered_event_wire TO SCHEMA buffered_event;
       CREATE RELAY buffered_events SCHEMA buffered_event UNBRANCHED CAPACITY 2;
       CREATE VHOST buffered_edge http-{{test_id}}-buffered-alter.example.com;
-      CREATE ENDPOINT buffered_ingress ON buffered_edge PATH '/buffered-alter' TYPE HTTP;
+      CREATE HTTP ENDPOINT buffered_ingress ON buffered_edge PATH '/buffered-alter';
       CREATE ZEROMQ CLIENT buffered_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE HTTP ENDPOINT INGESTOR buffered_source
+      CREATE HTTP ENDPOINT INGESTOR buffered_ingestor
         FROM buffered_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING buffered_event_codec
         TO buffered_events INHERIT ALL UNBRANCHED
@@ -164,11 +164,11 @@ Feature: Altering ingestors
       """
     And these Plexus commands begin executing in the background
       """
-      ALTER HTTP ENDPOINT INGESTOR buffered_source SET DECODE USING buffered_event_codec_v2;
+      ALTER HTTP ENDPOINT INGESTOR buffered_ingestor SET DECODE USING buffered_event_codec_v2;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
-    Then within "5s" node "node-1" eventually reports describe ingestor "buffered_source" as "status: quiesced"
-    And within "5s" node "node-1" eventually reports describe ingestor "buffered_source" as "quiesce state: entity hold"
+    Then within "5s" node "node-1" eventually reports describe ingestor "buffered_ingestor" as "status: quiesced"
+    And within "5s" node "node-1" eventually reports describe ingestor "buffered_ingestor" as "quiesce state: entity hold"
     When http payload is posted to node "node-1" with host "http-{{test_id}}-buffered-alter.example.com" path "/buffered-alter"
       """
       {"seq":2}
@@ -177,7 +177,7 @@ Feature: Altering ingestors
       """
       {"seq":3}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "buffered_source" as "nervix_ingestor_quiesce_buffered_records: 2"
+    Then within "5s" node "node-1" eventually reports describe ingestor "buffered_ingestor" as "nervix_ingestor_quiesce_buffered_records: 2"
     When the entity gate pause for domain "{{domain}}" is released
     Then the background Plexus execution succeeds
     And within "5s" the observed broker receives payloads
@@ -193,7 +193,7 @@ Feature: Altering ingestors
       | 3            |
 
   @set_ingestor_quiesce
-  Scenario Outline: SET QUIESCE changes only to a mode supported by the current source
+  Scenario Outline: SET QUIESCE changes only to a mode the source's entity declares and its delivery mode honors
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -204,18 +204,18 @@ Feature: Altering ingestors
       """
       CREATE SCHEMA quiesce_event ( seq I64 );
       CREATE WIRE JSON SCHEMA quiesce_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC quiesce_event_codec
-        FROM WIRE JSON SCHEMA quiesce_event_wire TO SCHEMA quiesce_event;
+      CREATE WIRE JSON CODEC quiesce_event_codec
+        FROM WIRE SCHEMA quiesce_event_wire TO SCHEMA quiesce_event;
       CREATE RELAY quiesce_events SCHEMA quiesce_event UNBRANCHED;
       CREATE VHOST quiesce_edge http-{{test_id}}-set-quiesce.example.com;
-      CREATE ENDPOINT quiesce_ingress ON quiesce_edge PATH '/set-quiesce' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR quiesce_source
+      CREATE HTTP ENDPOINT quiesce_ingress ON quiesce_edge PATH '/set-quiesce';
+      CREATE HTTP ENDPOINT INGESTOR quiesce_ingestor
         FROM quiesce_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING quiesce_event_codec
         TO quiesce_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
-      ALTER HTTP ENDPOINT INGESTOR quiesce_source SET QUIESCE REJECT RETRY AFTER 7s;
+      ALTER HTTP ENDPOINT INGESTOR quiesce_ingestor SET QUIESCE REJECT RETRY AFTER 7s;
       """
     Then the last command output contains
       """
@@ -223,15 +223,35 @@ Feature: Altering ingestors
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR quiesce_source;
+      SHOW CREATE INGESTOR quiesce_ingestor;
       """
     Then the last command output contains
       """
       ON QUIESCE REJECT RETRY AFTER 7s
       """
-    When these Plexus commands fail with "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
+    When these Plexus commands fail with "found SUSPEND"
       """
-      ALTER HTTP ENDPOINT INGESTOR quiesce_source SET QUIESCE SUSPEND;
+      ALTER HTTP ENDPOINT INGESTOR quiesce_ingestor SET QUIESCE SUSPEND;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      ALTER HTTP ENDPOINT INGESTOR quiesce_ingestor SET MODE ACK MAX 8 ACK TIMEOUT 5s;
+      """
+    And these Plexus commands fail with "HTTP ENDPOINT ingestors do not support ON QUIESCE BUFFER"
+      """
+      ALTER HTTP ENDPOINT INGESTOR quiesce_ingestor SET QUIESCE BUFFER MAX SIZE 1MiB;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE INGESTOR quiesce_ingestor;
+      """
+    Then the last command output contains
+      """
+      MODE ACK MAX 8 ACK TIMEOUT 5s
+      """
+    And the last command output contains
+      """
+      ON QUIESCE REJECT RETRY AFTER 7s
       """
 
     Examples:
@@ -254,8 +274,8 @@ Feature: Altering ingestors
 
       CREATE SCHEMA paced_event ( seq I64 );
       CREATE WIRE JSON SCHEMA paced_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC paced_event_codec
-        FROM WIRE JSON SCHEMA paced_event_wire
+      CREATE WIRE JSON CODEC paced_event_codec
+        FROM WIRE SCHEMA paced_event_wire
         TO SCHEMA paced_event;
       CREATE RELAY paced_events SCHEMA paced_event UNBRANCHED;
 
@@ -266,9 +286,9 @@ Feature: Altering ingestors
         };
 
       CREATE VHOST paced_edge http-{{test_id}}-paced-alter.example.com;
-      CREATE ENDPOINT paced_ingress ON paced_edge PATH '/paced-alter' TYPE HTTP;
+      CREATE HTTP ENDPOINT paced_ingress ON paced_edge PATH '/paced-alter';
 
-      CREATE HTTP ENDPOINT INGESTOR paced_source
+      CREATE HTTP ENDPOINT INGESTOR paced_ingestor
         FROM paced_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING paced_event_codec
         TIMESTAMP NOW
@@ -292,13 +312,13 @@ Feature: Altering ingestors
       """
       "seq":1
       """
-    When these Plexus commands fail with "requires ingestor 'paced_source' to declare TIMESTAMP NOW"
+    When these Plexus commands fail with "requires ingestor 'paced_ingestor' to declare TIMESTAMP NOW"
       """
-      ALTER HTTP ENDPOINT INGESTOR paced_source DROP TIMESTAMP;
+      ALTER HTTP ENDPOINT INGESTOR paced_ingestor DROP TIMESTAMP;
       """
     And these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR paced_source;
+      SHOW CREATE INGESTOR paced_ingestor;
       """
     Then the last command output contains
       """

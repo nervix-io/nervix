@@ -22,11 +22,12 @@ use nervix_dataflow_graph::{
     DataflowInputSide, DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind,
     DataflowSchemaField,
 };
+#[cfg(test)]
+use nervix_models::ScheduledNode;
 use nervix_models::{
     ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
     ImpactNodeCoverage, IngestorInput, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode, SchemaField,
-    SchemaFingerprint,
+    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, SchemaField, SchemaFingerprint,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::{
@@ -349,6 +350,7 @@ impl ActiveGraph {
 
     /// Every node of this graph as an unplaced schedule entry, carrying the branching and the
     /// schema fingerprint the registry resolved for it, before a scheduler decides where it runs.
+    #[cfg(test)]
     pub(crate) fn unplaced_schedule_nodes(&self) -> Vec<ScheduledNode> {
         let mut nodes = Vec::with_capacity(self.graph.node_count());
         for index in self.graph.node_indices() {
@@ -356,11 +358,14 @@ impl ActiveGraph {
                 .graph
                 .node_weight(index)
                 .verified("this index came from the same graph, which is not modified here");
-            let scheduled = ScheduledNode::new(
+            let mut scheduled = ScheduledNode::new(
                 (*node.config).clone(),
                 self.schema_fingerprint_for_index(index),
             )
             .with_resolved_branching(node.resolved_branching.clone());
+            if let Some(instancing) = &node.ingestor_units {
+                scheduled = scheduled.with_units(&instancing.units());
+            }
             nodes.push(scheduled);
         }
         nodes
@@ -545,9 +550,35 @@ pub(crate) struct ActiveNode {
     pub(crate) kind: ModelKind,
     pub(crate) config: Arc<Model>,
     pub(crate) resolved_branching: Option<ResolvedBranching>,
+    pub(in crate::registry) ingestor_units: Option<super::ingestor_units::IngestorUnits>,
 }
 
 impl ActiveNode {
+    pub(in crate::registry) fn placement_units(&self) -> Vec<nervix_models::Unit> {
+        if let Some(instancing) = &self.ingestor_units {
+            return instancing.units();
+        }
+        if matches!(
+            self.config.as_ref(),
+            Model::Relay(_)
+                | Model::Junction(_)
+                | Model::Deduplicator(_)
+                | Model::Reorderer(_)
+                | Model::WindowProcessor(_)
+                | Model::Correlator(_)
+                | Model::Inferencer(_)
+                | Model::WasmProcessor(_)
+                | Model::Generator(_)
+        ) && let Some(partitions) = self
+            .resolved_branching
+            .as_ref()
+            .and_then(|branch| branch.partitions())
+        {
+            return partitions.units();
+        }
+        vec![nervix_models::Unit::SINGLE]
+    }
+
     /// How this node is addressed: the kind it is and the name it carries, together.
     pub(in crate::registry) fn node_ref(&self) -> NodeRef {
         NodeRef::new(self.kind, self.identifier.clone())

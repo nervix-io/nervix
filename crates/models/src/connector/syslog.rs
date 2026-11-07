@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The syslog client Model, the listener source Model with its delivery mode, the
+//! - **Owns.** The syslog client Model, the listener ingestor Model with its delivery mode, the
 //!   collector emitter Model, and what each entity declares.
 //!   Client declarations also own public configuration keys, types, confidentiality and the side
 //!   that reads each key, what each side reads from them, and the frame limits both sides of the
 //!   wire share.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** How Syslog frames are decoded or encoded, how a listener is bound or how
 //!   a collector is written to.
 
@@ -282,15 +282,16 @@ const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[],
 };
 
-/// The peer a syslog message arrived from.
-const SYSLOG_LISTENER_METADATA: IngestorMetadataDeclaration =
-    IngestorMetadataDeclaration::new(&[IngestorMetadataField::new(
-        "peer_addr",
-        IngestorMetadataType::String,
-    )]);
+/// The peer, transport and verified TLS client subject of a received Syslog frame.
+const SYSLOG_LISTENER_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("peer_addr", IngestorMetadataType::String),
+    IngestorMetadataField::new("transport", IngestorMetadataType::String),
+    IngestorMetadataField::new("tls_peer", IngestorMetadataType::String),
+]);
 
 impl IngestorDeclaration for SyslogListenerIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: SYSLOG_LISTENER_METADATA,
         executes_on_every_cluster_node: true,
@@ -319,6 +320,10 @@ impl IngestorEntityBody for SyslogListenerIngestor {
         config: &[ClientConfigEntry],
     ) -> Result<(), Report<ClientConfigSchemaError>> {
         validate_listener_client_config(config)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -351,15 +356,47 @@ impl SyslogIngestMode {
     }
 }
 
+/// One change an `ALTER SYSLOG LISTENER INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum SyslogListenerIngestorChange {
+    /// `SET MODE <mode>`.
+    Mode(SyslogIngestMode),
+}
+
+impl crate::IngestorEntityChange for SyslogListenerIngestorChange {
+    type Entity = SyslogListenerIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut SyslogListenerIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Syslog = "SYSLOG";
-    /// What a syslog source reads.
+    /// What a syslog ingestor reads.
     pub enum SyslogIngestor;
     /// The alterations of the ingestors that read a syslog entity.
     pub enum SyslogListenerIngestorAlteration;
-    /// The entities a syslog source reads.
+    /// The entities a syslog ingestor reads.
     pub enum SyslogIngestorEntity {
-        Listener(SyslogListenerIngestor) = "LISTENER", "Syslog";
+        Listener(SyslogListenerIngestor => SyslogListenerIngestorChange) = "LISTENER", "Syslog";
     }
 }
 
@@ -377,6 +414,7 @@ impl EmitterDeclaration for SyslogCollectorEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Syslog),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: SyslogCollectorPublishingMode::KINDS,
@@ -401,15 +439,47 @@ impl EmitterEntityBody for SyslogCollectorEmitter {
     }
 }
 
+/// One change an `ALTER SYSLOG COLLECTOR EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum SyslogCollectorEmitterChange {
+    /// `SET MODE <mode>`.
+    Mode(SyslogCollectorPublishingMode),
+}
+
+impl crate::EmitterEntityChange for SyslogCollectorEmitterChange {
+    type Entity = SyslogCollectorEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut SyslogCollectorEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Syslog = "SYSLOG";
     /// What a syslog emitter writes.
     pub enum SyslogEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum SyslogCollectorEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum SyslogEmitterChange;
     /// The entities a syslog emitter writes.
     pub enum SyslogEmitterEntity {
-        Collector(SyslogCollectorEmitter, SyslogCollectorPublishingMode) = "COLLECTOR";
+        Collector(SyslogCollectorEmitter, SyslogCollectorPublishingMode, SyslogCollectorEmitterChange) = "COLLECTOR";
     }
 }
 

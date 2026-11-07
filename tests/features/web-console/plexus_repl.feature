@@ -1,4 +1,99 @@
 Feature: Web console Plexus REPL
+  @client_wire67
+  Scenario Outline: Web console recovers an uncertain command on its existing session
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA source_event ( value I64 );
+      CREATE RELAY events SCHEMA source_event UNBRANCHED;
+      START;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".prompt-row" contains "{{domain}}"
+    And selector ".domain-clock" contains "UNPACED"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION live_events TO events;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "EVENTS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Given the next three successful replies to console command "CREATE SCHEMA recovered_once ( value I64 );" are uncertain
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA recovered_once ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the uncertain console command kept its connection and existing attachments
+    And selector ".terminal" contains "quiesce level: DYNAMIC; planned relocations: 0" exactly 1 times
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @console_foreign_execution
+  Scenario Outline: Web console refuses a command outcome that names another execution and recovers its own
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".prompt-row" contains "{{domain}}"
+    Given the next successful reply to console command "CREATE SCHEMA answered_once ( value I64 );" names another execution
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA answered_once ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the console repeated the command under its own execution reference on a new connection
+    And selector ".terminal" contains "protocol violation: the reply to command execution '{{own_execution}}' names execution '{{foreign_execution}}'"
+    And selector ".terminal" contains "quiesce level: DYNAMIC; planned relocations: 0" exactly 1 times
+    And selector ".terminal" does not contain "another execution's failure"
+
+    Given the next successful reply to console command "CREATE RESOURCE answered_bundle;" names another execution
+    When selector ".create-menu-button" is pressed with "Enter"
+    And selector ".create-menu [data-create-kind='resource']" is pressed with "Enter"
+    And selector ".create-name" is filled with "answered_bundle"
+    Then selector ".create-preview" contains "CREATE RESOURCE answered_bundle;"
+    When selector ".create-submit" is pressed with "Enter"
+    Then the console repeated the command under its own execution reference on a new connection
+    And selector ".create-status" contains "Completed"
+    And selector ".terminal" contains "created resource 'answered_bundle'" exactly 1 times
+    And selector ".terminal" does not contain "another execution's failure"
+    And selector ".resource-dialog" contains "answered_bundle"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @connector_completion
+  Scenario Outline: Web console completes connector expressions from their declared scope
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".prompt-row" contains "{{domain}}"
+    When selector ".prompt-row input" is filled with "<prefix>"
+    Then selector ".suggestions" contains "<function>"
+
+    Examples:
+      | cluster_size | prefix                                                                                                                                                                             | function    |
+      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                                     | read_header |
+      | 1            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                                                | coalesce    |
+      | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                                    | coalesce    |
+      | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                                        | coalesce    |
+      | 1            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                                             | read_header |
+      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                                     | read_header |
+      | 3            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                                                | coalesce    |
+      | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                                    | coalesce    |
+      | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                                        | coalesce    |
+      | 3            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                                             | read_header |
+      | 1            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
+      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                                            | read_header |
+      | 3            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
+      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                                            | read_header |
+
   Scenario: Web console sends simple Plexus commands and renders responses
     Given a 3 node nervix cluster is started
     When the web console is opened on the leader node
@@ -59,6 +154,25 @@ Feature: Web console Plexus REPL
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "no domains registered"
 
+  @client_wire36
+  Scenario: Web console completes its latest input after a full command request window drains
+    Given a 1 node nervix cluster is started
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on the leader node with its request window observed
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "SHOW CLUSTER STATUS;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the web console submits "SHOW CLUSTER STATUS;" 63 times
+    Then the web console has sent 64 observed commands
+    When selector ".prompt-row input" is filled with "CREATE "
+    And the web console finishes its scheduled input callbacks
+    Then the observed web console session stays within its request window
+    When the command response delivery pause on node "{{leader}}" is released
+    Then selector ".suggestions" contains "DOMAIN"
+    And the observed web console session stays within its request window
+
   @client_wire13
   Scenario: Web console preserves several pending commands across a leader change
     Given a 3 node nervix cluster is started
@@ -68,6 +182,7 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
     Given command response delivery on node "{{old_leader}}" pauses after execution
     When the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -174,7 +289,8 @@ Feature: Web console Plexus REPL
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
@@ -207,7 +323,8 @@ Feature: Web console Plexus REPL
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN production;"
@@ -230,7 +347,8 @@ Feature: Web console Plexus REPL
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}" through resettable endpoint "console"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -242,12 +360,14 @@ Feature: Web console Plexus REPL
     When selector ".prompt-row input" is filled with "CREATE SCHEMA before_switchover ( value I64 );"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    When the stallable endpoint "console" resets its connections
+    Then the web console reports each acknowledged clock attachment for domain "{{domain}}" exactly once per session after at least 2 sessions
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{new_leader}}'"
     And selector ".prompt-row" contains "{{domain}} tx"
-    And selector ".terminal" contains "domain clock [{{domain}}] attached" exactly 2 times
+    And the web console reports each acknowledged clock attachment for domain "{{domain}}" exactly once per session after at least 3 sessions
     Given command response delivery on node "{{new_leader}}" pauses after execution
     When selector ".prompt-row input" is filled with "CREATE SCHEMA after_switchover ( value I64 );"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -281,7 +401,8 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -308,7 +429,8 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
@@ -346,6 +468,7 @@ Feature: Web console Plexus REPL
     When selector ".prompt-row input" is pressed with "Tab"
     Then selector ".prompt-row input" has value "SHOW CREATE"
 
+  @connector_completion
   Scenario: Web console completion replaces the word at the cursor and keeps the suffix
     Given a 1 node nervix cluster is started
     When the web console is opened on the leader node
@@ -414,6 +537,7 @@ Feature: Web console Plexus REPL
     Then selector ".suggestions" contains "value"
     And selector ".suggestions" does not contain "unrelated_field"
 
+  @connector_completion
   Scenario: Web console completes functions and scoped fields inside a route expression
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -436,6 +560,7 @@ Feature: Web console Plexus REPL
     Then selector ".suggestions" contains "value"
     And selector ".suggestions" does not contain "other_schema_field"
 
+  @connector_completion
   Scenario: Web console offers header functions only where the transport supports headers
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -445,10 +570,13 @@ Feature: Web console Plexus REPL
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
-    When selector ".prompt-row input" is filled with "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
+    When selector ".prompt-row input" is filled with "CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" contains "read_header"
     And selector ".suggestions" contains "read_headers"
-    When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
+    When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR ingestor FROM broker TOPIC 'events' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
+    Then selector ".suggestions" contains "read_header"
+    And selector ".suggestions" contains "read_headers"
+    When selector ".prompt-row input" is filled with "CREATE REDIS PUBSUB INGESTOR ingestor FROM broker CHANNEL 'events' MODE NO ACK ON QUIESCE DROP DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" does not contain "read_header"
     When selector ".prompt-row input" is filled with "CREATE KAFKA TOPIC EMITTER emitter FROM incoming TO broker TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
     Then selector ".suggestions" contains "write_header"
@@ -512,7 +640,8 @@ Feature: Web console Plexus REPL
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -617,7 +746,8 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     And selector ".graph-error" contains "NO ACTIVE DATAFLOW GRAPH"
@@ -633,6 +763,37 @@ Feature: Web console Plexus REPL
     And selector ".resource-version-list" contains "nested/beta.txt"
     When selector ".modal-scrim" is clicked by script
     Then selector ".resource-dialog" does not exist
+
+  Scenario Outline: Web console uploads a version after its leader refused the upload start before proposing it
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has resource directory "console_refused_start_dir" containing
+      """
+      {
+        "alpha.txt": "alpha"
+      }
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE console_bundle;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on node "{{leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".nav-item.resources" contains "console_bundle"
+    Given node "{{leader}}" refuses its next resource upload start as a leader that could not confirm its lease
+    When selector ".nav-item.resources:has-text('console_bundle')" is clicked
+    Then selector ".resource-dialog" contains "console_bundle"
+    When selector ".resource-dialog .file-upload-input" uploads resource directory "console_refused_start_dir"
+    Then selector ".resource-upload-status" contains "uploaded resource version 1"
+    And node "{{leader}}" refused a resource upload start
+    And selector ".resource-version-list" contains "version 1"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: Web console shows the latest completed resource version and the usages bound to each version
     Given a <cluster_size> node nervix cluster is started
@@ -655,7 +816,7 @@ Feature: Web console Plexus REPL
       CREATE RESOURCE lookup_bundle;
       CREATE SCHEMA lookup_entry (id STRING, value I64);
       CREATE WIRE JSON SCHEMA lookup_wire MODE STRICT (id string, value integer);
-      CREATE CODEC lookup_codec FROM WIRE JSON SCHEMA lookup_wire TO SCHEMA lookup_entry;
+      CREATE WIRE JSON CODEC lookup_codec FROM WIRE SCHEMA lookup_wire TO SCHEMA lookup_entry;
       """
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -770,10 +931,10 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE UNPACED DOMAIN {{domain}}_empty;
       """
@@ -804,10 +965,10 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -823,10 +984,10 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -905,8 +1066,8 @@ Feature: Web console Plexus REPL
         first_name string,
         surname string
       );
-      CREATE CODEC left_profile_codec FROM WIRE JSON SCHEMA left_profile_wire TO SCHEMA left_profile;
-      CREATE CODEC right_profile_codec FROM WIRE JSON SCHEMA right_profile_wire TO SCHEMA right_profile;
+      CREATE WIRE JSON CODEC left_profile_codec FROM WIRE SCHEMA left_profile_wire TO SCHEMA left_profile;
+      CREATE WIRE JSON CODEC right_profile_codec FROM WIRE SCHEMA right_profile_wire TO SCHEMA right_profile;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
       CREATE RELAY left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
@@ -916,8 +1077,8 @@ Feature: Web console Plexus REPL
       CREATE RELAY uncorrelated_right_profiles SCHEMA right_profile BRANCHED BY by_left_profile_ingestor;
       CREATE RELAY correlator_errors SCHEMA correlator_error BRANCHED BY by_left_profile_ingestor;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT left_ingress ON edge PATH '/left' TYPE HTTP;
-      CREATE ENDPOINT right_ingress ON edge PATH '/right' TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR left_profile_ingestor FROM left_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec TO left_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE HTTP ENDPOINT INGESTOR right_profile_ingestor FROM right_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec TO right_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT left_ingress ON edge PATH '/left';
+      CREATE HTTP ENDPOINT right_ingress ON edge PATH '/right'; CREATE HTTP ENDPOINT INGESTOR left_profile_ingestor FROM left_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec TO left_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE HTTP ENDPOINT INGESTOR right_profile_ingestor FROM right_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec TO right_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CORRELATOR correlate_profiles
         LEFT FROM left_profiles
         RIGHT FROM right_profiles
@@ -970,10 +1131,10 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -1009,10 +1170,10 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -1085,11 +1246,11 @@ Feature: Web console Plexus REPL
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string, user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest'; CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1151,11 +1312,11 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1201,16 +1362,17 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
@@ -1241,11 +1403,11 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1277,11 +1439,11 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1337,10 +1499,10 @@ Feature: Web console Plexus REPL
       CREATE SCHEMA event ( id I64, secret STRING );
       CREATE SCHEMA secret_event ( id I64, secret STRING SENSITIVE );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer, secret string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ended-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO events SET id = message.id, secret = message.secret UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -1395,16 +1557,17 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}" through resettable endpoint "console"
     Then selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION restored_metrics TO raw_metrics;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -1413,6 +1576,13 @@ Feature: Web console Plexus REPL
     And selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".prompt-row" contains "{{domain}} tx"
+    When the next web console session frames are held
+    And the stallable endpoint "console" resets its connections
+    Then the replacement web console session frames are held
+    When the held replacement web console session frames are released
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then the web console prompt is ready for input
     Given command response delivery on node "{{old_leader}}" pauses after execution
     When selector ".prompt-row input" is filled with "REVERT;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -1421,12 +1591,18 @@ Feature: Web console Plexus REPL
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then selector ".terminal" contains "delivery interrupted"
     When the command response delivery pause on node "{{old_leader}}" is released
-    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
-    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+    And selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then selector ".terminal" contains "transaction reverted: dropped 0 command(s);"
+    And selector ".prompt-row" does not contain "{{domain}} tx"
+    When selector ".subscription-tab .tab-main[data-subscription-title='raw_metrics']" is clicked by script
+    When one http payload is posted with a completed graph acknowledgement to node "node-1" host "http-{{test_id}}.example.com" path "/metrics"
       """
       {"value":7}
       """
-    Then selector ".terminal" contains ":7}"
+    Then selector ".terminal" contains ":7}" exactly 1 times
 
   @client_wire24
   Scenario: Web console restores a relay tab before it attaches its open transaction again
@@ -1436,16 +1612,17 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION restored_metrics TO raw_metrics;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -1458,14 +1635,81 @@ Feature: Web console Plexus REPL
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then selector ".terminal" contains "delivery interrupted"
     And selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
-    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+    When one http payload is posted with a completed graph acknowledgement to node "node-1" host "http-{{test_id}}.example.com" path "/metrics"
       """
       {"value":8}
       """
-    Then selector ".terminal" contains ":8}"
+    Then selector ".terminal" contains ":8}" exactly 1 times
     When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
     Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
     And selector ".prompt-row" contains "{{domain}} tx"
+
+  @client_wire24
+  Scenario Outline: Web console restores a relay tab and transaction after a gated reconnect
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on node "{{leader}}" through resettable endpoint "console"
+    Then selector ".graph-hit-layer" contains "raw_metrics"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION restored_metrics TO raw_metrics;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    And selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When the next web console session frames are held
+    And the stallable endpoint "console" resets its connections
+    Then the replacement web console session frames are held
+    When the held replacement web console session frames are released
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then the web console prompt is ready for input
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA after_reconnect ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    And the web console reports each acknowledged clock attachment for domain "{{domain}}" exactly once per session after at least 2 sessions
+    When selector ".subscription-tab .tab-main[data-subscription-title='raw_metrics']" is clicked by script
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When one http payload is posted with a completed graph acknowledgement to node "{{leader}}" host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":8}
+      """
+    Then selector ".terminal" contains ":8}" exactly 1 times
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".transaction-indicator" is pressed with "Enter"
+    Then selector ".transaction-inspector .inspector-summary" contains "1 accepted"
+    And selector ".transaction-inspector .inspector-item[data-name='after_reconnect']" contains "SCHEMA"
+    When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
+    And selector ".prompt-row input" is filled with "COMMIT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
+    And selector ".prompt-row" does not contain "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA after_reconnect;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains
+      """
+      CREATE SCHEMA after_reconnect (
+        value I64
+      );
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario: Web console keeps relay subscription histories isolated while switching tabs
     Given a 1 node nervix cluster is started
@@ -1482,13 +1726,13 @@ Feature: Web console Plexus REPL
         rust_keep boolean,
         go_keep boolean
       );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR rust_filter FROM raw_metrics FILTER WHERE input.rust_keep DEDUPLICATE ON input.value MAX TIME 10m UNBRANCHED TO rust_filtered_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR go_filter FROM rust_filtered_metrics FILTER WHERE input.go_keep DEDUPLICATE ON input.value MAX TIME 10m UNBRANCHED TO go_filtered_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
@@ -1601,10 +1845,10 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE ZEROMQ CLIENT zeromq_main CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };
       CREATE ZEROMQ PUSH EMITTER zeromq_notifications FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1634,10 +1878,10 @@ Feature: Web console Plexus REPL
       CREATE RESOURCE fraud_model;
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/ingest', 'timeout_ms' = 5000};
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -1666,10 +1910,10 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "http_notifications"
@@ -1694,7 +1938,7 @@ Feature: Web console Plexus REPL
         event_type string,
         value string
       );
-      CREATE CODEC activity_codec FROM WIRE JSON SCHEMA activity_wire TO SCHEMA activity;
+      CREATE WIRE JSON CODEC activity_codec FROM WIRE SCHEMA activity_wire TO SCHEMA activity;
       CREATE IF NOT EXISTS SCHEMA device_branch ( tenant_id STRING, device_id STRING );
       CREATE IF NOT EXISTS BRANCH by_iot_device_activity SCHEMA device_branch TTL 30m;
       CREATE RELAY device_activity_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
@@ -1738,7 +1982,7 @@ Feature: Web console Plexus REPL
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG; CREATE KAFKA TOPIC INGESTOR auth_server_activity
-        FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' INSTANCES 4 MODE NO ACK
+        FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' START AT LATEST INSTANCES 4 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING activity_codec
         TO auth_activity_landing
         INHERIT ALL
@@ -1802,7 +2046,7 @@ Feature: Web console Plexus REPL
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions FROM connected_sessions TO s3_lakehouse TABLE 'datalake_connected_sessions' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } FLUSH EACH 10s MAX BATCH SIZE 8MiB
+      CREATE ICEBERG TABLE EMITTER iceberg_connected_sessions FROM connected_sessions DETACHED TO s3_lakehouse TABLE 'datalake_connected_sessions' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } FLUSH EACH 10s MAX BATCH SIZE 8MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
@@ -1859,12 +2103,12 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA telemetry ( site STRING, value STRING );
       CREATE WIRE JSON SCHEMA telemetry_wire MODE STRICT ( site string, value string );
-      CREATE CODEC telemetry_codec FROM WIRE JSON SCHEMA telemetry_wire TO SCHEMA telemetry;
+      CREATE WIRE JSON CODEC telemetry_codec FROM WIRE SCHEMA telemetry_wire TO SCHEMA telemetry;
       CREATE IF NOT EXISTS SCHEMA site_branch ( site STRING );
       CREATE IF NOT EXISTS BRANCH by_primary_telemetry SCHEMA site_branch TTL 5m;
       CREATE RELAY telemetry_by_site SCHEMA telemetry BRANCHED BY by_primary_telemetry;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT primary_telemetry_endpoint ON edge PATH '/primary' TYPE HTTP;
+      CREATE HTTP ENDPOINT primary_telemetry_endpoint ON edge PATH '/primary';
       CREATE HTTP ENDPOINT INGESTOR primary_telemetry FROM primary_telemetry_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -1875,7 +2119,7 @@ Feature: Web console Plexus REPL
     And selector ".graph-branch-label" contains "(site)"
     When these Plexus commands are executed on the leader node
       """
-      CREATE ENDPOINT backup_telemetry_endpoint ON edge PATH '/backup' TYPE HTTP;
+      CREATE HTTP ENDPOINT backup_telemetry_endpoint ON edge PATH '/backup';
       CREATE HTTP ENDPOINT INGESTOR backup_telemetry FROM backup_telemetry_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -1901,14 +2145,14 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS BRANCH by_ingest_events SCHEMA value_branch TTL 5m;
       CREATE RELAY raw_events SCHEMA event BRANCHED BY by_ingest_events;
       CREATE RELAY deduped_events SCHEMA event BRANCHED BY by_ingest_events;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT raw_events_endpoint ON edge PATH '/raw' TYPE HTTP;
+      CREATE HTTP ENDPOINT raw_events_endpoint ON edge PATH '/raw';
       CREATE HTTP ENDPOINT INGESTOR ingest_events FROM raw_events_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO raw_events INHERIT ALL BRANCHED BY by_ingest_events SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR dedup_events FROM raw_events DEDUPLICATE ON input.value MAX TIME 10m BRANCHED BY by_ingest_events TO deduped_events INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
@@ -1933,11 +2177,11 @@ Feature: Web console Plexus REPL
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       CREATE SCHEMA event ( value STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY raw_events SCHEMA event UNBRANCHED;
       CREATE RELAY filtered_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT raw_events_endpoint ON edge PATH '/raw' TYPE HTTP;
+      CREATE HTTP ENDPOINT raw_events_endpoint ON edge PATH '/raw';
       CREATE HTTP ENDPOINT INGESTOR ingest_events FROM raw_events_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO raw_events INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_events FROM raw_events USING RESOURCE wasm_filter VERSION 1 FILE 'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO filtered_events SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       """
@@ -1967,7 +2211,7 @@ Feature: Web console Plexus REPL
         tenant string,
         user_id integer
       );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
@@ -1978,8 +2222,8 @@ Feature: Web console Plexus REPL
       CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_node SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_node;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reingestor_metrics_source
+      CREATE HTTP ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics';
+      CREATE HTTP ENDPOINT INGESTOR reingestor_metrics_ingestor
         FROM reingestor_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -2007,14 +2251,14 @@ Feature: Web console Plexus REPL
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
-    And selector ".graph-hit-layer" contains "reingestor_metrics_source"
+    And selector ".graph-hit-layer" contains "reingestor_metrics_ingestor"
     And selector ".graph-hit-layer" contains "notification_forwarder"
     And selector ".graph-hit-layer" contains "reingestor_metrics_node"
     And selector ".graph-hit-layer" contains "tenant_notifications"
     And selector ".graph-branch-label-layer" contains "by_reingestor_metrics_source"
     And selector ".graph-branch-label-layer" contains "by_reingestor_metrics_node"
     And branch group "by_reingestor_metrics_source" body overlaps graph item "notification_forwarder"
-    And branch group "by_reingestor_metrics_source" body does not overlap graph item "reingestor_metrics_source"
+    And branch group "by_reingestor_metrics_source" body does not overlap graph item "reingestor_metrics_ingestor"
     And branch group "by_reingestor_metrics_source" body does not overlap graph item "reingestor_metrics_node"
     And branch group "by_reingestor_metrics_node" body does not overlap graph item "reingestor_metrics_node"
 
@@ -2037,7 +2281,7 @@ Feature: Web console Plexus REPL
         value number,
         warn_high number
       );
-      CREATE CODEC telemetry_codec FROM WIRE JSON SCHEMA telemetry_wire TO SCHEMA telemetry;
+      CREATE WIRE JSON CODEC telemetry_codec FROM WIRE SCHEMA telemetry_wire TO SCHEMA telemetry;
       CREATE IF NOT EXISTS SCHEMA site_branch ( site STRING );
       CREATE IF NOT EXISTS SCHEMA device_branch ( device_id STRING );
       CREATE IF NOT EXISTS BRANCH by_http_telemetry SCHEMA site_branch TTL 5m;
@@ -2049,7 +2293,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY maintenance_alerts SCHEMA telemetry BRANCHED BY by_device_repartition;
       CREATE RELAY normal_telemetry SCHEMA telemetry BRANCHED BY by_device_repartition;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT telemetry_ingress ON edge PATH '/telemetry' TYPE HTTP;
+      CREATE HTTP ENDPOINT telemetry_ingress ON edge PATH '/telemetry';
       CREATE REDIS CLIENT redis_alerts POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE HTTP ENDPOINT INGESTOR http_telemetry
         FROM telemetry_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
@@ -2131,13 +2375,13 @@ Feature: Web console Plexus REPL
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS BRANCH by_relay_buffer_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_buffer_source CAPACITY 3;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_relay_buffer_source;
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
-      CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR relay_buffer_source
+      CREATE HTTP ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer'; CREATE HTTP ENDPOINT INGESTOR relay_buffer_ingestor
         FROM relay_buffer_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -2164,14 +2408,14 @@ Feature: Web console Plexus REPL
       """
     And the web console is opened on the leader node
     Then selector ".graph-hit-layer" contains "relay_buffer_ingress"
-    And graph edge from "relay_buffer_ingress" to "relay_buffer_source" is visible
-    And graph edge from "relay_buffer_ingress" to "relay_buffer_source" has traffic statistics
+    And graph edge from "relay_buffer_ingress" to "relay_buffer_ingestor" is visible
+    And graph edge from "relay_buffer_ingress" to "relay_buffer_ingestor" has traffic statistics
       """
       messages_total>=1
       bytes_total>=1
       batches_total=0
       """
-    And graph edge from "relay_buffer_source" to "notifications" has traffic statistics
+    And graph edge from "relay_buffer_ingestor" to "notifications" has traffic statistics
       """
       messages_total>=1
       bytes_total>=1
@@ -2182,7 +2426,7 @@ Feature: Web console Plexus REPL
       """
       {"user_id":42}
       """
-    Then graph edge from "relay_buffer_source" to "notifications" has traffic statistics
+    Then graph edge from "relay_buffer_ingestor" to "notifications" has traffic statistics
       """
       messages_total>=2
       bytes_total>=1
@@ -2206,18 +2450,18 @@ Feature: Web console Plexus REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA txn ( value STRING );
       CREATE WIRE JSON SCHEMA txn_wire MODE STRICT ( value string );
-      CREATE CODEC txn_codec FROM WIRE JSON SCHEMA txn_wire TO SCHEMA txn;
+      CREATE WIRE JSON CODEC txn_codec FROM WIRE SCHEMA txn_wire TO SCHEMA txn;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA value_branch TTL 5m;
       CREATE RELAY ss1 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE RELAY ss2 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE VHOST edge api.example.com;
-      CREATE ENDPOINT source_txns_endpoint ON edge PATH '/source' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_txns FROM source_txns_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING txn_codec TO ss1 INHERIT ALL BRANCHED BY by_source_txns SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT source_txns_endpoint ON edge PATH '/source';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns FROM source_txns_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING txn_codec TO ss1 INHERIT ALL BRANCHED BY by_source_txns SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR dedup_txns FROM ss1 DEDUPLICATE ON input.value MAX TIME 10m BRANCHED BY by_source_txns TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
-    Then selector ".graph-hit-layer" contains "source_txns"
+    Then selector ".graph-hit-layer" contains "ingestor_txns"
     And selector ".graph-hit-layer" contains "dedup_txns"
     When these Plexus commands are executed on the leader node
       """
@@ -2225,7 +2469,7 @@ Feature: Web console Plexus REPL
       CREATE IF NOT EXISTS BRANCH by_state_txns_ingestor SCHEMA value_branch TTL 5m;
       CREATE RELAY state_txns SCHEMA txn BRANCHED BY by_state_txns_ingestor WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY rr1 SCHEMA txn BRANCHED BY by_state_txns_ingestor;
-      CREATE ENDPOINT state_txns_endpoint ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT state_txns_endpoint ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR state_txns_ingestor FROM state_txns_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING txn_codec TO state_txns INHERIT ALL BRANCHED BY by_state_txns_ingestor SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REINGESTOR fwd FROM ss2 TO rr1 INHERIT ALL BRANCHED BY by_state_txns_ingestor SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
@@ -2244,7 +2488,7 @@ Feature: Web console Plexus REPL
     And selector ".graph-hit-layer" contains "source_txns_endpoint"
     And selector ".graph-hit-layer" contains "state_txns_endpoint"
     And selector ".graph-hit-layer" contains "ENDPOINT"
-    And graph item "source_txns" does not overlap graph item "state_txns_ingestor"
+    And graph item "ingestor_txns" does not overlap graph item "state_txns_ingestor"
     And graph item "ss1" does not overlap graph item "state_txns"
     And graph item "fwd" does not overlap graph item "rr1"
     And graph edge from "fwd" to "rr1" is visible

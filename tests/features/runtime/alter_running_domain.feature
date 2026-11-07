@@ -18,8 +18,8 @@ Feature: Altering schemas on a running domain
         seq integer
       );
 
-      CREATE CODEC running_event_codec
-        FROM WIRE JSON SCHEMA running_event_wire
+      CREATE WIRE JSON CODEC running_event_codec
+        FROM WIRE SCHEMA running_event_wire
         TO SCHEMA running_event;
 
       CREATE RELAY running_events SCHEMA running_event UNBRANCHED;
@@ -31,9 +31,9 @@ Feature: Altering schemas on a running domain
         };
 
       CREATE VHOST edge http-{{test_id}}-alter.example.com;
-      CREATE ENDPOINT running_event_ingress ON edge PATH '/alter-running' TYPE HTTP;
+      CREATE HTTP ENDPOINT running_event_ingress ON edge PATH '/alter-running';
 
-      CREATE HTTP ENDPOINT INGESTOR running_event_source
+      CREATE HTTP ENDPOINT INGESTOR running_event_ingestor
         FROM running_event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING running_event_codec
         TO running_events
@@ -106,8 +106,8 @@ Feature: Altering schemas on a running domain
       """
       CREATE SCHEMA timeout_event ( seq I64 );
       CREATE WIRE JSON SCHEMA timeout_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC timeout_event_codec
-        FROM WIRE JSON SCHEMA timeout_event_wire
+      CREATE WIRE JSON CODEC timeout_event_codec
+        FROM WIRE SCHEMA timeout_event_wire
         TO SCHEMA timeout_event;
       CREATE RELAY timeout_events SCHEMA timeout_event UNBRANCHED;
 
@@ -117,9 +117,9 @@ Feature: Altering schemas on a running domain
           'bind' = 'false'
         };
       CREATE VHOST timeout_edge http-{{test_id}}-alter-timeout.example.com;
-      CREATE ENDPOINT timeout_ingress
-        ON timeout_edge PATH '/alter-timeout' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR timeout_source
+      CREATE HTTP ENDPOINT timeout_ingress
+        ON timeout_edge PATH '/alter-timeout';
+      CREATE HTTP ENDPOINT INGESTOR timeout_ingestor
         FROM timeout_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timeout_event_codec
         TO timeout_events
@@ -194,8 +194,8 @@ Feature: Altering schemas on a running domain
         tenant string,
         seq integer
       );
-      CREATE CODEC mutable_event_codec
-        FROM WIRE JSON SCHEMA mutable_event_wire
+      CREATE WIRE JSON CODEC mutable_event_codec
+        FROM WIRE SCHEMA mutable_event_wire
         TO SCHEMA mutable_event;
 
       CREATE SCHEMA stable_event ( tenant STRING, seq I64 );
@@ -203,8 +203,8 @@ Feature: Altering schemas on a running domain
         tenant string,
         seq integer
       );
-      CREATE CODEC stable_event_codec
-        FROM WIRE JSON SCHEMA stable_event_wire
+      CREATE WIRE JSON CODEC stable_event_codec
+        FROM WIRE SCHEMA stable_event_wire
         TO SCHEMA stable_event;
 
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
@@ -220,12 +220,12 @@ Feature: Altering schemas on a running domain
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
       CREATE VHOST state_edge http-{{test_id}}-alter-state.example.com;
-      CREATE ENDPOINT mutable_ingress
-        ON state_edge PATH '/mutable' TYPE HTTP;
-      CREATE ENDPOINT stable_ingress
-        ON state_edge PATH '/stable' TYPE HTTP;
+      CREATE HTTP ENDPOINT mutable_ingress
+        ON state_edge PATH '/mutable';
+      CREATE HTTP ENDPOINT stable_ingress
+        ON state_edge PATH '/stable';
 
-      CREATE HTTP ENDPOINT INGESTOR mutable_source
+      CREATE HTTP ENDPOINT INGESTOR mutable_ingestor
         FROM mutable_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING mutable_event_codec
         TO mutable_state
@@ -235,7 +235,7 @@ Feature: Altering schemas on a running domain
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR stable_source
+      CREATE HTTP ENDPOINT INGESTOR stable_ingestor
         FROM stable_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stable_event_codec
         TO stable_state
@@ -322,8 +322,8 @@ Feature: Altering schemas on a running domain
 
       CREATE WIRE JSON SCHEMA rollback_event_wire MODE STRICT ( seq integer );
 
-      CREATE CODEC rollback_event_codec
-        FROM WIRE JSON SCHEMA rollback_event_wire
+      CREATE WIRE JSON CODEC rollback_event_codec
+        FROM WIRE SCHEMA rollback_event_wire
         TO SCHEMA rollback_event;
 
       CREATE RELAY rollback_events SCHEMA rollback_event UNBRANCHED CAPACITY 3;
@@ -335,9 +335,9 @@ Feature: Altering schemas on a running domain
         };
 
       CREATE VHOST rollback_edge http-{{test_id}}-rollback.example.com;
-      CREATE ENDPOINT rollback_ingress ON rollback_edge PATH '/alter-rollback' TYPE HTTP;
+      CREATE HTTP ENDPOINT rollback_ingress ON rollback_edge PATH '/alter-rollback';
 
-      CREATE HTTP ENDPOINT INGESTOR rollback_source
+      CREATE HTTP ENDPOINT INGESTOR rollback_ingestor
         FROM rollback_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING rollback_event_codec
         TO rollback_events

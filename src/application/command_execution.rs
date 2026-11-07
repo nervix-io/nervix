@@ -14,27 +14,30 @@
     )
 )]
 
-use std::{collections::BTreeSet, convert::Infallible, time::Duration};
+// Cluster policy definitions have one vocabulary owner. These facades hold bootstrap inputs.
+use std::{collections::BTreeSet, time::Duration};
 
 use ahash::RandomState;
+use arch_into::ArchInto as _;
 use blake3::Hasher;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    CommandExecution, CommandExecutionAdmissionPolicy, CommandExecutionDiagnostic,
-    CommandExecutionDisposition, CommandExecutionEffect, CommandExecutionPreviewStale,
-    CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
-    CommandExecutionStatementDisposition, CommandExecutionStatementResult,
+    CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
+    CommandExecutionDiagnostic, CommandExecutionDisposition, CommandExecutionEffect,
+    CommandExecutionPreviewStale, CommandExecutionRequestConflict, CommandExecutionResult,
+    CommandExecutionState, CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
     ConsensusError, RecordedBackupArchive, RestoreExecution,
 };
 use nervix_models::{
-    Backup, BackupCapture, BackupResources, BackupScope, ClusterNodeIdentity, ClusterParameters,
+    Backup, BackupCapture, BackupResources, BackupScope, ClusterNodeIdentity,
     CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Restore,
-    RestoreArchive, Setting, SettingDefinition, Statement, Timestamp, TransactionPosition,
-    TransactionStatus, UserName,
+    RestoreArchive, Setting, Statement, Timestamp, TransactionPosition, TransactionStatus,
+    UserName,
 };
+pub use nervix_models::{CommandExecutionCapacity, CommandRetryValidity};
 use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::{
     collections::DashMap,
@@ -72,49 +75,6 @@ impl From<&Backup> for BackupExecutionParameters {
     }
 }
 
-/// How long the cluster recognizes a command reference, so a client's retry of the same command
-/// finds its first outcome instead of running it again.
-pub struct CommandRetryValidity;
-
-impl SettingDefinition for CommandRetryValidity {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "command-retry-validity";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(15 * 60)
-    }
-
-    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
-/// The most command executions the cluster retains outcomes for at once.
-pub struct CommandExecutionCapacity;
-
-impl SettingDefinition for CommandExecutionCapacity {
-    type Class = ClusterParameters;
-    type Value = usize;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "command-execution-capacity";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> usize {
-        65_536
-    }
-
-    fn validate(_: &usize, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
 /// How the cluster admits persistent session commands and how long it retains their outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandExecutionPolicy {
@@ -127,16 +87,16 @@ impl CommandExecutionPolicy {
     pub fn resolve(
         retry_validity: Option<Duration>,
         capacity: Option<usize>,
-    ) -> Result<Self, Report<Infallible>> {
+    ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
             retry_validity: Setting::resolve(retry_validity, &())?,
-            capacity: Setting::resolve(capacity, &())?,
+            capacity: Setting::resolve(capacity.map(|value| value.arch_into()), &())?,
         })
     }
 
     pub fn new(retry_validity: Duration, capacity: usize) -> Self {
         Self::resolve(Some(retry_validity), Some(capacity))
-            .assured("the command execution settings declare no validation")
+            .assured("the command execution settings have valid bounds")
     }
 
     pub fn retry_validity(self) -> Duration {
@@ -144,7 +104,8 @@ impl CommandExecutionPolicy {
     }
 
     pub fn capacity(self) -> usize {
-        *self.capacity.value()
+        usize::try_from(*self.capacity.value())
+            .assured("the validated count fits a supported native target")
     }
 
     pub(in crate::application) fn admission_at(
@@ -157,7 +118,7 @@ impl CommandExecutionPolicy {
 
 impl Default for CommandExecutionPolicy {
     fn default() -> Self {
-        Self::resolve(None, None).assured("the command execution defaults declare no validation")
+        Self::resolve(None, None).assured("the command execution defaults have valid bounds")
     }
 }
 
@@ -498,6 +459,17 @@ fn transaction_targets_match(
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) fn refuse_expired_reference(
+        &self,
+        reference: &CommandExecutionReference,
+    ) -> CommandResult {
+        self.inner
+            .runtime
+            .metrics()
+            .record_command_execution_refusal(&CommandExecutionAdmissionError::Expired);
+        expired_reference(reference)
+    }
+
     pub(in crate::application) async fn reconcile_persistent_commands(
         &self,
         finished_before: Timestamp,
@@ -509,8 +481,18 @@ impl SessionServiceImpl {
             .command_execution_reconciliation(finished_before, retry_fence)
             .await;
         let maintenance_due = reconciliation.maintenance_due;
+        #[cfg(feature = "testing")]
+        let deferred = self
+            .inner
+            .runtime
+            .fault_injection()
+            .deferred_command_reconciliations(self.inner.consensus.local_node_id());
         for reference in reconciliation.applying {
             nervix_primitives::task::consume_budget().await;
+            #[cfg(feature = "testing")]
+            if deferred.contains(&reference) {
+                continue;
+            }
             let Some(execution_guard) = self.inner.command_executions.try_lock(reference.clone())
             else {
                 continue;
@@ -578,7 +560,7 @@ impl SessionServiceImpl {
                 .reclaim_command_executions(finished_before, retry_fence)
                 .await
         {
-            warn!(error = %error, "failed to reclaim retained command execution history");
+            warn!(error = %format_args!("{error:#}"), "failed to reclaim retained command execution history");
         }
     }
 
@@ -595,7 +577,7 @@ impl SessionServiceImpl {
             .await
         {
             if existing.is_expired() {
-                return Err(Box::new(expired_reference(&reference)));
+                return Err(Box::new(self.refuse_expired_reference(&reference)));
             }
             if let Some(conflict) = existing.request_conflict(
                 &owner,
@@ -652,6 +634,13 @@ impl SessionServiceImpl {
             .await;
 
         let effect = match &request.body {
+            PersistentCommandRequestBody::Statement {
+                statement: Statement::AlterCluster(alter),
+                ..
+            } => CommandExecutionEffect::AlterCluster {
+                changes: alter.parameters.clone(),
+                applied: None,
+            },
             PersistentCommandRequestBody::Transaction(transaction) => {
                 CommandExecutionEffect::TransactionRequest(Box::new(transaction.clone()))
             }
@@ -738,10 +727,7 @@ impl SessionServiceImpl {
             ))),
         };
         let admitted_at = current_timestamp();
-        let policy = self
-            .inner
-            .command_execution_policy
-            .admission_at(admitted_at);
+        let policy = self.command_execution_policy().admission_at(admitted_at);
         let execution = CommandExecution::applying_at_position(
             reference.clone(),
             owner,
@@ -759,6 +745,15 @@ impl SessionServiceImpl {
         {
             Ok(execution) => Ok(CommandAdmission::Admitted(execution)),
             Err(error) => {
+                if let ConsensusError::Conflict(
+                    ConsensusConflict::ExecutionReferenceAdmissionRefused { refusal, .. },
+                ) = error.current_context()
+                {
+                    self.inner
+                        .runtime
+                        .metrics()
+                        .record_command_execution_refusal(refusal);
+                }
                 if let ConsensusError::LeadershipLost { observed } = error.current_context() {
                     // The admission proposal may have reached the log before leadership moved,
                     // so whether the command was admitted is not known here. A leader that could
@@ -801,6 +796,14 @@ impl SessionServiceImpl {
             ));
         };
         match effect {
+            CommandExecutionEffect::AlterCluster { changes, applied } => {
+                Box::pin(self.alter_cluster_parameters(
+                    execution,
+                    &changes,
+                    applied.map(|record| *record),
+                ))
+                .await
+            }
             CommandExecutionEffect::CreateDomain {
                 if_not_exists,
                 existed_at_admission,
@@ -1076,6 +1079,12 @@ impl SessionServiceImpl {
             }
         };
         self.restore_transaction_binding_for_execution(&execution, &mut result, subscriptions);
+        if let Some(CommandExecutionTransactionTarget::Existing { id, .. }) =
+            execution.transaction_target()
+        {
+            self.release_missing_transaction_binding_on_failure(id, &result, subscriptions)
+                .await;
+        }
         result
     }
 
@@ -1128,9 +1137,10 @@ fn replicated_admission_refusal(
     error: &ConsensusError,
 ) -> Option<CommandResult> {
     match error {
-        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired { .. }) => {
-            Some(expired_reference(reference))
-        }
+        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
+            refusal: CommandExecutionAdmissionError::Expired,
+            ..
+        }) => Some(expired_reference(reference)),
         ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceConflict {
             kind, ..
         }) => Some(conflicting_reference(reference, *kind)),
@@ -1311,16 +1321,70 @@ fn statement_result(result: CommandExecutionStatementResult) -> CommandResult {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    #[cfg(feature = "testing")]
+    use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{
         CreateStatement, CreateUser, ImpactPlanningBasis, TransactionLifecycle,
         TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
         TransactionPreviewIdentity,
     };
+    use nervix_recovery::Discarded as _;
 
     use super::*;
+    use crate::application::test_fixtures::{
+        TestService, build_test_service, test_execution_reference,
+    };
+    #[cfg(feature = "testing")]
+    use crate::{
+        application::{
+            subscription::SessionSubscriptions,
+            test_fixtures::{build_test_service_with_probe, test_command_request},
+        },
+        captured_logs::CapturedLogs,
+    };
 
     fn domain() -> DomainName {
         DomainName::parse("default").assured("the test domain is an identifier-shaped literal")
+    }
+
+    #[nervix_primitives::test]
+    async fn completion_projection_keeps_admission_refusals_at_zero() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let reference = test_execution_reference();
+        let execution = CommandExecution {
+            reference: reference.clone(),
+            state: CommandExecutionState::Expired,
+        };
+        let result = service
+            .result_from_finished_execution(&reference, execution)
+            .await;
+        let metrics = service.inner.runtime.metrics().prometheus_text();
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+
+        let result = result.expect_err("an expired completion snapshot refuses result recovery");
+        assert_eq!(
+            result.disposition,
+            CommandDisposition::ExecutionReferenceExpired
+        );
+        let refusals = metrics
+            .lines()
+            .find(|line| {
+                line.starts_with("nervix_command_execution_admission_refusals_total{")
+                    && line.contains("reason=\"expired\"")
+            })
+            .verified("registration initializes the expired refusal child")
+            .split_whitespace()
+            .last()
+            .verified("a Prometheus counter sample has a value")
+            .parse::<u64>()
+            .assured("the refusal counter is an unsigned integer");
+        assert_eq!(refusals, 0);
     }
 
     /// The node process a test's command finishes on.
@@ -1422,9 +1486,11 @@ mod tests {
     fn replicated_admission_refusals_keep_their_typed_dispositions() {
         let reference = CommandExecutionReference::parse("reference.admission")
             .assured("the test reference is an identifier-shaped literal");
-        let expired = ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired {
-            reference: reference.clone(),
-        });
+        let expired =
+            ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
+                reference: reference.clone(),
+                refusal: CommandExecutionAdmissionError::Expired,
+            });
         assert_eq!(
             replicated_admission_refusal(&reference, &expired).map(|result| result.disposition),
             Some(CommandDisposition::ExecutionReferenceExpired)
@@ -1441,9 +1507,7 @@ mod tests {
             ))
         );
 
-        let unrelated = ConsensusError::Conflict(ConsensusConflict::Reason(format!(
-            "command execution reference '{reference}' has expired"
-        )));
+        let unrelated = ConsensusError::Conflict(ConsensusConflict::ClusterParameterInputsChanged);
         assert!(replicated_admission_refusal(&reference, &unrelated).is_none());
     }
 
@@ -1656,5 +1720,74 @@ mod tests {
         );
 
         assert_eq!(restored, result);
+    }
+
+    /// A failed reclamation of retained command history reports the proposal's whole cause chain,
+    /// so an operator can tell a storage failure from a refused proposal, and keeps the history for
+    /// a later pass.
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn a_failed_command_history_reclamation_reports_its_whole_cause_chain() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(true, probe.clone()).await;
+        let mut subscriptions = SessionSubscriptions::new();
+        let request = test_command_request("CREATE SCHEMA reclaimed ( user_id U32 )", "default");
+        let reference = request.execution_reference.clone();
+        let created = service.test_command(request, &mut subscriptions).await;
+        assert!(
+            created.succeeded(),
+            "the persistent command finishes: {created:?}"
+        );
+        // The command finished before this instant, so its history is due for reclamation.
+        let finished_before = current_timestamp();
+        probe.storage_fault().fail_next(
+            "reclaim-command-executions".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+
+        let logs = CapturedLogs::default();
+        // `#[nervix_primitives::test]` runs the whole future on the calling thread, so the
+        // thread-local default the guard installs stays in force across the await.
+        let guard = tracing::subscriber::set_default(logs.subscriber());
+        service
+            .reconcile_persistent_commands(finished_before, finished_before)
+            .await;
+        drop(guard);
+        let logs = logs.contents();
+
+        // Read the reclamation's own report: the consensus engine also logs the fault it met.
+        let warning = logs
+            .lines()
+            .find(|line| line.contains("failed to reclaim retained command execution history"));
+        let Some(warning) = warning else {
+            panic!("the failed reclamation must be reported: {logs}");
+        };
+        assert!(
+            warning.contains("error=consensus storage failed: "),
+            "the report must carry the reclamation's cause, not only its outermost context: \
+             {warning}"
+        );
+        assert!(
+            warning.contains("injected consensus storage failure"),
+            "the report must reach the storage failure beneath the reclamation: {warning}"
+        );
+        assert!(
+            service
+                .inner
+                .consensus
+                .current_command_execution(&reference)
+                .await
+                .is_some(),
+            "a reclamation that was not recorded keeps the command's history"
+        );
+
+        subscriptions.stop_all().await;
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
     }
 }

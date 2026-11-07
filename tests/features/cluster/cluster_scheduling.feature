@@ -50,7 +50,7 @@ Feature: Cluster scheduling
       """
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA event_branch ( id I64 );
       CREATE BRANCH by_event SCHEMA event_branch TTL 5m;
       CREATE RELAY stage_0 SCHEMA event BRANCHED BY by_event;
@@ -67,7 +67,7 @@ Feature: Cluster scheduling
       CREATE RELAY stage_11 SCHEMA event BRANCHED BY by_event;
       CREATE RELAY stage_12 SCHEMA event BRANCHED BY by_event;
       CREATE VHOST edge random-scheduler-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO stage_0 INHERIT ALL BRANCHED BY by_event SET id = message.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR hop_1 FROM stage_0 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_1 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR hop_2 FROM stage_1 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_2 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -189,8 +189,8 @@ Feature: Cluster scheduling
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -201,10 +201,9 @@ Feature: Cluster scheduling
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         }; CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -255,17 +254,16 @@ Feature: Cluster scheduling
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -319,8 +317,8 @@ Feature: Cluster scheduling
         level string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
@@ -335,12 +333,11 @@ Feature: Cluster scheduling
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
-      CREATE KAFKA TOPIC INGESTOR source_logs
-        FROM kafka_main TOPIC 'deduplicator_describe_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_deduplicator_describe_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR ingestor_logs
+        FROM kafka_main TOPIC 'deduplicator_describe_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_deduplicator_describe_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
         INHERIT ALL
@@ -424,8 +421,8 @@ Feature: Cluster scheduling
         level string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
@@ -438,12 +435,11 @@ Feature: Cluster scheduling
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
-      CREATE KAFKA TOPIC INGESTOR source_logs
-        FROM kafka_main TOPIC 'scheduled_dedup_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_scheduled_dedup_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR ingestor_logs
+        FROM kafka_main TOPIC 'scheduled_dedup_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_scheduled_dedup_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
         INHERIT ALL
@@ -461,7 +457,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      - domain={{domain}} kind=ingestor name=ingestor_logs unit=instance:0 owner=node-2
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -485,7 +481,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      - domain={{domain}} kind=ingestor name=ingestor_logs unit=instance:0 owner=node-2
       """
     And the last command output contains
       """
@@ -553,17 +549,16 @@ Feature: Cluster scheduling
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -627,19 +622,18 @@ Feature: Cluster scheduling
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -694,19 +688,18 @@ Feature: Cluster scheduling
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -722,7 +715,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-1
+      - domain={{domain}} kind=ingestor name=kafka_notifications unit=instance:0 owner=node-1
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -732,7 +725,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-2
+      - domain={{domain}} kind=ingestor name=kafka_notifications unit=instance:0 owner=node-2
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -763,7 +756,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-2
+      - domain={{domain}} kind=ingestor name=kafka_notifications unit=instance:0 owner=node-2
       """
     And the last command output contains
       """
@@ -813,7 +806,7 @@ Feature: Cluster scheduling
     And the last command output contains
       """
       quiesce level: ENTITY_PAUSE
-      - kind=ingestor name=kafka_notifications from=node-2 to=
+      - kind=ingestor name=kafka_notifications unit=instance:0 from=node-2 to=
       """
     When these Plexus commands are executed on the leader node
       """
@@ -821,7 +814,7 @@ Feature: Cluster scheduling
       """
     Then the last command output does not contain
       """
-      - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-2
+      - domain={{domain}} kind=ingestor name=kafka_notifications unit=instance:0 owner=node-2
       """
     And the relay subscription does not receive a payload within "1s"
     And the observed broker does not receive a payload within "1s"
@@ -855,8 +848,8 @@ Feature: Cluster scheduling
         level string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
@@ -869,12 +862,11 @@ Feature: Cluster scheduling
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
-      CREATE KAFKA TOPIC INGESTOR source_logs
-        FROM kafka_main TOPIC 'moved_dedup_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_moved_dedup_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR ingestor_logs
+        FROM kafka_main TOPIC 'moved_dedup_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_moved_dedup_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
         INHERIT ALL
@@ -892,7 +884,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      - domain={{domain}} kind=ingestor name=ingestor_logs unit=instance:0 owner=node-2
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -942,7 +934,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      - domain={{domain}} kind=ingestor name=ingestor_logs unit=instance:0 owner=node-2
       """
     And the last command output contains
       """

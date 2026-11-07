@@ -21,7 +21,9 @@ use ahash::{HashMap, HashMapExt};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusError, ConsensusRuntimeState};
-use nervix_interconnect::DomainClockProgressRequest;
+use nervix_interconnect::{
+    DomainClockAttachReceipt, DomainClockAttachRequest, DomainClockProgressRequest,
+};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainClockAdvancement, DomainClockAuthority,
     DomainClockPeriod, DomainClockProgress, DomainClockState, DomainName, DomainPace, DomainStatus,
@@ -32,6 +34,15 @@ use nervix_primitives::{
     time::{Instant, sleep},
 };
 use tracing::{debug, warn};
+
+mod attachments;
+
+pub(in crate::application) use attachments::{
+    DomainClockAttachmentInstaller, DomainClockAttachments,
+};
+use attachments::{
+    DomainClockAttachmentObservation, DomainClockAttachmentObserver, DomainClockAttachmentTarget,
+};
 
 use super::{background_task::BackgroundTask, session_service::SessionServiceImpl};
 use crate::{
@@ -104,17 +115,23 @@ pub(in crate::application) struct DomainClockTask {
 struct DomainClockProgressDelivery {
     latest: watch::Sender<Option<DomainClockProgressRequest>>,
     task: BackgroundTask,
+    revision: u64,
+    peer_process_epoch: u64,
+    lifetime: CancellationToken,
 }
 
 impl DomainClockProgressDelivery {
     fn start(
         service: SessionServiceImpl,
-        target: ClusterNodeIdentity,
+        target: DomainClockAttachmentTarget,
         shutdown: &CancellationToken,
     ) -> Self {
         let (latest, receiver) = watch::channel(None);
         let token = shutdown.child_token();
         let task_token = token.clone();
+        let revision = target.revision;
+        let peer_process_epoch = target.peer_process_epoch;
+        let lifetime = target.lifetime.clone();
         let handle = nervix_primitives::task::spawn(async move {
             Self::run(service, target, receiver, task_token).await;
         });
@@ -124,7 +141,16 @@ impl DomainClockProgressDelivery {
                 cancel: token,
                 handle,
             },
+            revision,
+            peer_process_epoch,
+            lifetime,
         }
+    }
+
+    fn matches(&self, target: &DomainClockAttachmentTarget) -> bool {
+        self.revision == target.revision
+            && self.peer_process_epoch == target.peer_process_epoch
+            && !self.lifetime.is_cancelled()
     }
 
     fn publish(&self, request: DomainClockProgressRequest) {
@@ -137,7 +163,7 @@ impl DomainClockProgressDelivery {
 
     async fn run(
         service: SessionServiceImpl,
-        target: ClusterNodeIdentity,
+        target: DomainClockAttachmentTarget,
         mut latest: watch::Receiver<Option<DomainClockProgressRequest>>,
         shutdown: CancellationToken,
     ) {
@@ -146,7 +172,9 @@ impl DomainClockProgressDelivery {
             nervix_primitives::task::consume_budget().await;
             if !retry_pending {
                 let changed = nervix_primitives::select! {
+                    biased;
                     _ = shutdown.cancelled() => return,
+                    _ = target.lifetime.cancelled() => return,
                     changed = latest.changed() => changed,
                 };
                 if changed.is_err() {
@@ -160,8 +188,12 @@ impl DomainClockProgressDelivery {
             };
             let domain_id = request.domain_id.clone();
             let result = nervix_primitives::select! {
+                biased;
                 _ = shutdown.cancelled() => return,
-                result = service.inner.interconnect.request(target.node_id(), request) => result,
+                _ = target.lifetime.cancelled() => return,
+                result = service.inner.interconnect.request_to_process(
+                    target.identity.node_id(), target.peer_process_epoch, request,
+                ) => result,
             };
             match result {
                 Ok(()) => {
@@ -170,12 +202,14 @@ impl DomainClockProgressDelivery {
                 Err(error) => {
                     debug!(
                         domain = domain_id.as_str(),
-                        node = %target,
+                        node = %target.identity,
                         error = %format_args!("{error:#}"),
                         "failed to deliver domain clock progress"
                     );
                     nervix_primitives::select! {
+                        biased;
                         _ = shutdown.cancelled() => return,
+                        _ = target.lifetime.cancelled() => return,
                         _ = sleep(DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF) => {}
                     }
                     retry_pending = true;
@@ -195,32 +229,37 @@ impl DomainClockProgressDeliveries {
         &mut self,
         service: &SessionServiceImpl,
         spec: &DomainClockTaskSpec,
-        clock_revision: u64,
+        attachments: &mut DomainClockAttachmentObserver,
         latest: Option<&DomainClockProgress>,
         shutdown: &CancellationToken,
         domain_id: &DomainName,
-    ) {
-        let gossip = service.inner.cluster.availability_state().await;
-        // A peer advertises the revision once its domain clocks, authority fences included, match
-        // it. It installs a reassigned fence ahead of its graph installation, so a peer whose graph
-        // installation waits on a node that left still receives progress.
-        let installed = service
+    ) -> bool {
+        attachments.prepare_observation();
+        let availability = service.inner.cluster.availability_state().await;
+        let members = service
             .inner
-            .cluster
-            .nodes_with_domain_clocks_installed(clock_revision)
-            .await;
-        let mut desired = gossip
-            .live_identities()
-            .intersection(&installed)
-            .cloned()
-            .collect::<BTreeSet<_>>();
+            .consensus
+            .membership_nodes()
+            .await
+            .into_keys()
+            .collect();
+        let mut desired = match attachments.observe(&availability.live_identities(), &members) {
+            DomainClockAttachmentObservation::Current(targets) => targets,
+            // Its unseen attachment version wakes the producer for a fresh availability read.
+            DomainClockAttachmentObservation::Refresh => return true,
+            DomainClockAttachmentObservation::Superseded => return false,
+        };
         desired.remove(&spec.authority);
 
         let departed = self
             .targets
-            .keys()
-            .filter(|target| !desired.contains(*target))
-            .cloned()
+            .iter()
+            .filter(|(identity, delivery)| {
+                desired
+                    .get(*identity)
+                    .is_none_or(|target| !delivery.matches(target))
+            })
+            .map(|(identity, _)| identity.clone())
             .collect::<Vec<_>>();
         for target in departed {
             nervix_primitives::task::consume_budget().await;
@@ -229,21 +268,21 @@ impl DomainClockProgressDeliveries {
             }
         }
 
-        for target in desired {
+        for (identity, target) in desired {
             nervix_primitives::task::consume_budget().await;
-            if self.targets.contains_key(&target) {
+            if self.targets.contains_key(&identity) {
                 continue;
             }
-            let delivery =
-                DomainClockProgressDelivery::start(service.clone(), target.clone(), shutdown);
+            let delivery = DomainClockProgressDelivery::start(service.clone(), target, shutdown);
             if let Some(progress) = latest {
                 delivery.publish(DomainClockProgressRequest {
                     domain_id: domain_id.clone(),
                     progress: progress.clone(),
                 });
             }
-            self.targets.insert(target, delivery);
+            self.targets.insert(identity, delivery);
         }
+        true
     }
 
     fn publish(&self, domain_id: &DomainName, progress: &DomainClockProgress) {
@@ -259,6 +298,132 @@ impl DomainClockProgressDeliveries {
         for delivery in self.targets.into_values() {
             nervix_primitives::task::consume_budget().await;
             delivery.stop().await;
+        }
+    }
+}
+
+struct DomainClockAttachmentSender {
+    request: DomainClockAttachRequest,
+    task: BackgroundTask,
+}
+
+impl DomainClockAttachmentSender {
+    fn start(
+        service: SessionServiceImpl,
+        request: DomainClockAttachRequest,
+        shutdown: &CancellationToken,
+    ) -> Self {
+        let cancel = shutdown.child_token();
+        let token = cancel.clone();
+        let pending = request.clone();
+        let handle = nervix_primitives::task::spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let result = nervix_primitives::select! {
+                    biased;
+                    _ = token.cancelled() => return,
+                    result = service.inner.interconnect.request(pending.authority.node_id(), pending.clone()) => result,
+                };
+                match result {
+                    Ok(DomainClockAttachReceipt::Accepted) => return,
+                    Ok(receipt) => {
+                        debug!(domain = %pending.domain_id, authority = %pending.authority, ?receipt, "domain clock attachment is not yet accepted")
+                    }
+                    Err(error) => {
+                        debug!(domain = %pending.domain_id, authority = %pending.authority, error = %format_args!("{error:#}"), "failed to attach domain clock delivery")
+                    }
+                }
+                nervix_primitives::select! {
+                    _ = token.cancelled() => return,
+                    _ = sleep(DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF) => {}
+                }
+            }
+        });
+        Self {
+            request,
+            task: BackgroundTask { cancel, handle },
+        }
+    }
+}
+
+#[derive(Default)]
+pub(in crate::application) struct DomainClockAttachmentSenders {
+    tasks: HashMap<DomainName, DomainClockAttachmentSender>,
+}
+
+impl DomainClockAttachmentSenders {
+    pub(in crate::application) async fn reconcile(
+        &mut self,
+        service: &SessionServiceImpl,
+        shutdown: &CancellationToken,
+        state: &ConsensusRuntimeState,
+    ) {
+        let local = service.inner.application_progress.local();
+        let mut desired = HashMap::new();
+        if let Some(installed_revision) = local
+            .domain_clock_installed
+            .filter(|revision| *revision >= state.revision)
+        {
+            for (domain_id, domain) in &state.domains {
+                nervix_primitives::task::consume_budget().await;
+                if matches!(domain.status, DomainStatus::Stopped)
+                    || matches!(domain.config.pace, DomainPace::Unpaced)
+                    || domain.clock.is_none()
+                {
+                    continue;
+                }
+                let Some(authority) = state.domain_clock_authorities.get(domain_id) else {
+                    continue;
+                };
+                let Some(owner) = authority.owner() else {
+                    continue;
+                };
+                if owner == &local.identity
+                    || !service.inner.runtime.has_domain_clock_authority(
+                        domain_id,
+                        domain.start_version,
+                        authority,
+                    )
+                {
+                    continue;
+                }
+                desired.insert(
+                    domain_id.clone(),
+                    DomainClockAttachRequest {
+                        domain_id: domain_id.clone(),
+                        target: local.identity.clone(),
+                        installed_revision,
+                        generation: domain.start_version,
+                        authority_revision: authority.revision(),
+                        authority: owner.clone(),
+                    },
+                );
+            }
+        }
+        let superseded = self
+            .tasks
+            .iter()
+            .filter(|(domain, sender)| desired.get(*domain) != Some(&sender.request))
+            .map(|(domain, _)| domain.clone())
+            .collect::<Vec<_>>();
+        for domain in superseded {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(sender) = self.tasks.remove(&domain) {
+                sender.task.stop().await;
+            }
+        }
+        for (domain, request) in desired {
+            nervix_primitives::task::consume_budget().await;
+            self.tasks.entry(domain).or_insert_with(|| {
+                DomainClockAttachmentSender::start(service.clone(), request, shutdown)
+            });
+        }
+    }
+
+    pub(in crate::application) async fn stop_all(self) {
+        for sender in self.tasks.into_values() {
+            nervix_primitives::task::consume_budget().await;
+            sender.task.stop().await;
         }
     }
 }
@@ -334,6 +499,7 @@ pub(in crate::application) async fn reconcile_domain_clock_tasks(
     state: &ConsensusRuntimeState,
     tasks: &mut HashMap<DomainName, DomainClockTask>,
     retirements: &mut DomainClockRetirements,
+    installation: &mut DomainClockAttachmentInstaller,
 ) {
     let local_identity = service.inner.cluster.local_node_identity().await;
 
@@ -390,6 +556,8 @@ pub(in crate::application) async fn reconcile_domain_clock_tasks(
         }
     }
 
+    desired.retain(|domain, _| !retirements.contains(domain));
+    installation.install(&desired, state.revision);
     for (domain_id, spec) in desired {
         nervix_primitives::task::consume_budget().await;
         if tasks.contains_key(&domain_id) || retirements.contains(&domain_id) {
@@ -400,13 +568,19 @@ pub(in crate::application) async fn reconcile_domain_clock_tasks(
         let task_domain_id = domain_id.clone();
         let task_token = token.clone();
         let task_spec = spec.clone();
-        let clock_revision = state.revision;
+        let attachments = service
+            .inner
+            .domain_clock_attachments
+            .observer(&domain_id, &spec)
+            .assured(
+                "the single clock controller installed this exact authority before starting it",
+            );
         let handle = nervix_primitives::task::spawn(async move {
             run_domain_clock(
                 task_service,
                 task_domain_id,
                 task_spec,
-                clock_revision,
+                attachments,
                 task_token,
             )
             .await;
@@ -473,7 +647,7 @@ async fn run_domain_clock(
     service: SessionServiceImpl,
     domain_id: DomainName,
     spec: DomainClockTaskSpec,
-    clock_revision: u64,
+    mut attachments: DomainClockAttachmentObserver,
     shutdown: CancellationToken,
 ) {
     let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
@@ -492,16 +666,19 @@ async fn run_domain_clock(
         if shutdown.is_cancelled() {
             break;
         }
-        deliveries
+        if !deliveries
             .reconcile(
                 &service,
                 &spec,
-                clock_revision,
+                &mut attachments,
                 latest_progress.as_ref(),
                 &shutdown,
                 &domain_id,
             )
-            .await;
+            .await
+        {
+            break;
+        }
         let wall_time = current_timestamp();
         let due = match spec
             .clock
@@ -547,6 +724,7 @@ async fn run_domain_clock(
                         _ = shutdown.cancelled() => break,
                         _ = sleep(remaining) => {},
                         _ = &mut cluster_change => {},
+                        _ = attachments.changed() => {},
                     }
                     continue;
                 }
@@ -615,6 +793,7 @@ async fn run_domain_clock(
             _ = shutdown.cancelled() => break,
             _ = sleep(wait) => {}
             _ = &mut cluster_change => {}
+            _ = attachments.changed() => {}
         }
     }
     deliveries.stop_all().await;
@@ -722,8 +901,9 @@ impl SessionServiceImpl {
     }
 
     /// Installs the authority fences of the committed `state` ahead of graph installation, then
-    /// advertises its runtime revision once every domain clock on this node matches it.
-    pub(in crate::application) async fn install_committed_domain_clocks(
+    /// records its runtime revision once every domain clock on this node matches it. Receiver
+    /// attachment reconciliation reads that installed phase independently of graph readiness.
+    pub(in crate::application) fn install_committed_domain_clocks(
         &self,
         state: &ConsensusRuntimeState,
     ) {
@@ -733,10 +913,10 @@ impl SessionServiceImpl {
             &state.domain_clock_authorities,
         );
         if let CommittedClockInstallation::Complete = installation {
-            self.inner
-                .cluster
-                .set_local_domain_clock_revision_installed(state.revision)
-                .await;
+            self.inner.application_progress.advance(
+                nervix_interconnect::ApplicationProgressPhase::DomainClockInstalled,
+                state.revision,
+            );
         }
     }
 

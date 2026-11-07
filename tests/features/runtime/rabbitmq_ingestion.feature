@@ -19,7 +19,7 @@ Feature: RabbitMQ ingestion
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main CONFIG { 'addr' = '{{rabbitmq_stallable_addr}}' };
       CREATE MQTT CLIENT mqtt_out CONFIG {
@@ -33,7 +33,7 @@ Feature: RabbitMQ ingestion
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications
         TO mqtt_out TOPIC 'automatic_out_{{test_id}}'
-        MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
@@ -101,8 +101,8 @@ Feature: RabbitMQ ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
@@ -166,8 +166,8 @@ Feature: RabbitMQ ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
@@ -191,7 +191,7 @@ Feature: RabbitMQ ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "rabbit_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "rabbit_notifications" leaves fault mode
     And RabbitMQ message is published to queue "notifications_reconnect_{{test_id}}"
@@ -232,8 +232,8 @@ Feature: RabbitMQ ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
@@ -257,7 +257,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_redelivery_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_redelivery_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -314,8 +314,8 @@ Feature: RabbitMQ ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
@@ -339,7 +339,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -414,8 +414,8 @@ Feature: RabbitMQ ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
@@ -439,7 +439,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_ack_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_ack_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -508,8 +508,8 @@ Feature: RabbitMQ ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main
@@ -590,8 +590,8 @@ Feature: RabbitMQ ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 16;
         CREATE RABBITMQ CLIENT rabbit_main
@@ -612,7 +612,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' MODE QOS 1 ACK PARALLEL MAX 4 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' QOS 1 MODE ACK PARALLEL MAX 4 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -645,19 +645,19 @@ Feature: RabbitMQ ingestion
     When emitter "mqtt_forward" enters fault mode
     Then within "30s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      ingestor ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
       """
     And within "30s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      ingestor ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
       """
     And within "30s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      ingestor ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
       """
     And within "30s" the active session observes a server error containing
       """
-      source ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
+      ingestor ACK chain failed for ingestor 'rabbit_notifications' in domain '{{domain}}': fault injector failed emitter 'mqtt_forward'
       """
     When emitter "mqtt_forward" leaves fault mode
     And the stallable endpoint "rabbitmq" is resumed
@@ -724,8 +724,8 @@ Feature: RabbitMQ ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 16;
         CREATE RABBITMQ CLIENT rabbit_main
@@ -746,7 +746,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_ack_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_ack_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -837,8 +837,8 @@ Feature: RabbitMQ ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 16;
         CREATE RABBITMQ CLIENT rabbit_main
@@ -847,8 +847,7 @@ Feature: RabbitMQ ingestion
         };
         CREATE MQTT CLIENT mqtt_out
         CONFIG {
-          'addr' = '{{mqtt_addr}}',
-          'client_id' = 'nervix-cucumber-rabbit-lost-reject-out-{{test_id}}'
+          'addr' = '{{mqtt_addr}}'
         };
         CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
         FROM rabbit_main QUEUE 'notifications_individual_{{test_id}}' MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 1h ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -866,14 +865,14 @@ Feature: RabbitMQ ingestion
             FLUSH IMMEDIATE ON MESSAGE ERROR LOG
           TO refused INHERIT ALL WHERE output.user_id = 102
             FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_successful FROM successful TO mqtt_out TOPIC 'notifications_individual_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_successful FROM successful TO mqtt_out TOPIC 'notifications_individual_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE MQTT TOPIC EMITTER mqtt_refused FROM refused
           TO mqtt_out TOPIC 'notifications_individual_out_{{test_id}}'
-          MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+          QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
           INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;

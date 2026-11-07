@@ -18,16 +18,16 @@ Feature: Domain metrics
         tenant string,
         transaction_id string
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_domain_metrics_source SCHEMA tenant_branch TTL 5m;
         CREATE RELAY domain_metrics_raw SCHEMA transaction BRANCHED BY by_domain_metrics_source;
         CREATE RELAY domain_metrics_deduped SCHEMA transaction BRANCHED BY by_domain_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT domain_metrics_ingress ON edge PATH '/domain-metrics' TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR domain_metrics_source
+        CREATE HTTP ENDPOINT domain_metrics_ingress ON edge PATH '/domain-metrics';
+        CREATE HTTP ENDPOINT INGESTOR domain_metrics_ingestor
         FROM domain_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO domain_metrics_raw
@@ -50,7 +50,7 @@ Feature: Domain metrics
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE ZEROMQ PUSH EMITTER domain_metrics_sink FROM domain_metrics_deduped TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING transaction_codec
+        CREATE ZEROMQ PUSH EMITTER domain_metrics_emitter FROM domain_metrics_deduped TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING transaction_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -65,7 +65,8 @@ Feature: Domain metrics
       """
       "transaction_id":"txn-1"
       """
-    When these Plexus commands are executed
+    When leadership is transferred to node "<leader>"
+    And these Plexus commands are executed on node "node-1"
       """
       DESCRIBE DOMAIN;
       """
@@ -102,6 +103,7 @@ Feature: Domain metrics
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | leader |
+      | 1            | node-1 |
+      | 3            | node-1 |
+      | 3            | node-2 |

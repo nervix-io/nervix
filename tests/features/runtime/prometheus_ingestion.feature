@@ -16,14 +16,9 @@ Feature: Prometheus ingestion
         value F64,
         timestamp STRING
       );
-        CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string
-      );
-        CREATE CODEC sample_codec
-        FROM WIRE JSON SCHEMA sample_wire
-        TO SCHEMA sample;
+        CREATE JAQ JSON CODEC sample_codec
+        TO SCHEMA sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value, timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
@@ -74,14 +69,9 @@ Feature: Prometheus ingestion
         value F64,
         timestamp STRING
       );
-        CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string
-      );
-        CREATE CODEC sample_codec
-        FROM WIRE JSON SCHEMA sample_wire
-        TO SCHEMA sample;
+        CREATE JAQ JSON CODEC sample_codec
+        TO SCHEMA sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value, timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
@@ -105,7 +95,7 @@ Feature: Prometheus ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "prom_samples" leaves fault mode
     Then the relay subscription receives a payload
@@ -137,14 +127,9 @@ Feature: Prometheus ingestion
         value F64,
         timestamp STRING
       );
-        CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string
-      );
-        CREATE CODEC sample_codec
-        FROM WIRE JSON SCHEMA sample_wire
-        TO SCHEMA sample;
+        CREATE JAQ JSON CODEC sample_codec
+        TO SCHEMA sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value, timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
@@ -282,8 +267,8 @@ Feature: Prometheus ingestion
     When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA sample ( source STRING, value F64, timestamp STRING );
-      CREATE WIRE JSON SCHEMA sample_wire MODE STRICT ( source string, value number, timestamp string );
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE JAQ JSON CODEC sample_codec TO SCHEMA sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value, timestamp}';
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://prometheus.nervix.test:9090',
@@ -347,9 +332,9 @@ Feature: Prometheus ingestion
       """
     When these Plexus statements are executed on the leader node
       """
-      CREATE SCHEMA bulk_sample ( source STRING, index STRING, value F64, timestamp STRING );
-      CREATE WIRE JSON SCHEMA bulk_sample_wire MODE STRICT ( source string, index string, value number, timestamp string );
-      CREATE CODEC bulk_sample_codec FROM WIRE JSON SCHEMA bulk_sample_wire TO SCHEMA bulk_sample;
+      CREATE SCHEMA bulk_sample ( value F64, timestamp STRING );
+      CREATE WIRE JSON SCHEMA bulk_sample_wire MODE LOOSE ( value number, timestamp string );
+      CREATE WIRE JSON CODEC bulk_sample_codec FROM WIRE SCHEMA bulk_sample_wire TO SCHEMA bulk_sample;
       CREATE RELAY samples SCHEMA bulk_sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = '{{mock_http_addr}}/prometheus-vector/{{test_id}}/100/always',
@@ -407,9 +392,9 @@ Feature: Prometheus ingestion
       """
     When these Plexus statements are executed on the leader node
       """
-      CREATE SCHEMA bulk_sample ( source STRING, index STRING, value F64, timestamp STRING );
-      CREATE WIRE JSON SCHEMA bulk_sample_wire MODE STRICT ( source string, index string, value number, timestamp string );
-      CREATE CODEC bulk_sample_codec FROM WIRE JSON SCHEMA bulk_sample_wire TO SCHEMA bulk_sample;
+      CREATE SCHEMA bulk_sample ( value F64, timestamp STRING );
+      CREATE WIRE JSON SCHEMA bulk_sample_wire MODE LOOSE ( value number, timestamp string );
+      CREATE WIRE JSON CODEC bulk_sample_codec FROM WIRE SCHEMA bulk_sample_wire TO SCHEMA bulk_sample;
       CREATE RELAY samples SCHEMA bulk_sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = '{{mock_http_addr}}/prometheus-vector/{{test_id}}/50000/once',

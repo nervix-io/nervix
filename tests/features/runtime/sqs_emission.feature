@@ -17,8 +17,8 @@ Feature: SQS emission
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -101,8 +101,8 @@ Feature: SQS emission
         user_id integer,
         header_name string
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
@@ -188,8 +188,8 @@ Feature: SQS emission
         user_id integer,
         note string
       );
-      CREATE CODEC note_codec
-      FROM WIRE JSON SCHEMA note_wire
+      CREATE WIRE JSON CODEC note_codec
+      FROM WIRE SCHEMA note_wire
       TO SCHEMA note_event;
       CREATE RELAY notes SCHEMA note_event UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
@@ -271,8 +271,8 @@ Feature: SQS emission
         tenant string,
         sequence integer
       );
-      CREATE CODEC order_codec
-      FROM WIRE JSON SCHEMA order_wire
+      CREATE WIRE JSON CODEC order_codec
+      FROM WIRE SCHEMA order_wire
       TO SCHEMA order_event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -360,8 +360,8 @@ Feature: SQS emission
         tenant string,
         sequence integer
       );
-      CREATE CODEC order_codec
-      FROM WIRE JSON SCHEMA order_wire
+      CREATE WIRE JSON CODEC order_codec
+      FROM WIRE SCHEMA order_wire
       TO SCHEMA order_event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -392,7 +392,7 @@ Feature: SQS emission
       CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
       TO sqs_main QUEUE 'fifo_kept_{{test_id}}.fifo'
-      FIFO GROUP FROM BRANCH
+      FIFO GROUP branch.tenant
       SEND BATCH MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING order_codec
       INHERIT ALL
@@ -452,8 +452,8 @@ Feature: SQS emission
         tenant string,
         sequence integer
       );
-      CREATE CODEC order_codec
-      FROM WIRE JSON SCHEMA order_wire
+      CREATE WIRE JSON CODEC order_codec
+      FROM WIRE SCHEMA order_wire
       TO SCHEMA order_event;
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
       CREATE RELAY rejected_orders SCHEMA rejected_order UNBRANCHED;
@@ -552,8 +552,8 @@ Feature: SQS emission
         tenant string,
         note string
       );
-      CREATE CODEC reading_codec
-      FROM WIRE JSON SCHEMA reading_wire
+      CREATE WIRE JSON CODEC reading_codec
+      FROM WIRE SCHEMA reading_wire
       TO SCHEMA reading;
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE MQTT CLIENT mqtt_ingress
@@ -634,8 +634,8 @@ Feature: SQS emission
         order_id string,
         attempt integer
       );
-      CREATE CODEC order_codec
-      FROM WIRE JSON SCHEMA order_wire
+      CREATE WIRE JSON CODEC order_codec
+      FROM WIRE SCHEMA order_wire
       TO SCHEMA order_event;
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
       CREATE MQTT CLIENT mqtt_ingress
@@ -709,8 +709,8 @@ Feature: SQS emission
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_ingress

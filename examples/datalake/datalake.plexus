@@ -68,8 +68,8 @@ CREATE WIRE JSON SCHEMA edge_site_wire MODE STRICT (
   edge_lon NUMBER
 );
 
-CREATE CODEC edge_site_codec
-  FROM WIRE JSON SCHEMA edge_site_wire
+CREATE WIRE JSON CODEC edge_site_codec
+  FROM WIRE SCHEMA edge_site_wire
   TO SCHEMA edge_site;
 
 CREATE HASH MAP edge_sites_by_id KEY edge_id FROM RESOURCE reference_data VERSION 1 PATH 'edge_sites.jsonl' DECODE USING edge_site_codec;
@@ -91,8 +91,7 @@ CREATE SCHEMA device_activity (
   seq I64
 );
 
-CREATE CODEC device_activity_cbor_codec
-  FROM CBOR
+CREATE JAQ CBOR CODEC device_activity_cbor_codec
   TO SCHEMA device_activity
   WITH JAQ TRANSFORMATIONS ON INGESTION '.'
   ENCODE ts AS RFC3339;
@@ -111,8 +110,8 @@ CREATE SCHEMA edge_activity (
   seq I64
 );
 
-CREATE CODEC edge_activity_protobuf_codec
-  FROM PROTOBUF USING RESOURCE edge_activity_proto VERSION 1
+CREATE PROTOBUF CODEC edge_activity_protobuf_codec
+  USING RESOURCE edge_activity_proto VERSION 1
   CONFIG {
     'file' = 'edge_activity.proto',
     'include' = '.'
@@ -154,8 +153,8 @@ CREATE WIRE JSON SCHEMA auth_activity_wire MODE STRICT (
   seq INTEGER
 );
 
-CREATE CODEC auth_activity_json_codec
-  FROM WIRE JSON SCHEMA auth_activity_wire
+CREATE WIRE JSON CODEC auth_activity_json_codec
+  FROM WIRE SCHEMA auth_activity_wire
   TO SCHEMA auth_activity
   ENCODE ts AS RFC3339;
 
@@ -389,8 +388,8 @@ CREATE WIRE JSON SCHEMA security_event_wire MODE STRICT (
   source_event_id STRING
 );
 
-CREATE CODEC security_event_json_codec
-  FROM WIRE JSON SCHEMA security_event_wire
+CREATE WIRE JSON CODEC security_event_json_codec
+  FROM WIRE SCHEMA security_event_wire
   TO SCHEMA security_event
   ENCODE observed_at AS RFC3339;
 
@@ -430,8 +429,8 @@ CREATE WIRE JSON SCHEMA distance_alert_wire MODE STRICT (
   edge_lon NUMBER OPTIONAL
 );
 
-CREATE CODEC distance_alert_json_codec
-  FROM WIRE JSON SCHEMA distance_alert_wire
+CREATE WIRE JSON CODEC distance_alert_json_codec
+  FROM WIRE SCHEMA distance_alert_wire
   TO SCHEMA distance_alert
   ENCODE observed_at AS RFC3339;
 
@@ -541,7 +540,7 @@ CREATE NATS SUBJECT INGESTOR edge_server_activity
   ON GENERAL ERROR LOG;
 
 CREATE KAFKA TOPIC INGESTOR auth_server_activity
-  FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' INSTANCES 4 MODE NO ACK ON QUIESCE SUSPEND
+  FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' START AT LATEST INSTANCES 4 MODE NO ACK ON QUIESCE SUSPEND
   DECODE USING auth_activity_json_codec
   TIMESTAMP AT ts
   TO auth_activity_landing
@@ -555,8 +554,9 @@ CREATE KAFKA TOPIC INGESTOR auth_server_activity
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR edge_location_lookup
+CREATE DEDUPLICATOR edge_location_lookup
   FROM edge_activity_landing
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -570,8 +570,9 @@ CREATE ATTACHED DEDUPLICATOR edge_location_lookup
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR device_activity_splitter
+CREATE DEDUPLICATOR device_activity_splitter
   FROM device_activity_landing
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -591,8 +592,9 @@ CREATE ATTACHED DEDUPLICATOR device_activity_splitter
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR edge_activity_splitter
+CREATE DEDUPLICATOR edge_activity_splitter
   FROM edge_activity_enriched_landing
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -607,8 +609,9 @@ CREATE ATTACHED DEDUPLICATOR edge_activity_splitter
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR auth_activity_splitter
+CREATE DEDUPLICATOR auth_activity_splitter
   FROM auth_activity_landing
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -623,8 +626,9 @@ CREATE ATTACHED DEDUPLICATOR auth_activity_splitter
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED WASM PROCESSOR geoip_device_location_resolver
+CREATE WASM PROCESSOR geoip_device_location_resolver
   FROM device_location_events
+  ATTACHED
   USING RESOURCE geoip_wasm VERSION 1
   FILE 'nervix_datalake_geo_wasm_guest.wasm'
   MAX FUEL 1000000000
@@ -686,8 +690,9 @@ CREATE ATTACHED WASM PROCESSOR geoip_device_location_resolver
   ON REJECTED STATE PRESERVE
   ON GLOBAL ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR device_location_distance
+CREATE DEDUPLICATOR device_location_distance
   FROM device_location_geo_events
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -703,9 +708,10 @@ CREATE ATTACHED DEDUPLICATOR device_location_distance
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED CORRELATOR device_edge_connect_correlator
+CREATE CORRELATOR device_edge_connect_correlator
   LEFT FROM device_connect_events
   RIGHT FROM edge_connect_events
+  ATTACHED
   CORRELATE WHERE left.session_id = right.session_id AND left.edge_id = right.edge_id
   MATCH EARLIEST
   MAX TIME 5s
@@ -736,8 +742,9 @@ CREATE ATTACHED CORRELATOR device_edge_connect_correlator
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR connect_distance_score
+CREATE DEDUPLICATOR connect_distance_score
   FROM device_edge_connect_events
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -747,9 +754,10 @@ CREATE ATTACHED DEDUPLICATOR connect_distance_score
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED CORRELATOR connected_session_correlator
+CREATE CORRELATOR connected_session_correlator
   LEFT FROM device_edge_connect_scored_events
   RIGHT FROM auth_authorized_events
+  ATTACHED
   CORRELATE WHERE left.session_id = right.session_id AND left.edge_id = right.edge_id
   MATCH EARLIEST
   MAX TIME 10s
@@ -784,9 +792,10 @@ CREATE ATTACHED CORRELATOR connected_session_correlator
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED CORRELATOR disconnect_correlator
+CREATE CORRELATOR disconnect_correlator
   LEFT FROM device_disconnect_events
   RIGHT FROM edge_disconnect_events
+  ATTACHED
   CORRELATE WHERE left.session_id = right.session_id AND left.edge_id = right.edge_id
   MATCH EARLIEST
   MAX TIME 5s
@@ -817,8 +826,9 @@ CREATE ATTACHED CORRELATOR disconnect_correlator
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR device_disconnect_only_projector
+CREATE DEDUPLICATOR device_disconnect_only_projector
   FROM device_disconnect_unmatched
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -839,8 +849,9 @@ CREATE ATTACHED DEDUPLICATOR device_disconnect_only_projector
     FLUSH EACH 250ms MAX BATCH SIZE 256kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR edge_disconnect_only_projector
+CREATE DEDUPLICATOR edge_disconnect_only_projector
   FROM edge_disconnect_unmatched
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -860,8 +871,9 @@ CREATE ATTACHED DEDUPLICATOR edge_disconnect_only_projector
     FLUSH EACH 250ms MAX BATCH SIZE 256kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR denied_auth_security_mapper
+CREATE DEDUPLICATOR denied_auth_security_mapper
   FROM auth_denied_events
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -874,8 +886,9 @@ CREATE ATTACHED DEDUPLICATOR denied_auth_security_mapper
     FLUSH EACH 250ms MAX BATCH SIZE 256kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR uncorrelated_auth_security_mapper
+CREATE DEDUPLICATOR uncorrelated_auth_security_mapper
   FROM uncorrelated_auth_events
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -888,8 +901,9 @@ CREATE ATTACHED DEDUPLICATOR uncorrelated_auth_security_mapper
     FLUSH EACH 250ms MAX BATCH SIZE 256kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR connect_without_auth_security_mapper
+CREATE DEDUPLICATOR connect_without_auth_security_mapper
   FROM connect_without_auth_events
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -905,16 +919,18 @@ CREATE ATTACHED DEDUPLICATOR connect_without_auth_security_mapper
     FLUSH EACH 250ms MAX BATCH SIZE 256kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED JUNCTION security_event_junction
+CREATE JUNCTION security_event_junction
   FROM security_auth_denied_events, security_uncorrelated_auth_events, security_connect_without_auth_events
+  ATTACHED
   BRANCHED BY by_device
   TO security_events
     INHERIT ALL
     FLUSH EACH 250ms MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR location_distance_alert_mapper
+CREATE DEDUPLICATOR location_distance_alert_mapper
   FROM device_location_checked_events
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -930,8 +946,9 @@ CREATE ATTACHED DEDUPLICATOR location_distance_alert_mapper
     FLUSH EACH 250ms MAX BATCH SIZE 256kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED DEDUPLICATOR connection_distance_alert_mapper
+CREATE DEDUPLICATOR connection_distance_alert_mapper
   FROM connected_sessions
+  ATTACHED
   DEDUPLICATE ON input.event_id
   MAX TIME 30m
   BRANCHED BY by_device
@@ -947,16 +964,18 @@ CREATE ATTACHED DEDUPLICATOR connection_distance_alert_mapper
     FLUSH EACH 250ms MAX BATCH SIZE 256kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED JUNCTION distance_alert_junction
+CREATE JUNCTION distance_alert_junction
   FROM location_distance_alerts, connection_distance_alerts
+  ATTACHED
   BRANCHED BY by_device
   TO distance_alerts
     INHERIT ALL
     FLUSH EACH 250ms MAX BATCH SIZE 256kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED KAFKA TOPIC EMITTER kafka_security_events
+CREATE KAFKA TOPIC EMITTER kafka_security_events
   FROM security_events
+  ATTACHED
   TO kafka_auth TOPIC 'datalake_security_events'
     MODE ACK PARALLEL MAX 1000 ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING security_event_json_codec
@@ -965,8 +984,9 @@ CREATE ATTACHED KAFKA TOPIC EMITTER kafka_security_events
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED REDIS PUBSUB EMITTER redis_distance_alerts
+CREATE REDIS PUBSUB EMITTER redis_distance_alerts
   FROM distance_alerts
+  ATTACHED
   TO redis_security_alerts CHANNEL 'datalake_distance_alerts'
     MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING distance_alert_json_codec
@@ -975,8 +995,9 @@ CREATE ATTACHED REDIS PUBSUB EMITTER redis_distance_alerts
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions
+CREATE ICEBERG TABLE EMITTER iceberg_connected_sessions
   FROM connected_sessions
+  DETACHED
   TO s3_lakehouse TABLE 'datalake_connected_sessions' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
@@ -1010,8 +1031,9 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED ICEBERG TABLE EMITTER iceberg_device_locations
+CREATE ICEBERG TABLE EMITTER iceberg_device_locations
   FROM device_location_checked_events
+  DETACHED
   TO s3_lakehouse TABLE 'datalake_device_locations' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_device_locations' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
@@ -1048,8 +1070,9 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_device_locations
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_matched_events
+CREATE ICEBERG TABLE EMITTER iceberg_disconnect_matched_events
   FROM disconnect_events_matched
+  DETACHED
   TO s3_lakehouse TABLE 'datalake_disconnect_matched_events' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_matched_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
@@ -1079,8 +1102,9 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_matched_events
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_device_only_events
+CREATE ICEBERG TABLE EMITTER iceberg_disconnect_device_only_events
   FROM disconnect_events_device_only
+  DETACHED
   TO s3_lakehouse TABLE 'datalake_disconnect_device_only_events' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_device_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
@@ -1110,8 +1134,9 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_device_only_events
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_edge_only_events
+CREATE ICEBERG TABLE EMITTER iceberg_disconnect_edge_only_events
   FROM disconnect_events_edge_only
+  DETACHED
   TO s3_lakehouse TABLE 'datalake_disconnect_edge_only_events' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_edge_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
@@ -1141,8 +1166,9 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_edge_only_events
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED ICEBERG TABLE EMITTER iceberg_security_events
+CREATE ICEBERG TABLE EMITTER iceberg_security_events
   FROM security_events
+  DETACHED
   TO s3_lakehouse TABLE 'datalake_security_events' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_security_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
@@ -1162,8 +1188,9 @@ CREATE DETACHED ICEBERG TABLE EMITTER iceberg_security_events
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED ICEBERG TABLE EMITTER iceberg_distance_alerts
+CREATE ICEBERG TABLE EMITTER iceberg_distance_alerts
   FROM distance_alerts
+  DETACHED
   TO s3_lakehouse TABLE 'datalake_distance_alerts' NAMESPACE 'datalake_demo' LOCATION 's3://nervix-iceberg/tables/datalake_distance_alerts' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {

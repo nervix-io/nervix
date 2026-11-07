@@ -19,16 +19,16 @@ Feature: Deduplicator metrics
         transaction_id string,
         amount integer
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_dedup_metrics_source SCHEMA tenant_branch TTL 5m;
         CREATE RELAY raw_txns SCHEMA transaction BRANCHED BY by_dedup_metrics_source;
         CREATE RELAY deduped_txns SCHEMA transaction BRANCHED BY by_dedup_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT dedup_metrics_ingress ON edge PATH '/dedup-metrics' TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR dedup_metrics_source
+        CREATE HTTP ENDPOINT dedup_metrics_ingress ON edge PATH '/dedup-metrics';
+        CREATE HTTP ENDPOINT INGESTOR dedup_metrics_ingestor
         FROM dedup_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO raw_txns

@@ -4,9 +4,9 @@ use std::{collections::BTreeSet, num::NonZeroU32, str::FromStr as _};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AvroType, CreateAvroWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf, FieldName,
-    JsonType, ParseAsType, SchemaField, UdfArgument, UdfLanguage, UdfReturn, WireSchemaField,
-    WireSchemaStrictness,
+    AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema,
+    CreateSchema, CreateUdf, CreateWireSchema, FieldName, JsonType, ParseAsType, SchemaField,
+    UdfArgument, UdfLanguage, UdfReturn, WireSchemaField, WireSchemaStrictness,
 };
 
 use crate::{Arbitrary, text::GeneratedName};
@@ -48,30 +48,24 @@ pub fn fields_of_every_type() -> Vec<SchemaField> {
     fields
 }
 
-const JSON_TYPES: [JsonType; 19] = [
+const JSON_TYPES: [JsonType; 5] = [
     JsonType::String,
     JsonType::Number,
     JsonType::Integer,
-    JsonType::Object,
     JsonType::Array,
     JsonType::Boolean,
-    JsonType::Null,
-    JsonType::U8,
-    JsonType::I8,
-    JsonType::U16,
-    JsonType::I16,
-    JsonType::U32,
-    JsonType::I32,
-    JsonType::U64,
-    JsonType::I64,
-    JsonType::Datetime,
-    JsonType::F32,
-    JsonType::F64,
-    JsonType::Bytes,
 ];
 
-const AVRO_TYPES: [AvroType; 13] = [
-    AvroType::Null,
+const CBOR_TYPES: [CborType; 6] = [
+    CborType::Integer,
+    CborType::Float,
+    CborType::Boolean,
+    CborType::Text,
+    CborType::Bytes,
+    CborType::Array,
+];
+
+const AVRO_PRIMITIVE_TYPES: [AvroType; 7] = [
     AvroType::Boolean,
     AvroType::Int,
     AvroType::Long,
@@ -79,12 +73,10 @@ const AVRO_TYPES: [AvroType; 13] = [
     AvroType::Double,
     AvroType::Bytes,
     AvroType::String,
-    AvroType::Record,
-    AvroType::Enum,
-    AvroType::Array,
-    AvroType::Map,
-    AvroType::Fixed,
 ];
+
+/// The most arrays a generated AVRO wire type nests around its primitive item type.
+const AVRO_ARRAY_DEPTH: u8 = 3;
 
 impl Arbitrary<'_> {
     /// Between `minimum` and `maximum` names, none repeated, in the order they were drawn.
@@ -181,40 +173,47 @@ impl Arbitrary<'_> {
             .pick([WireSchemaStrictness::Strict, WireSchemaStrictness::Loose])
     }
 
-    /// A JSON wire schema, which is also the shape of a CBOR wire schema.
+    /// A JSON wire schema in its declared vocabulary.
     pub fn json_wire_schema(&mut self) -> CreateJsonWireSchema {
-        let name = self.name();
-        let strictness = self.wire_strictness();
-        let names = self.distinct_names(1, FIELDS);
-        let mut fields = Vec::with_capacity(names.len());
-        for field in names {
-            fields.push(WireSchemaField {
-                name: field,
-                ty: self.entropy.pick(JSON_TYPES),
-                optional: self.entropy.flag(),
-            });
-        }
-        CreateJsonWireSchema {
-            name,
-            strictness,
-            fields,
+        self.wire_schema(|arbitrary| arbitrary.entropy.pick(JSON_TYPES))
+    }
+
+    /// A CBOR wire schema in its declared vocabulary.
+    pub fn cbor_wire_schema(&mut self) -> CreateCborWireSchema {
+        self.wire_schema(|arbitrary| arbitrary.entropy.pick(CBOR_TYPES))
+    }
+
+    /// An Avro wire schema, its arrays nested at most [`AVRO_ARRAY_DEPTH`] deep.
+    pub fn avro_wire_schema(&mut self) -> CreateAvroWireSchema {
+        self.wire_schema(|arbitrary| arbitrary.avro_type_within(AVRO_ARRAY_DEPTH))
+    }
+
+    /// An AVRO wire type: a primitive type, or an array of an AVRO type nested at most `depth`
+    /// arrays deep.
+    fn avro_type_within(&mut self, depth: u8) -> AvroType {
+        let Some(below) = depth.checked_sub(1) else {
+            return self.entropy.pick(AVRO_PRIMITIVE_TYPES);
+        };
+        match self.entropy.byte() % 3 {
+            0 => AvroType::array_of(self.avro_type_within(below)),
+            _ => self.entropy.pick(AVRO_PRIMITIVE_TYPES),
         }
     }
 
-    /// An Avro wire schema.
-    pub fn avro_wire_schema(&mut self) -> CreateAvroWireSchema {
+    fn wire_schema<T>(&mut self, mut draw: impl FnMut(&mut Self) -> T) -> CreateWireSchema<T> {
         let name = self.name();
         let strictness = self.wire_strictness();
         let names = self.distinct_names(1, FIELDS);
         let mut fields = Vec::with_capacity(names.len());
         for field in names {
+            let ty = draw(self);
             fields.push(WireSchemaField {
                 name: field,
-                ty: self.entropy.pick(AVRO_TYPES),
+                ty,
                 optional: self.entropy.flag(),
             });
         }
-        CreateAvroWireSchema {
+        CreateWireSchema {
             name,
             strictness,
             fields,

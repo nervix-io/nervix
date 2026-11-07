@@ -27,7 +27,6 @@ use argon2::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::{Report, ResultExt as _};
-use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use http_body_util::Full;
 use hyper::{
     Request as HyperRequest, Response as HyperResponse, StatusCode,
@@ -55,7 +54,9 @@ const BASIC_AUTH_REALM: &str = "Nervix";
 
 const AUTH_RATE_LIMIT_PER_SECOND: u32 = 10;
 
-pub(in crate::application) type AuthRateLimiter = DefaultKeyedRateLimiter<String>;
+mod pacing;
+
+pub(in crate::application) use pacing::AuthenticationPacing;
 
 /// The credentials a `Basic` authorization token carries, or `None` when it carries none.
 ///
@@ -83,7 +84,9 @@ fn credentials_from_basic_authorization(value: &str) -> Option<BasicAuthCredenti
     credentials_from_basic_token(token.trim())
 }
 
-fn credentials_from_metadata(metadata: &MetadataMap) -> Option<BasicAuthCredentials> {
+pub(in crate::application) fn credentials_from_metadata(
+    metadata: &MetadataMap,
+) -> Option<BasicAuthCredentials> {
     let value = metadata.get("authorization")?;
     let Ok(value) = value.to_str() else {
         return None;
@@ -145,7 +148,7 @@ pub(in crate::application) enum GrpcAuthenticationError {
     Busy,
 }
 
-/// Why presented credentials did not authenticate a caller.
+/// Why a call did not authenticate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
     nervix_lint,
@@ -156,12 +159,24 @@ pub(in crate::application) enum GrpcAuthenticationError {
                   operator diagnostic and never reveal credential details to the caller"
     )
 )]
-pub(in crate::application) enum CredentialRejection {
+pub(in crate::application) enum AuthenticationRefusal {
+    /// The call presented no readable Basic credentials.
+    Missing,
     /// The user is unknown, the password is wrong, or the stored hash could not be verified.
-    Failed,
+    Rejected,
     /// The node's bounded execution could not take the verification now, so the credentials were
     /// not judged at all.
-    Busy,
+    Unavailable,
+}
+
+impl From<AuthenticationRefusal> for GrpcAuthenticationError {
+    fn from(refusal: AuthenticationRefusal) -> Self {
+        match refusal {
+            AuthenticationRefusal::Missing => Self::Required,
+            AuthenticationRefusal::Rejected => Self::Failed,
+            AuthenticationRefusal::Unavailable => Self::Busy,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -346,49 +361,70 @@ pub(in crate::application) async fn user_credentials(
 }
 
 impl SessionServiceImpl {
-    pub(in crate::application) fn new_auth_rate_limiter() -> AuthRateLimiter {
-        let quota = Quota::per_second(
+    pub(in crate::application) fn new_authentication_pacing() -> AuthenticationPacing {
+        AuthenticationPacing::new(
             NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND)
                 .assured("AUTH_RATE_LIMIT_PER_SECOND is a positive constant"),
-        );
-        RateLimiter::keyed(quota)
+        )
     }
 
-    pub(in crate::application) async fn authenticate_grpc_metadata(
+    /// Authenticates the Basic credentials a call presented, or refuses a call that presented none.
+    pub(in crate::application) async fn authenticate(
         &self,
-        metadata: &MetadataMap,
-    ) -> error_stack::Result<UserName, GrpcAuthenticationError> {
-        let Some(credentials) = credentials_from_metadata(metadata) else {
-            return Err(Report::new(GrpcAuthenticationError::Required));
+        credentials: Option<&BasicAuthCredentials>,
+    ) -> Result<UserName, AuthenticationRefusal> {
+        let Some(credentials) = credentials else {
+            return Err(AuthenticationRefusal::Missing);
         };
-        match self.authenticate_basic_credentials(&credentials).await {
-            Ok(user) => Ok(user),
-            Err(CredentialRejection::Failed) => Err(Report::new(GrpcAuthenticationError::Failed)),
-            Err(CredentialRejection::Busy) => Err(Report::new(GrpcAuthenticationError::Busy)),
-        }
+        self.authenticate_basic_credentials(credentials).await
     }
 
-    pub(in crate::application) async fn authenticate_basic_credentials(
+    /// Whether `credentials` name a user and that user's password.
+    ///
+    /// Every name costs the node the same work. A name that names no user, or that cannot name
+    /// one, has its password hashed the way creating a user hashes one, so the attempt charges the
+    /// credentials worker what verifying a stored hash charges it and takes as long: the answer,
+    /// and when it arrives, cannot tell an unknown user from a wrong password.
+    async fn authenticate_basic_credentials(
         &self,
         credentials: &BasicAuthCredentials,
-    ) -> Result<UserName, CredentialRejection> {
-        let Ok(user_name) = UserName::parse(&credentials.username) else {
-            return Err(CredentialRejection::Failed);
+    ) -> Result<UserName, AuthenticationRefusal> {
+        let user_name = UserName::parse(&credentials.username).ok();
+        let name = match &user_name {
+            Some(name) => name.as_str().to_owned(),
+            None => credentials.username.to_ascii_lowercase(),
+        };
+        let admission = self
+            .inner
+            .authentication_pacing
+            .before_verification(&name)
+            .await;
+        let outcome = self.verify_basic_credentials(credentials, user_name).await;
+        match &outcome {
+            Ok(_) => self.inner.authentication_pacing.authenticated(&name).await,
+            Err(AuthenticationRefusal::Rejected) => {
+                self.inner
+                    .authentication_pacing
+                    .refused(name, admission)
+                    .await;
+            }
+            Err(AuthenticationRefusal::Missing | AuthenticationRefusal::Unavailable) => {}
+        }
+        outcome
+    }
+
+    /// Verifies credentials only after their presented name's quota has admitted the attempt.
+    async fn verify_basic_credentials(
+        &self,
+        credentials: &BasicAuthCredentials,
+        user_name: Option<UserName>,
+    ) -> Result<UserName, AuthenticationRefusal> {
+        let Some(user_name) = user_name else {
+            return self.refuse_unknown_user(credentials).await;
         };
         let Some(user) = self.inner.consensus.current_user(&user_name).await else {
-            return Err(CredentialRejection::Failed);
+            return self.refuse_unknown_user(credentials).await;
         };
-        let auth_rate_limit_key = user_name.as_str().to_string();
-        if self
-            .inner
-            .failed_auth_rate_limit_keys
-            .contains_key(&auth_rate_limit_key)
-        {
-            self.inner
-                .auth_rate_limiter
-                .until_key_ready(&auth_rate_limit_key)
-                .await;
-        }
         let verified = verify_password_hash(
             self.inner.runtime.executor(),
             user.password_hash,
@@ -402,22 +438,36 @@ impl SessionServiceImpl {
                     // Nothing judged the credentials, so the attempt neither paces the user nor
                     // clears a pacing it already has.
                     debug!(user = user_name.as_str(), error = ?error, "credential verification was not admitted");
-                    return Err(CredentialRejection::Busy);
+                    return Err(AuthenticationRefusal::Unavailable);
                 }
                 warn!(user = user_name.as_str(), error = ?error, "credential verification failed");
                 false
             }
         };
         if matched {
-            self.inner
-                .failed_auth_rate_limit_keys
-                .remove(&auth_rate_limit_key);
             return Ok(user_name);
         }
-        self.inner
-            .failed_auth_rate_limit_keys
-            .insert(auth_rate_limit_key, ());
-        Err(CredentialRejection::Failed)
+        Err(AuthenticationRefusal::Rejected)
+    }
+
+    /// Refuses credentials whose name names no user once the work verifying a user's password
+    /// takes is done: the presented password is hashed at the parameters every user's hash is
+    /// created with, on the credentials worker under the same charge, and the hash is discarded.
+    async fn refuse_unknown_user(
+        &self,
+        credentials: &BasicAuthCredentials,
+    ) -> Result<UserName, AuthenticationRefusal> {
+        let hashed =
+            hash_password(self.inner.runtime.executor(), credentials.password.clone()).await;
+        let Err(error) = hashed else {
+            return Err(AuthenticationRefusal::Rejected);
+        };
+        if let PasswordHashError::Busy = error.current_context() {
+            debug!(error = %format_args!("{error:#}"), "credential verification was not admitted");
+            return Err(AuthenticationRefusal::Unavailable);
+        }
+        warn!(error = %format_args!("{error:#}"), "credential verification failed");
+        Err(AuthenticationRefusal::Rejected)
     }
 
     pub(in crate::application) async fn create_user(
@@ -532,10 +582,13 @@ impl SessionServiceImpl {
 
 #[cfg(all(test, feature = "testing"))]
 mod tests {
+    use std::time::Duration;
+
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_execution::OperationLimits;
     use nervix_models::{CreateStatement, CreateUser, UserName};
+    use nervix_recovery::Discarded as _;
 
     use super::*;
     #[cfg(feature = "testing")]
@@ -780,9 +833,30 @@ mod tests {
 
         let filled = FilledCpuClass::fill(&executor, CpuClass::Credentials).await;
         let refused = service.authenticate_basic_credentials(&credentials).await;
-        assert_eq!(refused, Err(CredentialRejection::Busy));
+        assert_eq!(refused, Err(AuthenticationRefusal::Unavailable));
         // Nothing judged the credentials, so the user is not paced as after a failed attempt.
-        assert!(service.inner.failed_auth_rate_limit_keys.is_empty());
+        assert!(service.inner.authentication_pacing.is_empty().await);
+
+        let unknown = BasicAuthCredentials {
+            username: "unknown_user".to_string(),
+            password: "busy-secret".to_string(),
+        };
+        let refused = service.authenticate_basic_credentials(&unknown).await;
+        assert_eq!(
+            refused,
+            Err(AuthenticationRefusal::Unavailable),
+            "a name that names no user is not judged either while the node has no room"
+        );
+        assert!(service.inner.authentication_pacing.is_empty().await);
+        let invalid = BasicAuthCredentials {
+            username: "not a user".to_string(),
+            password: "busy-secret".to_string(),
+        };
+        assert_eq!(
+            service.authenticate_basic_credentials(&invalid).await,
+            Err(AuthenticationRefusal::Unavailable)
+        );
+        assert!(service.inner.authentication_pacing.is_empty().await);
 
         filled.release().await;
         let accepted = service.authenticate_basic_credentials(&credentials).await;
@@ -791,5 +865,132 @@ mod tests {
             Ok(UserName::parse("busy_user").assured("the name parsed above"))
         );
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// The credentials work an executor has done.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct CredentialsWork {
+        /// Jobs the credentials worker admitted.
+        jobs: u64,
+        /// Charges the credentials memory granted.
+        charges: u64,
+    }
+
+    impl CredentialsWork {
+        fn of(executor: &Executor) -> Self {
+            let snapshot = executor.snapshot();
+            Self {
+                jobs: snapshot.credentials_cpu.admitted,
+                charges: snapshot.credentials_memory.granted,
+            }
+        }
+
+        fn after_one_verification(self) -> Self {
+            Self {
+                jobs: self.jobs.checked_add(1).assured("a test admits few jobs"),
+                charges: self
+                    .charges
+                    .checked_add(1)
+                    .assured("a test grants few charges"),
+            }
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn every_presented_name_costs_the_credentials_work_of_one_verification() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
+        let created = service
+            .create_user(CreateStatement::new(
+                CreateUser {
+                    name: UserName::parse("known_user")
+                        .assured("the test user name is an identifier-shaped literal"),
+                    password: "known-secret".to_string(),
+                },
+                false,
+            ))
+            .await;
+        assert!(
+            created.succeeded(),
+            "user creation must succeed: {created:?}"
+        );
+        let executor = service.inner.runtime.executor().clone();
+
+        for presented in [
+            BasicAuthCredentials {
+                username: "known_user".to_string(),
+                password: "wrong-secret".to_string(),
+            },
+            BasicAuthCredentials {
+                username: "unknown_user".to_string(),
+                password: "any-secret".to_string(),
+            },
+            BasicAuthCredentials {
+                username: "not a user name".to_string(),
+                password: "any-secret".to_string(),
+            },
+        ] {
+            let before = CredentialsWork::of(&executor);
+            let refused = service.authenticate(Some(&presented)).await;
+            assert_eq!(
+                refused,
+                Err(AuthenticationRefusal::Rejected),
+                "{:?} does not authenticate",
+                presented.username
+            );
+            assert_eq!(
+                CredentialsWork::of(&executor),
+                before.after_one_verification(),
+                "{:?} costs the node one verification",
+                presented.username
+            );
+        }
+
+        let before = CredentialsWork::of(&executor);
+        let missing = service.authenticate(None).await;
+        assert_eq!(missing, Err(AuthenticationRefusal::Missing));
+        assert_eq!(
+            CredentialsWork::of(&executor),
+            before,
+            "a call without credentials has nothing to verify"
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[nervix_primitives::test]
+    async fn unknown_names_are_paced_after_their_first_refusal() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
+        for username in ["unknown_user", "not a user name"] {
+            let credentials = BasicAuthCredentials {
+                username: username.to_string(),
+                password: "any-secret".to_string(),
+            };
+            assert_eq!(
+                service.authenticate(Some(&credentials)).await,
+                Err(AuthenticationRefusal::Rejected)
+            );
+            let started = nervix_primitives::time::Instant::now();
+            for _ in 0..21 {
+                nervix_primitives::task::consume_budget().await;
+                assert_eq!(
+                    service.authenticate(Some(&credentials)).await,
+                    Err(AuthenticationRefusal::Rejected)
+                );
+            }
+            assert!(
+                started.elapsed() >= Duration::from_secs(1),
+                "repeated refusals for {username:?} must wait on that name's quota"
+            );
+        }
+        tokio::fs::remove_dir_all(&path)
+            .await
+            .discarded("the test's temporary database is cleaned up on a best-effort basis");
     }
 }

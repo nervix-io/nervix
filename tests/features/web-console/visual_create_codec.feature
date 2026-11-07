@@ -16,34 +16,87 @@ Feature: Web console visual codec and signaling protocol creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='codec']" is clicked
     And selector ".create-name" is filled with "visual_payload_codec"
-    And selector ".create-codec-format [data-format='wire-json']" is clicked
+    Then selector ".create-codec-format [data-format='wire-json']" contains "WIRE JSON"
+    And selector ".create-codec-format [data-format='wire-cbor']" contains "WIRE CBOR"
+    And selector ".create-codec-format [data-format='wire-avro']" contains "WIRE AVRO"
+    And selector ".create-codec-format [data-format='json']" contains "JAQ JSON"
+    And selector ".create-codec-format [data-format='yaml']" contains "JAQ YAML"
+    And selector ".create-codec-format [data-format='toml']" contains "JAQ TOML"
+    And selector ".create-codec-format [data-format='xml']" contains "JAQ XML"
+    And selector ".create-codec-format [data-format='cbor']" contains "JAQ CBOR"
+    And selector ".create-codec-format [data-format='protobuf']" contains "PROTOBUF"
+    And selector ".create-codec-format [data-format='syslog']" contains "SYSLOG"
+    When selector ".create-codec-format [data-format='wire-json']" is clicked
     And selector ".create-codec-schema .create-choice-search" is filled with "visual_payload"
     Then selector ".create-codec-schema [data-value='visual_payload']" exists
     When selector ".create-codec-schema [data-value='visual_payload']" is clicked
     And selector ".create-codec-wire-schema .create-choice-search" is filled with "visual_payload_wire"
     Then selector ".create-codec-wire-schema [data-value='visual_payload_wire']" exists
     When selector ".create-codec-wire-schema [data-value='visual_payload_wire']" is clicked
-    Then selector ".create-preview" contains "CREATE CODEC visual_payload_codec"
-    And selector ".create-preview" contains "FROM WIRE JSON SCHEMA visual_payload_wire"
+    Then selector ".create-preview" contains "CREATE WIRE JSON CODEC visual_payload_codec"
+    And selector ".create-preview" contains "FROM WIRE SCHEMA visual_payload_wire"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE CODEC visual_payload_codec;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE CODEC visual_payload_codec"
-    And selector ".terminal" contains "FROM WIRE JSON SCHEMA visual_payload_wire"
+    Then selector ".terminal" contains "CREATE WIRE JSON CODEC visual_payload_codec"
+    And selector ".terminal" contains "FROM WIRE SCHEMA visual_payload_wire"
     When these Plexus commands are executed on the leader node
       """
       CREATE RELAY visual_inbox SCHEMA visual_payload UNBRANCHED;
       CREATE VHOST visual_edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_ingest ON visual_edge PATH '/ingest' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR visual_source FROM visual_ingest MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT visual_ingest ON visual_edge PATH '/ingest';
+      CREATE HTTP ENDPOINT INGESTOR visual_ingestor FROM visual_ingest MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
     Examples:
       | cluster_size |
       | 1            |
       | 3            |
+
+  @visual_codec_base64
+  Scenario Outline: A visual codec declares BASE64 for byte text in a <format> string
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE SCHEMA visual_binary (payload BYTES);
+      CREATE WIRE <format> SCHEMA visual_binary_wire MODE STRICT (payload string);
+      """
+    And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
+    And selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='codec']" is clicked
+    And selector ".create-name" is filled with "visual_binary_codec"
+    And selector ".create-codec-format [data-format='<kind>']" is clicked
+    And selector ".create-codec-schema .create-choice-search" is filled with "visual_binary"
+    Then selector ".create-codec-schema [data-value='visual_binary']" exists
+    When selector ".create-codec-schema [data-value='visual_binary']" is clicked
+    And selector ".create-codec-wire-schema .create-choice-search" is filled with "visual_binary_wire"
+    Then selector ".create-codec-wire-schema [data-value='visual_binary_wire']" exists
+    When selector ".create-codec-wire-schema [data-value='visual_binary_wire']" is clicked
+    And selector ".create-codec-encoding-add" is clicked
+    And selector ".create-codec-encoding-field" is filled with "payload"
+    And selector ".create-codec-encoding-format [data-value='BASE64']" is clicked
+    Then selector ".create-codec-encoding-format [data-value='BASE64'].active" exists
+    And selector ".create-preview" contains "ENCODE payload AS BASE64"
+    And selector ".create-preview" contains "CREATE WIRE <format> CODEC visual_binary_codec"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
+    And selector ".prompt-row input" is filled with "SHOW CREATE CODEC visual_binary_codec;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "ENCODE payload AS BASE64"
+
+    Examples:
+      | cluster_size | format | kind      |
+      | 1            | JSON   | wire-json |
+      | 3            | JSON   | wire-json |
+      | 1            | AVRO   | wire-avro |
+      | 3            | AVRO   | wire-avro |
 
   @visual_signaling_create
   Scenario: A multi-step signaling protocol retains its order and program text
@@ -85,7 +138,7 @@ Feature: Web console visual codec and signaling protocol creation
     When these Plexus commands are executed on the leader node
       """
       CREATE VHOST visual_edge ws-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_socket ON visual_edge PATH '/ws' TYPE WEBSOCKETS WITH SIGNALING PROTOCOL visual_handshake;
+      CREATE WEBSOCKETS ENDPOINT visual_socket ON visual_edge PATH '/ws' WITH SIGNALING PROTOCOL visual_handshake;
       """
 
   @visual_jaq_codec_create
@@ -114,6 +167,7 @@ Feature: Web console visual codec and signaling protocol creation
     And selector ".create-codec-batch-enabled" is clicked
     And selector ".create-codec-batch-program" is filled with "{records: .}"
     Then selector ".create-preview" contains "ON EMITTING BATCH"
+    And selector ".create-preview" contains "CREATE JAQ JSON CODEC visual_jaq_codec"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -249,7 +303,7 @@ Feature: Web console visual codec and signaling protocol creation
     Then selector ".transaction-indicator" eventually disappears
     When selector ".prompt-row input" is filled with "SHOW CREATE CODEC staged_codec;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "FROM WIRE JSON SCHEMA staged_wire"
+    Then selector ".terminal" contains "FROM WIRE SCHEMA staged_wire"
     When selector ".prompt-row input" is filled with "SHOW CREATE SIGNALING PROTOCOL staged_handshake;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE SIGNALING PROTOCOL staged_handshake"
@@ -266,7 +320,8 @@ Feature: Web console visual codec and signaling protocol creation
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
@@ -282,10 +337,10 @@ Feature: Web console visual codec and signaling protocol creation
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
-    And selector ".create-preview" contains "FROM WIRE JSON SCHEMA visual_payload_wire"
+    And selector ".create-preview" contains "FROM WIRE SCHEMA visual_payload_wire"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE CODEC reconnected_codec;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE CODEC reconnected_codec"
+    Then selector ".terminal" contains "CREATE WIRE JSON CODEC reconnected_codec"

@@ -39,11 +39,11 @@ Feature: Relay correlation
         first_name string,
         surname string
       );
-        CREATE CODEC left_profile_codec
-        FROM WIRE JSON SCHEMA left_profile_wire
+        CREATE WIRE JSON CODEC left_profile_codec
+        FROM WIRE SCHEMA left_profile_wire
         TO SCHEMA left_profile;
-        CREATE CODEC right_profile_codec
-        FROM WIRE JSON SCHEMA right_profile_wire
+        CREATE WIRE JSON CODEC right_profile_codec
+        FROM WIRE SCHEMA right_profile_wire
         TO SCHEMA right_profile;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
@@ -54,22 +54,18 @@ Feature: Relay correlation
         CREATE RELAY correlated_profiles SCHEMA correlated_profile BRANCHED BY by_left_profile_ingestor;
         CREATE RELAY correlation_audits SCHEMA correlation_audit BRANCHED BY by_left_profile_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT left_ingress
+        CREATE HTTP ENDPOINT left_ingress
         ON edge
-        PATH '/left'
-        TYPE HTTP;
-        CREATE ENDPOINT left_alias_ingress
+        PATH '/left';
+        CREATE HTTP ENDPOINT left_alias_ingress
         ON edge
-        PATH '/left-alias'
-        TYPE HTTP;
-        CREATE ENDPOINT right_ingress
+        PATH '/left-alias';
+        CREATE HTTP ENDPOINT right_ingress
         ON edge
-        PATH '/right'
-        TYPE HTTP;
-        CREATE ENDPOINT right_alias_ingress
+        PATH '/right';
+        CREATE HTTP ENDPOINT right_alias_ingress
         ON edge
-        PATH '/right-alias'
-        TYPE HTTP;
+        PATH '/right-alias';
         CREATE HTTP ENDPOINT INGESTOR left_profile_ingestor
         FROM left_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec

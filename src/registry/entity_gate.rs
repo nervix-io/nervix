@@ -16,15 +16,15 @@ use std::collections::BTreeSet;
 use ahash::HashSet;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClusterNodeName, ConcreteBranchCoverage, DomainSchedule, ImpactGateBoundary,
-    ImpactNodeCoverage, Model, ModelKind, NodeRef, RelayName, ScheduledNode,
+    ClusterNodeName, ConcreteBranchCoverage, DomainSchedule, EntityGateTargets, ImpactGateBoundary,
+    ImpactNodeCoverage, Model, ModelKind, NodeRef, NodeUnitRef, RelayName, ScheduledNode,
 };
 
 use super::{graph::is_schedulable_model, validation::branching::model_branch_selection};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct EntityGatePlan {
-    affected_entities: Vec<NodeRef>,
+    targets: EntityGateTargets,
     relays: Vec<RelayName>,
 }
 
@@ -42,7 +42,7 @@ impl EntityGatePlan {
             None => Vec::new(),
         };
         Self {
-            affected_entities: affected_entities.into_iter().collect(),
+            targets: EntityGateTargets::Entities(affected_entities.into_iter().collect()),
             relays,
         }
     }
@@ -50,9 +50,39 @@ impl EntityGatePlan {
     pub(crate) fn for_ownership_handoff(
         current: Option<&DomainSchedule>,
         desired: Option<&DomainSchedule>,
-        moved_entities: impl IntoIterator<Item = NodeRef>,
+        moved_units: impl IntoIterator<Item = NodeUnitRef>,
     ) -> Self {
-        let mut affected = BTreeSet::from_iter(moved_entities);
+        let mut affected = BTreeSet::from_iter(moved_units);
+        // A new intake layout consumes every former unit, including units absent from the target.
+        // Those sources must remain frozen until all target primaries and replicas hold their cut.
+        if let (Some(current), Some(desired)) = (current, desired) {
+            let layouts = affected
+                .iter()
+                .map(|unit| unit.node.clone())
+                .collect::<BTreeSet<_>>();
+            for identity in layouts {
+                if identity.kind != ModelKind::Ingestor {
+                    continue;
+                }
+                if let (Some(before), Some(after)) =
+                    (current.nodes.get(&identity), desired.nodes.get(&identity))
+                    && before.units.keys().ne(after.units.keys())
+                {
+                    affected.extend(
+                        before
+                            .units
+                            .keys()
+                            .map(|unit| NodeUnitRef::new(identity.clone(), *unit)),
+                    );
+                    affected.extend(
+                        after
+                            .units
+                            .keys()
+                            .map(|unit| NodeUnitRef::new(identity.clone(), *unit)),
+                    );
+                }
+            }
+        }
         loop {
             let prior_len = affected.len();
             for schedule in [current, desired].into_iter().flatten() {
@@ -66,7 +96,12 @@ impl EntityGatePlan {
                 break;
             }
         }
-        let affected_entities = affected.iter().cloned().collect::<Vec<_>>();
+        let affected_entities = affected
+            .iter()
+            .map(|member| member.node.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let relays = match current {
             Some(schedule) => {
                 ownership_handoff_relays_for_schedule(schedule, affected_entities.as_slice())
@@ -74,13 +109,17 @@ impl EntityGatePlan {
             None => Vec::new(),
         };
         Self {
-            affected_entities: affected.into_iter().collect(),
+            targets: EntityGateTargets::Units(affected.into_iter().collect()),
             relays,
         }
     }
 
-    pub(crate) fn affected_entities(&self) -> &[NodeRef] {
-        &self.affected_entities
+    pub(crate) fn affected_entities(&self) -> Vec<NodeRef> {
+        self.targets.entities()
+    }
+
+    pub(crate) fn targets(&self) -> &EntityGateTargets {
+        &self.targets
     }
 
     pub(crate) fn relays(&self) -> &[RelayName] {
@@ -89,7 +128,7 @@ impl EntityGatePlan {
 
     pub(crate) fn from_commit_plan(plan: nervix_models::TransactionEntityGatePlan) -> Self {
         Self {
-            affected_entities: plan.affected_entities,
+            targets: plan.targets,
             relays: plan.relays,
         }
     }
@@ -207,7 +246,7 @@ pub(crate) fn ownership_handoff_gate_participants(
                 None => false,
             };
             if is_affected || is_gated_relay || writes_gated_relay {
-                participants.extend(node.execution_nodes().iter().cloned());
+                participants.extend(node.execution_nodes());
             }
         }
     }
@@ -501,13 +540,21 @@ mod tests {
             ],
             vec![
                 PlacementGroupSchedule {
-                    unit: nervix_models::Unit::Single,
-                    members: vec![first.clone(), second.clone()],
+                    members: vec![first.clone(), second.clone()]
+                        .into_iter()
+                        .map(|node| {
+                            nervix_models::NodeUnitRef::new(node, nervix_models::Unit::SINGLE)
+                        })
+                        .collect(),
                     primary_node: None,
                 },
                 PlacementGroupSchedule {
-                    unit: nervix_models::Unit::Single,
-                    members: vec![second.clone(), third.clone()],
+                    members: vec![second.clone(), third.clone()]
+                        .into_iter()
+                        .map(|node| {
+                            nervix_models::NodeUnitRef::new(node, nervix_models::Unit::SINGLE)
+                        })
+                        .collect(),
                     primary_node: None,
                 },
             ],
@@ -516,7 +563,7 @@ mod tests {
         let plan = EntityGatePlan::for_ownership_handoff(
             Some(&schedule),
             Some(&schedule),
-            [first.clone()],
+            [NodeUnitRef::new(first.clone(), nervix_models::Unit::SINGLE)],
         );
 
         assert_eq!(plan.affected_entities(), &[first, second, third]);

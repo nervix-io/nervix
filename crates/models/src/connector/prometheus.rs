@@ -3,14 +3,14 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The Prometheus client Model with the `CONFIG` keys it declares and the API root
-//!   its address names, the query source Model with its delivery mode and response bound, and what
-//!   each declares.
+//!   its address names, the query ingestor Model with its delivery mode and response bound, and what
+//!   each declares, which includes the sample a query ingestor delivers and the metadata beside it.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and client declarations, the HTTP transport's request
+//! - **Depends on.** The shared ingestor and client declarations, the HTTP transport's request
 //!   timeout, the URL Standard parser, the domain clock's period, the byte size a limit holds and
 //!   the names a body references.
-//! - **Must not know.** The Prometheus HTTP API's endpoints and answers, how a client is built, or
-//!   how a query is evaluated on its cadence.
+//! - **Must not know.** The Prometheus HTTP API's endpoints, how a client is built or an answer is
+//!   read, or how a query is evaluated on its cadence.
 
 #![cfg_attr(
     nervix_lint,
@@ -24,6 +24,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+mod sample;
+
+pub use sample::{
+    PROMETHEUS_VECTOR_RESULT, PrometheusNonFiniteValue, PrometheusSample, PrometheusSampleValue,
+    PrometheusSampleValueError, PrometheusUnsupportedResult,
+};
+
 use super::{
     bounds::{
         BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
@@ -36,8 +43,9 @@ use crate::{
     AcknowledgementConfirmation, ByteSizeUnit, ClientConfigEntry, ClientName, ConnectorKind,
     DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode,
     IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PayloadSizeLimit, PositionClass,
 };
 
 configured_client!(Prometheus: unpooled, config CLIENT_CONFIG, CreateClientPrometheus => PrometheusConfigEntry);
@@ -58,7 +66,7 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     )
 };
 
-/// Why a Prometheus client's `CONFIG { … }` block cannot configure a query source. Each error
+/// Why a Prometheus client's `CONFIG { … }` block cannot configure a query ingestor. Each error
 /// names the key at fault and never quotes a value, which can name a credential's file.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PrometheusClientConfigError {
@@ -195,12 +203,20 @@ const PROMETHEUS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
+/// The statement's query and the instant its poll evaluated it at, the same for every sample of one
+/// poll.
+const PROMETHEUS_QUERY_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("query", IngestorMetadataType::String),
+    IngestorMetadataField::new("evaluated_at", IngestorMetadataType::Datetime),
+]);
+
 /// A query answer carries each sample's labels, which its payload holds, and no transport headers
-/// of its own, so a query source reads none.
+/// of its own, so a query ingestor reads none.
 impl IngestorDeclaration for PrometheusQueryIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: PROMETHEUS_QUERY_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
         position_class: PositionClass::None,
@@ -245,6 +261,10 @@ impl IngestorEntityBody for PrometheusQueryIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -275,15 +295,75 @@ impl PrometheusIngestMode {
     }
 }
 
+/// One change an `ALTER PROMETHEUS QUERY INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PrometheusQueryIngestorChange {
+    /// `SET QUERY '<promql>'`.
+    Query(String),
+    /// `SET MAX BODY SIZE <bytes>`.
+    MaxBodySize(PayloadSizeLimit),
+    /// `DROP MAX BODY SIZE`: the declared default bounds a response again.
+    DropMaxBodySize,
+    /// `SET EVERY <duration>`.
+    Every(DomainClockPeriod),
+    /// `SET MODE <mode>`.
+    Mode(PrometheusIngestMode),
+}
+
+impl crate::IngestorEntityChange for PrometheusQueryIngestorChange {
+    type Entity = PrometheusQueryIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut PrometheusQueryIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Query(query) => entity.query = query.clone(),
+            Self::MaxBodySize(limit) => entity.max_body_size = Some(*limit),
+            Self::DropMaxBodySize => {
+                if entity.max_body_size.take().is_none() {
+                    return Err(error_stack::Report::new(
+                        crate::AlterIngestorError::OptionNotWritten {
+                            kind: <PrometheusQueryIngestor as crate::IngestorEntityModel>::KIND,
+                            option: "MAX BODY SIZE",
+                        },
+                    ));
+                }
+            }
+            Self::Every(every) => entity.every = *every,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Query(query) => format!("SET QUERY {}", crate::string_literal(query)),
+            Self::MaxBodySize(limit) => format!("SET MAX BODY SIZE {limit}"),
+            Self::DropMaxBodySize => "DROP MAX BODY SIZE".to_owned(),
+            Self::Every(every) => format!(
+                "SET EVERY {}",
+                crate::canonical::duration_literal(every.as_nanos())
+            ),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Prometheus = "PROMETHEUS";
-    /// What a Prometheus source reads.
+    /// What a Prometheus ingestor reads.
     pub enum PrometheusIngestor;
     /// The alterations of the ingestors that read a Prometheus entity.
     pub enum PrometheusQueryIngestorAlteration;
-    /// The entities a Prometheus source reads.
+    /// The entities a Prometheus ingestor reads.
     pub enum PrometheusIngestorEntity {
-        Query(PrometheusQueryIngestor) = "QUERY", "Prometheus";
+        Query(PrometheusQueryIngestor => PrometheusQueryIngestorChange) = "QUERY", "Prometheus";
     }
 }
 
@@ -320,7 +400,7 @@ mod tests {
     #[test]
     fn the_declared_response_bound_default_is_the_one_in_effect() {
         let [_, max_body_size, _] = PrometheusQueryIngestor::CAPABILITIES.options else {
-            panic!("a query source declares QUERY, MAX BODY SIZE and EVERY");
+            panic!("a query ingestor declares QUERY, MAX BODY SIZE and EVERY");
         };
         assert_eq!(max_body_size.keywords, "MAX BODY SIZE");
         let OptionPresence::Optional {

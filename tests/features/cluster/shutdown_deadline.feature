@@ -11,6 +11,7 @@ Feature: Process shutdown deadline
     And an authenticated upload of resource "held_archive" <progress> is held open on the server process
     When the server process receives SIGTERM
     Then the server process exits with status 0 within "60s" of the last signal
+    And the held resource upload ended with status "Unavailable"
     And the server process log contains "shutdown admission phase finished outcome=Completed"
     And the server process log contains "shutdown terminal-teardown phase finished outcome=Completed"
 
@@ -30,13 +31,13 @@ Feature: Process shutdown deadline
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC held_event_codec
-        FROM WIRE JSON SCHEMA held_event_wire
+      CREATE WIRE JSON CODEC held_event_codec
+        FROM WIRE SCHEMA held_event_wire
         TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-{{test_id}}.example.com;
-      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TIMESTAMP NOW

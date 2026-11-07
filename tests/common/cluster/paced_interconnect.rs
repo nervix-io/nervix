@@ -7,6 +7,7 @@
 
 use std::{io, net::SocketAddr};
 
+use meticulous::OptionExt as _;
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
     sync::{
@@ -64,6 +65,7 @@ impl TransferCounts {
 pub(super) struct PacedInterconnect {
     port: u16,
     counts: Arc<TransferCounts>,
+    release_pacing: CancellationToken,
     cancellation: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -81,6 +83,8 @@ impl PacedInterconnect {
         let port = listener.local_addr()?.port();
         let counts = Arc::new(TransferCounts::default());
         let observed = counts.clone();
+        let release_pacing = CancellationToken::new();
+        let released = release_pacing.clone();
         let cancellation = CancellationToken::new();
         let cancelled = cancellation.clone();
         let task = nervix_primitives::task::spawn(async move {
@@ -95,8 +99,9 @@ impl PacedInterconnect {
                         observed.accepted.fetch_add(1, Ordering::Relaxed);
                         let observed = observed.clone();
                         let cancelled = cancelled.child_token();
+                        let released = released.clone();
                         connections.spawn(async move {
-                            let transfer = forward(incoming, target, bytes_per_second, observed.clone());
+                            let transfer = forward(incoming, target, bytes_per_second, observed.clone(), released);
                             nervix_primitives::select! {
                                 _ = cancelled.cancelled() => {
                                     observed.cancelled.fetch_add(1, Ordering::Relaxed);
@@ -118,6 +123,7 @@ impl PacedInterconnect {
         Ok(Self {
             port,
             counts,
+            release_pacing,
             cancellation,
             task,
         })
@@ -141,6 +147,7 @@ async fn forward(
     target: SocketAddr,
     bytes_per_second: u64,
     observed: Arc<TransferCounts>,
+    released: CancellationToken,
 ) -> io::Result<()> {
     let outgoing = TcpStream::connect(target).await.inspect_err(|_| {
         observed.connect_failures.fetch_add(1, Ordering::Relaxed);
@@ -153,12 +160,18 @@ async fn forward(
         let mut forwarded = 0_u64;
         let mut pace = BytePace::new(bytes_per_second);
         loop {
+            nervix_primitives::task::consume_budget().await;
             let count = incoming_read.read(&mut buffer).await?;
             if count == 0 {
                 return outgoing_write.shutdown().await;
             }
             // Delaying each bounded chunk before writing prevents an initial unpaced burst.
-            sleep_until(pace.deadline(count, Instant::now())).await;
+            if !released.is_cancelled() {
+                nervix_primitives::select! {
+                    _ = released.cancelled() => {},
+                    _ = sleep_until(pace.deadline(count, Instant::now())) => {},
+                }
+            }
             outgoing_write.write_all(&buffer[..count]).await?;
             let count_bytes = u64::try_from(count).expect("the read fits its bounded buffer");
             forwarded = forwarded.saturating_add(count_bytes);
@@ -176,6 +189,29 @@ async fn forward(
 }
 
 impl Cluster {
+    /// Retains only the release signal; dropping the cluster still ends the pacer's sockets.
+    pub(crate) fn interconnect_pacing_release(&self, node_id: &str) -> CancellationToken {
+        self.nodes[node_id]
+            .spec
+            .paced_interconnect
+            .as_ref()
+            .assured("the scenario installed its byte pacer before observing fault release")
+            .release_pacing
+            .clone()
+    }
+
+    /// Releases this scenario's byte fault on existing and future connections, preserving their
+    /// sockets and every byte already in flight.
+    pub(crate) fn release_interconnect_pacing(&self, node_id: &str) {
+        self.nodes[node_id]
+            .spec
+            .paced_interconnect
+            .as_ref()
+            .assured("the scenario installed its byte pacer before releasing the cadence")
+            .release_pacing
+            .cancel();
+    }
+
     /// Pace a stopped node's existing advertised endpoint, forwarding to a private listener.
     pub(crate) async fn pace_stopped_node_interconnect(
         &mut self,

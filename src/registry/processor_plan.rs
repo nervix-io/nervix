@@ -15,15 +15,16 @@
 use std::num::NonZeroU64;
 
 use ahash::{HashMap, HashSet};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, BranchName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateBranch, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerTensorDeclaration,
     InferencerTensorMapping, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
     ProcessorOutputs as ModelProcessorOutputs, RelayName, ResolvedBranching, ResourceName,
-    ScheduledNodes, SchemaFingerprint, WasmStateGenerations, WindowBound,
+    ScheduledNodes, SchemaFingerprint, WindowBound,
 };
+use nervix_primitives::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BranchedProcessorNodeSpec {
@@ -31,7 +32,6 @@ pub(crate) struct BranchedProcessorNodeSpec {
     pub(crate) branch: Option<BranchName>,
     pub(crate) branch_ttl: Option<String>,
     pub(crate) branch_max_instances: Option<NonZeroU64>,
-    pub(crate) wasm_state_reset: Option<nervix_models::WasmStateReset>,
     pub(crate) binding: ProcessorPlanBinding,
 }
 
@@ -41,7 +41,6 @@ pub(crate) struct BranchedProcessorNodeSpec {
 pub(crate) struct ProcessorPlanBinding {
     schema_fingerprint: Option<SchemaFingerprint>,
     resolved_branching: Option<ResolvedBranching>,
-    wasm_state_generations: Option<WasmStateGenerations>,
 }
 
 impl BranchedProcessorNodeSpec {
@@ -56,7 +55,7 @@ impl BranchedProcessorNodeSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BranchedNodeSpecs {
-    pub(crate) processors: Vec<BranchedProcessorNodeSpec>,
+    pub(crate) processors: Vec<Arc<BranchedProcessorNodeSpec>>,
 }
 
 impl BranchedNodeSpecs {
@@ -64,7 +63,7 @@ impl BranchedNodeSpecs {
         &self,
         kind: ModelKind,
         identifier: &ModelName,
-    ) -> Option<&BranchedProcessorNodeSpec> {
+    ) -> Option<&Arc<BranchedProcessorNodeSpec>> {
         self.processors
             .iter()
             .find(|node| node.spec.kind == kind && &node.spec.processor == identifier)
@@ -121,6 +120,7 @@ pub(crate) enum BranchedProcessorOperationSpec {
         resource_version: u64,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
+        state: Option<InferencerStatePlan>,
         output_schema: Vec<InferencerTensorDeclaration>,
     },
     WasmProcessor {
@@ -131,6 +131,61 @@ pub(crate) enum BranchedProcessorOperationSpec {
         limits: nervix_models::WasmProcessorLimits,
         rejected_state_policy: nervix_models::WasmRejectedStatePolicy,
     },
+}
+
+/// A validated fixed state port pair. Initial expressions are materialized during node binding.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InferencerStatePortPlan {
+    pub(crate) input: String,
+    pub(crate) output: String,
+    pub(crate) schema: nervix_models::InferencerTensorSchema,
+    pub(crate) elements: usize,
+    pub(crate) initial: nervix_models::InferencerStateInitial,
+}
+
+/// The static state footprint and ordered port pairs of one concrete inferencer branch.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InferencerStatePlan {
+    pub(crate) bindings: Vec<InferencerStatePortPlan>,
+    pub(crate) bytes_per_branch: u64,
+}
+
+impl InferencerStatePlan {
+    fn from_validated(bindings: &[nervix_models::InferencerStateBinding]) -> Option<Self> {
+        if bindings.is_empty() {
+            return None;
+        }
+        let mut bytes_per_branch = 0u64;
+        let bindings = bindings
+            .iter()
+            .map(|binding| {
+                let elements = binding.schema.fixed_element_count().verified(
+                    "registry state validation proved every fixed tensor element count fits",
+                );
+                let bytes = u64::try_from(elements)
+                    .verified("the supported native usize widths fit in u64")
+                    .checked_mul(
+                        u64::try_from(std::mem::size_of::<f32>())
+                            .assured("the size of f32 fits in u64"),
+                    )
+                    .verified("registry state validation checked the tensor byte count");
+                bytes_per_branch = bytes_per_branch.checked_add(bytes).verified(
+                    "registry state validation checked the combined branch state byte count",
+                );
+                InferencerStatePortPlan {
+                    input: binding.input.clone(),
+                    output: binding.output.clone(),
+                    schema: binding.schema.clone(),
+                    elements,
+                    initial: binding.initial.clone(),
+                }
+            })
+            .collect();
+        Some(Self {
+            bindings,
+            bytes_per_branch,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -298,7 +353,6 @@ fn processor_node_spec(
         branch: policy.branch,
         branch_ttl: policy.ttl,
         branch_max_instances: policy.max_instances,
-        wasm_state_reset: None,
         binding: ProcessorPlanBinding::default(),
     }
 }
@@ -313,20 +367,13 @@ pub(crate) struct PlannedModel {
 pub(crate) fn branched_node_specs_from_scheduled_nodes(
     nodes: &ScheduledNodes,
 ) -> BranchedNodeSpecs {
-    let resets = nodes
-        .values()
-        .filter_map(|node| {
-            node.wasm_state_reset()
-                .cloned()
-                .map(|reset| (node.identifier.clone(), reset))
-        })
-        .collect::<HashMap<_, _>>();
     let mut specs = branched_node_specs_from_models(nodes.values().map(|node| PlannedModel {
         kind: node.kind(),
         identifier: node.identifier.clone(),
         model: (*node.config).clone(),
     }));
     for processor in &mut specs.processors {
+        let processor = Arc::make_mut(processor);
         let identity = NodeRef::new(processor.spec.kind, processor.spec.processor.clone());
         let scheduled = nodes.get(&identity).verified(
             "the processor specification came from this same validated scheduled-node map",
@@ -334,9 +381,7 @@ pub(crate) fn branched_node_specs_from_scheduled_nodes(
         processor.binding = ProcessorPlanBinding {
             schema_fingerprint: Some(scheduled.schema_fingerprint),
             resolved_branching: scheduled.resolved_branching.clone(),
-            wasm_state_generations: scheduled.wasm_state_generations().cloned(),
         };
-        processor.wasm_state_reset = resets.get(&processor.spec.processor).cloned();
     }
     specs
 }
@@ -508,6 +553,7 @@ pub(crate) fn branched_node_specs_from_models(
                         resource_version: inferencer.resource_version,
                         file: inferencer.file.clone(),
                         inputs: inferencer.inputs.clone(),
+                        state: InferencerStatePlan::from_validated(&inferencer.state),
                         output_schema: inferencer.output_schema.clone(),
                     },
                 };
@@ -550,12 +596,13 @@ pub(crate) fn branched_node_specs_from_models(
 
     processors.sort_by(|left, right| left.spec.processor.cmp(&right.spec.processor));
 
-    BranchedNodeSpecs { processors }
+    BranchedNodeSpecs {
+        processors: processors.into_iter().map(Arc::new).collect(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
     use nervix_models::{
         BranchEviction, BranchSelection, CreateJunction, CreateSchema, ParseAsType,
         ProcessorOutput, ProcessorOutputs, ScheduledNode, SchemaField,
@@ -619,6 +666,7 @@ mod tests {
         .with_resolved_branching(Some(ResolvedBranching::branched(
             branch_name,
             branch_schema,
+            nervix_models::BranchPartitions::ONE,
         )));
         [branch, junction]
             .into_iter()
@@ -695,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn wasm_guest_state_generation_changes_the_prepared_revision() {
+    fn unit_generations_leave_the_processor_program_definition_unchanged() {
         let nodes = crate::registry::test_fixtures::unplaced_schedule(vec![
             crate::registry::test_fixtures::wasm_processor("filter", "incoming", "outgoing"),
         ]);
@@ -715,10 +763,6 @@ mod tests {
             .processor(ModelKind::WasmProcessor, &named("filter"))
             .assured("the changed WASM processor has a plan");
 
-        assert_ne!(
-            current.binding.wasm_state_generations,
-            changed.binding.wasm_state_generations
-        );
-        assert!(!changed.reuses_prepared_revision(Some(current)));
+        assert!(changed.reuses_prepared_revision(Some(current)));
     }
 }

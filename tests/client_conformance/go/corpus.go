@@ -149,6 +149,16 @@ func schemaLines(frame []byte) (*session.SubscriptionOpened, []field, []field, [
 	if schema == nil {
 		return nil, nil, nil, nil, errors.New("the opened subscription has no schema")
 	}
+	fields, keys, lines, err := rowSchemaLines(schema)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return opened, fields, keys, lines, nil
+}
+
+// rowSchemaLines renders a row schema: a FIELD line per field, then the branch and a KEY line per
+// branch key field when the relay is branched.
+func rowSchemaLines(schema *session.RowSchema) ([]field, []field, []string, error) {
 	var fields, keys []field
 	var lines []string
 	for index := 0; index < schema.FieldsLength(); index++ {
@@ -156,7 +166,7 @@ func schemaLines(frame []byte) (*session.SubscriptionOpened, []field, []field, [
 		schema.Fields(row, index)
 		parsed, err := readField(row)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, err
 		}
 		fields = append(fields, parsed)
 		lines = append(lines, parsed.line("FIELD"))
@@ -168,13 +178,22 @@ func schemaLines(frame []byte) (*session.SubscriptionOpened, []field, []field, [
 			branch.Fields(row, index)
 			parsed, err := readField(row)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, err
 			}
 			keys = append(keys, parsed)
 			lines = append(lines, parsed.line("KEY"))
 		}
 	}
-	return opened, fields, keys, lines, nil
+	return fields, keys, lines, nil
+}
+
+// diagnosticLine renders one diagnostic and its span, or none when it names no position.
+func diagnosticLine(diagnostic *session.Diagnostic) string {
+	span := "none"
+	if location := diagnostic.Span(nil); location != nil {
+		span = fmt.Sprintf("%d..%d", location.Start(), location.End())
+	}
+	return fmt.Sprintf("DIAGNOSTIC span=%s message=%s", span, text(diagnostic.Message()))
 }
 
 // commandLines renders one command outcome, its first line after head.
@@ -192,11 +211,7 @@ func commandLines(head string, outcome *session.CommandOutcome) ([]string, error
 	for index := 0; index < outcome.DiagnosticsLength(); index++ {
 		diagnostic := new(session.Diagnostic)
 		outcome.Diagnostics(diagnostic, index)
-		span := "none"
-		if location := diagnostic.Span(nil); location != nil {
-			span = fmt.Sprintf("%d..%d", location.Start(), location.End())
-		}
-		lines = append(lines, fmt.Sprintf("DIAGNOSTIC span=%s message=%s", span, text(diagnostic.Message())))
+		lines = append(lines, diagnosticLine(diagnostic))
 	}
 	switch outcome.DispositionType() {
 	case session.CommandDispositionLeaderRedirect:
@@ -329,6 +344,95 @@ func restoreReportLines(report *session.RestoreReport) ([]string, error) {
 		lines = append(lines, fmt.Sprintf("RESTORE_STEP kind=%s domain=%s outcome=%s",
 			session.EnumNamesRestoreStepKind[*kind], orNone(domain),
 			session.EnumNamesRestoreStepOutcome[*outcome]))
+	}
+	return lines, nil
+}
+
+// uploadLines renders one frame of a resource upload stream.
+func uploadLines(frame []byte) ([]string, error) {
+	if err := frameRoot(frame, "NXUM"); err != nil {
+		return nil, err
+	}
+	message := session.GetRootAsUploadMessage(frame, 0)
+	switch message.PartType() {
+	case session.UploadPartUploadStart:
+		start := new(session.UploadStart)
+		if err := union(message.Part, start); err != nil {
+			return nil, err
+		}
+		return []string{fmt.Sprintf("UPLOAD_START request=%d domain=%s resource=%s identity=%s total_bytes=%d",
+			start.RequestId(), start.Domain(), start.Resource(), start.UploadIdentity(), start.TotalBytes())}, nil
+	case session.UploadPartUploadChunk:
+		chunk := new(session.UploadChunk)
+		if err := union(message.Part, chunk); err != nil {
+			return nil, err
+		}
+		return []string{"UPLOAD_CHUNK bytes=" + hex.EncodeToString(chunk.BytesBytes())}, nil
+	}
+	return nil, fmt.Errorf("undeclared upload part %d", message.PartType())
+}
+
+// uploadReplyLines renders the typed outcome and all diagnostics of a resource upload.
+func uploadReplyLines(frame []byte) ([]string, error) {
+	if err := frameRoot(frame, "NXUR"); err != nil {
+		return nil, err
+	}
+	reply := session.GetRootAsUploadReply(frame, 0)
+	request := "none"
+	if id := reply.RequestId(); id != nil {
+		request = fmt.Sprintf("%d", *id)
+	}
+	prefix := "UPLOAD_REPLY " + request
+	var line string
+	switch reply.DispositionType() {
+	case session.UploadDispositionResourceInstalled:
+		installed := new(session.ResourceInstalled)
+		if err := union(reply.Disposition, installed); err != nil {
+			return nil, err
+		}
+		origin := installed.Origin()
+		if origin == nil {
+			return nil, errors.New("an installed upload has no origin")
+		}
+		line = fmt.Sprintf("%s INSTALLED identity=%s version=%d origin=%s", prefix,
+			installed.UploadIdentity(), installed.Version(), session.EnumNamesOutcomeOrigin[*origin])
+	case session.UploadDispositionUploadFailed:
+		failed := new(session.UploadFailed)
+		if err := union(reply.Disposition, failed); err != nil {
+			return nil, err
+		}
+		failure := failed.Failure()
+		if failure == nil {
+			return nil, errors.New("a refused upload has no reason")
+		}
+		version := "none"
+		if assigned := failed.AssignedVersion(); assigned != nil {
+			version = fmt.Sprintf("%d", *assigned)
+		}
+		line = fmt.Sprintf("%s FAILED identity=%s failure=%s version=%s", prefix,
+			orNone(failed.UploadIdentity()), session.EnumNamesUploadFailure[*failure], version)
+	case session.UploadDispositionLeaderRedirect:
+		redirect := new(session.LeaderRedirect)
+		if err := union(reply.Disposition, redirect); err != nil {
+			return nil, err
+		}
+		line = prefix + " NOT_LEADER leader=none"
+		if leader := redirect.Leader(nil); leader != nil {
+			line = fmt.Sprintf("%s NOT_LEADER leader=%s grpc=%s console=%s", prefix,
+				leader.Node(), orNone(leader.GrpcUri()), orNone(leader.WebConsoleUri()))
+		}
+	default:
+		return nil, fmt.Errorf("undeclared upload disposition %d", reply.DispositionType())
+	}
+	lines := []string{line + " message=" + text(reply.Message())}
+	for index := 0; index < reply.DiagnosticsLength(); index++ {
+		diagnostic := new(session.Diagnostic)
+		reply.Diagnostics(diagnostic, index)
+		span := "none"
+		if location := diagnostic.Span(nil); location != nil {
+			span = fmt.Sprintf("%d..%d", location.Start(), location.End())
+		}
+		lines = append(lines, fmt.Sprintf("DIAGNOSTIC span=%s message=%s", span, text(diagnostic.Message())))
 	}
 	return lines, nil
 }
@@ -574,6 +678,28 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 				session.EnumNamesRequestRejection[*rejection], orNone(rejected.Field()),
 				text(rejected.Message()))}, nil
 		case session.ReplyBodySubscribeOutcome:
+			outcome := new(session.SubscribeOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			if outcome.DispositionType() == session.SubscribeDispositionSubscriptionRefused {
+				refused := new(session.SubscriptionRefused)
+				if err := union(outcome.Disposition, refused); err != nil {
+					return nil, err
+				}
+				refusal := refused.Refusal()
+				if refusal == nil {
+					return nil, errors.New("a subscription refusal has no reason")
+				}
+				lines := []string{fmt.Sprintf("REPLY %d SUBSCRIBE_REFUSED refusal=%s message=%s", id,
+					session.EnumNamesSubscriptionRefusal[*refusal], text(outcome.Message()))}
+				for index := 0; index < outcome.DiagnosticsLength(); index++ {
+					diagnostic := new(session.Diagnostic)
+					outcome.Diagnostics(diagnostic, index)
+					lines = append(lines, diagnosticLine(diagnostic))
+				}
+				return lines, nil
+			}
 			opened, _, _, lines, err := schemaLines(frame)
 			if err != nil {
 				return nil, err
@@ -683,8 +809,17 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 				}
 				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH domain_not_found domain=%s message=%s",
 					id, notFound.Domain(), message)}, nil
-			case session.DomainClockAttachDispositionRequestFailed:
-				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH failed message=%s", id, message)}, nil
+			case session.DomainClockAttachDispositionDomainClockAttachRefused:
+				refused := new(session.DomainClockAttachRefused)
+				if err := union(outcome.Disposition, refused); err != nil {
+					return nil, err
+				}
+				refusal := refused.Refusal()
+				if refusal == nil {
+					return nil, errors.New("a clock attach refusal has no reason")
+				}
+				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH refused refusal=%s message=%s", id,
+					session.EnumNamesDomainClockAttachRefusal[*refusal], message)}, nil
 			}
 			return nil, fmt.Errorf("undeclared attach disposition %d", outcome.DispositionType())
 		case session.ReplyBodyDomainClockDetachOutcome:
@@ -953,6 +1088,22 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 		}
 		return []string{fmt.Sprintf("EVENT PRODUCER_ENDED producer=%d reason=%s message=%s",
 			ended.Producer(), session.EnumNamesProducerEndReason[*reason], text(ended.Message()))}, nil
+	case session.ServerBodyServerNotice:
+		notice := new(session.ServerNotice)
+		if err := union(message.Body, notice); err != nil {
+			return nil, err
+		}
+		level := notice.Level()
+		if level == nil {
+			return nil, errors.New("a notice has no level")
+		}
+		kind := notice.Kind()
+		if kind == nil {
+			return nil, errors.New("a notice has no kind")
+		}
+		return []string{fmt.Sprintf("EVENT NOTICE level=%s kind=%s message=%s",
+			session.EnumNamesNoticeLevel[*level], session.EnumNamesNoticeKind[*kind],
+			text(notice.Message()))}, nil
 	}
 	return nil, fmt.Errorf("the corpus holds no %s message", message.BodyType())
 }
@@ -995,8 +1146,17 @@ func clientLines(frame []byte) ([]string, error) {
 		if kind == nil {
 			return nil, errors.New("a subscribe request has no type")
 		}
-		return []string{fmt.Sprintf("REQUEST %d SUBSCRIBE domain=%s statement=%s type=%s", id,
-			subscribe.Domain(), text(subscribe.Statement()), session.EnumNamesSubscriptionType[*kind])}, nil
+		lines := []string{fmt.Sprintf("REQUEST %d SUBSCRIBE domain=%s statement=%s type=%s", id,
+			subscribe.Domain(), text(subscribe.Statement()), session.EnumNamesSubscriptionType[*kind])}
+		if expected := subscribe.ExpectedSchema(nil); expected != nil {
+			_, _, schema, err := rowSchemaLines(expected)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, "EXPECTED_SCHEMA")
+			lines = append(lines, schema...)
+		}
+		return lines, nil
 	case session.ClientRequestSuggestRequest:
 		suggest := new(session.SuggestRequest)
 		suggest.Init(table.Bytes, table.Pos)
@@ -1116,7 +1276,7 @@ func corpus(directory string) error {
 	var files []string
 	for _, entry := range entries {
 		switch filepath.Ext(entry.Name()) {
-		case ".nxcm", ".nxsm", ".nxbq", ".nxbd", ".nxrm", ".nxrr":
+		case ".nxcm", ".nxsm", ".nxbq", ".nxbd", ".nxrm", ".nxrr", ".nxum", ".nxur":
 			files = append(files, entry.Name())
 		}
 	}
@@ -1146,6 +1306,10 @@ func corpus(directory string) error {
 			lines, err = restoreLines(frame)
 		case ".nxrr":
 			lines, err = restoreReplyLines(frame)
+		case ".nxum":
+			lines, err = uploadLines(frame)
+		case ".nxur":
+			lines, err = uploadReplyLines(frame)
 		default:
 			lines, err = serverLines(frame, fields, keys)
 		}

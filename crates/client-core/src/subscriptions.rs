@@ -1,15 +1,18 @@
 //! The subscriptions a client wants across exchange replacements.
 //!
-//! - **Owns.** The acknowledged creation contracts, cancellation fences, lifecycle, gaps, ends and
-//!   failed restorations of client subscriptions, and whether an open session may hold each one.
+//! - **Owns.** The acknowledged creation contracts and the schema each acknowledged generation
+//!   announced, cancellation fences, lifecycle, gaps, ends, restorations the server refused for
+//!   good and failed restorations of client subscriptions, and whether an open session may hold
+//!   each one.
 //! - **Depends on.** Typed subscription Models, wire identities and the client's event contract.
 //! - **Must not know.** How a request is transported or how an exchange routes its frames.
 
-use std::{collections::VecDeque, time::Duration};
+use std::{collections::VecDeque, fmt, time::Duration};
 
 use ahash::HashMap;
 use nervix_client_wire::{
-    SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionType,
+    RequestRejection, RowSchema, SubscribeRequest, SubscriptionEndReason, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionType,
 };
 use nervix_models::{CreateSubscription, DomainName, SubscriptionName};
 use nervix_primitives::sync::{Arc, blocking::Mutex, watch};
@@ -40,14 +43,52 @@ pub struct SubscriptionInterruption {
     pub subscription: SubscriptionHandle,
 }
 
-/// An attempt to open an interrupted subscription again that the current session refused or did
-/// not answer. The subscription stays interrupted, and the client tries again after `retry_after`
-/// for as long as the subscription is desired and the session stays open.
+/// Why an attempt to open an interrupted subscription again opened nothing, when a later attempt
+/// may open it. A refusal that says the relay or its domain no longer exists, or that the relay
+/// announces another schema, ends the subscription instead and is never one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionRestorationCause {
+    /// The session holds a transaction, which refuses every session-local request until it ends.
+    InTransaction,
+    /// The server refused the subscription's statement.
+    InvalidStatement,
+    /// The session already holds a subscription of that name.
+    NameInUse,
+    /// The subscription's filter does not compile against its relay's definition.
+    InvalidFilter,
+    /// The serving node could not open the subscription now.
+    Unavailable,
+    /// The session rejected the request without serving it.
+    Rejected(RequestRejection),
+    /// The client could not send the request, or could not use its reply.
+    Failed,
+}
+
+impl fmt::Display for SubscriptionRestorationCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InTransaction => formatter.write_str("the session holds a transaction"),
+            Self::InvalidStatement => formatter.write_str("the server refused its statement"),
+            Self::NameInUse => formatter.write_str("the session already holds its name"),
+            Self::InvalidFilter => formatter.write_str("its filter does not compile"),
+            Self::Unavailable => formatter.write_str("the serving node could not open it now"),
+            Self::Rejected(_) => formatter.write_str("the session rejected the request"),
+            Self::Failed => formatter.write_str("the client could not complete the attempt"),
+        }
+    }
+}
+
+/// An attempt to open an interrupted subscription again that the current session refused for now.
+/// The subscription stays interrupted, and the client tries again after `retry_after` for as long
+/// as the subscription is desired and the session stays open. An unanswered reopening ends the
+/// session at its request timeout instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionRestorationFailure {
     /// The generation the restoration would replace, which ended with its session.
     pub subscription: SubscriptionHandle,
-    /// The server's refusal, or why the request got no answer.
+    /// Why the attempt opened nothing.
+    pub cause: SubscriptionRestorationCause,
+    /// The server's message, or how the attempt failed in the client.
     pub message: String,
     /// How long the client waits before its next attempt.
     pub retry_after: Duration,
@@ -61,7 +102,8 @@ pub(crate) struct SubscriptionContract {
 }
 
 impl SubscriptionContract {
-    pub(crate) fn request(&self) -> SubscribeRequest {
+    /// The request that opens the subscription, expecting `expected_schema` when it restores one.
+    fn request(&self, expected_schema: Option<RowSchema>) -> SubscribeRequest {
         let statement = nervix_plexus::subscribe::create_subscription_query(
             self.create.name.as_str(),
             self.create.relay.as_str(),
@@ -73,6 +115,7 @@ impl SubscriptionContract {
             domain: self.domain.clone(),
             statement,
             subscription_type: self.subscription_type,
+            expected_schema,
         }
     }
 }
@@ -82,6 +125,20 @@ pub(crate) struct RestoreAttempt {
     pub(crate) contract: SubscriptionContract,
     pub(crate) ticket: Arc<()>,
     pub(crate) generation: Arc<()>,
+    /// The schema the generation a restoration replaces announced, which the server must still
+    /// announce for the restoration to open. `None` for a first creation.
+    pub(crate) expected_schema: Option<Arc<RowSchema>>,
+}
+
+impl RestoreAttempt {
+    /// The subscribe request of the attempt.
+    pub(crate) fn request(&self) -> SubscribeRequest {
+        let expected_schema = match &self.expected_schema {
+            Some(schema) => Some(RowSchema::clone(schema)),
+            None => None,
+        };
+        self.contract.request(expected_schema)
+    }
 }
 
 struct DesiredSubscription {
@@ -92,8 +149,10 @@ struct DesiredSubscription {
     /// Fences the result of that attempt from a later use of the same name.
     ticket: Arc<()>,
     attempt_in_flight: bool,
-    /// Whether the server ever acknowledged the contract, which makes the entry restorable.
-    acknowledged: bool,
+    /// The schema the generation the server last opened for the contract announced, or `None`
+    /// while the server never acknowledged it. Only an acknowledged entry is restorable, and its
+    /// restoration expects this schema.
+    announced: Option<Arc<RowSchema>>,
     /// Whether the exchange of `generation` ended, and every subscription its session held.
     generation_ended: bool,
     /// The end of the generation the server ended, until the caller reads it. Its event follows
@@ -108,9 +167,10 @@ impl DesiredSubscription {
         let SubscriptionLifecycle::Interrupted(previous) = &self.lifecycle else {
             return None;
         };
-        if !self.acknowledged {
+        let Some(announced) = &self.announced else {
             return None;
-        }
+        };
+        let expected_schema = Some(announced.clone());
         let previous = previous.clone();
         let ticket = Arc::new(());
         self.ticket = ticket.clone();
@@ -122,7 +182,18 @@ impl DesiredSubscription {
             contract: self.contract.clone(),
             ticket,
             generation,
+            expected_schema,
         })
+    }
+
+    /// Records the schema `opened` announced, unless the reader already recorded it.
+    fn announce(&mut self, opened: &SubscriptionOpened) {
+        if let Some(announced) = &self.announced
+            && **announced == opened.schema
+        {
+            return;
+        }
+        self.announced = Some(Arc::new(opened.schema.clone()));
     }
 
     /// Whether a session that is still open may hold the subscription: one holds a generation
@@ -178,7 +249,8 @@ impl DesiredSubscription {
 enum RegistryEvent {
     Interrupted(SubscriptionInterruption),
     RestorationFailed(SubscriptionRestorationFailure),
-    /// An end the server sent that its exchange ended before the caller read.
+    /// An end the server sent that its exchange ended before the caller read, or the end of a
+    /// restoration the server refused for good.
     Ended(SubscriptionEnded),
 }
 
@@ -237,7 +309,8 @@ impl State {
             .push_back(RegistryEvent::RestorationFailed(failure));
     }
 
-    /// Reports an end whose exchange ended before the caller read it. It is the last event of its
+    /// Reports an end the registry delivers itself: one whose exchange ended before the caller read
+    /// it, or that of a restoration the server refused for good. It is the last event of its
     /// generation, and a generation ends once.
     fn report_end(&mut self, ended: SubscriptionEnded) {
         self.events.push_back(RegistryEvent::Ended(ended));
@@ -343,7 +416,7 @@ impl DesiredSubscriptions {
 
     pub(crate) fn has_acknowledged_desired(&self) -> bool {
         self.inner.state.lock().entries.values().any(|entry| {
-            entry.acknowledged
+            entry.announced.is_some()
                 && !matches!(
                     entry.lifecycle,
                     SubscriptionLifecycle::Closing
@@ -383,7 +456,7 @@ impl DesiredSubscriptions {
                 generation: generation.clone(),
                 ticket: ticket.clone(),
                 attempt_in_flight: true,
-                acknowledged: false,
+                announced: None,
                 generation_ended: false,
                 unread_end: None,
             },
@@ -394,6 +467,7 @@ impl DesiredSubscriptions {
             contract,
             ticket,
             generation,
+            expected_schema: None,
         })
     }
 
@@ -448,7 +522,13 @@ impl DesiredSubscriptions {
 
     /// The exchange reader applies a successful reply before it can route following rows. The
     /// caller's waiter may run later, so this is the acknowledgement boundary for delivery.
-    pub(crate) fn acknowledge(&self, handle: &SubscriptionHandle, generation: &Arc<()>) {
+    /// `schema` is the one the reply announced, which the reader shares with its stream.
+    pub(crate) fn acknowledge(
+        &self,
+        handle: &SubscriptionHandle,
+        schema: &Arc<RowSchema>,
+        generation: &Arc<()>,
+    ) {
         let mut state = self.inner.state.lock();
         let Some(entry) = state.entries.get_mut(&handle.name) else {
             return;
@@ -459,7 +539,7 @@ impl DesiredSubscriptions {
         if let SubscriptionLifecycle::Creating | SubscriptionLifecycle::Restoring(_) =
             entry.lifecycle
         {
-            entry.acknowledged = true;
+            entry.announced = Some(schema.clone());
             entry.lifecycle = SubscriptionLifecycle::Active(handle.clone());
         }
         drop(state);
@@ -521,7 +601,7 @@ impl DesiredSubscriptions {
     ///
     /// A success that arrives after its caller began deleting the name keeps the entry closing,
     /// and the deletion then asks the server to delete that generation.
-    pub(crate) fn created(&self, attempt: &RestoreAttempt, opened: Option<&SubscriptionHandle>) {
+    pub(crate) fn created(&self, attempt: &RestoreAttempt, opened: Option<&SubscriptionOpened>) {
         let name = &attempt.contract.create.name;
         let mut state = self.inner.state.lock();
         let Some(entry) = state.entries.get_mut(name) else {
@@ -537,31 +617,32 @@ impl DesiredSubscriptions {
             // The reader applied the reply that opened the generation when it arrived, before the
             // end that followed it, so the end stands.
             _ if let SubscriptionLifecycle::Ended(_) = entry.lifecycle => {}
-            Some(handle) if entry.generation_ended => {
+            Some(opened) if entry.generation_ended => {
                 if let SubscriptionLifecycle::Closing = entry.lifecycle {
                     state.entries.remove(name);
-                } else if !entry.acknowledged {
-                    entry.acknowledged = true;
-                    entry.lifecycle = SubscriptionLifecycle::Interrupted(handle.clone());
+                } else if entry.announced.is_none() {
+                    entry.announce(opened);
+                    entry.lifecycle =
+                        SubscriptionLifecycle::Interrupted(opened.subscription.clone());
                     state.interrupted(SubscriptionInterruption {
-                        subscription: handle.clone(),
+                        subscription: opened.subscription.clone(),
                     });
                 }
             }
-            Some(_) if let SubscriptionLifecycle::Closing = entry.lifecycle => {
-                entry.acknowledged = true;
+            Some(opened) if let SubscriptionLifecycle::Closing = entry.lifecycle => {
+                entry.announce(opened);
             }
             Some(_) if let SubscriptionLifecycle::DeliveryFailed(_) = entry.lifecycle => {}
-            Some(handle) => {
-                entry.acknowledged = true;
-                entry.lifecycle = SubscriptionLifecycle::Active(handle.clone());
+            Some(opened) => {
+                entry.announce(opened);
+                entry.lifecycle = SubscriptionLifecycle::Active(opened.subscription.clone());
             }
             None if entry.generation_ended
                 && let SubscriptionLifecycle::Closing = entry.lifecycle =>
             {
                 state.entries.remove(name);
             }
-            None if entry.generation_ended && entry.acknowledged => {}
+            None if entry.generation_ended && entry.announced.is_some() => {}
             None if let SubscriptionLifecycle::Restoring(previous) = &entry.lifecycle => {
                 entry.lifecycle = SubscriptionLifecycle::Interrupted(previous.clone());
             }
@@ -574,12 +655,49 @@ impl DesiredSubscriptions {
         self.inner.changed.send_replace(());
     }
 
+    /// Ends a subscription whose restoration the server refused for good, as the server's end of
+    /// its generation would end it: the subscription reads `Ended` from then on, its end is
+    /// reported once, after the events before it, and it is never opened again on its own.
+    /// Nothing happens once the entry no longer waits for that attempt's exchange to open it: the
+    /// caller deleted it, or the exchange ended.
+    pub(crate) fn restoration_ended(
+        &self,
+        attempt: &RestoreAttempt,
+        reason: SubscriptionEndReason,
+        message: String,
+    ) {
+        let name = &attempt.contract.create.name;
+        let mut state = self.inner.state.lock();
+        let Some(entry) = state.entries.get_mut(name) else {
+            return;
+        };
+        if !Arc::ptr_eq(&entry.ticket, &attempt.ticket)
+            || !Arc::ptr_eq(&entry.generation, &attempt.generation)
+            || entry.generation_ended
+        {
+            return;
+        }
+        let SubscriptionLifecycle::Interrupted(previous) = &entry.lifecycle else {
+            return;
+        };
+        let previous = previous.clone();
+        entry.lifecycle = SubscriptionLifecycle::Ended(previous.clone());
+        state.report_end(SubscriptionEnded {
+            subscription: previous,
+            reason,
+            message,
+        });
+        drop(state);
+        self.inner.changed.send_replace(());
+    }
+
     /// Reports that a restoration attempt did not open the subscription, which the client tries
     /// again after `retry_after`. `false` once the entry no longer waits for that attempt's
     /// exchange to open it: the caller deleted it, or the exchange ended.
     pub(crate) fn restoration_failed(
         &self,
         attempt: &RestoreAttempt,
+        cause: SubscriptionRestorationCause,
         message: String,
         retry_after: Duration,
     ) -> bool {
@@ -599,6 +717,7 @@ impl DesiredSubscriptions {
         };
         let failure = SubscriptionRestorationFailure {
             subscription: previous.clone(),
+            cause,
             message,
             retry_after,
         };
@@ -836,6 +955,91 @@ mod shuttle_tests {
         }
     }
 
+    /// The reply that opened generation `generation` of the subscription.
+    fn announced(generation: NonZeroU64) -> SubscriptionOpened {
+        SubscriptionOpened {
+            subscription: SubscriptionHandle {
+                name: name(),
+                generation,
+            },
+            domain: DomainName::parse("tenant").assured("a literal domain name"),
+            relay: RelayName::parse("events").assured("a literal relay name"),
+            subscription_type: SubscriptionType::Row,
+            schema: RowSchema {
+                fields: Vec::new(),
+                branch: None,
+            },
+        }
+    }
+
+    /// A restoration the server refused for good, ending the subscription, races its caller
+    /// deleting it. Whichever comes first, the deletion never asks the server about a subscription
+    /// nothing opened, no event of the deleted subscription is left for its caller, and the name is
+    /// free again once the deletion completes.
+    #[test]
+    fn shuttle_a_restoration_ended_for_good_racing_a_deletion_releases_the_name() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let desired = DesiredSubscriptions::new();
+                let first_generation = Arc::new(());
+                let pending = desired
+                    .begin(contract(), first_generation.clone())
+                    .verified("the registry starts empty");
+                desired.created(&pending, Some(&announced(NonZeroU64::MIN)));
+                desired.ended(&first_generation);
+                let generation = Arc::new(());
+                let restoring = desired
+                    .restore(generation.clone())
+                    .pop()
+                    .verified("the acknowledged subscription is restored");
+                let ending = {
+                    let desired = desired.clone();
+                    nervix_primitives::task::spawn(async move {
+                        desired.created(&restoring, None);
+                        desired.restoration_ended(
+                            &restoring,
+                            SubscriptionEndReason::RelayRemoved,
+                            "stream 'events' does not exist in domain 'tenant'".to_string(),
+                        );
+                    })
+                };
+                let deleting = {
+                    let desired = desired.clone();
+                    let generation = generation.clone();
+                    nervix_primitives::task::spawn(
+                        async move { desired.cancel(&name(), generation) },
+                    )
+                };
+                ending
+                    .await
+                    .assured("the ending side only resolves the restoration");
+                let cancellation = deleting
+                    .await
+                    .assured("the deleting side only starts the deletion");
+                if let Cancellation::Delete(attempt) = cancellation {
+                    assert!(
+                        !desired.deletion_waits(&attempt),
+                        "the restoration the deletion waited for is resolved"
+                    );
+                    assert!(
+                        matches!(desired.deletion_target(&attempt), DeletionTarget::NotOpened),
+                        "a deletion never asks the server about a subscription nothing opened"
+                    );
+                }
+                assert_eq!(desired.lifecycle(&name()), None);
+                let left = desired.take_event();
+                assert!(
+                    left.is_none(),
+                    "a deleted subscription leaves no event for its caller: {left:?}"
+                );
+                assert!(
+                    desired.begin(contract(), generation).is_some(),
+                    "the name is free once the deletion completed"
+                );
+            });
+        });
+    }
+
     /// A reader finds no event the registry reported while the subscription's exchange ends: it
     /// takes the interruption that end reports, or its wait for the registry's next change
     /// observes it.
@@ -848,11 +1052,7 @@ mod shuttle_tests {
                 let pending = desired
                     .begin(contract(), generation.clone())
                     .verified("the registry starts empty");
-                let opened = SubscriptionHandle {
-                    name: name(),
-                    generation: NonZeroU64::MIN,
-                };
-                desired.created(&pending, Some(&opened));
+                desired.created(&pending, Some(&announced(NonZeroU64::MIN)));
                 let ending = {
                     let desired = desired.clone();
                     nervix_primitives::task::spawn(async move { desired.ended(&generation) })

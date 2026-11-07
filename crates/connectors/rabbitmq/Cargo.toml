@@ -1,5 +1,5 @@
 [package]
-description = "The RabbitMQ source and sink connector for Nervix"
+description = "The RabbitMQ ingestor and emitter connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-rabbitmq"
@@ -39,6 +39,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+nervix-crypto = { workspace = true }
 nervix-model-harness = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }

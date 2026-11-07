@@ -62,6 +62,7 @@ Feature: Session protocol
       | 1            |
       | 3            |
 
+  @client_wire_probe_recovery @command_reference_recovery
   Scenario Outline: Cancelling a durably admitted command ends only the wait for it
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -70,14 +71,16 @@ Feature: Session protocol
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "leader"
-    Given command execution on node "{{leader}}" pauses after durable admission
+    Given the leader refuses the admission of execution reference "cancel-admitted-{{test_id}}" as a leader whose lease lapsed
+    And command execution on node "{{leader}}" pauses after durable admission
     When the active session sends request "admitted" with execution reference "cancel-admitted-{{test_id}}" and this Plexus command
       """
       CREATE SCHEMA admitted_record (
         value STRING
       );
       """
-    Then the durable command admission pause on node "{{leader}}" is reached
+    Then request "admitted" reaches the durable command admission pause on node "{{leader}}"
+    And the leader refused the admission of execution reference "cancel-admitted-{{test_id}}" as a leader whose lease lapsed
     When the active session cancels request "admitted"
     Then request "admitted" is cancelled after admission
     When the durable command admission pause on node "{{leader}}" is released
@@ -159,6 +162,65 @@ Feature: Session protocol
     When the active session sends a message larger than the frame limit
     Then the active session ends with status "OutOfRange"
 
+  @session_shutdown_ending @deloxide_stress
+  Scenario Outline: A native session is told its node is shutting down before its call ends
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When the node serving the active session is stopped
+    Then the active session ends because its node is shutting down
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # The command holds the session's ordered lane until the shutdown deadline ends it, so the call
+  # ends before that only if the session lets go of its client as soon as it has said why it ends.
+  @session_shutdown_ending @deloxide_stress
+  Scenario Outline: A native session whose admitted command still runs is told its node is shutting down before its call ends
+    Given shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given command execution on node "{{leader}}" pauses after durable admission
+    When the active session sends request "admitted" with execution reference "shutdown-admitted-{{test_id}}" and this Plexus command
+      """
+      CREATE SCHEMA admitted_record (
+        value STRING
+      );
+      """
+    Then the durable command admission pause on node "{{leader}}" is reached
+    When the node serving the active session is stopped
+    Then the active session ends because its node is shutting down
+    When the durable command admission pause on node "{{leader}}" is released
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @session_shutdown_unread @deloxide_stress
+  Scenario Outline: A native client reading nothing cannot hold a node stop past the connection grace period
+    Given shutdown timeout is configured as "30s"
+    And a <cluster_size> node nervix cluster is started
+    And a native session on the leader reads nothing until request acceptance waits
+    When the node serving the unread native session is stopped
+    Then the unread native connection ends after its grace period and the stop completes within its deadline
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Leadership lost after durable admission leaves an unknown outcome that a retry recovers
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -197,6 +259,7 @@ Feature: Session protocol
       CREATE SCHEMA uncertain_record (
       """
 
+  @client_wire_probe_recovery @command_reference_recovery
   Scenario Outline: A leader that cannot confirm its lease during <phase> reports that, not a move
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -235,6 +298,42 @@ Feature: Session protocol
       | phase        |
       | admission    |
       | finalization |
+
+  @client_wire_probe_recovery @command_reference_recovery
+  Scenario: A finalization lease refusal remains observable after an earlier admission leadership move
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "admitting_leader"
+    And a node other than placeholder "admitting_leader" is saved as placeholder "lapsed_leader"
+    Given the leader refuses the finalization of execution reference "finalization-after-move-{{test_id}}" as a leader whose lease lapsed
+    And leadership moves from node "{{admitting_leader}}" to node "{{lapsed_leader}}" before its next admission proposal
+    When this Plexus command request with execution reference "finalization-after-move-{{test_id}}" begins executing in the background on the leader node
+      """
+      CREATE SCHEMA recovered_finalization_record (value STRING);
+      """
+    Then the background command request reports an unknown outcome because the leader could not confirm its lease
+    And the leader refused the finalization of execution reference "finalization-after-move-{{test_id}}" as a leader whose lease lapsed
+    And the leadership move before the admission proposal completed
+    And node "{{lapsed_leader}}" eventually reports leader "{{lapsed_leader}}"
+    When this Plexus command request with execution reference "finalization-after-move-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA recovered_finalization_record (value STRING);
+      """
+    Then the last command request succeeded
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA recovered_finalization_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA recovered_finalization_record (
+        value STRING
+      );
+      """
 
   Scenario: A leader that cannot confirm its lease while a command applies reports that, not a move
     Given a 3 node nervix cluster is started
@@ -324,13 +423,13 @@ Feature: Session protocol
       """
       CREATE SCHEMA held_event ( seq I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC held_event_codec
-        FROM WIRE JSON SCHEMA held_event_wire
+      CREATE WIRE JSON CODEC held_event_codec
+        FROM WIRE SCHEMA held_event_wire
         TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST held_edge http-{{test_id}}-held.example.com;
-      CREATE ENDPOINT held_ingress ON held_edge PATH '/held' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT held_ingress ON held_edge PATH '/held';
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TO held_events

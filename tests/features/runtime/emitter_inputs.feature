@@ -20,8 +20,8 @@ Feature: Emitter relay inputs
         tenant string,
         source string
       );
-      CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+      CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_source_a SCHEMA tenant_branch TTL 5m;
@@ -29,9 +29,9 @@ Feature: Emitter relay inputs
       CREATE RELAY source_a_events SCHEMA event BRANCHED BY by_source_a;
       CREATE RELAY source_b_events SCHEMA event BRANCHED BY by_source_b;
       CREATE VHOST edge emitter-inputs-{{test_id}}.example.com;
-      CREATE ENDPOINT source_a_ingress ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT source_b_ingress ON edge PATH '/b' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_a
+      CREATE HTTP ENDPOINT source_a_ingress ON edge PATH '/a';
+      CREATE HTTP ENDPOINT source_b_ingress ON edge PATH '/b';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_a
         FROM source_a_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO source_a_events
@@ -41,7 +41,7 @@ Feature: Emitter relay inputs
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR source_b
+      CREATE HTTP ENDPOINT INGESTOR ingestor_b
         FROM source_b_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO source_b_events

@@ -151,7 +151,8 @@ mod tests {
     fn a_metadata_declaration_is_carried_as_its_declared_fields_and_none_as_no_schema() {
         use crate::{
             HttpIngestorEntity, IngestorEntityKind, KafkaIngestorEntity, MqttIngestorEntity,
-            SyslogIngestorEntity, WebsocketsIngestorEntity,
+            PulsarIngestorEntity, SyslogIngestorEntity, WebsocketsIngestorEntity,
+            ZeroMqIngestorEntity,
         };
 
         let described = |kind: IngestorEntityKind| {
@@ -170,7 +171,7 @@ mod tests {
             })
         };
         assert_eq!(
-            described(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)),
+            described(IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull)),
             None
         );
         assert_eq!(
@@ -201,8 +202,47 @@ mod tests {
             ])
         );
         assert_eq!(
+            described(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)),
+            Some(vec![
+                ("topic".to_owned(), DataType::Utf8, true),
+                ("retain".to_owned(), DataType::Boolean, true),
+                ("qos".to_owned(), DataType::UInt8, true),
+                ("duplicate".to_owned(), DataType::Boolean, true),
+                ("content_type".to_owned(), DataType::Utf8, true),
+                ("response_topic".to_owned(), DataType::Utf8, true),
+                ("correlation_data".to_owned(), DataType::Binary, true),
+                ("message_expiry".to_owned(), DataType::UInt32, true),
+            ])
+        );
+        assert_eq!(
+            described(IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic)),
+            Some(vec![
+                ("topic".to_owned(), DataType::Utf8, true),
+                ("message_id".to_owned(), DataType::Utf8, true),
+                (
+                    "publish_time".to_owned(),
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+                    true
+                ),
+                (
+                    "event_time".to_owned(),
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+                    true
+                ),
+                ("key".to_owned(), DataType::Utf8, true),
+                ("ordering_key".to_owned(), DataType::Binary, true),
+                ("producer_name".to_owned(), DataType::Utf8, true),
+                ("sequence_id".to_owned(), DataType::Int64, true),
+                ("redelivery_count".to_owned(), DataType::Int64, true),
+            ])
+        );
+        assert_eq!(
             described(IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener)),
-            Some(vec![("peer_addr".to_owned(), DataType::Utf8, true)])
+            Some(vec![
+                ("peer_addr".to_owned(), DataType::Utf8, true),
+                ("transport".to_owned(), DataType::Utf8, true),
+                ("tls_peer".to_owned(), DataType::Utf8, true)
+            ])
         );
         assert_eq!(
             described(IngestorEntityKind::Websockets(

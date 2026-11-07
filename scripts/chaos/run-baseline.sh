@@ -19,6 +19,8 @@ source "${script_dir}/output-boundary.sh"
 source "${script_dir}/image-package-check.sh"
 # shellcheck source=verifier-self-check.sh
 source "${script_dir}/verifier-self-check.sh"
+# shellcheck source=instance-owners.sh
+source "${script_dir}/instance-owners.sh"
 
 usage() {
     cat <<EOF
@@ -52,6 +54,7 @@ Options:
                          ${fault}). backup-fault requires one of owner-crash, leader-crash,
                          owner-partition or rolling-restart, and restore-fault one of
                          leader-crash, leader-partition, owner-crash or reclamation-owner-crash.
+  --state-partitions N   Stateful fixture branch partitions: 1 or 4 (default: 1).
   --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
                          burst-loss, rate-limit, combined (default: ${degradation_profile}).
   --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
@@ -106,6 +109,8 @@ partition_option_set=false
 isolation_seconds=45
 isolation_option_set=false
 fault=none
+stateful_partitions=1
+stateful_partitions_set=false
 fault_option_set=false
 degradation_profile=all
 degradation_option_set=false
@@ -250,6 +255,12 @@ while [[ "$#" -gt 0 ]]; do
             [[ "$#" -ge 2 ]] || setup_error '--fault requires a value'
             fault="$2"
             fault_option_set=true
+            shift 2
+            ;;
+        --state-partitions)
+            [[ "$#" -ge 2 ]] || setup_error '--state-partitions requires a count'
+            stateful_partitions="$2"
+            stateful_partitions_set=true
             shift 2
             ;;
         --profile | --load-interval-ms | --baseline-seconds | --degrade-seconds | --drain-seconds | --max-backlog | --min-throughput-pct)
@@ -404,14 +415,25 @@ fi
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
 # The restart, recovery, stateful, endpoints, lifetimes, domain-time, mixed-instability, backup
 # fault and restore scenarios share their traffic, findings and exit handling.
+if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+    fixture_file="${script_dir}/fixtures/instances.plexus"
+fi
+
 recovery_scenario=false
+if [[ "${stateful_partitions_set}" == true && "${scenario}" != stateful ]]; then
+    setup_error '--state-partitions applies only to stateful'
+fi
+case "${stateful_partitions}" in
+    1 | 4) ;;
+    *) setup_error '--state-partitions must be 1 or 4' ;;
+esac
 case "${scenario}" in
     stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) recovery_scenario=true ;;
 esac
@@ -934,6 +956,18 @@ compose() {
     run_bounded "${compose_call_timeout:-120}" docker compose "${compose_args[@]}" "$@"
 }
 
+# Keep an exec's remote process under the same bound as its Docker client. Ending the client alone
+# does not end a process inside a reusable helper. Both tool images provide timeout's -k form.
+helper_request() {
+    local service="$1"
+    shift
+    local remaining limit="${compose_call_timeout:-120}"
+    remaining="$(remaining_seconds)"
+    if ((remaining == 0)); then return 124; fi
+    if ((limit > remaining)); then limit="${remaining}"; fi
+    compose exec -T --interactive=false "${service}" timeout -k 5s "${limit}s" "$@" </dev/null
+}
+
 run_cli() {
     local domain="$1"
     local command_text="$2"
@@ -944,12 +978,12 @@ run_cli() {
     if [[ -n "${domain}" ]]; then
         domain_args=(--domain "${domain}")
     fi
-    compose run --rm --no-deps admin \
+    helper_request admin \
         nervix-cli \
         --server "http://${cli_host}:47391" \
         "${domain_args[@]}" \
         --password "${CHAOS_PASSWORD}" \
-        --command "${command_text}" >"${cli_output}" 2>&1 || cli_status=$?
+        --command "${command_text}" </dev/null >"${cli_output}" 2>&1 || cli_status=$?
     cat "${cli_output}"
     if [[ "${cli_status}" -eq 0 ]] \
         && ! grep -Fq 'Error:' "${cli_output}" \
@@ -968,6 +1002,9 @@ cli_command() {
     local command_text="$1"
     run_cli "" "${command_text}"
 }
+
+# shellcheck source=cluster-parameters.sh
+source "${script_dir}/cluster-parameters.sh"
 
 domain_cli_command() {
     local command_text="$1"
@@ -1823,16 +1860,16 @@ node_listener_probe="
 # Requires every listener of HOSTNAME to answer and its /readyz to report a known leader.
 probe_node() {
     local hostname="$1"
-    compose run --rm --no-deps probe sh -eu -c "${node_listener_probe}
+    helper_request probe sh -eu -c "${node_listener_probe}
         wget -q -T 3 -O /dev/null \"http://\$1:9090/readyz\"
-    " -- "${hostname}" >/dev/null 2>&1
+    " -- "${hostname}" </dev/null >/dev/null 2>&1
 }
 
 # Requires every listener of HOSTNAME to answer, whatever its /readyz reports: a node can know no
 # leader for a moment during an election, which loss on a leader's link can start.
 probe_node_listeners() {
     local hostname="$1"
-    compose run --rm --no-deps probe sh -eu -c "${node_listener_probe}" -- "${hostname}" >/dev/null 2>&1
+    helper_request probe sh -eu -c "${node_listener_probe}" -- "${hostname}" </dev/null >/dev/null 2>&1
 }
 
 cluster_status_ready() {
@@ -1921,8 +1958,8 @@ record_load_pacing() {
 capture_metrics() {
     local hostname="$1"
     local output="${artifact_dir}/public/metrics-${hostname}.txt"
-    compose run --rm --no-deps probe wget -q -T 5 -O - \
-        "http://${hostname}:9090/metrics" >"${output}"
+    helper_request probe wget -q -T 5 -O - \
+        "http://${hostname}:9090/metrics" </dev/null >"${output}" || return $?
     trim_file "${output}" 1048576
 }
 
@@ -2213,9 +2250,11 @@ compose config --quiet
 if [[ "${scenario}" == mixed-instability ]]; then
     # The node settings and load interval Compose renders are part of the experiment, so a replay
     # deploys them again and refuses to start when its rendering differs.
-    deployment="$(compose config --format json | jq -c '
+    deployment="$(compose config --format json | jq -c \
+        --argjson parameters "$(requested_cluster_parameters)" '
         {nodes: (.services["nervix-1"].environment
-                 | with_entries(select(.key | test("^NERVIX_(RAFT_|NODE_UNAVAILABILITY_TIMEOUT$|REPLICA_COUNT$|STATE_SNAPSHOT_INTERVAL$)")))),
+                 | with_entries(select(.key | startswith("NERVIX_RAFT_")))),
+         parameters: $parameters,
          load_interval_ms: (.services.load.environment.CHAOS_LOAD_INTERVAL_MS | tonumber)}')"
     if [[ -n "${replay_dir}" ]]; then
         jq -e --argjson rendered "${deployment}" '.mixed.deployment == $rendered' \
@@ -2230,7 +2269,9 @@ compose config >"${artifact_dir}/compose.rendered.yaml"
 compose_ready=true
 
 phase "broker startup and provisioning"
-compose up --detach broker
+# The helpers live only for this run. Every exec still starts a fresh CLI or probe process with
+# its own public request, while repeated observations avoid creating and attaching containers.
+compose up --detach --no-deps broker admin probe
 wait_for "Kafka broker" 90 probe_broker
 broker_admin /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server broker:9092 \
@@ -2299,6 +2340,10 @@ if [[ "${node_count}" == "3" ]]; then
     node_hosts+=(nervix-2 nervix-3)
 fi
 wait_for "public cluster status for ${node_count} node(s)" 120 cluster_status_ready
+phase "committed cluster parameter installation"
+configure_cluster_parameters >"${artifact_dir}/public/cluster-parameter-change.txt" 2>&1
+wait_for "committed parameters installed on every node" 120 capture_cluster_parameters \
+    "${artifact_dir}/public/cluster-parameters" "${node_names[@]}"
 phase "startup status publication"
 # shellcheck source=startup-status.sh
 source "${script_dir}/startup-status.sh"
@@ -2363,6 +2408,9 @@ fi
 domain_cli_command "${plexus_fixture}" \
     >"${artifact_dir}/public/configure-plexus.txt" 2>&1
 if [[ "${scenario}" == stateful ]]; then
+    domain_cli_command "CREATE BRANCH chaos_state_branch SCHEMA chaos_branch_key TTL 5m PARTITIONS ${stateful_partitions} MAX INSTANCES 16 EVICT LRU;" \
+        >"${artifact_dir}/public/configure-stateful-branch.txt" 2>&1
+    update_manifest '.fixtures.stateful_partitions = $count' --argjson count "${stateful_partitions}"
     domain_cli_command "$(<"${script_dir}/fixtures/stateful.plexus")" \
         >"${artifact_dir}/public/configure-stateful-plexus.txt" 2>&1
 fi
@@ -2430,9 +2478,11 @@ fi
 
 phase "public placement evidence"
 if [[ "${node_count}" == "3" ]]; then
-    domain_cli_command \
-        'RELOCATE INGESTOR chaos_ingestor ONTO NODE node-1 IGNORE PREFERENCES;' \
-        >"${artifact_dir}/public/relocate-ingestor.txt" 2>&1
+    if [[ "${scenario}" != ingestor-instances-owner-crash ]]; then
+        domain_cli_command \
+            'RELOCATE INGESTOR chaos_ingestor ONTO NODE node-1 IGNORE PREFERENCES;' \
+            >"${artifact_dir}/public/relocate-ingestor.txt" 2>&1
+    fi
     domain_cli_command \
         'RELOCATE RELAY chaos_records ONTO NODE node-2 IGNORE PREFERENCES;' \
         >"${artifact_dir}/public/relocate-relay.txt" 2>&1
@@ -2448,9 +2498,15 @@ else
     expected_emitter_owner="node-1"
 fi
 
-wait_for "ingestor owner ${expected_ingestor_owner}" 60 \
-    describe_owner_ready 'DESCRIBE INGESTOR chaos_ingestor;' \
-    "${expected_ingestor_owner}" "${artifact_dir}/public/describe-ingestor.txt"
+if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+    wait_for 'three distinct ready ingestor instance owners' 60 \
+        describe_spread_instances_ready "${artifact_dir}/public/describe-ingestor.txt" \
+        "${artifact_dir}/public/instance-owners.json"
+else
+    wait_for "ingestor owner ${expected_ingestor_owner}" 60 \
+        describe_owner_ready 'DESCRIBE INGESTOR chaos_ingestor;' \
+        "${expected_ingestor_owner}" "${artifact_dir}/public/describe-ingestor.txt"
+fi
 wait_for "relay owner ${expected_relay_owner}" 60 \
     describe_owner_ready 'DESCRIBE RELAY chaos_records;' \
     "${expected_relay_owner}" "${artifact_dir}/public/describe-relay.txt"
@@ -2475,6 +2531,14 @@ jq -n \
         "public/describe-emitter.txt"
       ]
     }' >"${artifact_dir}/results/remote-path.json"
+if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+    remote_path_tmp="$(mktemp "${artifact_dir}/results/.remote-path.XXXXXX")"
+    jq --slurpfile instances "${artifact_dir}/public/instance-owners.json" \
+        'del(.ingestor_owner) | .ingestor_instances = $instances[0]
+        | .evidence += ["public/instance-owners.json"]' \
+        "${artifact_dir}/results/remote-path.json" >"${remote_path_tmp}"
+    mv "${remote_path_tmp}" "${artifact_dir}/results/remote-path.json"
+fi
 
 if [[ "${scenario}" != "baseline" ]]; then
     # Fault scenarios use this setup and the shared final ledger verifier.
@@ -2615,7 +2679,7 @@ if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}"
         output_has_all_records "${input_end}"; then
         output_wait_timed_out=true
     fi
-    # Preserve an exact ledger even when the sink stayed short of the accepted boundary.
+    # Preserve an exact ledger even when the emitter stayed short of the accepted boundary.
     output_minimum=0
 else
     wait_for "output topic to contain at least ${input_end} records" 120 \
@@ -2661,7 +2725,7 @@ fi
     "${artifact_dir}/results/ledger.json" "${ledger_args[@]}" \
     >"${artifact_dir}/results/ledger.txt"
 if [[ "${output_wait_timed_out}" == true ]]; then
-    printf 'sink output exceeded the %s-second accepted-input boundary\n' "${output_wait_seconds:-120}" >&2
+    printf 'emitter output exceeded the %s-second accepted-input boundary\n' "${output_wait_seconds:-120}" >&2
     exit 124
 fi
 

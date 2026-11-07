@@ -22,15 +22,15 @@ Feature: Conditional expressions
         divisor integer,
         result integer OPTIONAL
       );
-      CREATE CODEC calculation_codec
-        FROM WIRE JSON SCHEMA calculation_wire
+      CREATE WIRE JSON CODEC calculation_codec
+        FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE RELAY calculations SCHEMA calculation UNBRANCHED;
       CREATE RELAY calculated SCHEMA calculation UNBRANCHED;
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge conditional-expression-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR calculation_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/calculations';
+      CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations
@@ -94,14 +94,14 @@ Feature: Conditional expressions
       CREATE WIRE JSON SCHEMA conditional_sample_wire MODE STRICT (
         value integer
       );
-      CREATE CODEC conditional_sample_codec
-        FROM WIRE JSON SCHEMA conditional_sample_wire
+      CREATE WIRE JSON CODEC conditional_sample_codec
+        FROM WIRE SCHEMA conditional_sample_wire
         TO SCHEMA conditional_sample;
       CREATE RELAY conditional_samples SCHEMA conditional_sample UNBRANCHED;
       CREATE RELAY conditional_summaries SCHEMA conditional_summary UNBRANCHED;
       CREATE VHOST edge conditional-window-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/conditional-window' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR conditional_sample_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/conditional-window';
+      CREATE HTTP ENDPOINT INGESTOR conditional_sample_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_sample_codec
         TO conditional_samples
@@ -173,14 +173,14 @@ Feature: Conditional expressions
         active boolean,
         score integer
       );
-      CREATE CODEC conditional_input_codec
-        FROM WIRE JSON SCHEMA conditional_input_wire
+      CREATE WIRE JSON CODEC conditional_input_codec
+        FROM WIRE SCHEMA conditional_input_wire
         TO SCHEMA conditional_input;
       CREATE RELAY conditional_inputs SCHEMA conditional_input UNBRANCHED;
       CREATE RELAY conditional_outputs SCHEMA conditional_output UNBRANCHED;
       CREATE VHOST edge conditional-forms-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/conditional-forms' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR conditional_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/conditional-forms';
+      CREATE HTTP ENDPOINT INGESTOR conditional_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_input_codec
         TO conditional_inputs
@@ -266,15 +266,15 @@ Feature: Conditional expressions
         raw string,
         pattern string
       );
-      CREATE CODEC routed_text_codec
-        FROM WIRE JSON SCHEMA routed_text_wire
+      CREATE WIRE JSON CODEC routed_text_codec
+        FROM WIRE SCHEMA routed_text_wire
         TO SCHEMA routed_text;
       CREATE RELAY routed_texts SCHEMA routed_text UNBRANCHED;
       CREATE RELAY routed_results SCHEMA routed_result UNBRANCHED;
       CREATE RELAY routed_text_errors SCHEMA routed_text_error UNBRANCHED;
       CREATE VHOST edge nested-arms-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/routed-texts' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR routed_text_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/routed-texts';
+      CREATE HTTP ENDPOINT INGESTOR routed_text_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_text_codec
         TO routed_texts
@@ -392,14 +392,14 @@ Feature: Conditional expressions
         kind string,
         text string
       );
-      CREATE CODEC support_request_codec
-        FROM WIRE JSON SCHEMA support_request_wire
+      CREATE WIRE JSON CODEC support_request_codec
+        FROM WIRE SCHEMA support_request_wire
         TO SCHEMA support_request;
       CREATE RELAY support_requests SCHEMA support_request UNBRANCHED;
       CREATE RELAY support_decisions SCHEMA support_decision UNBRANCHED;
       CREATE VHOST edge guarded-udf-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/support-requests' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR support_request_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/support-requests';
+      CREATE HTTP ENDPOINT INGESTOR support_request_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING support_request_codec
         TO support_requests
@@ -465,13 +465,13 @@ Feature: Conditional expressions
         id string,
         kind string
       );
-      CREATE CODEC tagged_note_codec
-        FROM WIRE JSON SCHEMA tagged_note_wire
+      CREATE WIRE JSON CODEC tagged_note_codec
+        FROM WIRE SCHEMA tagged_note_wire
         TO SCHEMA tagged_note;
       CREATE RELAY routed_notes SCHEMA routed_note UNBRANCHED;
       CREATE VHOST edge header-arms-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/notes' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR note_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/notes';
+      CREATE HTTP ENDPOINT INGESTOR note_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tagged_note_codec
         TO routed_notes

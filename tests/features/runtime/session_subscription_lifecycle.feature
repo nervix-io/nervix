@@ -8,10 +8,10 @@ Feature: Session subscription lifecycle
       CREATE SCHEMA event ( id I64, secret STRING );
       CREATE SCHEMA secret_event ( id I64, secret STRING SENSITIVE );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer, secret string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge redefined-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -121,10 +121,10 @@ Feature: Session subscription lifecycle
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge restarted-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -183,10 +183,10 @@ Feature: Session subscription lifecycle
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge interest-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -299,12 +299,12 @@ Feature: Session subscription lifecycle
       CREATE SCHEMA seed ( text STRING );
       CREATE SCHEMA filler ( text STRING );
       CREATE WIRE JSON SCHEMA seed_wire MODE STRICT ( text string );
-      CREATE CODEC seed_codec FROM WIRE JSON SCHEMA seed_wire TO SCHEMA seed;
+      CREATE WIRE JSON CODEC seed_codec FROM WIRE SCHEMA seed_wire TO SCHEMA seed;
       CREATE RELAY seeds SCHEMA seed UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY floods SCHEMA filler UNBRANCHED;
       CREATE RELAY probes SCHEMA filler UNBRANCHED;
       CREATE VHOST edge saturated-{{test_id}}.example.com;
-      CREATE ENDPOINT seed_endpoint ON edge PATH '/seeds' TYPE HTTP;
+      CREATE HTTP ENDPOINT seed_endpoint ON edge PATH '/seeds';
       CREATE HTTP ENDPOINT INGESTOR seed_ingestor
         FROM seed_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING seed_codec
@@ -340,10 +340,10 @@ Feature: Session subscription lifecycle
       """
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge neighbor-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

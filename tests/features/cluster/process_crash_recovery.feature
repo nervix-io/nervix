@@ -11,14 +11,14 @@ Feature: Real process crash recovery
       CREATE SCHEMA window_input (tenant STRING, value I64);
       CREATE SCHEMA window_output (tenant STRING, samples I64);
       CREATE WIRE JSON SCHEMA window_wire MODE STRICT (tenant string, value integer);
-      CREATE CODEC window_codec FROM WIRE JSON SCHEMA window_wire TO SCHEMA window_input;
+      CREATE WIRE JSON CODEC window_codec FROM WIRE SCHEMA window_wire TO SCHEMA window_input;
       CREATE SCHEMA window_tenant (tenant STRING);
       CREATE BRANCH by_window_tenant SCHEMA window_tenant TTL 5m;
       CREATE RELAY window_inputs SCHEMA window_input BRANCHED BY by_window_tenant;
       CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_window_tenant;
       CREATE VHOST window_edge window-crash-{{test_id}}.example.com;
-      CREATE ENDPOINT window_ingress ON window_edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR window_source
+      CREATE HTTP ENDPOINT window_ingress ON window_edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR window_ingestor
         FROM window_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
         TO window_inputs INHERIT ALL BRANCHED BY by_window_tenant
@@ -94,7 +94,7 @@ Feature: Real process crash recovery
       CREATE SCHEMA reading (tenant STRING, value I64);
       CREATE SCHEMA reading_window (tenant STRING, samples I64, total I64);
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT (tenant string, value integer);
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA reading_tenant (tenant STRING);
       CREATE BRANCH by_reading_tenant SCHEMA reading_tenant TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant;
@@ -102,8 +102,8 @@ Feature: Real process crash recovery
       CREATE RELAY unique_readings SCHEMA reading BRANCHED BY by_reading_tenant;
       CREATE RELAY copied_readings SCHEMA reading BRANCHED BY by_reading_tenant;
       CREATE VHOST reading_edge readings-{{test_id}}.example.com;
-      CREATE ENDPOINT reading_ingress ON reading_edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT reading_ingress ON reading_edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_reading_tenant
@@ -214,8 +214,8 @@ Feature: Real process crash recovery
         user_id integer,
         tenant string
       );
-      CREATE CODEC crash_event_codec
-        FROM WIRE JSON SCHEMA crash_event_wire
+      CREATE WIRE JSON CODEC crash_event_codec
+        FROM WIRE SCHEMA crash_event_wire
         TO SCHEMA crash_event;
       CREATE SCHEMA crash_tenant (
         tenant STRING
@@ -224,8 +224,8 @@ Feature: Real process crash recovery
       CREATE RELAY crash_input SCHEMA crash_event BRANCHED BY by_crash_tenant;
       CREATE RELAY crash_unique SCHEMA crash_event BRANCHED BY by_crash_tenant;
       CREATE VHOST crash_edge crash-{{test_id}}.example.com;
-      CREATE ENDPOINT crash_ingress ON crash_edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR crash_source
+      CREATE HTTP ENDPOINT crash_ingress ON crash_edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR crash_ingestor
         FROM crash_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING crash_event_codec
         TO crash_input

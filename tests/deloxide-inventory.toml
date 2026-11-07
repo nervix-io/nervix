@@ -17,6 +17,87 @@
 # the compiler's catalog: a new owner of tracked locks needs a record, and a record whose file no
 # longer acquires one is removed.
 
+[[invocation]]
+bound_seconds = 120
+evidence = true
+id = "rate-limit-store"
+kind = "libtest-each"
+marker = "diagnostic_tests::deloxide_"
+package = "nervix-rate-limit"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+target = "lib"
+
+[[invocation]]
+bound_seconds = 120
+evidence = true
+features = ["testing"]
+id = "emitter-branch-retirement"
+kind = "libtest-each"
+marker = "runtime::emitter_buffer::tests::retiring_one_source_branch_settles_only_its_unresolved_host_rows"
+package = "nervix-server"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+target = "lib"
+
+[[workload]]
+coverage = "Production buffer retirement settles real ACK roots through the tracked completion-sender mutex, preserves connector-staged ownership and counts delivered rows once. The exclusively owned branch collections, async timer and parked-wait orchestration are outside detector evidence."
+id = "owner.emitter-branch-retirement"
+invariant = "Retiring a source branch NoACKs only its unresolved host rows and leaves independent source/key rows and connector-owned acknowledgements intact."
+invocation = "emitter-branch-retirement"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "runtime::emitter_buffer::tests::retiring_one_source_branch_settles_only_its_unresolved_host_rows"
+
+[[workload]]
+coverage = "The engine's selected blocking shard locks, concurrent key leases, exact rollback, global eviction, TTL removal and fresh keyed-store restoration; governor internals and atomic memory ordering are outside detector evidence."
+id = "owner.rate-limit-keyed-transactions"
+invariant = "Bounded key transactions never exceed the global capacity, retain no refunded charge and restore the complete allowance generation without a tracked deadlock."
+invocation = "rate-limit-store"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "diagnostic_tests::deloxide_keyed_transactions_expire_evict_refund_and_restore"
+
+[[owner]]
+path = "crates/rate-limit/src/keyed.rs"
+workloads = ["owner.rate-limit-keyed-transactions"]
+
+[[workload]]
+coverage = "An actual applied joint promotion is interrupted at its uniform continuation through the consensus storage pause's tracked condition-variable wait and release; reconciliation finishes and both survivors apply commands after each possible voter stops. Async membership serialization and watches are untracked."
+examples = 3
+feature = "tests/features/cluster/membership_recovery.feature"
+id = "scenario.joint-membership-recovery"
+invariant = "An interrupted joint transition becomes the committed uniform target without a deadlock, and any two of its three voters can continue committing."
+invocation = "scenarios"
+scenario = "A refused uniform step is reconciled before any one of three voters stops"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the controlled joint promotion reaches the consensus storage pause's tracked wait and release, then completes reconciliation and stops each possible voter. Async membership serialization and watches are untracked."
+examples = 3
+feature = "tests/features/cluster/membership_recovery.feature"
+id = "stress.joint-membership-recovery"
+invariant = "An interrupted joint transition becomes the committed uniform target without a deadlock, and any two of its three voters can continue committing."
+invocation = "stress-scenarios"
+scenario = "A refused uniform step is reconciled before any one of three voters stops"
+selections = ["deloxide-stress"]
+
 [[workload]]
 coverage = "Kafka records through the real broker and the source host's tracked ingestion and ACK state, with every new metadata field read in NO ACK, ACK SEQUENTIAL and ACK PARALLEL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
 examples = 6
@@ -48,6 +129,16 @@ scenario = "Kafka broker event time makes historical windows due independently i
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A real Kafka record whose CreateTime no DATETIME holds, between in-range neighbours, read under ACK SEQUENTIAL by ingestors that read metadata.timestamp in a route, through TIMESTAMP AT, only metadata.timestamp_type, or no metadata, on one and three nodes, through the source host's tracked ingestion, refusal and acknowledgement state. Driver polling and borrowed metadata visits are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-timestamp-refusal"
+invariant = "A record whose timestamp no DATETIME holds is refused with a validation admit error naming metadata.timestamp exactly where a route or TIMESTAMP AT reads that field, is ingested with its timestamp kind everywhere else, and leaves its neighbours' ingestion unchanged."
+invocation = "scenarios"
+scenario = "A Kafka timestamp no DATETIME holds refuses its record only where metadata.timestamp is read"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Under scheduling stress: real-broker Kafka ingestion and ACK state in all three modes with every record metadata field read. Driver polling and borrowed metadata visits remain untracked."
 examples = 6
 feature = "tests/features/runtime/kafka_metadata.feature"
@@ -76,6 +167,397 @@ invariant = "TIMESTAMP AT metadata.timestamp uses the broker instant for each br
 invocation = "stress-scenarios"
 scenario = "Kafka broker event time makes historical windows due independently in two branches"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a real Kafka record whose CreateTime no DATETIME holds, between in-range neighbours, read under ACK SEQUENTIAL by ingestors that read it in a route, through TIMESTAMP AT, only its kind, or no metadata, beside tracked ingestion, refusal and acknowledgement state. Driver polling and borrowed metadata visits remain untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-timestamp-refusal"
+invariant = "A record whose timestamp no DATETIME holds is refused with a validation admit error naming metadata.timestamp exactly where a route or TIMESTAMP AT reads that field, is ingested with its timestamp kind everywhere else, and leaves its neighbours' ingestion unchanged."
+invocation = "stress-scenarios"
+scenario = "A Kafka timestamp no DATETIME holds refuses its record only where metadata.timestamp is read"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "MQTT publishes through the real broker and the source host's tracked ingestion and ACK state, with every metadata field read in NO ACK and ACK SEQUENTIAL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
+examples = 6
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-metadata"
+invariant = "Every delivered publish reads its own topic, flags and MQTT 5 properties, and a property its publisher left unset reads as null."
+invocation = "scenarios"
+scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real wildcard deliveries routed by metadata.topic beside tracked ingestion state on one and three nodes. Driver polling and borrowed metadata visits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-topic-routing"
+invariant = "A route over metadata.topic receives exactly the publishes delivered on its topic, under one wildcard filter."
+invocation = "scenarios"
+scenario = "A wildcard MQTT ingestor routes each publish by the topic it was delivered on"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real MQTT 5 user properties read as headers beside tracked ingestion state on one and three nodes. Driver polling and borrowed header visits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-user-properties"
+invariant = "read_header and read_headers find a publish's user properties in their written order with their repeats, and a name matches only its exact spelling."
+invocation = "scenarios"
+scenario = "An MQTT ingestor reads user properties as headers in the order the publisher wrote them"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A reset connection forces broker redelivery through the source host's tracked ACK, suspend and resume state on one and three nodes. Driver reconnection and network waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-redelivery"
+invariant = "A publish the broker delivers again after a lost connection reads metadata.duplicate as true, and its first delivery reads false."
+invocation = "scenarios"
+scenario = "A publish the broker delivers again reads metadata.duplicate as true"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An ALTER held at its entity gate retains a publish in the source host's tracked quiesce state on one and three nodes, and its release replays it. Driver polling and retained metadata values are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-quiesce-retention"
+invariant = "A publish a buffering quiesce retains reads its own metadata and user properties when the buffer replays it."
+invocation = "scenarios"
+scenario = "A publish a buffering quiesce retains keeps its metadata and user properties"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: real-broker MQTT ingestion and ACK state with every metadata field read. Driver polling and borrowed metadata visits remain untracked."
+examples = 6
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-metadata"
+invariant = "Every delivered publish reads its own topic, flags and MQTT 5 properties, and a property its publisher left unset reads as null."
+invocation = "stress-scenarios"
+scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: wildcard deliveries routed by metadata.topic beside tracked ingestion state. Driver polling and borrowed metadata visits remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-topic-routing"
+invariant = "A route over metadata.topic receives exactly the publishes delivered on its topic, under one wildcard filter."
+invocation = "stress-scenarios"
+scenario = "A wildcard MQTT ingestor routes each publish by the topic it was delivered on"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: real MQTT 5 user properties read as headers beside tracked ingestion state. Driver polling and borrowed header visits remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-user-properties"
+invariant = "read_header and read_headers find a publish's user properties in their written order with their repeats, and a name matches only its exact spelling."
+invocation = "stress-scenarios"
+scenario = "An MQTT ingestor reads user properties as headers in the order the publisher wrote them"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a reset connection forces broker redelivery through tracked ACK, suspend and resume state. Driver reconnection and network waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-redelivery"
+invariant = "A publish the broker delivers again after a lost connection reads metadata.duplicate as true, and its first delivery reads false."
+invocation = "stress-scenarios"
+scenario = "A publish the broker delivers again reads metadata.duplicate as true"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: an ALTER held at its entity gate retains and replays a publish through tracked quiesce state. Driver polling and retained metadata values remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-quiesce-retention"
+invariant = "A publish a buffering quiesce retains reads its own metadata and user properties when the buffer replays it."
+invocation = "stress-scenarios"
+scenario = "A publish a buffering quiesce retains keeps its metadata and user properties"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata.feature"
+id = "scenario.pulsar-message-topic"
+invariant = "A route reading only the topic admits its payload while the other typed metadata columns remain unread."
+invocation = "scenarios"
+scenario = "A Pulsar ingestor projects its message topic"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 6
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "scenario.pulsar-message-values"
+invariant = "Every delivered message keeps its exact nine-field metadata and properties in all three acknowledgement modes."
+invocation = "scenarios"
+scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "scenario.pulsar-message-event-time"
+invariant = "Each branch's historical duration window uses the broker message's event time and preserves its fields."
+invocation = "scenarios"
+scenario = "Pulsar event time flushes historical windows separately for two branches"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "scenario.pulsar-message-redelivery"
+invariant = "A rejected graph attempt redelivers the same message id with the broker's incremented count and eventually settles its subscription."
+invocation = "scenarios"
+scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata.feature"
+id = "stress.pulsar-message-topic"
+invariant = "A route reading only the topic admits its payload while the other typed metadata columns remain unread."
+invocation = "stress-scenarios"
+scenario = "A Pulsar ingestor projects its message topic"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 6
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "stress.pulsar-message-values"
+invariant = "Every delivered message keeps its exact nine-field metadata and properties in all three acknowledgement modes."
+invocation = "stress-scenarios"
+scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "stress.pulsar-message-event-time"
+invariant = "Each branch's historical duration window uses the broker message's event time and preserves its fields."
+invocation = "stress-scenarios"
+scenario = "Pulsar event time flushes historical windows separately for two branches"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "stress.pulsar-message-redelivery"
+invariant = "A rejected graph attempt redelivers the same message id with the broker's incremented count and eventually settles its subscription."
+invocation = "stress-scenarios"
+scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A real broker-stored batch passes through tracked ingestion, relay and acknowledgement state on one and three nodes. The bounded protocol fixture, driver channels and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_batch.feature"
+id = "scenario.pulsar-batch-member-metadata"
+invariant = "Present member sequence ids and event times override their envelope fields, including zero; omitted member fields inherit the envelope. Each member preserves all metadata and its exact batch position."
+invocation = "scenarios"
+scenario = "Pulsar batch members retain their own sequence ids and complete metadata"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: A real broker-stored batch passes through tracked ingestion, relay and acknowledgement state on one and three nodes. The bounded protocol fixture, driver channels and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_batch.feature"
+id = "stress.pulsar-batch-member-metadata"
+invariant = "Present member sequence ids and event times override their envelope fields, including zero; omitted member fields inherit the envelope. Each member preserves all metadata and its exact batch position."
+invocation = "stress-scenarios"
+scenario = "Pulsar batch members retain their own sequence ids and complete metadata"
+selections = ["deloxide-stress"]
+
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-deduplicator"
+invariant = "A deduplicator runs each branch partition on its scheduled owner."
+invocation = "scenarios"
+scenario = "A deduplicator runs each branch partition on its scheduled owner"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-deduplicator"
+invariant = "A deduplicator runs each branch partition on its scheduled owner."
+invocation = "stress-scenarios"
+scenario = "A deduplicator runs each branch partition on its scheduled owner"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-generator"
+invariant = "A generator reads and emits only the keys of its own partition."
+invocation = "scenarios"
+scenario = "A generator reads and emits only the keys of its own partition"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-generator"
+invariant = "A generator reads and emits only the keys of its own partition."
+invocation = "stress-scenarios"
+scenario = "A generator reads and emits only the keys of its own partition"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 3
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-window"
+invariant = "A partitioned window restores each units incomplete window after cluster restart."
+invocation = "scenarios"
+scenario = "A partitioned window restores each units incomplete window after cluster restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 3
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-window"
+invariant = "A partitioned window restores each units incomplete window after cluster restart."
+invocation = "stress-scenarios"
+scenario = "A partitioned window restores each units incomplete window after cluster restart"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-wasm"
+invariant = "A partitioned WASM processor resets only the selected units branch lifetime."
+invocation = "scenarios"
+scenario = "A partitioned WASM processor resets only the selected units branch lifetime"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-wasm"
+invariant = "A partitioned WASM processor resets only the selected units branch lifetime."
+invocation = "stress-scenarios"
+scenario = "A partitioned WASM processor resets only the selected units branch lifetime"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-correlator"
+invariant = "A partitioned correlator matches interleaved keys only inside their partition."
+invocation = "scenarios"
+scenario = "A partitioned correlator matches interleaved keys only inside their partition"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-correlator"
+invariant = "A partitioned correlator matches interleaved keys only inside their partition."
+invocation = "stress-scenarios"
+scenario = "A partitioned correlator matches interleaved keys only inside their partition"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "scenario.processor-partitions-dependency"
+invariant = "Partitioned dependency reads resolve each keys materialized owner locally and remotely."
+invocation = "scenarios"
+scenario = "Partitioned dependency reads resolve each keys materialized owner locally and remotely"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/processor_partitions.feature"
+id = "stress.processor-partitions-dependency"
+invariant = "Partitioned dependency reads resolve each keys materialized owner locally and remotely."
+invocation = "stress-scenarios"
+scenario = "Partitioned dependency reads resolve each keys materialized owner locally and remotely"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 1
+feature = "tests/features/cluster/processor_partition_recovery.feature"
+id = "scenario.processor-partition-recovery-loss"
+invariant = "Losing one processor partition owner preserves both units state and sibling progress."
+invocation = "scenarios"
+scenario = "Losing one processor partition owner preserves both units state and sibling progress"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 1
+feature = "tests/features/cluster/processor_partition_recovery.feature"
+id = "stress.processor-partition-recovery-loss"
+invariant = "Losing one processor partition owner preserves both units state and sibling progress."
+invocation = "stress-scenarios"
+scenario = "Losing one processor partition owner preserves both units state and sibling progress"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 1
+feature = "tests/features/cluster/processor_partition_recovery.feature"
+id = "scenario.processor-partition-recovery-drain"
+invariant = "Draining one processor partition owner hands off its state and keeps sibling owners."
+invocation = "scenarios"
+scenario = "Draining one processor partition owner hands off its state and keeps sibling owners"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 1
+feature = "tests/features/cluster/processor_partition_recovery.feature"
+id = "stress.processor-partition-recovery-drain"
+invariant = "Draining one processor partition owner hands off its state and keeps sibling owners."
+invocation = "stress-scenarios"
+scenario = "Draining one processor partition owner hands off its state and keeps sibling owners"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/cluster/processor_partition_restore.feature"
+id = "scenario.processor-partition-restore"
+invariant = "Partitioned deduplicator keys and windows resume on their scheduled unit owners."
+invocation = "scenarios"
+scenario = "Partitioned deduplicator keys and windows resume on their scheduled unit owners"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production partition supervisors, scoped relay registrations, dispatch fences and checkpoint ownership acquire selected blocking locks; transport waits and guest internals remain outside detector evidence."
+examples = 2
+feature = "tests/features/cluster/processor_partition_restore.feature"
+id = "stress.processor-partition-restore"
+invariant = "Partitioned deduplicator keys and windows resume on their scheduled unit owners."
+invocation = "stress-restore-scenarios"
+scenario = "Partitioned deduplicator keys and windows resume on their scheduled unit owners"
+selections = ["deloxide-stress-restore"]
 
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
@@ -169,7 +651,19 @@ kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@joint_membership_recovery",
+  "@client_restore_codec_native",
+  "@client_restore_uncertainty_native",
+  "@ingestor_instance_lifecycle",
   "@kafka_record_metadata",
+  "@mqtt_metadata",
+  "@processor_partitions",
+  "@processor_partition_recovery",
+  "@processor_partition_restore",
+  "@nats_authentication",
+  "@nats_authentication_refusal",
+  "@pulsar_message_metadata",
+  "@rabbitmq_metadata",
   "@restore_client_inspection",
   "@runtime_installation_retry",
   "@execution_class_drain",
@@ -187,14 +681,17 @@ tags = [
   "@client_ingestor_alter_drain",
   "@syslog_suspend_handoff",
   "@syslog_listener_rebind",
+  "@syslog_metadata",
   "@resource_source_discovery",
   "@resource_upload_publication",
   "@deadlock_reports",
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
   "@client_io_03_generation",
+  "@client_wire_subscription_timeout",
   "@remote_ack_owners",
   "@backup_wait",
+  "@client_wire_backup_outage",
   "@stopped_checkpoint_writes",
   "@backup_cut_diagnostics",
   "@backup_parked_wait",
@@ -217,6 +714,7 @@ tags = [
   "@shutdown_emitter_finish",
   "@emitter_finish_at_stop",
   "@nats_core_connection_loss",
+  "@nats_stream_lost_pub_ack",
   "@iceberg_commit_memory",
   "@iceberg_batch_bounds",
   "@zeromq_emitter_open_deadline",
@@ -226,10 +724,17 @@ tags = [
   "@websocket_declaration_lifecycle",
   "@endpoint_metadata_buffer",
   "@mqtt_source_retirement",
+  "@mqtt_emitter_pubcomp_boundary",
+  "@mqtt_client_credentials_refused",
   "@pulsar_source_retirement",
+  "@pulsar_ingestor_reconnect",
+  "@pulsar_subscription_conflict",
   "@forced_failover_delivery",
+  "@relay_partition_failover",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
+  "@nats_stream_suspend",
+  "@sqs_parallel_batch",
   "@sqs_ingestor_receive_deadline",
   "@kept_ingestor_offsets",
   "@redis_subscription_backpressure",
@@ -239,6 +744,13 @@ tags = [
   "@node_prerequisite_refusal",
   "@backup_holder_download",
   "@snapshot_receive_admission",
+  "@session_shutdown_ending",
+  "@client_wire_restoration_end",
+  "@session_shutdown_unread",
+  "@nats_envelope_metadata",
+  "@client_foreign_execution",
+  "@client_reply_kind",
+  "@client_restore_reply_validation",
 ]
 target = "test:scenarios"
 
@@ -290,7 +802,12 @@ inputs = ["tests/features/**/*.feature"]
 kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide-stress"]
-tags = ["@deloxide_stress"]
+tags = [
+  "@deloxide_stress",
+  "@ingestor_instance_lifecycle",
+  "@processor_partitions",
+  "@processor_partition_recovery",
+]
 target = "test:scenarios"
 
 # The ten endpoint ACK lifecycle examples have a separate bounded serial phase. They do not
@@ -325,8 +842,12 @@ target = "test:scenarios"
 
 # The capture, restore and checkpoint-transfer scenarios, tagged `@deloxide_stress_restore`, one at
 # a time in the restore selection's lane.
+# Check 41311131846 ran 78 of 80 examples within the former 3840s suite budget after the two
+# NATS STREAM lost-PubAck examples joined this serial selection. Both passed in 30.6s total;
+# the last window example finished its body at 3835s and another remained queued. The current
+# 94-example inventory has a 3960s suite budget and a 360s teardown reserve in this bound.
 [[invocation]]
-bound_seconds = 4200
+bound_seconds = 4320
 concurrency = 1
 evidence = true
 id = "stress-restore-scenarios"
@@ -336,6 +857,86 @@ package = "nervix-scenarios"
 selections = ["deloxide-stress-restore"]
 tags = ["@deloxide_stress_restore"]
 target = "test:scenarios"
+
+[[workload]]
+coverage = "RabbitMQ deliveries through the real broker and the source host's tracked ingestion and ACK state, with every declared metadata field read under ACK SEQUENTIAL and NO ACK on one and three nodes. The AMQP client's reader and borrowed metadata visits are untracked."
+examples = 4
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-delivery-metadata"
+invariant = "Every admitted delivery reads its own envelope and each AMQP basic property as its field's exact type, and a property its publisher left unset reads as null."
+invocation = "scenarios"
+scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A delivery rejected through an emitter fault returns through the real broker and the source host's tracked ACK state on one and three nodes, read on each delivery. Broker redelivery and the emitter's fault timing are untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-redelivered-metadata"
+invariant = "A delivery the ingestor rejected reads metadata.redelivered as false on its first delivery and true when the broker delivers it again, and reaches its emitter once the fault ends."
+invocation = "scenarios"
+scenario = "A RabbitMQ delivery the ingestor rejected reads metadata.redelivered as true when the broker delivers it again"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A producer's AMQP timestamp drives a paced window through tracked source and processor lifecycle state on one and three nodes. Logical timer waits and borrowed metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-timestamp-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp admits a delivery at the instant its producer wrote, and the window aggregates every row it decoded at that instant."
+invocation = "scenarios"
+scenario = "TIMESTAMP AT metadata.timestamp windows RabbitMQ messages at the instant their producer wrote"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "One delivery reaches two ingestors on one and three nodes, and the one that reads a timestamp no DATETIME holds refuses it through the message-error path and tracked ACK state. The ingest group's async refusal step and borrowed metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-timestamp-refusal"
+invariant = "A timestamp no DATETIME holds refuses its message with a validation admit error naming metadata.timestamp only where the field is read, and the next representable delivery passes both ingestors."
+invocation = "scenarios"
+scenario = "A RabbitMQ timestamp no DATETIME holds refuses its message only where metadata.timestamp is read"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: real-broker RabbitMQ ingestion and ACK state in both modes with every declared metadata field read. The AMQP client's reader and borrowed metadata visits remain untracked."
+examples = 4
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-delivery-metadata"
+invariant = "Every admitted delivery reads its own envelope and each AMQP basic property as its field's exact type, and a property its publisher left unset reads as null."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a delivery rejected through an emitter fault returns through the real broker and the source host's tracked ACK state. Broker redelivery and the emitter's fault timing remain untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-redelivered-metadata"
+invariant = "A delivery the ingestor rejected reads metadata.redelivered as false on its first delivery and true when the broker delivers it again, and reaches its emitter once the fault ends."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ delivery the ingestor rejected reads metadata.redelivered as true when the broker delivers it again"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a producer's AMQP timestamp drives a paced window beside tracked source and processor lifecycle state. Logical timer waits and borrowed metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-timestamp-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp admits a delivery at the instant its producer wrote, and the window aggregates every row it decoded at that instant."
+invocation = "stress-scenarios"
+scenario = "TIMESTAMP AT metadata.timestamp windows RabbitMQ messages at the instant their producer wrote"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: one delivery reaches two ingestors, and the one that reads a timestamp no DATETIME holds refuses it through the message-error path and tracked ACK state. The ingest group's async refusal step and borrowed metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-timestamp-refusal"
+invariant = "A timestamp no DATETIME holds refuses its message with a validation admit error naming metadata.timestamp only where the field is read, and the next representable delivery passes both ingestors."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ timestamp no DATETIME holds refuses its message only where metadata.timestamp is read"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Actual outer and nested snapshot decoders, their execution worker FIFO admission and callback destruction, and native checkpoint readers. The independent input charge uses untracked semaphore permits; explicit queued cancellation is covered by the production-owner Shuttle check."
@@ -746,6 +1347,36 @@ scenario = "A stopping <role> whose cordon release outlasts one second completes
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A graceful stop of the node serving a native gRPC session on one and three nodes: admission closes, the session ends its in-flight requests and queues its ending under its tracked in-flight and ending locks, its call ends after the ending, and the public listeners close their connections within their grace period. The connection cut, the listener join and the gRPC server's graceful shutdown are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "scenario.session-shutdown-ending"
+invariant = "A native session on a stopping node receives SessionEnding with reason ServerShuttingDown as its last frame, and its call ends with status OK rather than with its connection."
+invocation = "scenarios"
+scenario = "A native session is told its node is shutting down before its call ends"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A graceful stop, under a five-second shutdown deadline, of the node serving a native gRPC session whose durably admitted command is held in its ordered lane, on one and three nodes: the session ends its in-flight requests and queues its ending under its tracked in-flight and ending locks and lets go of its client while the lane still waits, and terminal teardown ends the held command at the deadline. The connection cut, the listener join, the gRPC server's graceful shutdown and the fault-injection hold are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "scenario.session-shutdown-ending-admitted-command"
+invariant = "A native session whose admitted command still runs when its node stops receives SessionEnding with reason ServerShuttingDown, and its call ends with status OK before the command or the shutdown deadline ends."
+invocation = "scenarios"
+scenario = "A native session whose admitted command still runs is told its node is shutting down before its call ends"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A real unread native Exchange with no HTTP/2 response credit fills the session's control lane, and a test-only observer sees accept_frame actually wait for reply capacity before the serving node stops. The session's in-flight and ending locks run during admission shutdown. The observer, transport flow control, listener join and connection cut are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "scenario.session-shutdown-unread"
+invariant = "An unread native client's connection is cut after the two-second grace, the node stops within its deadline, admission completes and that launch logs its connection cut, on one and three nodes."
+invocation = "scenarios"
+scenario = "A native client reading nothing cannot hold a node stop past the connection grace period"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "A Kafka source's shutdown quiesce closes intake before the leader moves an attached emitter, while tracked source controls and ACK completion run during the stop."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -876,6 +1507,16 @@ scenario = "Nervix reports a core NATS connection change during STOP"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "On one and three nodes a NATS STREAM emitter publishes through a controlled endpoint that forwards its first message but drops the PubAck, then resumes replies. The confirmation timeout, retry and host acknowledgement traverse tracked graph lifecycle and cluster locks; the NATS driver and endpoint sockets are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "scenario.nats-stream-lost-pub-ack"
+invariant = "A stream emitter retries an unconfirmed publication with the same message ID and the stream stores it once."
+invocation = "scenarios"
+scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "STOP on one and three nodes reaches the MQTT sink's finish while its client holds a QOS 0 publish it took behind a broker connection whose CONNECT the endpoint holds. The measured stop completion follows the endpoint's resumption and the broker receives the payload exactly once. Domain teardown and source controls exercise tracked locks; the client's event loop, its flush notices and the proxy's asynchronous gate are untracked."
 examples = 2
 feature = "tests/features/runtime/mqtt_emission.feature"
@@ -883,6 +1524,26 @@ id = "scenario.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "scenarios"
 scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An attached MQTT QOS 2 emitter on one and three nodes whose endpoint drops every PUBREL, so each publish reaches the broker and its exchange stops after PUBREC: the persistent session's event loop keeps running while ACK TIMEOUT expires, the host retries the record on its policy, and the retry's exchange reaches PUBCOMP once the endpoint forwards again."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "scenario.mqtt-emitter-pubcomp-boundary"
+invariant = "An MQTT QOS 2 record stays unacknowledged until PUBCOMP, whatever the broker already holds, and a retried exchange completes through the same running event loop without blocking its emitter task."
+invocation = "scenarios"
+scenario = "An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "MQTT sources and emitters on one and three nodes whose broker listener refuses a client that writes no credentials: each source resume and emitter connection fails with the broker's refusal, the source connects again on the host's reconnect cadence and the emitter on its retry policy, beside the tracked locks of the Plexus commands, the ingestor and emitter status publication and the cluster's teardown. The client's event loop, the broker's refusal and the reconnect waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_client_keys.feature"
+id = "scenario.mqtt-client-credentials-refused"
+invariant = "An MQTT client that writes no credentials to a broker requiring them never subscribes or publishes, and its source and emitter keep reporting the broker's refusal while they connect again."
+invocation = "scenarios"
+scenario = "The broker refuses an MQTT client without credentials, and its source and emitter report the refusal"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1302,6 +1963,16 @@ scenario = "A full Syslog TCP intake keeps every frame through source suspension
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Verified TLS client-subject extraction and complete Syslog metadata projection through real one- and three-node hosts. The source's async connection and immutable peer metadata are outside Deloxide; node lifecycle and host owners retain their tracked locks."
+examples = 4
+feature = "tests/features/runtime/syslog_metadata.feature"
+id = "scenario.syslog-tls-metadata"
+invariant = "Every TLS frame carries its transport and peer address, with the exact client subject only after client-certificate verification."
+invocation = "scenarios"
+scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Resource publication, a replica's temporarily empty source view, pending observation, archive installation and a lookup through the replicated file. The test-control map and watch are untracked; consensus persistence and node lifecycle use tracked owners."
 examples = 1
 feature = "tests/features/cluster/resource_source_discovery.feature"
@@ -1370,6 +2041,26 @@ invariant = "An HTTP ingestor started above the memory high watermark on one and
 invocation = "scenarios"
 scenario = "Memory high watermark pauses scheduled ingestors"
 selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The real Rust client's tracked request registry and event queues end a silent exchange after one held reopening reply exceeds its request timeout, on one and three nodes. Async watch and transport waits are untracked and have a production-owner Shuttle check."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-subscription-timeout"
+invariant = "A waiting reader reopens its acknowledged subscription in another session and receives exactly one row from one post while the first reopening reply remains held."
+invocation = "scenarios"
+scenario = "An unanswered subscription reopening lets a waiting native reader open another session"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the real Rust client's tracked request registry and event queues end a silent exchange after one unanswered reopening, on one and three nodes. Async watch and transport waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-subscription-timeout"
+invariant = "A waiting reader reopens its acknowledged subscription in another session and receives exactly one row from one post while the first reopening reply remains held."
+invocation = "stress-scenarios"
+scenario = "An unanswered subscription reopening lets a waiting native reader open another session"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Rust client consumers, producers and the attached domain clock resuming across a cluster restart."
@@ -1582,6 +2273,26 @@ scenario = "A bounded native wait recovers the original multi-domain backup afte
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Native-client session recovery of a backup whose session a stopped TCP forwarder ended: reconnect attempts until the forwarder restarts after the client's retry budget has passed, the repeated command under its reference, and the archive download. Existing client, storage and cluster lifecycle locks are tracked; the reconnect backoff, command-retry asynchronous waits and the forwarder's sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-wire-backup-outage"
+invariant = "A backup whose session is lost keeps reconnecting until its own wait deadline, past the client's retry budget, and completes under its original execution reference with a verified archive on one and three nodes."
+invocation = "scenarios"
+scenario = "A native backup waits through an outage longer than its retry budget on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Native client subscription restoration that the server refuses for good: the desired-subscription lock across a lost session, the restoration's refusal, the end it reports once and the local deletion that releases the name, with the exchange's reply delivery."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-wire-restoration-end"
+invariant = "A native client whose subscription's relay was dropped while it was disconnected ends the subscription once as RelayRemoved on one and three nodes, reports nothing after that end, and deletes it without the server so its name is free again."
+invocation = "scenarios"
+scenario = "A native client ends the restoration of a subscription whose relay was <change> while it was disconnected"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -1632,7 +2343,7 @@ scenario = "A node whose memory limit cannot hold its memory budgets refuses to 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
+coverage = "Whole-cluster teardown, concurrent live-policy discovery, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. The fixture's reconciliation gate, watch channels and test fault map are untracked."
 examples = 1
 feature = "tests/features/cluster/restarted_voter_observation.feature"
 id = "scenario.restarted-voter-observation"
@@ -1712,6 +2423,36 @@ scenario = "A stopping <role> whose cordon release outlasts one second completes
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: a graceful stop of the node serving a native gRPC session on one and three nodes, while the session ends its in-flight requests and queues its ending under its tracked in-flight and ending locks. The connection cut, the listener join and the gRPC server's graceful shutdown are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "stress.session-shutdown-ending"
+invariant = "A native session on a stopping node receives SessionEnding with reason ServerShuttingDown as its last frame, and its call ends with status OK rather than with its connection."
+invocation = "stress-scenarios"
+scenario = "A native session is told its node is shutting down before its call ends"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a graceful stop, under a five-second shutdown deadline, of the node serving a native gRPC session whose durably admitted command is held in its ordered lane, on one and three nodes, while the session ends its in-flight requests and queues its ending under its tracked in-flight and ending locks. The connection cut, the listener join, the gRPC server's graceful shutdown and the fault-injection hold are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "stress.session-shutdown-ending-admitted-command"
+invariant = "A native session whose admitted command still runs when its node stops receives SessionEnding with reason ServerShuttingDown, and its call ends with status OK before the command or the shutdown deadline ends."
+invocation = "stress-scenarios"
+scenario = "A native session whose admitted command still runs is told its node is shutting down before its call ends"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a real native Exchange grants no response credit until a request's production acceptance future waits for room, then its node stops through the session's tracked in-flight and ending locks. The test-only observation, flow control, listener join and cut remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "stress.session-shutdown-unread"
+invariant = "An unread native client's connection is cut after the two-second grace, the node stops within its deadline, admission completes and that launch logs its connection cut, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A native client reading nothing cannot hold a node stop past the connection grace period"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: bounded remote delivery and peer admission owners under interleaved branches, attached sink acknowledgement and Kafka source offset commit."
 examples = 2
 feature = "tests/features/runtime/remote_ack_owners.feature"
@@ -1772,6 +2513,16 @@ scenario = "A full Syslog TCP intake keeps every frame through source suspension
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: verified TLS subject extraction and complete Syslog metadata through the real host. Deloxide observes the host's tracked locks, not the source's async connection or immutable metadata."
+examples = 4
+feature = "tests/features/runtime/syslog_metadata.feature"
+id = "stress.syslog-tls-metadata"
+invariant = "Every TLS frame carries its transport and peer address, with the exact client subject only after client-certificate verification."
+invocation = "stress-scenarios"
+scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: Syslog accept failure injection while an established connection streams, through the runtime's tracked source lifecycle owners."
 examples = 4
 feature = "tests/features/runtime/syslog_support.feature"
@@ -1809,6 +2560,16 @@ id = "stress.client-consumer-restore"
 invariant = "After a cluster restart on one and three nodes, a Rust client's producer and consumer resume their unchanged endpoint: the consumer reports its attachment interruption and delivers the batch submitted after the restart, and the attached domain clock reports its interruption and ticks again."
 invocation = "stress-scenarios"
 scenario = "A producer and consumer resume their unchanged endpoint after a session restart"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: native client subscription restoration that the server refuses for good: the desired-subscription lock across a lost session, the restoration's refusal, the end it reports once and the local deletion that releases the name, with the exchange's reply delivery."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-wire-restoration-end"
+invariant = "A native client whose subscription's relay was dropped while it was disconnected ends the subscription once as RelayRemoved on one and three nodes, reports nothing after that end, and deletes it without the server so its name is free again."
+invocation = "stress-scenarios"
+scenario = "A native client ends the restoration of a subscription whose relay was <change> while it was disconnected"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -1922,7 +2683,7 @@ scenario = "A node whose memory limit cannot hold its memory budgets refuses to 
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
+coverage = "Under scheduling stress: whole-cluster teardown, concurrent live-policy discovery, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. The fixture's reconciliation gate, watch channels and test fault map are untracked."
 examples = 1
 feature = "tests/features/cluster/restarted_voter_observation.feature"
 id = "stress.restarted-voter-observation"
@@ -2312,6 +3073,16 @@ scenario = "A cluster backup recovers a first-domain lease release refused by a 
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: native-client session recovery of a backup across a TCP forwarder outage longer than its retry budget, the repeated command under its reference, and the archive download. The reconnect backoff, command-retry asynchronous waits and the forwarder's sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-wire-backup-outage"
+invariant = "A backup whose session is lost keeps reconnecting until its own wait deadline, past the client's retry budget, and completes under its original execution reference with a verified archive on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A native backup waits through an outage longer than its retry budget on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -2412,6 +3183,26 @@ scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: an attached MQTT QOS 2 emitter on one and three nodes whose endpoint drops every PUBREL, so each publish reaches the broker and its exchange stops after PUBREC: the persistent session's event loop keeps running while ACK TIMEOUT expires, the host retries the record on its policy, and the retry's exchange reaches PUBCOMP once the endpoint forwards again."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "stress.mqtt-emitter-pubcomp-boundary"
+invariant = "An MQTT QOS 2 record stays unacknowledged until PUBCOMP, whatever the broker already holds, and a retried exchange completes through the same running event loop without blocking its emitter task."
+invocation = "stress-scenarios"
+scenario = "An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: MQTT sources and emitters on one and three nodes whose broker listener refuses a client that writes no credentials: each source resume and emitter connection fails with the broker's refusal, the source connects again on the host's reconnect cadence and the emitter on its retry policy, beside the tracked locks of the Plexus commands, the ingestor and emitter status publication and the cluster's teardown. The client's event loop, the broker's refusal and the reconnect waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_client_keys.feature"
+id = "stress.mqtt-client-credentials-refused"
+invariant = "An MQTT client that writes no credentials to a broker requiring them never subscribes or publishes, and its source and emitter keep reporting the broker's refusal while they connect again."
+invocation = "stress-scenarios"
+scenario = "The broker refuses an MQTT client without credentials, and its source and emitter report the refusal"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: an Iceberg commit on one and three nodes whose staged file the bulk memory class has no room for, so the emitter host retries the commit on its policy while the sink keeps the staged file and its acknowledgements, then the commit once the scenario releases its hold. The host's retry status and its tracked publication run beside the commit; the memory charges are semaphore permits and the catalog and object-store clients are asynchronous, so the detector does not see them."
 examples = 2
 feature = "tests/features/runtime/iceberg_emission.feature"
@@ -2480,6 +3271,26 @@ invariant = "A lost connection during STOP produces the Core NATS pending-record
 invocation = "stress-scenarios"
 scenario = "Nervix reports a core NATS connection change during STOP"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: on one and three nodes a NATS STREAM emitter publishes through a controlled endpoint that forwards its first message but drops the PubAck, then resumes replies. The confirmation timeout, retry and host acknowledgement traverse tracked graph lifecycle and cluster locks; the NATS driver and endpoint sockets are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "stress.nats-stream-lost-pub-ack"
+invariant = "A stream emitter retries an unconfirmed publication with the same message ID and the stream stores it once."
+invocation = "stress-scenarios"
+scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: in the restore lane, a NATS STREAM emitter's lost PubAck and retry on one and three nodes exercise tracked graph lifecycle and cluster locks while its driver and endpoint sockets remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "stress.nats-stream-lost-pub-ack-restore"
+invariant = "A stream emitter retries an unconfirmed publication with the same message ID and the stream stores it once."
+invocation = "stress-restore-scenarios"
+scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID"
+selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "Under scheduling stress: a connect-mode ZeroMQ emitter on one and three nodes whose sink open runs out of connect_timeout_ms against a port that refuses every connection, the emitter task's reopen on its retry policy, and the reopen that connects once a peer listens, beside the tracked locks of the Plexus commands, the HTTP endpoint intake and the cluster's teardown. The ZeroMQ driver's connection attempts, the connect deadline and the emitter's retry wait are untracked."
@@ -2682,6 +3493,26 @@ scenario = "An MQTT input moves away from an unavailable endpoint without retain
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "The ingestor loop's failed read, its resume on the declared retry policy and the consumer it opens again, with no driver retry between a lost broker and the host. Broker I/O, TLS and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_client_authentication.feature"
+id = "scenario.pulsar-ingestor-reconnect"
+invariant = "A Pulsar ingestor that loses its broker reports each failed reconnect to the host, whose backoff grows on its RETRY POLICY, and clears its status once the broker returns, on one and three nodes."
+invocation = "scenarios"
+scenario = "A Pulsar ingestor leaves reconnecting to its declared RETRY POLICY"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the ingestor loop's failed read, its resume on the declared retry policy and the consumer it opens again, with no driver retry between a lost broker and the host. Broker I/O, TLS and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_client_authentication.feature"
+id = "stress.pulsar-ingestor-reconnect"
+invariant = "A Pulsar ingestor that loses its broker reports each failed reconnect to the host, whose backoff grows on its RETRY POLICY, and clears its status once the broker returns, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A Pulsar ingestor leaves reconnecting to its declared RETRY POLICY"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Typed input retirement during domain rebuild after source tasks stop, removing the Pulsar subscription a dropped ingestor owned. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
 examples = 4
 feature = "tests/features/runtime/pulsar_subscriptions.feature"
@@ -2699,6 +3530,26 @@ id = "stress.pulsar-subscription-drop"
 invariant = "DROP while running or stopped retires each locally owned Pulsar input before its typed execution plan is withdrawn, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "Dropping a Pulsar ingestor removes the subscription it owns"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An owned EXCLUSIVE Pulsar join the broker refuses at open, on one and three nodes: the source host starts the ingestor with no consumer, publishes the refusal through its tracked status and resume paths, and retries until the other consumer leaves. The connector holds no tracked lock; broker I/O and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_subscription_types.feature"
+id = "scenario.pulsar-subscription-join-refused"
+invariant = "A join refused because another consumer holds the subscription leaves the ingestor started, reports the refusal as its transient status, and reaches the first resume that the broker admits."
+invocation = "scenarios"
+scenario = "A subscription another consumer holds is the ingestor's transient status until it leaves"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an owned EXCLUSIVE Pulsar join the broker refuses at open, on one and three nodes, with the source host publishing the refusal through its tracked status and resume paths until the other consumer leaves. The connector holds no tracked lock; broker I/O and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_subscription_types.feature"
+id = "stress.pulsar-subscription-join-refused"
+invariant = "A join refused because another consumer holds the subscription leaves the ingestor started, reports the refusal as its transient status, and reaches the first resume that the broker admits."
+invocation = "stress-scenarios"
+scenario = "A subscription another consumer holds is the ingestor's transient status until it leaves"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2759,6 +3610,46 @@ id = "stress.forced-failover-delivery"
 invariant = "The destination delivers the retained input and installs a later revision before the former owner is released, within bounds below the entity gate deadline."
 invocation = "stress-scenarios"
 scenario = "A forced failover and a later revision install while the former owner remains paused"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Failover of the owner of one partition of a partitioned relay: per-unit owner routes, the moved partition's channel retirement and owner task replacement while the other partitions keep their owners, channels and owner tasks. Exercises relay channel ordering, dispatch gate engagement, ACK ownership and consensus lifecycle locks; asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "scenario.relay-partition-failover"
+invariant = "Losing the owner of some partitions moves only those partitions to surviving nodes, the other partitions keep flowing and keep their owners, and every key's order to the emitter is kept."
+invocation = "scenarios"
+scenario = "Failover of one partition owner moves only its partitions and leaves the other partitions running"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: failover of one partition owner of a partitioned relay, with per-unit owner routes, channel retirement and owner task replacement for only the moved partitions. Asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "stress.relay-partition-failover"
+invariant = "Losing the owner of some partitions moves only those partitions to surviving nodes, the other partitions keep flowing and keep their owners, and every key's order to the emitter is kept."
+invocation = "stress-scenarios"
+scenario = "Failover of one partition owner moves only its partitions and leaves the other partitions running"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Failover of the owner of some partitions of a materialized relay while a surviving node keeps others: each kept partition's relay-state task stops before the state store's assignment rebinding, and its successor starts with the new originator. Exercises the assignment barrier and the relay's dispatch gate; asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "scenario.relay-partition-state-failover"
+invariant = "A partition a surviving node keeps goes on applying materialized updates after a sibling partition's owner fails, and the moved partitions' new owners apply theirs."
+invocation = "scenarios"
+scenario = "A partition a surviving node keeps goes on applying its materialized state after another partition's owner fails"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: each kept partition's relay-state task stops before the assignment rebinding a failover performs, and its successor starts with the new originator. Asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "stress.relay-partition-state-failover"
+invariant = "A partition a surviving node keeps goes on applying materialized updates after a sibling partition's owner fails, and the moved partitions' new owners apply theirs."
+invocation = "stress-scenarios"
+scenario = "A partition a surviving node keeps goes on applying its materialized state after another partition's owner fails"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2970,16 +3861,31 @@ workloads = [
 [[owner]]
 path = "crates/client-core/src/client.rs"
 workloads = [
+  "scenario.restore-attempt-history",
+  "stress.restore-attempt-history",
+  "stress.restore-attempt-history-restore",
+  "scenario.client-restore-reply-validation",
+  "stress.client-restore-reply-validation",
+  "stress.client-restore-reply-validation-restore",
+  "scenario.client-foreign-execution",
+  "stress.client-foreign-execution",
+  "scenario.client-reply-kind",
+  "stress.client-reply-kind",
+  "scenario.restore-codec-rejection",
+  "stress.restore-codec-rejection",
+  "stress.restore-codec-rejection-restore",
   "paced.reopen-generation",
   "paced.delayed-refusal",
   "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
+  "scenario.client-wire-backup-outage",
   "stress.paced.reopen-generation",
   "stress.paced.delayed-refusal",
   "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
+  "stress.client-wire-backup-outage",
 ]
 
 [[owner]]
@@ -3010,9 +3916,27 @@ workloads = [
 ]
 
 [[owner]]
+gap = "The listed workloads reach the pending-replies lock through every request's registration, the replies its reader routes and the close of an exchange. None cancels a command through the Rust client: its only caller, nervix-cli, has no diagnostic form, and the lane starts an ordinary CLI binary, so ExchangeRequests::cancel, which registers a CancelRequest under the same single unnested acquisition every request takes and closes the registry when the frame cannot be sent, is exercised only by the client-core unit tests and the CLI scenarios, outside the lane."
 path = "crates/client-core/src/exchange.rs"
 workloads = [
+  "scenario.restore-attempt-history",
+  "stress.restore-attempt-history",
+  "stress.restore-attempt-history-restore",
+  "scenario.client-subscription-timeout",
+  "stress.client-subscription-timeout",
+  "scenario.client-restore-reply-validation",
+  "stress.client-restore-reply-validation",
+  "stress.client-restore-reply-validation-restore",
+  "scenario.client-foreign-execution",
+  "stress.client-foreign-execution",
+  "scenario.client-reply-kind",
+  "stress.client-reply-kind",
+  "scenario.restore-codec-rejection",
+  "stress.restore-codec-rejection",
+  "stress.restore-codec-rejection-restore",
   "scenario.client-alter-drain",
+  "scenario.client-wire-restoration-end",
+  "stress.client-wire-restoration-end",
   "paced.reopen-generation",
   "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
@@ -3047,6 +3971,8 @@ workloads = [
 [[owner]]
 path = "crates/client-core/src/restoration.rs"
 workloads = [
+  "scenario.client-wire-restoration-end",
+  "stress.client-wire-restoration-end",
   "paced.reopen-generation",
   "paced.follow-start-generation",
   "stress.paced.reopen-generation",
@@ -3055,7 +3981,12 @@ workloads = [
 
 [[owner]]
 path = "crates/client-core/src/subscriptions.rs"
-workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "stress.diagnostic-nodes",
+  "scenario.client-wire-restoration-end",
+  "stress.client-wire-restoration-end",
+]
 
 [[owner]]
 path = "crates/connectors/kafka/src/topic/ingestor_rejection.rs"
@@ -3123,9 +4054,14 @@ workloads = [
 ]
 
 [[owner]]
-gap = "The listed node workloads reach the armed-fault mutex and sync-delay RwLock during durable writes. They do not arm StoragePause's blocking condition-variable wait and release or inject a nonzero sync delay; those fault effects are outside the registered lane workloads."
+gap = "The listed node workloads reach the armed-fault mutex and sync-delay RwLock during durable writes. The joint-membership workloads also reach StoragePause's blocking condition-variable wait and release. They do not inject a nonzero sync delay; that fault effect is outside the registered lane workloads."
 path = "crates/consensus/src/storage_fault.rs"
-workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "stress.diagnostic-nodes",
+  "scenario.joint-membership-recovery",
+  "stress.joint-membership-recovery",
+]
 
 [[owner]]
 path = "crates/interconnect/src/connection.rs"
@@ -3241,6 +4177,12 @@ workloads = [
 [[owner]]
 path = "src/application/session/mod.rs"
 workloads = [
+  "scenario.session-shutdown-unread",
+  "stress.session-shutdown-unread",
+  "scenario.session-shutdown-ending",
+  "stress.session-shutdown-ending",
+  "scenario.session-shutdown-ending-admitted-command",
+  "stress.session-shutdown-ending-admitted-command",
   "scenario.clock-takeover-local",
   "scenario.clock-takeover-observer",
   "stress.clock-takeover-local",
@@ -3260,6 +4202,12 @@ workloads = [
 [[owner]]
 path = "src/application/session/outbound.rs"
 workloads = [
+  "scenario.session-shutdown-unread",
+  "stress.session-shutdown-unread",
+  "scenario.session-shutdown-ending",
+  "stress.session-shutdown-ending",
+  "scenario.session-shutdown-ending-admitted-command",
+  "stress.session-shutdown-ending-admitted-command",
   "scenario.clock-takeover-local",
   "scenario.clock-takeover-observer",
   "stress.clock-takeover-local",
@@ -3402,6 +4350,10 @@ workloads = [
 [[owner]]
 path = "src/registry/storage.rs"
 workloads = [
+  "parameters.request-header-cap",
+  "parameters.live",
+  "parameters.restart",
+  "parameters.return",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
@@ -3411,17 +4363,81 @@ workloads = [
 [[owner]]
 path = "src/runtime/branch_aggregated_state.rs"
 workloads = [
+  "scenario.ingestor-instance-01",
+  "stress.ingestor-instance-01",
+  "scenario.ingestor-instance-02",
+  "stress.ingestor-instance-02",
+  "scenario.ingestor-instance-03",
+  "stress.ingestor-instance-03",
+  "scenario.ingestor-instance-04",
+  "stress.ingestor-instance-04",
+  "scenario.ingestor-instance-05",
+  "stress.ingestor-instance-05",
+  "scenario.ingestor-instance-06",
+  "stress.ingestor-instance-06",
+  "scenario.ingestor-instance-07",
+  "stress.ingestor-instance-07",
+  "scenario.ingestor-instance-08",
+  "stress.ingestor-instance-08",
+  "scenario.ingestor-instance-09",
+  "stress.ingestor-instance-09",
+  "scenario.ingestor-instance-10",
+  "stress.ingestor-instance-10",
+  "scenario.ingestor-instance-11",
+  "stress.ingestor-instance-11",
+  "scenario.ingestor-instance-12",
+  "stress.ingestor-instance-12",
+  "scenario.ingestor-instance-13",
+  "stress.ingestor-instance-13",
+  "scenario.ingestor-instance-14",
+  "stress.ingestor-instance-14",
+
   "scenario.client-alter-drain",
   "stress.client-alter-drain",
   "scenario.window-metrics-drain",
   "scenario.window-metrics-relocation",
   "stress.window-metrics-drain",
   "stress.window-metrics-relocation",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
 path = "src/runtime/branch_lifecycle_state.rs"
 workloads = [
+  "scenario.ingestor-instance-01",
+  "stress.ingestor-instance-01",
+  "scenario.ingestor-instance-02",
+  "stress.ingestor-instance-02",
+  "scenario.ingestor-instance-03",
+  "stress.ingestor-instance-03",
+  "scenario.ingestor-instance-04",
+  "stress.ingestor-instance-04",
+  "scenario.ingestor-instance-05",
+  "stress.ingestor-instance-05",
+  "scenario.ingestor-instance-06",
+  "stress.ingestor-instance-06",
+  "scenario.ingestor-instance-07",
+  "stress.ingestor-instance-07",
+  "scenario.ingestor-instance-08",
+  "stress.ingestor-instance-08",
+  "scenario.ingestor-instance-09",
+  "stress.ingestor-instance-09",
+  "scenario.ingestor-instance-10",
+  "stress.ingestor-instance-10",
+  "scenario.ingestor-instance-11",
+  "stress.ingestor-instance-11",
+  "scenario.ingestor-instance-12",
+  "stress.ingestor-instance-12",
+  "scenario.ingestor-instance-13",
+  "stress.ingestor-instance-13",
+  "scenario.ingestor-instance-14",
+  "stress.ingestor-instance-14",
+
   "scenario.guest-save-backup",
   "stress.guest-save-backup",
   "scenario.native-metadata-restore",
@@ -3432,11 +4448,46 @@ workloads = [
   "stress.branch-state-resume",
   "stress.branch-state-stale-coordinator",
   "stress.restore-generation",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
 path = "src/runtime/branch_runtime.rs"
 workloads = [
+  "scenario.ingestor-instance-01",
+  "stress.ingestor-instance-01",
+  "scenario.ingestor-instance-02",
+  "stress.ingestor-instance-02",
+  "scenario.ingestor-instance-03",
+  "stress.ingestor-instance-03",
+  "scenario.ingestor-instance-04",
+  "stress.ingestor-instance-04",
+  "scenario.ingestor-instance-05",
+  "stress.ingestor-instance-05",
+  "scenario.ingestor-instance-06",
+  "stress.ingestor-instance-06",
+  "scenario.ingestor-instance-07",
+  "stress.ingestor-instance-07",
+  "scenario.ingestor-instance-08",
+  "stress.ingestor-instance-08",
+  "scenario.ingestor-instance-09",
+  "stress.ingestor-instance-09",
+  "scenario.ingestor-instance-10",
+  "stress.ingestor-instance-10",
+  "scenario.ingestor-instance-11",
+  "stress.ingestor-instance-11",
+  "scenario.ingestor-instance-12",
+  "stress.ingestor-instance-12",
+  "scenario.ingestor-instance-13",
+  "stress.ingestor-instance-13",
+  "scenario.ingestor-instance-14",
+  "stress.ingestor-instance-14",
+
   "scenario.shutdown-flush-before-freeze",
   "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
@@ -3445,11 +4496,46 @@ workloads = [
   "stress.wasm-kafka-restore",
   "scenario.backup-parked-wait-slow-reads",
   "stress.backup-parked-wait-slow-reads",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
 path = "src/runtime/entity_gate.rs"
 workloads = [
+  "scenario.ingestor-instance-01",
+  "stress.ingestor-instance-01",
+  "scenario.ingestor-instance-02",
+  "stress.ingestor-instance-02",
+  "scenario.ingestor-instance-03",
+  "stress.ingestor-instance-03",
+  "scenario.ingestor-instance-04",
+  "stress.ingestor-instance-04",
+  "scenario.ingestor-instance-05",
+  "stress.ingestor-instance-05",
+  "scenario.ingestor-instance-06",
+  "stress.ingestor-instance-06",
+  "scenario.ingestor-instance-07",
+  "stress.ingestor-instance-07",
+  "scenario.ingestor-instance-08",
+  "stress.ingestor-instance-08",
+  "scenario.ingestor-instance-09",
+  "stress.ingestor-instance-09",
+  "scenario.ingestor-instance-10",
+  "stress.ingestor-instance-10",
+  "scenario.ingestor-instance-11",
+  "stress.ingestor-instance-11",
+  "scenario.ingestor-instance-12",
+  "stress.ingestor-instance-12",
+  "scenario.ingestor-instance-13",
+  "stress.ingestor-instance-13",
+  "scenario.ingestor-instance-14",
+  "stress.ingestor-instance-14",
+
   "scenario.websocket-declaration-buffer",
   "stress.websocket-declaration-buffer",
   "scenario.syslog-suspend-handoff",
@@ -3474,6 +4560,12 @@ workloads = [
   "stress.shutdown-terminating-destination",
   "scenario.shutdown-unactivated-handoff",
   "stress.shutdown-unactivated-handoff",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -3503,6 +4595,34 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.ingestor-instance-01",
+  "stress.ingestor-instance-01",
+  "scenario.ingestor-instance-02",
+  "stress.ingestor-instance-02",
+  "scenario.ingestor-instance-03",
+  "stress.ingestor-instance-03",
+  "scenario.ingestor-instance-04",
+  "stress.ingestor-instance-04",
+  "scenario.ingestor-instance-05",
+  "stress.ingestor-instance-05",
+  "scenario.ingestor-instance-06",
+  "stress.ingestor-instance-06",
+  "scenario.ingestor-instance-07",
+  "stress.ingestor-instance-07",
+  "scenario.ingestor-instance-08",
+  "stress.ingestor-instance-08",
+  "scenario.ingestor-instance-09",
+  "stress.ingestor-instance-09",
+  "scenario.ingestor-instance-10",
+  "stress.ingestor-instance-10",
+  "scenario.ingestor-instance-11",
+  "stress.ingestor-instance-11",
+  "scenario.ingestor-instance-12",
+  "stress.ingestor-instance-12",
+  "scenario.ingestor-instance-13",
+  "stress.ingestor-instance-13",
+  "scenario.ingestor-instance-14",
+  "stress.ingestor-instance-14",
   "scenario.websocket-declaration-buffer",
   "stress.websocket-declaration-buffer",
   "scenario.syslog-suspend-handoff",
@@ -3539,6 +4659,10 @@ workloads = [
   "stress.pulsar-subscription-replacement",
   "scenario.pulsar-subscription-retention",
   "stress.pulsar-subscription-retention",
+  "scenario.pulsar-ingestor-reconnect",
+  "stress.pulsar-ingestor-reconnect",
+  "scenario.pulsar-subscription-join-refused",
+  "stress.pulsar-subscription-join-refused",
   "scenario.websocket-source-drop",
   "scenario.websocket-source-reconnect",
   "scenario.websocket-source-move",
@@ -3561,11 +4685,27 @@ workloads = [
   "stress.diagnostic-nodes",
   "stress.memory-pressure-pause",
   "stress.shutdown-kafka-handoff",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
+  "scenario.nats-stream-metadata",
+  "stress.nats-stream-metadata",
+  "scenario.nats-subject-metadata",
+  "stress.nats-subject-metadata",
+  "scenario.nats-reply-subject",
+  "stress.nats-reply-subject",
+  "scenario.nats-header-order",
+  "stress.nats-header-order",
 ]
 
 [[owner]]
 path = "src/runtime/materialized_state.rs"
 workloads = [
+  "scenario.relay-partition-state-failover",
+  "stress.relay-partition-state-failover",
   "scenario.restore-publication-coordinator",
   "stress.restore-publication-coordinator",
   "owner.materialized-publications",
@@ -3590,6 +4730,24 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/processor_branch_task.rs"
 workloads = [
+  "scenario.processor-partitions-deduplicator",
+  "stress.processor-partitions-deduplicator",
+  "scenario.processor-partitions-generator",
+  "stress.processor-partitions-generator",
+  "scenario.processor-partitions-window",
+  "stress.processor-partitions-window",
+  "scenario.processor-partitions-wasm",
+  "stress.processor-partitions-wasm",
+  "scenario.processor-partitions-correlator",
+  "stress.processor-partitions-correlator",
+  "scenario.processor-partitions-dependency",
+  "stress.processor-partitions-dependency",
+  "scenario.processor-partition-recovery-loss",
+  "stress.processor-partition-recovery-loss",
+  "scenario.processor-partition-recovery-drain",
+  "stress.processor-partition-recovery-drain",
+  "scenario.processor-partition-restore",
+  "stress.processor-partition-restore",
   "owner.branch-lane-channel-retirement",
   "scenario.wasm-kafka-restore",
   "scenario.client-alter-drain",
@@ -3602,19 +4760,51 @@ workloads = [
 [[owner]]
 path = "src/runtime/relay_boundary.rs"
 workloads = [
+  "scenario.processor-partitions-deduplicator",
+  "stress.processor-partitions-deduplicator",
+  "scenario.processor-partitions-generator",
+  "stress.processor-partitions-generator",
+  "scenario.processor-partitions-window",
+  "stress.processor-partitions-window",
+  "scenario.processor-partitions-wasm",
+  "stress.processor-partitions-wasm",
+  "scenario.processor-partitions-correlator",
+  "stress.processor-partitions-correlator",
+  "scenario.processor-partitions-dependency",
+  "stress.processor-partitions-dependency",
+  "scenario.processor-partition-recovery-loss",
+  "stress.processor-partition-recovery-loss",
+  "scenario.processor-partition-recovery-drain",
+  "stress.processor-partition-recovery-drain",
   "scenario.diagnostic-nodes",
   "scenario.forced-failover-delivery",
   "scenario.materialized-retention-activation",
   "scenario.materialized-restart-retention",
+  "scenario.relay-partition-failover",
+  "scenario.relay-partition-state-failover",
   "stress.diagnostic-nodes",
   "stress.forced-failover-delivery",
   "stress.materialized-retention-activation",
   "stress.materialized-restart-retention",
+  "stress.relay-partition-failover",
+  "stress.relay-partition-state-failover",
 ]
 
 [[owner]]
 path = "src/runtime/relay_channel.rs"
 workloads = [
+  "scenario.processor-partitions-deduplicator",
+  "stress.processor-partitions-deduplicator",
+  "scenario.processor-partitions-generator",
+  "stress.processor-partitions-generator",
+  "scenario.processor-partitions-window",
+  "stress.processor-partitions-window",
+  "scenario.processor-partitions-wasm",
+  "stress.processor-partitions-wasm",
+  "scenario.processor-partitions-correlator",
+  "stress.processor-partitions-correlator",
+  "scenario.processor-partitions-dependency",
+  "stress.processor-partitions-dependency",
   "scenario.diagnostic-nodes",
   "stress.diagnostic-nodes",
   "scenario.forced-failover-delivery",
@@ -3636,6 +4826,37 @@ workloads = [
 [[owner]]
 path = "src/runtime/state_store.rs"
 workloads = [
+  "scenario.ingestor-instance-01",
+  "stress.ingestor-instance-01",
+  "scenario.ingestor-instance-02",
+  "stress.ingestor-instance-02",
+  "scenario.ingestor-instance-03",
+  "stress.ingestor-instance-03",
+  "scenario.ingestor-instance-04",
+  "stress.ingestor-instance-04",
+  "scenario.ingestor-instance-05",
+  "stress.ingestor-instance-05",
+  "scenario.ingestor-instance-06",
+  "stress.ingestor-instance-06",
+  "scenario.ingestor-instance-07",
+  "stress.ingestor-instance-07",
+  "scenario.ingestor-instance-08",
+  "stress.ingestor-instance-08",
+  "scenario.ingestor-instance-09",
+  "stress.ingestor-instance-09",
+  "scenario.ingestor-instance-10",
+  "stress.ingestor-instance-10",
+  "scenario.ingestor-instance-11",
+  "stress.ingestor-instance-11",
+  "scenario.ingestor-instance-12",
+  "stress.ingestor-instance-12",
+  "scenario.ingestor-instance-13",
+  "stress.ingestor-instance-13",
+  "scenario.ingestor-instance-14",
+  "stress.ingestor-instance-14",
+
+  "scenario.relay-partition-state-failover",
+  "stress.relay-partition-state-failover",
   "scenario.kafka-start-generation",
   "stress.kafka-start-generation",
   "scenario.kafka-start-generation-restore",
@@ -3655,11 +4876,20 @@ workloads = [
   "stress.restore-staging-quota",
   "stress.branch-state-large",
   "stress.wasm-large-handoff",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
 path = "src/runtime_ack.rs"
 workloads = [
+  "owner.emitter-branch-retirement",
+  "scenario.sqs-parallel-batch",
+  "stress.sqs-parallel-batch",
   "scenario.client-alter-drain",
   "scenario.shutdown-source-confirmation",
   "scenario.shutdown-source-confirmation-handoff",
@@ -3753,23 +4983,63 @@ scenario = "MQTT ACK PARALLEL publishes a quiesce change meets half gathered rea
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "An entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+coverage = "An entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The admitted message exercises U32 and DATETIME projection at the quiesce boundary; the bounded ingest-metadata-projection property separately verifies retained-copy replay. The held answer, the SQS client and the read's cancellation are outside the detector."
 examples = 2
 feature = "tests/features/runtime/sqs_ingestion.feature"
 id = "scenario.sqs-receive-at-quiesce"
-invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message with exact U32 receive_count and DATETIME sent_at reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+coverage = "An entity hold that quiesces a NATS STREAM ingestor on one and three nodes, through public Plexus commands: the ingestor suspends, lets its durable consumer's pull go and resumes, beside tracked quiesce, schedule and teardown locks. The NATS client, its pull, inbox drain and acknowledgement requests are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_ingestion.feature"
+id = "scenario.nats-stream-suspend"
+invariant = "A suspended NATS STREAM ingestor sends no pull request, so what is published meanwhile stays pending in its stream, and it delivers and acknowledges all of it once it resumes, on one and three nodes."
+invocation = "scenarios"
+scenario = "A suspended NATS STREAM ingestor leaves what is published in its stream and delivers it once it resumes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an entity hold that quiesces a NATS STREAM ingestor on one and three nodes, through public Plexus commands: the ingestor suspends, lets its durable consumer's pull go and resumes, beside tracked quiesce, schedule and teardown locks. The NATS client, its pull, inbox drain and acknowledgement requests are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_ingestion.feature"
+id = "stress.nats-stream-suspend"
+invariant = "A suspended NATS STREAM ingestor sends no pull request, so what is published meanwhile stays pending in its stream, and it delivers and acknowledges all of it once it resumes, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A suspended NATS STREAM ingestor leaves what is published in its stream and delivers it once it resumes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The admitted message exercises U32 and DATETIME projection at the quiesce boundary; the bounded ingest-metadata-projection property separately verifies retained-copy replay. The held answer, the SQS client and the read's cancellation are outside the detector."
 examples = 2
 feature = "tests/features/runtime/sqs_ingestion.feature"
 id = "stress.sqs-receive-at-quiesce"
-invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message with exact U32 receive_count and DATETIME sent_at reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An SQS ACK PARALLEL batch of ten messages that a stalled emitter holds in flight and that is then acknowledged as one batch, through public Plexus commands, including the tracked acknowledgement-tree locks the batch waits on. The SQS client, its receives, its batch deletions and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/sqs_ingestion.feature"
+id = "scenario.sqs-parallel-batch"
+invariant = "An SQS ACK PARALLEL MAX 10 ingestor holds ten messages in flight while their acknowledgements wait, and deletes them with batch requests once they are acknowledged, on one and three nodes."
+invocation = "scenarios"
+scenario = "SQS ACK PARALLEL takes up to its MAX of messages into one batch and deletes them with batch requests"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an SQS ACK PARALLEL batch of ten messages that a stalled emitter holds in flight and that is then acknowledged as one batch, through public Plexus commands, including the tracked acknowledgement-tree locks the batch waits on. The SQS client, its receives, its batch deletions and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/sqs_ingestion.feature"
+id = "stress.sqs-parallel-batch"
+invariant = "An SQS ACK PARALLEL MAX 10 ingestor holds ten messages in flight while their acknowledgements wait, and deletes them with batch requests once they are acknowledged, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "SQS ACK PARALLEL takes up to its MAX of messages into one batch and deletes them with batch requests"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -4032,6 +5302,278 @@ invocation = "stress-scenarios"
 scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected"
 selections = ["deloxide-stress"]
 
+# Parameter publication shares the existing runtime admission and storage owners in every mode.
+[[workload]]
+coverage = "A restore held before model application meets a lower committed header cap while runtime installation retains the prior policy. Authoritative observation requires the typed cap refusal and an empty target before barriers are released."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.restore-model-cap"
+invariant = "A restore cannot strongly publish models validated against a superseded cluster cap."
+invocation = "cluster-parameters"
+scenario = "A restore refuses models above a cap committed while runtime installation waits on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A real committed cap change invalidates the inspected transaction basis on one and three nodes while the queued Model remains valid; stale commit refusal preserves the open transaction and applies no effect before explicit reinspection."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.transaction-preview-fence"
+invariant = "An inspected transaction cannot commit against a superseded cluster-parameter revision."
+invocation = "cluster-parameters"
+scenario = "A parameter change invalidates an inspected transaction preview on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "The committed header-count range is checked against the request transport's representable distinct-field capacity before publication."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.header-count-range"
+invariant = "A cluster parameter cannot promise a header count its HTTP representation cannot hold."
+invocation = "cluster-parameters"
+scenario = "A parameter change reserves transport capacity in the HTTP header count on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Committed header caps validate literal HTTP polling headers at both parameter transition and model admission. The request transport is not opened by this configuration-only scenario."
+examples = 4
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.request-header-cap"
+invariant = "A cluster header cap protects existing and newly admitted HTTP polling ingestors."
+invocation = "cluster-parameters"
+scenario = "A lower HTTP request header <parameter> cap protects stored and new ingestors on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Committed header caps validate literal WebSocket upgrade headers at parameter transition and model admission. This configuration-only scenario opens no transport."
+examples = 4
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.websocket-header-cap"
+invariant = "A cluster header cap protects existing and newly admitted WebSocket connection ingestors."
+invocation = "cluster-parameters"
+scenario = "A lower WebSocket upgrade header <parameter> cap protects stored and new ingestors on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+id = "cluster-parameters"
+inputs = ["tests/features/cluster/cluster_parameters.feature"]
+kind = "cucumber"
+package = "nervix-scenarios"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+tags = ["@cluster_parameters"]
+target = "test:scenarios"
+
+[[workload]]
+coverage = "Exercises the existing committed-parameter installation and status owners on one and three nodes; duration literal parsing itself has no tracked synchronization."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.multi-span-duration"
+invariant = "Committed and running policy report the complete multi-span duration on one- and three-node clusters."
+invocation = "cluster-parameters"
+scenario = "A multi-span duration commits and applies on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Each live node installs the committed policy before command completion."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.live"
+invariant = "Each live node installs the committed policy before command completion."
+invocation = "cluster-parameters"
+scenario = "A committed parameter change applies on every node without restarting on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "First-bootstrap values become one cluster authority."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.seed"
+invariant = "First-bootstrap values become one cluster authority."
+invocation = "cluster-parameters"
+scenario = "First bootstrap seeds the parameter record for every node on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Explicit seed flags are refused after the first bootstrap."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.refuse-seed"
+invariant = "Explicit seed flags are refused after the first bootstrap."
+invocation = "cluster-parameters"
+scenario = "An existing cluster refuses parameter seed options at a later node start on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Committed policy survives a process restart."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.restart"
+invariant = "Committed policy survives a process restart."
+invocation = "cluster-parameters"
+scenario = "A committed parameter survives a node restart on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A returning node answers public status and liveness, remains unready and returns a nonterminal outcome for an exact durable retry while initial discovery is held, then adopts live policy and recovers that execution."
+examples = 1
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.return"
+invariant = "A returning node adopts live policy before its stale log catches up."
+invocation = "cluster-parameters"
+scenario = "A node down during a parameter change adopts the committed record when it returns"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "An atomic cap refusal identifies the existing model."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.model-cap"
+invariant = "An atomic cap refusal identifies the existing model."
+invocation = "cluster-parameters"
+scenario = "Lowering a cap refuses the existing model that exceeds it on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Repeated-work durations have a typed positive bound."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.positive-duration"
+invariant = "Repeated-work durations have a typed positive bound."
+invocation = "cluster-parameters"
+scenario = "A parameter change refuses a nonpositive snapshot interval on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Session completion pages on one and three nodes through the server's statement grammar; the assignment grammar itself takes no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.completion-unassigned"
+invariant = "Completing a parameter change offers only the parameters it has not assigned."
+invocation = "cluster-parameters"
+scenario = "Completing a parameter change offers only the parameters it has not assigned on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A named client's command is refused by the server's statement grammar on one and three nodes before admission; parsing takes no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.repeat-refusal"
+invariant = "A parameter change refuses a repeated parameter at the word that repeats it, naming the parameter."
+invocation = "cluster-parameters"
+scenario = "A parameter change refuses a repeated parameter where the repeat is written on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Public native producer opens observe a raised and lowered policy while admitted credit remains attached."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.client-credit"
+invariant = "New grants use committed byte limits; an admitted grant survives a later lower cap."
+invocation = "cluster-parameters"
+scenario = "A live producer byte cap changes new grants and retains admitted credit on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Lowered header cardinality and byte limits are validated against known HTTP header names even when their values are dynamic."
+examples = 4
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.header-cap"
+invariant = "A parameter transition cannot invalidate a model's known HTTP header names or their byte requirement."
+invocation = "cluster-parameters"
+scenario = "A lower HTTP header <parameter> cap refuses known names with dynamic values on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 [[workload]]
 coverage = "Tracked transaction state and impact recording during branch reset application and recovery. Async gates, consensus/network waits and the test-owned fault maps are untracked."
 examples = 2
@@ -4110,4 +5652,625 @@ id = "stress.kafka-start-generation-restore"
 invariant = "A restored START AT generation resumes its archived positions without rewinding acknowledged partitions."
 invocation = "stress-restore-scenarios"
 scenario = "A backup preserves the applied START AT Kafka generation on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-01"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "Kafka competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-01"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "Kafka competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-02"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "MQTT competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-02"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "MQTT competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-03"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "RabbitMQ competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-03"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-04"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "SQS competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-04"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "SQS competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-05"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "NATS competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-05"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "NATS competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-06"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "Pulsar competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-06"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "Pulsar competing consumers are scheduled as distinct instances on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-07"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "Kafka domain-offset instances follow their constructed partitions on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-07"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "Kafka domain-offset instances follow their constructed partitions on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 1
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-08"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "Drain of one instance owner preserves every other instance owner"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 1
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-08"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "Drain of one instance owner preserves every other instance owner"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 1
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-09"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "Failover of one instance owner preserves every other instance owner"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 1
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-09"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "Failover of one instance owner preserves every other instance owner"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-10"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-10"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-11"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-11"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-12"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "SQS partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-12"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "SQS partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-13"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "NATS partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-13"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "NATS partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "scenario.ingestor-instance-14"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "scenarios"
+scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
+examples = 2
+feature = "tests/features/runtime/ingestor_instances.feature"
+id = "stress.ingestor-instance-14"
+invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invocation = "stress-scenarios"
+scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "scenario.ingestor-instance-layout-01"
+invariant = "The canonical future-start cut stays durable while stopped, newly placed units resume their exact partitions, and each published payload arrives once."
+invocation = "scenarios"
+scenario = "Newly placed instances retain a canonical future start through STOP and START on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "stress.ingestor-instance-layout-01"
+invariant = "The canonical future-start cut stays durable while stopped, newly placed units resume their exact partitions, and each published payload arrives once."
+invocation = "stress-scenarios"
+scenario = "Newly placed instances retain a canonical future start through STOP and START on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "scenario.ingestor-instance-layout-02"
+invariant = "A stopped source can publish a changed instance count across its selected owners without opening a broker consumer."
+invocation = "scenarios"
+scenario = "A stopped domain-offset source changes its unit count on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "stress.ingestor-instance-layout-02"
+invariant = "A stopped source can publish a changed instance count across its selected owners without opening a broker consumer."
+invocation = "stress-scenarios"
+scenario = "A stopped domain-offset source changes its unit count on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "scenario.ingestor-instance-layout-03"
+invariant = "Growing and shrinking the instance layout preserves each acknowledged Kafka position and the complete metric history through live and stopped transitions."
+invocation = "scenarios"
+scenario = "A domain-offset source retains acknowledged positions through live and stopped layout changes on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "stress.ingestor-instance-layout-03"
+invariant = "Growing and shrinking the instance layout preserves each acknowledged Kafka position and the complete metric history through live and stopped transitions."
+invocation = "stress-scenarios"
+scenario = "A domain-offset source retains acknowledged positions through live and stopped layout changes on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Token, nkey and mounted JWT credentials on one and three nodes prepare NATS connections, forward traffic through an ingestor and emitter, and tear down their host lifecycle. Authentication and driver I/O are async and untracked; the host's existing lifecycle locks remain tracked."
+examples = 6
+feature = "tests/features/runtime/nats_authentication.feature"
+id = "scenario.nats-client-authentication"
+invariant = "The same declared authentication method opens both NATS boundary directions, with confidential public inspection."
+invocation = "scenarios"
+scenario = "NATS ingestors and emitters authenticate with <method>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: authenticated NATS traffic traverses both boundary directions and their host lifecycle on one and three nodes. The driver and authentication operations are async and untracked."
+examples = 6
+feature = "tests/features/runtime/nats_authentication.feature"
+id = "stress.nats-client-authentication"
+invariant = "The same declared authentication method opens both NATS boundary directions, with confidential public inspection."
+invocation = "stress-scenarios"
+scenario = "NATS ingestors and emitters authenticate with <method>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A missing token, nkey or JWT identity on one and three nodes reports refusal on both ingestor and emitter while their host retries and subsequently tears down. The broker and client I/O are async and untracked; host lifecycle locks are tracked."
+examples = 6
+feature = "tests/features/runtime/nats_authentication.feature"
+id = "scenario.nats-client-authentication-refusal"
+invariant = "An authentication-refused boundary reports its connection error and remains safe to stop."
+invocation = "scenarios"
+scenario = "A NATS broker refuses a client without its required <method> identity"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: missing NATS identities exercise refusal, host retry and teardown on one and three nodes. Driver authentication and network I/O remain untracked."
+examples = 6
+feature = "tests/features/runtime/nats_authentication.feature"
+id = "stress.nats-client-authentication-refusal"
+invariant = "An authentication-refused boundary reports its connection error and remains safe to stop."
+invocation = "stress-scenarios"
+scenario = "A NATS broker refuses a client without its required <method> identity"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A TLS-addressed emitter fails against a plaintext broker. Start, failure observation and teardown reach tracked graph lifecycle owners; TLS and socket I/O are outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-tls-required"
+invariant = "A NATS SUBJECT emitter refuses a plaintext server when the client requires TLS."
+invocation = "scenarios"
+scenario = "A NATS SUBJECT emitter refuses a plaintext server when the client requires TLS"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: A TLS-addressed emitter fails against a plaintext broker. Start, failure observation and teardown reach tracked graph lifecycle owners; TLS and socket I/O are outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-tls-required"
+invariant = "A NATS SUBJECT emitter refuses a plaintext server when the client requires TLS."
+invocation = "stress-scenarios"
+scenario = "A NATS SUBJECT emitter refuses a plaintext server when the client requires TLS"
+selections = ["deloxide-stress"]
+
+
+[[workload]]
+coverage = "A durable consumer delivers all seven metadata fields through source projection and TIMESTAMP AT on one and three nodes, then confirms the transport acknowledgement. Source startup and teardown reach tracked lifecycle owners; metadata parsing and projection add no lock and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-stream-metadata"
+invariant = "NATS STREAM metadata carries the server's delivery identity and event time."
+invocation = "scenarios"
+scenario = "NATS STREAM metadata carries the server's delivery identity and event time"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: A durable consumer delivers all seven metadata fields through source projection and TIMESTAMP AT on one and three nodes, then confirms the transport acknowledgement. Source startup and teardown reach tracked lifecycle owners; metadata parsing and projection add no lock and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-stream-metadata"
+invariant = "NATS STREAM metadata carries the server's delivery identity and event time."
+invocation = "stress-scenarios"
+scenario = "NATS STREAM metadata carries the server's delivery identity and event time"
+selections = ["deloxide-stress"]
+
+
+[[workload]]
+coverage = "Wildcard deliveries retain their concrete subject and absent or present reply through the ingest group. Startup and teardown reach tracked lifecycle owners; metadata reads and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-subject-metadata"
+invariant = "NATS wildcard messages project the concrete subject and optional reply."
+invocation = "scenarios"
+scenario = "NATS wildcard messages project the concrete subject and optional reply"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: Wildcard deliveries retain their concrete subject and absent or present reply through the ingest group. Startup and teardown reach tracked lifecycle owners; metadata reads and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-subject-metadata"
+invariant = "NATS wildcard messages project the concrete subject and optional reply."
+invocation = "stress-scenarios"
+scenario = "NATS wildcard messages project the concrete subject and optional reply"
+selections = ["deloxide-stress"]
+
+
+[[workload]]
+coverage = "A request traverses an ingest group, relay, reply envelope and Core publication, and its external response returns through a second ingest group. Graph startup, routing and teardown reach tracked lifecycle owners; the borrowed envelope and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-reply-subject"
+invariant = "A NATS SUBJECT emitter sends a request with its evaluated reply subject."
+invocation = "scenarios"
+scenario = "A NATS SUBJECT emitter sends a request with its evaluated reply subject"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: A request traverses an ingest group, relay, reply envelope and Core publication, and its external response returns through a second ingest group. Graph startup, routing and teardown reach tracked lifecycle owners; the borrowed envelope and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-reply-subject"
+invariant = "A NATS SUBJECT emitter sends a request with its evaluated reply subject."
+invocation = "stress-scenarios"
+scenario = "A NATS SUBJECT emitter sends a request with its evaluated reply subject"
+selections = ["deloxide-stress"]
+
+
+[[workload]]
+coverage = "A Core publication through an ingest group and relay retains interleaved repeated headers at the external broker. Startup and teardown reach tracked lifecycle owners; header encoding and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "scenario.nats-header-order"
+invariant = "NATS publication preserves interleaved repeated header names."
+invocation = "scenarios"
+scenario = "NATS publication preserves interleaved repeated header names"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: A Core publication through an ingest group and relay retains interleaved repeated headers at the external broker. Startup and teardown reach tracked lifecycle owners; header encoding and NATS sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_envelope_metadata.feature"
+id = "stress.nats-header-order"
+invariant = "NATS publication preserves interleaved repeated header names."
+invocation = "stress-scenarios"
+scenario = "NATS publication preserves interleaved repeated header names"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Native-client command registration, foreign-reference validation, exchange termination and reconnect through the client's tracked pending-reply lock on one and three nodes. Async command and reconnect locks, network waits and reference comparisons remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-foreign-execution"
+invariant = "A foreign command outcome ends its session and the client recovers the original command under its own execution reference, without adopting the foreign failure."
+invocation = "scenarios"
+scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: native-client registration, validation, exchange close and reconnect through the tracked pending-reply lock. Async locks and network waits remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-foreign-execution"
+invariant = "A foreign command outcome ends its session and the client recovers the original command under its own execution reference, without adopting the foreign failure."
+invocation = "stress-scenarios"
+scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+[[workload]]
+coverage = "Native restores through the real one- and three-node cluster and a bounded gRPC peer that replaces only a completed restore's reply. Rejection ends the selected client's tracked pending registry, and original-reference recovery opens a new session; tonic buffering and async transport are untracked. The ordinary CLI examples are outside this diagnostic selection."
+examples = 4
+feature = "tests/features/runtime/client_restore_codec_rejection.feature"
+id = "scenario.restore-codec-rejection"
+invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
+invocation = "scenarios"
+scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the four native malformed and oversized restore replies reach the same tracked client pending registry and original-reference recovery on one and three nodes. Async transport, tonic buffering and the ordinary CLI process remain outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/client_restore_codec_rejection.feature"
+id = "stress.restore-codec-rejection"
+invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
+invocation = "stress-scenarios"
+scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the four native malformed and oversized restore replies reach the same tracked client pending registry and original-reference recovery on one and three nodes. Async transport, tonic buffering and the ordinary CLI process remain outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/client_restore_codec_rejection.feature"
+id = "stress.restore-codec-rejection-restore"
+invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
+invocation = "stress-restore-scenarios"
+scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Native restores through a real one- or three-node cluster and a bounded peer that loses a completed answer and removes the local archive. Session recovery and exact-reference recovery reach the existing tracked pending registry. Async upload, file reads and the ordinary CLI process are outside detector evidence."
+examples = 2
+feature = "tests/features/tools/client_restore_uncertainty.feature"
+id = "scenario.restore-attempt-history"
+invariant = "A later local archive failure cannot settle an earlier completed restore whose answer was lost; its original execution remains recoverable."
+invocation = "scenarios"
+scenario = "A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the two native later-read failures exercise reconnect and exact-reference recovery through the existing tracked client registry. Async transport and file reads, and the separate ordinary CLI process, remain untracked."
+examples = 2
+feature = "tests/features/tools/client_restore_uncertainty.feature"
+id = "stress.restore-attempt-history"
+invariant = "A later local archive failure cannot settle an earlier completed restore whose answer was lost; its original execution remains recoverable."
+invocation = "stress-scenarios"
+scenario = "A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the same two native archive failures and exact-reference recoveries reach client lifecycle locks while the real cluster restores state. Async transport, file reads and the separate ordinary CLI process remain outside detector evidence."
+examples = 2
+feature = "tests/features/tools/client_restore_uncertainty.feature"
+id = "stress.restore-attempt-history-restore"
+invariant = "A later local archive failure cannot settle an earlier completed restore whose answer was lost; its original execution remains recoverable."
+invocation = "stress-restore-scenarios"
+scenario = "A later archive failure keeps the <client> restore uncertain on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Native-client command registration with its reply kind, reply-kind validation, exchange termination and reconnect through the client's tracked pending-reply lock on one and three nodes. Async command and reconnect locks, network waits and reply-kind comparisons remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-reply-kind"
+invariant = "A reply of another kind under a command's request identity ends its session before any of its effects apply, and the client recovers the original command under its own execution reference."
+invocation = "scenarios"
+scenario = "A native command recovers its own execution after a reply of another kind on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: native-client registration with its reply kind, validation, exchange close and reconnect through the tracked pending-reply lock. Async locks and network waits remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-reply-kind"
+invariant = "A reply of another kind under a command's request identity ends its session before any of its effects apply, and the client recovers the original command under its own execution reference."
+invocation = "stress-scenarios"
+scenario = "A native command recovers its own execution after a reply of another kind on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/client_restore_reply_validation.feature"
+id = "scenario.client-restore-reply-validation"
+invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
+invocation = "scenarios"
+scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/client_restore_reply_validation.feature"
+id = "stress.client-restore-reply-validation"
+invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
+invocation = "stress-scenarios"
+scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/client_restore_reply_validation.feature"
+id = "stress.client-restore-reply-validation-restore"
+invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
+invocation = "stress-restore-scenarios"
+scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]

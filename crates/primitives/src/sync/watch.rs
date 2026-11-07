@@ -7,7 +7,8 @@
 //! sent in between. Shuttle's own watch channel reads the version with no scheduling point before
 //! it, so no schedule could place a send there. This channel takes a scheduling point immediately
 //! before each read of the shared version that registers or decides something: subscribing,
-//! [`Receiver::has_changed`], [`Sender::receiver_count`] and the send that checks it. It locks its
+//! [`Receiver::mark_unchanged`], [`Receiver::has_changed`], [`Sender::receiver_count`] and the send
+//! that checks it. It locks its
 //! value with Shuttle's modeled lock, and a receiver waits on this crate's `Notify`, whose
 //! registrations and notifications are scheduling points too.
 //!
@@ -254,6 +255,12 @@ impl<T> Receiver<T> {
         let has_changed = self.seen != current;
         self.seen = current;
         Ref { inner, has_changed }
+    }
+
+    /// Mark the current value as seen without borrowing it or notifying another receiver.
+    pub fn mark_unchanged(&mut self) {
+        scheduling::point();
+        self.seen = self.shared.state.load().version();
     }
 
     /// Whether a value newer than the one last marked as seen was sent. Fails once every sender

@@ -154,6 +154,7 @@ impl EmitterDeclaration for MongoDbCollectionEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::MongoDb),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::Bson,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: MongoDbCollectionPublishingMode::KINDS,
@@ -204,15 +205,132 @@ impl EmitterEntityBody for MongoDbCollectionEmitter {
     }
 }
 
+/// Why an `ON CONFLICT` clause cannot be written for a MongoDB collection's `VALUES`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "conflict-clause validation returns pure declaration refusals"
+    )
+)]
+pub enum MongoDbConflictError {
+    #[error("MongoDB ON CONFLICT target column '{column}' is not mapped in VALUES")]
+    UnmappedTarget { column: String },
+    #[error(
+        "MongoDB ON CONFLICT DO UPDATE requires at least one non-conflict VALUES field to update"
+    )]
+    NothingToUpdate,
+}
+
+impl MongoDbConflictAction {
+    /// Checks this clause against the fields its write maps: every target field is mapped, and
+    /// `DO UPDATE` leaves a mapped field outside its target to update.
+    pub fn validate(&self, values: &[MongoDbValueMapping]) -> Result<(), MongoDbConflictError> {
+        let target = match self {
+            Self::None => return Ok(()),
+            Self::DoNothing { target } | Self::DoUpdate { target } => target,
+        };
+        let mapped: std::collections::BTreeSet<&str> = values
+            .iter()
+            .map(|mapping| mapping.column.as_str())
+            .collect();
+        for column in target {
+            if !mapped.contains(column.as_str()) {
+                return Err(MongoDbConflictError::UnmappedTarget {
+                    column: column.clone(),
+                });
+            }
+        }
+        if let Self::DoUpdate { target } = self {
+            let targeted: std::collections::BTreeSet<&str> =
+                target.iter().map(String::as_str).collect();
+            let updates_a_field = values
+                .iter()
+                .any(|mapping| !targeted.contains(mapping.column.as_str()));
+            if !updates_a_field {
+                return Err(MongoDbConflictError::NothingToUpdate);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One change an `ALTER MONGODB COLLECTION EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum MongoDbCollectionEmitterChange {
+    /// `SET COLLECTION '<collection>'`.
+    Collection(MongoDbCollectionName),
+    /// `SET ON CONFLICT … DO NOTHING|UPDATE`, or `DROP ON CONFLICT` where the action is the
+    /// ordinary insert a statement that writes no `ON CONFLICT` makes.
+    OnConflict(MongoDbConflictAction),
+    /// `SET MODE <mode>`.
+    Mode(MongoDbCollectionPublishingMode),
+}
+
+impl crate::EmitterEntityChange for MongoDbCollectionEmitterChange {
+    type Entity = MongoDbCollectionEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut MongoDbCollectionEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Collection(collection) => entity.collection = collection.clone(),
+            Self::OnConflict(action) => {
+                if *action == MongoDbConflictAction::None
+                    && entity.conflict_action == MongoDbConflictAction::None
+                {
+                    return Err(error_stack::Report::new(
+                        crate::AlterEmitterError::OptionNotWritten {
+                            entity: <MongoDbCollectionEmitter as crate::EmitterEntityModel>::KIND,
+                            option: "ON CONFLICT",
+                        },
+                    ));
+                }
+                action.validate(&entity.values).map_err(|error| {
+                    error_stack::Report::new(error).change_context(
+                        crate::AlterEmitterError::ConflictAction {
+                            entity: <MongoDbCollectionEmitter as crate::EmitterEntityModel>::KIND,
+                        },
+                    )
+                })?;
+                entity.conflict_action = action.clone();
+            }
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Collection(collection) => format!(
+                "SET COLLECTION {}",
+                crate::string_literal(collection.as_str())
+            ),
+            Self::OnConflict(action) => match action.conflict_clause() {
+                Some(clause) => format!("SET {clause}"),
+                None => "DROP ON CONFLICT".to_owned(),
+            },
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector MongoDb = "MONGODB";
     /// What a MongoDB emitter writes.
     pub enum MongoDbEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum MongoDbCollectionEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum MongoDbEmitterChange;
     /// The entities a MongoDB emitter writes.
     pub enum MongoDbEmitterEntity {
-        Collection(MongoDbCollectionEmitter, MongoDbCollectionPublishingMode) = "COLLECTION";
+        Collection(MongoDbCollectionEmitter, MongoDbCollectionPublishingMode, MongoDbCollectionEmitterChange) = "COLLECTION";
     }
 }
 

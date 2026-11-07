@@ -16,13 +16,13 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
-    WebsocketsUpgradeHeader,
+    WebsocketsConnectionIngestor, WebsocketsConnectionIngestorChange, WebsocketsEndpointIngestor,
+    WebsocketsEndpointIngestorChange, WebsocketsIngestMode, WebsocketsUpgradeHeader,
 };
 
 use super::{
     delivery::{no_ack, push_quiesce_clause},
-    endpoint::{EndpointIntake, intake},
+    endpoint::{self, EndpointIntake, intake},
 };
 use crate::{
     lexer::{Identifier, Token},
@@ -81,6 +81,32 @@ pub(super) fn endpoint_body<'src>()
             quiesce,
         },
     )
+}
+
+/// `SET HEADERS`, `DROP HEADERS` or `SET MODE`: one part of a `WEBSOCKETS CONNECTION` body.
+pub(super) fn connection_change<'src>()
+-> impl Parser<'src, &'src [Token], WebsocketsConnectionIngestorChange, extra::Err<ParseError<'src>>>
++ Clone {
+    let headers = upgrade_headers().map(WebsocketsConnectionIngestorChange::Headers);
+    let mode = kw(Identifier::Mode)
+        .ignore_then(no_ack().to(WebsocketsIngestMode::NoAck))
+        .map(WebsocketsConnectionIngestorChange::Mode);
+    let set = kw(Identifier::Set).ignore_then(choice((headers, mode)));
+    let drop = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Headers))
+        .to(WebsocketsConnectionIngestorChange::DropHeaders);
+    choice((set, drop)).boxed()
+}
+
+/// `SET MODE`: the one part of a `WEBSOCKETS ENDPOINT` body beside its endpoint.
+pub(super) fn endpoint_change<'src>()
+-> impl Parser<'src, &'src [Token], WebsocketsEndpointIngestorChange, extra::Err<ParseError<'src>>>
++ Clone {
+    kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Mode))
+        .ignore_then(endpoint::mode())
+        .map(WebsocketsEndpointIngestorChange::Mode)
+        .boxed()
 }
 
 #[cfg(test)]

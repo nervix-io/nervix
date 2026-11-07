@@ -14,12 +14,13 @@
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    AckMode, AlterRelay, AlterRelayOperation, ClusterNodeName, CordonNode, CorrelatorName,
-    DeduplicatorName, DescribeRelay, DrainNode, DropModel, DropNode, EmitterName, EndpointName,
-    FieldName, FlushPolicy, IngestorName, JunctionName, Model, ModelKind, ModelName,
-    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName, SchemaName,
-    ShowEmitters, ShowIngestors, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
-    WasmProcessorName, WindowProcessorName,
+    AckMode, AlterBranch, AlterBranchOperation, AlterRelay, AlterRelayOperation, BranchName,
+    BranchPartitions, ClusterNodeName, CordonNode, CorrelatorName, DeduplicatorName, DescribeRelay,
+    DrainNode, DropModel, DropNode, EmitterName, EndpointName, FieldName, FlushPolicy,
+    IngestorName, JunctionName, Model, ModelKind, ModelName, ReingestorName, RelayName,
+    ReordererName, RequestedResourceVersion, ResourceName, SchemaName, ShowEmitters, ShowIngestors,
+    Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode, WasmProcessorName,
+    WindowProcessorName,
 };
 use nonzero_ext::nonzero;
 use rstest::rstest;
@@ -57,6 +58,11 @@ fn numeric_slots_offer_a_named_placeholder_rather_than_nothing() {
             "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES ",
             "max_instances",
         ),
+        (
+            "CREATE BRANCH b SCHEMA s TTL 1s PARTITIONS ",
+            "partition_count",
+        ),
+        ("ALTER BRANCH b SET PARTITIONS ", "partition_count"),
         (
             "CREATE RELAY r SCHEMA s UNBRANCHED CAPACITY ",
             "relay_capacity",
@@ -197,7 +203,7 @@ fn show_transactions_completion_stays_in_its_statement_branch() {
 /// A slot with a real constraint should say what it wants.
 #[test]
 fn constrained_slots_do_not_hide_behind_a_generic_literal_label() {
-    let input = "CREATE ENDPOINT e ON v PATH ";
+    let input = "CREATE HTTP ENDPOINT e ON v PATH ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"endpoint_path".to_string()));
     assert!(!suggestions.contains(&"string_literal".to_string()));
@@ -256,8 +262,8 @@ fn create_if_not_exists_completion_suggests_compound_keyword_without_leakage() {
 
 #[test]
 fn ingestor_mode_context_suggestions_do_not_leak_schema_keywords() {
-    let input =
-        "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE ";
+    let input = "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' \
+                 START AT LATEST MODE ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"ACK".to_string()));
     assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -503,14 +509,12 @@ fn tolerant_conversion_body_does_not_change_route_completion_context() {
         suggest_statement(converted, converted.len())
     );
 
-    let unfinished_conditional =
-        "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = CASE WHEN ";
     let unfinished_conversion = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET \
                                  result = TRY_CAST(input.raw AS ";
     assert_eq!(
-        suggest_statement(unfinished_conditional, unfinished_conditional.len()),
         suggest_statement(unfinished_conversion, unfinished_conversion.len()),
-        "an unfinished conversion offers what any unfinished expression offers"
+        Vec::<String>::new(),
+        "a conversion's type position is not an expression operand"
     );
 }
 
@@ -541,8 +545,73 @@ fn alter_context_suggestions_include_all_supported_model_families() {
     assert!(suggestions.contains(&"GENERATOR".to_string()));
     assert!(suggestions.contains(&"SCHEMA".to_string()));
     assert!(suggestions.contains(&"WIRE".to_string()));
+    assert!(suggestions.contains(&"BRANCH".to_string()));
     assert!(!suggestions.contains(&"JSON".to_string()));
     assert!(!suggestions.contains(&"AVRO".to_string()));
+}
+
+#[test]
+fn parses_alter_branch_set_partitions_statement() {
+    let parsed =
+        parse_statement("ALTER BRANCH by_tenant SET PARTITIONS 4;").expect("parse should succeed");
+    assert_eq!(
+        parsed,
+        Statement::AlterBranch(AlterBranch {
+            branch: BranchName::try_from("by_tenant").expect("valid branch name"),
+            operations: vec![AlterBranchOperation::SetPartitions {
+                partitions: BranchPartitions::Direct(nonzero!(4u16)),
+            }],
+        })
+    );
+}
+
+#[test]
+fn create_branch_tail_suggestions_offer_partitions_before_eviction_only() {
+    let input = "CREATE BRANCH b SCHEMA s TTL 1s ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(
+        suggestions.contains(&"PARTITIONS".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
+    assert!(!suggestions.contains(&"SET".to_string()), "{suggestions:?}");
+    assert!(
+        !suggestions.contains(&"CAPACITY".to_string()),
+        "{suggestions:?}"
+    );
+
+    let input = "CREATE BRANCH b SCHEMA s TTL 1s PARTITIONS 4 ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
+    assert!(
+        !suggestions.contains(&"PARTITIONS".to_string()),
+        "{suggestions:?}"
+    );
+
+    let input = "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES 3 EVICT LRU ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(
+        !suggestions.contains(&"PARTITIONS".to_string()),
+        "{suggestions:?}"
+    );
+}
+
+#[test]
+fn alter_branch_suggestions_do_not_leak_relay_operations() {
+    let input = "ALTER BRANCH by_tenant SET ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(
+        suggestions.contains(&"PARTITIONS".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(
+        !suggestions.contains(&"CAPACITY".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(
+        !suggestions.contains(&"SCHEMA".to_string()),
+        "{suggestions:?}"
+    );
 }
 
 #[test]
@@ -1284,7 +1353,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
             CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
                 user_id integer,
                 created_at string,
-                payload object
+                payload string
             );
         "#,
         None,
@@ -1471,20 +1540,18 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::endpoint(
         r#"
-            CREATE ENDPOINT my_ws_endpoint
+            CREATE WEBSOCKETS ENDPOINT my_ws_endpoint
                 ON edge
-                PATH '/ws'
-                TYPE WEBSOCKETS;
+                PATH '/ws';
         "#,
         None,
         &[]
     )]
 #[case::http_endpoint(
         r#"
-            CREATE ENDPOINT my_http_endpoint
+            CREATE HTTP ENDPOINT my_http_endpoint
                 ON edge
-                PATH '/ingest'
-                TYPE HTTP;
+                PATH '/ingest';
         "#,
         None,
         &[]
@@ -1512,7 +1579,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
                 FROM
                     kafka_main
                     TOPIC 'notifications'
-                    OFFSET BY CONSUMER GROUP 'nervix_consumer'
+                    OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
                 ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications
@@ -1691,8 +1758,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::codec_with_multiline_jaq_program(
         r#"
-            CREATE CODEC binance_ws_event_codec
-                FROM JSON
+            CREATE JAQ JSON CODEC binance_ws_event_codec
                 TO SCHEMA binance_ws_event
                 WITH JAQ TRANSFORMATIONS ON INGESTION $jaq${
                     event_type: .e,

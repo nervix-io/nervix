@@ -36,18 +36,19 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     AlterIngestor, AlterIngestorOperation, AlterTransportIngestorOperation, ClientProducerIngestor,
-    CreateIngestor, CreateStatement, GeneralErrorPolicy, IngestTimestampSource, IngestorAlteration,
-    IngestorEntity, IngestorEntityKind, IngestorEntityModel, IngestorInput, IngestorName,
+    CreateIngestor, CreateStatement, IngestTimestampSource, IngestorAlteration, IngestorEntity,
+    IngestorEntityKind, IngestorEntityModel, IngestorInput, IngestorName, IngestorReferenceKind,
     ShowIngestors, TransportIngestorInput,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, alter_ingestor_route_body,
-        alter_op_separator, boxed_choice, codec_ref, field_ref, filter_where_clause,
-        flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
-        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, suggest_from, tok,
+        ConstructionChanges, LexedInput, ParseError, ParseFromSourceError,
+        alter_ingestor_route_body, alter_op_separator, boxed_choice, client_ref, codec_ref,
+        construction_alteration, field_ref, filter_where_clause, flushed_ingestor_outputs,
+        general_error_policy, if_not_exists_clause, ingestor_name, into_parse_error, kw,
+        kw_phrase2, lex_input, relay_ref, set_general_error_policy, suggest_from, tok,
         where_expression,
     },
 };
@@ -91,7 +92,7 @@ fn timestamp_source<'src>()
 -> impl Parser<'src, &'src [Token], IngestTimestampSource, extra::Err<ParseError<'src>>> + Clone {
     let metadata_field = kw(Identifier::Metadata)
         .ignore_then(tok(Token::Dot))
-        .ignore_then(field_ref())
+        .ignore_then(field_ref().labelled("ref:ingestor_timestamp_metadata"))
         .map(IngestTimestampSource::AtMetadata);
     let payload_field = field_ref().map(IngestTimestampSource::At);
     let at_field = kw(Identifier::At).ignore_then(choice((metadata_field, payload_field)));
@@ -156,6 +157,7 @@ fn declared_input<'src>()
         transport_input(pulsar::topic_body()),
         transport_input(mqtt::topic_body()),
         transport_input(nats::subject_body()),
+        transport_input(nats::stream_body()),
         transport_input(rabbitmq::queue_body()),
         transport_input(redis::pubsub_body()),
         transport_input(prometheus::query_body()),
@@ -202,15 +204,17 @@ pub fn create_ingestor_parser<'src>()
         .boxed()
 }
 
-/// The operations every ingestor accepts whatever it reads.
+/// The operations every ingestor accepts whatever it reads: a quiesce mode its entity declares, the
+/// client where it reads through one, its timestamp, filter, routes and general error policy.
 fn shared_operation<'src, S>()
 -> impl Parser<'src, &'src [Token], AlterIngestorOperation<S>, extra::Err<ParseError<'src>>> + Clone
 where
-    S: Clone + 'src,
+    S: IngestorEntityModel + Clone + 'src,
 {
+    let capabilities = S::KIND.capabilities();
     let set_quiesce = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Quiesce))
-        .ignore_then(delivery::alter_quiesce_body())
+        .ignore_then(delivery::declared_quiesce_body(capabilities.quiesce))
         .map(|quiesce| AlterIngestorOperation::SetQuiesce { quiesce });
     let set_timestamp = kw(Identifier::Set)
         .ignore_then(timestamp_source())
@@ -239,27 +243,35 @@ where
         .ignore_then(kw(Identifier::Route))
         .ignore_then(alter_ingestor_route_body())
         .map(|route| AlterIngestorOperation::ReplaceRoute { route });
-    let set_general_error = kw(Identifier::Set)
-        .ignore_then(kw(Identifier::General))
-        .then_ignore(kw(Identifier::Error))
-        .ignore_then(choice((
-            kw(Identifier::Ignore).to(GeneralErrorPolicy::Ignore),
-            kw(Identifier::Log).to(GeneralErrorPolicy::Log),
-        )))
-        .map(|policy| AlterIngestorOperation::SetGeneralError { policy });
+    let alter_route = kw_phrase2(Identifier::Alter, Identifier::Route)
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(relay_ref())
+        .then(construction_alteration(ConstructionChanges::Every))
+        .map(|(relay, alteration)| AlterIngestorOperation::AlterRoute { relay, alteration });
+    let set_general_error =
+        set_general_error_policy().map(|policy| AlterIngestorOperation::SetGeneralError { policy });
 
-    choice((
-        set_quiesce,
-        set_timestamp,
-        drop_timestamp,
-        set_filter,
-        drop_filter,
-        add_route,
-        drop_route,
-        replace_route,
-        set_general_error,
-    ))
-    .boxed()
+    let mut operations = vec![
+        set_quiesce.boxed(),
+        set_timestamp.boxed(),
+        drop_timestamp.boxed(),
+        set_filter.boxed(),
+        drop_filter.boxed(),
+        add_route.boxed(),
+        drop_route.boxed(),
+        replace_route.boxed(),
+        alter_route.boxed(),
+        set_general_error.boxed(),
+    ];
+    if let IngestorReferenceKind::Client(_) = capabilities.reference {
+        operations.push(
+            kw_phrase2(Identifier::Set, Identifier::Client)
+                .ignore_then(client_ref())
+                .map(|client| AlterIngestorOperation::SetClient { client })
+                .boxed(),
+        );
+    }
+    choice(operations).boxed()
 }
 
 /// `SET FROM <body>`, which reads only the body of the pair the head names.
@@ -267,7 +279,7 @@ fn set_source<'src, S, P>(
     body: P,
 ) -> impl Parser<'src, &'src [Token], AlterIngestorOperation<S>, extra::Err<ParseError<'src>>> + Clone
 where
-    S: Clone + 'src,
+    S: IngestorEntityModel + Clone + 'src,
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     kw(Identifier::Set)
@@ -277,12 +289,25 @@ where
         .boxed()
 }
 
+/// One change the pair's own grammar writes: `SET MODE`, a locator, or an option it declares.
+fn entity_change<'src, S, C>(
+    change: C,
+) -> impl Parser<'src, &'src [Token], AlterIngestorOperation<S>, extra::Err<ParseError<'src>>> + Clone
+where
+    S: IngestorEntityModel + Clone + 'src,
+    C: Parser<'src, &'src [Token], S::Change, extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    change
+        .map(|change| AlterIngestorOperation::Change { change })
+        .boxed()
+}
+
 /// `SET DECODE USING <codec>`, which only a transport's ingestor has.
 fn set_decode<'src, S>()
 -> impl Parser<'src, &'src [Token], AlterTransportIngestorOperation<S>, extra::Err<ParseError<'src>>>
 + Clone
 where
-    S: Clone + 'src,
+    S: IngestorEntityModel + Clone + 'src,
 {
     kw(Identifier::Set)
         .ignore_then(kw_phrase2(Identifier::Decode, Identifier::Using))
@@ -317,38 +342,35 @@ where
         .boxed()
 }
 
-/// The alteration of a transport's ingestor, whose `SET FROM` reads `body`.
-fn transport_alteration<'src, S, P>(
+/// The alteration of a transport's ingestor, whose `SET FROM` reads `body` and whose own changes
+/// `change` reads.
+fn transport_alteration<'src, S, P, C>(
     body: P,
+    change: C,
 ) -> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone
 where
     S: IngestorEntityModel + Clone + 'src,
     Vec<AlterTransportIngestorOperation<S>>: Into<IngestorAlteration>,
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
+    C: Parser<'src, &'src [Token], S::Change, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
-    alteration::<S, _, _>(transport_operation(body))
-}
-
-/// The shared operations of a transport ingestor; an entity may compose typed options with them.
-fn transport_operation<'src, S, P>(
-    body: P,
-) -> impl Parser<'src, &'src [Token], AlterTransportIngestorOperation<S>, extra::Err<ParseError<'src>>>
-+ Clone
-where
-    S: IngestorEntityModel + Clone + 'src,
-    P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
-{
-    choice((
+    let operation = choice((
         set_source(body).map(AlterTransportIngestorOperation::from),
         set_decode(),
+        entity_change(change).map(AlterTransportIngestorOperation::from),
         shared_operation().map(AlterTransportIngestorOperation::from),
-    ))
+    ));
+    alteration::<S, _, _>(operation)
 }
 
 /// The alteration of a client ingestor, which decodes nothing and so has no codec to set.
 fn client_alteration<'src>()
 -> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone {
-    let operation = choice((set_source(client::producer_body()), shared_operation()));
+    let operation = choice((
+        set_source(client::producer_body()),
+        entity_change(client::change()),
+        shared_operation(),
+    ));
     alteration::<ClientProducerIngestor, _, _>(operation)
 }
 
@@ -356,20 +378,24 @@ pub fn alter_ingestor_parser<'src>()
 -> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Alter)
         .ignore_then(boxed_choice!(
-            transport_alteration(http::request_body()),
-            transport_alteration(http::endpoint_body()),
-            transport_alteration(kafka::topic_body()),
-            pulsar::alteration(),
-            transport_alteration(mqtt::topic_body()),
-            transport_alteration(nats::subject_body()),
-            transport_alteration(rabbitmq::queue_body()),
-            transport_alteration(redis::pubsub_body()),
-            transport_alteration(prometheus::query_body()),
-            transport_alteration(zeromq::pull_body()),
-            transport_alteration(sqs::queue_body()),
-            transport_alteration(websockets::connection_body()),
-            transport_alteration(websockets::endpoint_body()),
-            transport_alteration(syslog::listener_body()),
+            transport_alteration(http::request_body(), http::request_change()),
+            transport_alteration(http::endpoint_body(), http::endpoint_change()),
+            transport_alteration(kafka::topic_body(), kafka::change()),
+            transport_alteration(pulsar::topic_body(), pulsar::change()),
+            transport_alteration(mqtt::topic_body(), mqtt::change()),
+            transport_alteration(nats::subject_body(), nats::subject_change()),
+            transport_alteration(nats::stream_body(), nats::stream_change()),
+            transport_alteration(rabbitmq::queue_body(), rabbitmq::change()),
+            transport_alteration(redis::pubsub_body(), redis::change()),
+            transport_alteration(prometheus::query_body(), prometheus::change()),
+            transport_alteration(zeromq::pull_body(), zeromq::change()),
+            transport_alteration(sqs::queue_body(), sqs::change()),
+            transport_alteration(
+                websockets::connection_body(),
+                websockets::connection_change()
+            ),
+            transport_alteration(websockets::endpoint_body(), websockets::endpoint_change()),
+            transport_alteration(syslog::listener_body(), syslog::change()),
             client_alteration(),
         ))
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -442,18 +468,19 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         ClientIngestMode, ClientIngestorAlteration, ClientProducerIngestor, CodecName,
-        EndpointIngestMode, FlushPolicy, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestMode,
-        HttpRequestIngestor, HttpRequestIngestorAlteration, IngestQuiesceMode,
-        IngestQuiesceOverflow, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor,
-        MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor,
-        MqttTopicIngestorAlteration, NatsIngestMode, NatsIngestor, NatsSubjectIngestor,
-        PrometheusIngestMode, PrometheusIngestor, PrometheusQueryIngestor, PulsarIngestMode,
-        PulsarIngestor, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicIngestor,
-        RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor,
-        RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SchemaName, SqsIngestMode,
-        SqsIngestor, SqsQueueIngestor, SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor,
-        WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
-        WebsocketsIngestor, ZeroMqIngestMode, ZeroMqIngestor, ZeroMqPullIngestor,
+        EndpointIngestMode, FlushPolicy, GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor,
+        HttpRequestIngestMode, HttpRequestIngestor, HttpRequestIngestorAlteration,
+        IngestQuiesceMode, IngestQuiesceOverflow, IngestStartPosition, KafkaIngestMode,
+        KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, MqttIngestMode, MqttIngestor, MqttQos,
+        MqttSession, MqttTopicIngestor, MqttTopicIngestorAlteration, NatsIngestMode, NatsIngestor,
+        NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestor, PrometheusQueryIngestor,
+        PulsarIngestMode, PulsarIngestor, PulsarSubscription, PulsarSubscriptionOwnership,
+        PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor,
+        RedisIngestor, RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SchemaName,
+        SqsIngestMode, SqsIngestor, SqsQueueIngestor, SyslogIngestMode, SyslogIngestor,
+        SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+        WebsocketsIngestMode, WebsocketsIngestor, ZeroMqIngestMode, ZeroMqIngestor,
+        ZeroMqPullIngestor,
     };
     use nonzero_ext::nonzero;
 
@@ -503,9 +530,9 @@ mod tests {
             "KAFKA TOPIC INGESTOR i FROM c TOPIC 't' OFFSET BY DOMAIN MODE NO ACK ON QUIESCE \
              SUSPEND",
             "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' OWNED BY INGESTOR START AT \
-             EARLIEST MODE NO ACK ON QUIESCE SUSPEND",
-            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' PROVISIONED MODE NO ACK ON \
-             QUIESCE SUSPEND",
+             EARLIEST TYPE SHARED MODE NO ACK ON QUIESCE SUSPEND",
+            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' PROVISIONED TYPE EXCLUSIVE \
+             MODE NO ACK ON QUIESCE SUSPEND",
             "RABBITMQ QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
              POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND",
             "SQS QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
@@ -567,7 +594,7 @@ mod tests {
             ),
             (
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'public/default/orders' SUBSCRIPTION 's' \
-                 PROVISIONED MODE NO ACK ON QUIESCE SUSPEND",
+                 PROVISIONED TYPE SHARED MODE NO ACK ON QUIESCE SUSPEND",
                 "invalid pulsar_topic 'public/default/orders': holds '/' without naming its \
                  domain, one of persistent, non-persistent",
             ),
@@ -591,7 +618,7 @@ mod tests {
     fn keeps_an_external_name_exactly_as_written() {
         let parsed = parse_create_ingestor(&ingestor_with_source(
             "KAFKA TOPIC INGESTOR i FROM c TOPIC 'Orders.EU' OFFSET BY CONSUMER GROUP 'Readers of \
-             Orders' MODE NO ACK ON QUIESCE SUSPEND",
+             Orders' START AT LATEST MODE NO ACK ON QUIESCE SUSPEND",
         ))
         .expect("a case-preserving topic and group parse");
         let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
@@ -603,7 +630,7 @@ mod tests {
             panic!("expected a Kafka topic source");
         };
         assert_eq!(topic.as_str(), "Orders.EU");
-        let KafkaOffsetMode::ConsumerGroup(group) = offset_mode else {
+        let KafkaOffsetMode::ConsumerGroup { group, .. } = offset_mode else {
             panic!("expected a consumer group");
         };
         assert_eq!(group.as_str(), "Readers of Orders");
@@ -869,7 +896,7 @@ mod tests {
                 FROM
                     kafka_main
                     TOPIC 'notifications'
-                    OFFSET BY CONSUMER GROUP 'nervix_consumer'
+                    OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
                 ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications
@@ -911,11 +938,12 @@ mod tests {
                     .expect("valid client identifier"),
                 topic: nervix_models::KafkaTopicName::try_from("notifications")
                     .expect("valid topic identifier"),
-                offset_mode: KafkaOffsetMode::ConsumerGroup(
-                    nervix_models::KafkaConsumerGroupName::try_from("nervix_consumer")
+                offset_mode: KafkaOffsetMode::ConsumerGroup {
+                    group: nervix_models::KafkaConsumerGroupName::try_from("nervix_consumer")
                         .expect("valid consumer group identifier"),
-                ),
-                instances: nonzero!(1u64),
+                    start_at: IngestStartPosition::Latest,
+                },
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: KafkaIngestMode::AckParallel {
                     max: nonzero!(10u64),
                     batch_timeout: "500ms".to_string(),
@@ -1025,7 +1053,7 @@ mod tests {
     fn parses_create_ingestor_ack_sequential() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1040,7 +1068,10 @@ mod tests {
         else {
             panic!("expected kafka ingestor source");
         };
-        assert_eq!(*instances, nonzero!(1u64));
+        assert_eq!(
+            *instances,
+            nervix_models::IngestorInstances::Count(nonzero!(1u64))
+        );
         assert_eq!(
             mode,
             &KafkaIngestMode::AckSequential {
@@ -1057,7 +1088,7 @@ mod tests {
     fn parses_create_ingestor_kafka_no_ack() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE NO ACK
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST MODE NO ACK
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1078,7 +1109,7 @@ mod tests {
     fn rejects_create_ingestor_kafka_no_ack_max() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE NO ACK MAX 20
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST MODE NO ACK MAX 20
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1092,7 +1123,7 @@ mod tests {
     #[test]
     fn no_ack_completion_continues_to_quiesce_without_max() {
         let input = "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP \
-                     'g' MODE NO ACK ";
+                     'g' START AT LATEST MODE NO ACK ";
         let suggestions = suggest_create_ingestor(input, input.len());
 
         assert!(suggestions.contains(&"ON QUIESCE".to_string()));
@@ -1103,7 +1134,7 @@ mod tests {
     fn parses_create_ingestor_pulsar_ack_sequential() {
         let input = r#"
             CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' OWNED BY INGESTOR START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
+              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
               ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1124,10 +1155,11 @@ mod tests {
                     name: nervix_models::PulsarSubscriptionName::try_from("nervix_subscription")
                         .expect("valid subscription identifier"),
                     ownership: PulsarSubscriptionOwnership::Ingestor {
-                        start_at: nervix_models::PulsarStartPosition::Earliest
+                        start_at: nervix_models::IngestStartPosition::Earliest
                     },
+                    kind: nervix_models::PulsarSubscriptionType::Shared,
                 },
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: PulsarIngestMode::AckSequential {
                     timeout: "15s".to_string(),
                     retry_policy: RetryPolicy {
@@ -1187,7 +1219,7 @@ mod tests {
                     .expect("valid client identifier"),
                 queue: nervix_models::RabbitMqQueueName::try_from("notifications")
                     .expect("valid queue identifier"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: RabbitMqIngestMode::AckSequential {
                     timeout: "20s".to_string(),
                     retry_policy: RetryPolicy {
@@ -1246,8 +1278,8 @@ mod tests {
 
     #[test]
     fn suggests_mode_options() {
-        let input =
-            "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE ";
+        let input = "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP \
+                     'g' START AT LATEST MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1293,7 +1325,7 @@ mod tests {
     #[test]
     fn pulsar_mode_context_does_not_offer_kafka_offset_keywords() {
         let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' OWNED \
-                     BY INGESTOR START AT EARLIEST MODE ";
+                     BY INGESTOR START AT EARLIEST TYPE SHARED MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1316,13 +1348,13 @@ mod tests {
             (
                 "OWNED BY INGESTOR START AT EARLIEST",
                 PulsarSubscriptionOwnership::Ingestor {
-                    start_at: nervix_models::PulsarStartPosition::Earliest,
+                    start_at: nervix_models::IngestStartPosition::Earliest,
                 },
             ),
             (
                 "owned by Ingestor start at earliest",
                 PulsarSubscriptionOwnership::Ingestor {
-                    start_at: nervix_models::PulsarStartPosition::Earliest,
+                    start_at: nervix_models::IngestStartPosition::Earliest,
                 },
             ),
             ("PROVISIONED", PulsarSubscriptionOwnership::Provisioned),
@@ -1330,7 +1362,7 @@ mod tests {
         ] {
             let source = format!(
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'Readers' {ownership} \
-                 INSTANCES 2 MODE NO ACK ON QUIESCE SUSPEND"
+                 TYPE SHARED INSTANCES 2 MODE NO ACK ON QUIESCE SUSPEND"
             );
             let parsed = parse_create_ingestor(&ingestor_with_source(&source))
                 .unwrap_or_else(|error| panic!("`{source}` should parse: {error:?}"));
@@ -1344,7 +1376,11 @@ mod tests {
             };
             assert_eq!(subscription.name.as_str(), "Readers", "{source}");
             assert_eq!(subscription.ownership, expected, "{source}");
-            assert_eq!(*instances, nonzero!(2u64), "{source}");
+            assert_eq!(
+                *instances,
+                nervix_models::IngestorInstances::Count(nonzero!(2u64)),
+                "{source}"
+            );
         }
     }
 
@@ -1361,7 +1397,7 @@ mod tests {
         ] {
             let source = format!(
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'readers' {ownership} \
-                 MODE NO ACK ON QUIESCE SUSPEND"
+                 TYPE SHARED MODE NO ACK ON QUIESCE SUSPEND"
             );
             let error = parse_create_ingestor(&ingestor_with_source(&source)).expect_err(&format!(
                 "`{source}` declares no single ownership of its subscription"
@@ -1388,17 +1424,21 @@ mod tests {
     }
 
     #[test]
-    fn pulsar_ownership_is_followed_by_the_instances_and_the_mode() {
+    fn pulsar_ownership_is_followed_by_the_type_and_then_the_instances_and_the_mode() {
         for ownership in ["OWNED BY INGESTOR START AT EARLIEST", "PROVISIONED"] {
-            let input = format!(
+            let owned = format!(
                 "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' {ownership} "
             );
-            let suggestions = suggest_create_ingestor(&input, input.len());
-            assert!(suggestions.contains(&"INSTANCES".to_string()), "{input}");
-            assert!(suggestions.contains(&"MODE".to_string()), "{input}");
+            let suggestions = suggest_create_ingestor(&owned, owned.len());
+            assert_eq!(suggestions, ["TYPE"], "{owned}");
+
+            let typed = format!("{owned}TYPE FAILOVER ");
+            let suggestions = suggest_create_ingestor(&typed, typed.len());
+            assert!(suggestions.contains(&"INSTANCES".to_string()), "{typed}");
+            assert!(suggestions.contains(&"MODE".to_string()), "{typed}");
             assert!(
                 !suggestions.contains(&"PROVISIONED".to_string()),
-                "{input}: {suggestions:?}"
+                "{typed}: {suggestions:?}"
             );
         }
     }
@@ -1416,7 +1456,7 @@ mod tests {
         "#;
 
         parse_create_ingestor_tokens(&to_tokens(input))
-            .expect_err("Pulsar subscription type is not part of the public grammar");
+            .expect_err("a Pulsar subscription's TYPE follows its owner");
     }
 
     #[test]
@@ -1425,7 +1465,7 @@ mod tests {
             CREATE KAFKA TOPIC INGESTOR kafka_notifications
                 FROM kafka_main
                     TOPIC 'notifications'
-                    OFFSET BY CONSUMER GROUP 'nervix_consumer'
+                    OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
                 ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications BRANCHED BY user_id_kind_branch SET user_id = message.user_id
@@ -1587,7 +1627,7 @@ mod tests {
                     .expect("valid client identifier"),
                 topic: nervix_models::MqttTopicFilter::try_from("notifications")
                     .expect("valid topic filter"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 session: MqttSession::Clean,
                 qos: MqttQos::Qos0,
                 mode: MqttIngestMode::NoAck,
@@ -1623,7 +1663,10 @@ mod tests {
         };
         assert_eq!(client.as_str(), "mqtt_main");
         assert_eq!(topic.as_str(), "notifications");
-        assert_eq!(*instances, nonzero!(1u64));
+        assert_eq!(
+            *instances,
+            nervix_models::IngestorInstances::Count(nonzero!(1u64))
+        );
         assert_eq!(*session, MqttSession::Clean);
         assert_eq!(*qos, MqttQos::Qos1);
     }
@@ -1652,7 +1695,7 @@ mod tests {
                     .expect("valid client identifier"),
                 topic: nervix_models::MqttTopicFilter::try_from("devices/+/notifications")
                     .expect("valid topic filter"),
-                instances: nonzero!(3u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(3u64)),
                 session: MqttSession::Persistent,
                 qos: MqttQos::Qos1,
                 mode: MqttIngestMode::AckParallel {
@@ -1788,7 +1831,7 @@ mod tests {
                     "nats_notifications_group"
                 )
                 .expect("valid queue group identifier"),
-                instances: nonzero!(3u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(3u64)),
                 mode: NatsIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             }))
@@ -2117,7 +2160,7 @@ mod tests {
         let metadata = format!("{head}metadata.");
         let suggestions = suggest_create_ingestor(&metadata, metadata.len());
         assert!(
-            suggestions.contains(&"field_name".to_string()),
+            suggestions.contains(&"ref:ingestor_timestamp_metadata".to_string()),
             "{suggestions:?}"
         );
         assert!(
@@ -2342,7 +2385,7 @@ mod tests {
                     .expect("valid client identifier"),
                 queue: nervix_models::SqsQueueName::try_from("notifications")
                     .expect("valid queue identifier"),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: SqsIngestMode::AckSequential {
                     timeout: "45s".to_string(),
                     retry_policy: RetryPolicy {
@@ -2359,7 +2402,7 @@ mod tests {
     fn parses_create_ingestor_kafka_instances() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' INSTANCES 3 MODE NO ACK
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST INSTANCES 3 MODE NO ACK
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -2373,7 +2416,10 @@ mod tests {
         else {
             panic!("expected kafka ingestor source");
         };
-        assert_eq!(instances, nonzero!(3u64));
+        assert_eq!(
+            instances,
+            nervix_models::IngestorInstances::Count(nonzero!(3u64))
+        );
     }
 
     #[test]
@@ -2396,7 +2442,10 @@ mod tests {
         else {
             panic!("expected rabbitmq ingestor source");
         };
-        assert_eq!(instances, nonzero!(2u64));
+        assert_eq!(
+            instances,
+            nervix_models::IngestorInstances::Count(nonzero!(2u64))
+        );
     }
 
     #[test]
@@ -2417,14 +2466,17 @@ mod tests {
         else {
             panic!("expected sqs ingestor source");
         };
-        assert_eq!(instances, nonzero!(4u64));
+        assert_eq!(
+            instances,
+            nervix_models::IngestorInstances::Count(nonzero!(4u64))
+        );
     }
 
     #[test]
     fn rejects_zero_instances() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' INSTANCES 0 MODE NO ACK
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST INSTANCES 0 MODE NO ACK
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -2443,7 +2495,7 @@ mod tests {
     fn parses_ingestor_with_filter_where_and_output_routes() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR kafka_notifications
-              FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'nervix_consumer' MODE NO ACK
+              FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST MODE NO ACK
               ON QUIESCE SUSPEND DECODE USING notification_kafka_message
               FILTER WHERE message.active
               TO notifications
@@ -2496,7 +2548,7 @@ mod tests {
     fn rejects_invalid_ingestor_output_route_program() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR kafka_notifications
-              FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'nervix_consumer'
+              FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
               MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_kafka_message
               TO notifications UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 SET notifications.normalized = ON MESSAGE ERROR LOG

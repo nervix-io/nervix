@@ -21,20 +21,20 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE SCHEMA rejected_request (event_id STRING, message STRING);
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -98,18 +98,18 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -184,20 +184,20 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE SCHEMA rejected_request (event_id STRING, message STRING);
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -258,19 +258,19 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE SCHEMA routed_event (user_id I64, event_id STRING OPTIONAL, message STRING OPTIONAL);
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY observed SCHEMA routed_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -330,16 +330,16 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA rejected_request (event_id STRING, message STRING);
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -391,18 +391,18 @@ Feature: HTTP client transport contract
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -474,18 +474,18 @@ Feature: HTTP client transport contract
     And these Plexus commands are executed
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -535,7 +535,7 @@ Feature: HTTP client transport contract
 
   @http_client_transport
   Scenario Outline: Both sides speak HTTP/2 to an endpoint whose TLS offers it on <cluster_size> nodes
-    Given HTTPS receiver "secure" is running with a certificate for "127.0.0.1" and offers HTTP/2
+    Given HTTPS receiver "secure" is running with a certificate for "127.0.0.1" and offers HTTP/2 with required client authentication
     And HTTP receiver "secure" answers requests for "/" with 'respond 200; header Content-Type: application/json; body {"user_id":42}'
     And HTTP receiver "secure" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -556,18 +556,18 @@ Feature: HTTP client transport contract
     And these Plexus commands are executed
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -575,7 +575,9 @@ Feature: HTTP client transport contract
       CREATE HTTP CLIENT api MOUNT receiver_tls VERSION 1 CONFIG {
         'endpoint' = 'https://127.0.0.1:{{http_receiver_port.secure}}',
         'timeout_ms' = 5000,
-        'tls_ca_file' = '{{receiver_tls}}/ca.pem'
+        'tls_ca_file' = '{{receiver_tls}}/ca.pem',
+        'tls_cert_file' = '{{receiver_tls}}/client.pem',
+        'tls_key_file' = '{{receiver_tls}}/client-key.pem'
       };
       CREATE HTTP REQUEST INGESTOR poller FROM api METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING polled_codec
@@ -632,18 +634,18 @@ Feature: HTTP client transport contract
     And these Plexus commands are executed
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -687,6 +689,40 @@ Feature: HTTP client transport contract
       | 3            |
 
   @http_client_transport
+  Scenario Outline: Both HTTP directions start without host TLS roots on <cluster_size> server processes
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers requests for "/" with 'respond 200; header Content-Type: application/json; body {"user_id":42}'
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And a <cluster_size> node nervix-server process cluster is started with an empty host TLS trust store
+    And the server process cluster is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA polled_event (user_id I64);
+      CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
+      CREATE HTTP CLIENT api CONFIG {
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
+      };
+      CREATE HTTP REQUEST INGESTOR poller FROM api METHOD 'GET' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING polled_codec
+        TO polled INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP REQUEST EMITTER published FROM polled
+        TO api METHOD 'POST' PATH '/events'
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING polled_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then HTTP receiver "api" eventually captures a request with request line "GET /"
+    And HTTP receiver "api" eventually captures a request with request line "POST /events"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @http_client_transport
   Scenario Outline: Proxy environment variables carry neither side's requests on <cluster_size> server processes
     Given HTTP receiver "api" is running
     And HTTP proxy "environment" is running
@@ -698,7 +734,7 @@ Feature: HTTP client transport contract
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
@@ -740,7 +776,7 @@ Feature: HTTP client transport contract
       """
       CREATE SCHEMA polled_event (user_id I64);
       CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
-      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE WIRE JSON CODEC polled_codec FROM WIRE SCHEMA polled_wire TO SCHEMA polled_event;
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}/private/{{test_id}}?token=secret-{{test_id}}',

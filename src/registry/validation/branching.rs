@@ -944,7 +944,11 @@ pub(in crate::registry) fn resolved_branch_selection(
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
     let schema = schema_model(domain, identifier, models, &branch.schema)?.clone();
-    Ok(ResolvedBranching::branched(branch_ref.clone(), schema))
+    Ok(ResolvedBranching::branched(
+        branch_ref.clone(),
+        schema,
+        branch.partitions,
+    ))
 }
 
 pub(in crate::registry) fn branch_model<'a>(
@@ -1209,9 +1213,14 @@ mod tests {
                 sensitive: false,
             }],
         };
-        let branching = ResolvedBranching::branched(branch_name.clone(), branch_schema.clone());
+        let branching = ResolvedBranching::branched(
+            branch_name.clone(),
+            branch_schema.clone(),
+            nervix_models::BranchPartitions::ONE,
+        );
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let relay_index = graph.add_node(ActiveNode {
+            ingestor_units: None,
             identifier: named("events"),
             kind: ModelKind::Relay,
             config: Arc::new(relay("events", "event_schema")),
@@ -1265,7 +1274,11 @@ mod tests {
             &domain,
             &producer,
             &relay_name,
-            ResolvedBranching::branched(branch_name, sensitive_schema),
+            ResolvedBranching::branched(
+                branch_name,
+                sensitive_schema,
+                nervix_models::BranchPartitions::ONE,
+            ),
             &indices,
             &mut graph,
         )
@@ -1276,7 +1289,11 @@ mod tests {
             &domain,
             &producer,
             &relay_name,
-            ResolvedBranching::branched(named("by_account"), branch_schema),
+            ResolvedBranching::branched(
+                named("by_account"),
+                branch_schema,
+                nervix_models::BranchPartitions::ONE,
+            ),
             &indices,
             &mut graph,
         )
@@ -1519,8 +1536,13 @@ mod tests {
                                     KafkaTopicIngestor {
                                         client: named("broker_in_2"),
                                         topic: named("notifications"),
-                                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
-                                        instances: nonzero!(1u64),
+                                        offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                            group: named("cg"),
+                                            start_at: nervix_models::IngestStartPosition::Earliest,
+                                        },
+                                        instances: nervix_models::IngestorInstances::Count(
+                                            nonzero!(1u64),
+                                        ),
                                         mode: KafkaIngestMode::AckSequential {
                                             timeout: "30s".to_string(),
                                             retry_policy: nervix_models::RetryPolicy {

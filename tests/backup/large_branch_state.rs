@@ -66,11 +66,11 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          CREATE SCHEMA payment ( tenant STRING, transaction_id STRING, amount I64 );
          CREATE WIRE JSON SCHEMA payment_wire MODE STRICT ( tenant string, transaction_id string, \
          amount integer );
-         CREATE CODEC payment_codec FROM WIRE JSON SCHEMA payment_wire TO SCHEMA payment;
+         CREATE WIRE JSON CODEC payment_codec FROM WIRE SCHEMA payment_wire TO SCHEMA payment;
          CREATE SCHEMA metric ( tenant STRING, latency I64, note STRING );
          CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( tenant string, latency integer, note \
          string );
-         CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+         CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
          CREATE SCHEMA key_summary ( tenant STRING, amount I64, key_bytes I64 );
          CREATE SCHEMA metric_summary ( tenant STRING, samples I64, total I64 OPTIONAL, \
          first_latency I64 OPTIONAL, last_latency I64 OPTIONAL, smallest I64 OPTIONAL, largest \
@@ -82,13 +82,13 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
          CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant;
          CREATE VHOST edge {host};
-         CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
-         CREATE ENDPOINT metric_ingress ON edge PATH '/metrics' TYPE HTTP;
+         CREATE HTTP ENDPOINT payment_ingress ON edge PATH '/payments';
+         CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
          CREATE HTTP ENDPOINT INGESTOR payment_source FROM payment_ingress MODE ACK MAX 8 ACK \
          TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING payment_codec TO payments \
          INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE \
          ERROR LOG ON GENERAL ERROR LOG;
-         CREATE HTTP ENDPOINT INGESTOR metric_source FROM metric_ingress MODE NO ACK ON QUIESCE \
+         CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK ON QUIESCE \
          BUFFER MAX SIZE 2MiB DECODE USING metric_codec TO metrics INHERIT ALL BRANCHED BY \
          by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;

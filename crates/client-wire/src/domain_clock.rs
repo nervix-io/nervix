@@ -116,6 +116,26 @@ fn decode_paced(
     })
 }
 
+/// Why an attach request attached nothing, other than a domain the serving node does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DomainClockAttachRefusal {
+    /// The session holds a transaction, which refuses every session-local request until it ends.
+    InTransaction,
+}
+
+wire_enum!(
+    ALL_DOMAIN_CLOCK_ATTACH_REFUSALS: DomainClockAttachRefusal
+        => wire::DomainClockAttachRefusal { InTransaction }
+);
+
+impl fmt::Display for DomainClockAttachRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InTransaction => formatter.write_str("the session holds a transaction"),
+        }
+    }
+}
+
 /// What became of a request to attach the session to a domain's clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DomainClockAttachDisposition {
@@ -128,8 +148,8 @@ pub enum DomainClockAttachDisposition {
     AlreadyAttached(DomainName),
     /// The serving node has no domain by that name.
     DomainNotFound(DomainName),
-    /// The request was refused; the outcome's message says why.
-    Failed,
+    /// The request was refused. The refusal says why, and the outcome's message describes it.
+    Refused(DomainClockAttachRefusal),
 }
 
 /// The reply to a request to attach the session to a domain's clock.
@@ -186,10 +206,18 @@ impl DomainClockAttachOutcome {
                     not_found,
                 )
             }
-            DomainClockAttachDisposition::Failed => EncodedUnion::new(
-                wire::DomainClockAttachDisposition::RequestFailed,
-                wire::RequestFailed::create(encoder.fbb(), &wire::RequestFailedArgs {}),
-            ),
+            DomainClockAttachDisposition::Refused(refusal) => {
+                let refused = wire::DomainClockAttachRefused::create(
+                    encoder.fbb(),
+                    &wire::DomainClockAttachRefusedArgs {
+                        refusal: Some((*refusal).into()),
+                    },
+                );
+                EncodedUnion::new(
+                    wire::DomainClockAttachDisposition::DomainClockAttachRefused,
+                    refused,
+                )
+            }
         };
         let message = encoder.text("DomainClockAttachOutcome.message", &self.message)?;
         let outcome = wire::DomainClockAttachOutcome::create(
@@ -223,9 +251,11 @@ impl DomainClockAttachOutcome {
             DomainClockAttachDisposition::DomainNotFound(
                 decoder.name("DomainNotFound.domain", not_found.domain())?,
             )
-        } else if let wire::DomainClockAttachDisposition::RequestFailed = outcome.disposition_type()
-        {
-            DomainClockAttachDisposition::Failed
+        } else if let Some(refused) = outcome.disposition_as_domain_clock_attach_refused() {
+            DomainClockAttachDisposition::Refused(
+                decoder
+                    .required_enumeration("DomainClockAttachRefused.refusal", refused.refusal())?,
+            )
         } else {
             return Err(decoder.unknown_union(
                 "DomainClockAttachOutcome.disposition",

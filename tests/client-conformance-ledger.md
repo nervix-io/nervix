@@ -21,21 +21,22 @@ lifetimes, restoration and runnable paced workflows. This ledger owns the qualif
 | C ABI, in process | Shared Rust binding | Native gRPC | `tests/common/client_conformance/c_abi_probe.rs` |
 | C (C11) | Shared Rust binding | Native gRPC | `tests/client_conformance/c/probe.c` |
 | C++ (C++17) | Shared Rust binding, owned through `std::unique_ptr` | Native gRPC | `tests/client_conformance/cpp/probe.cpp` |
-| CPython 3.12+ | Shared Rust binding through `ctypes` | Native gRPC | `tests/client_conformance/python/probe.py` |
-| Java 22+ | Shared Rust binding through the Foreign Function and Memory API | Native gRPC | `tests/client_conformance/java/Probe.java` |
+| CPython 3.12+ | Shared Rust binding through the Python package `nervix_client` on pyo3, `crates/client-python` | Native gRPC | `tests/client_conformance/python/probe.py` |
+| Java 21+ | Shared Rust host runtime through the JNI library, `crates/client-jvm` | Native gRPC | `tests/client_conformance/java/Probe.java` |
 | Ruby 3.3+ | Shared Rust binding through Fiddle | Native gRPC | `tests/client_conformance/ruby/probe.rb` |
 | Go 1.25+ | Independent native client, `flatc --go` and `google.golang.org/grpc` | Native gRPC | `tests/client_conformance/go/` |
 | Node.js 24 | Independent native client, `flatc --ts` and the built-in `WebSocket` | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 | Bun 1.4 | The same TypeScript client, unchanged | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 
-The shared Rust binding is `crates/client-ffi`, whose contract is
-`crates/client-ffi/include/nervix_client.h`. Every binding host drives the Rust client's own state
-machine, so leader retry, request correlation, reconnection, execution identity and subscription
-restoration are the ones `nervix-client-core` tests, and no host reinterprets an uncertain outcome.
+The shared Rust binding is the host session runtime, `crates/client-host`, which C, C++ and
+Ruby hosts reach through the C ABI of `crates/client-ffi`, whose contract is
+`crates/client-ffi/include/nervix_client.h`, and CPython hosts through the Python package of
+`crates/client-python` and JVM hosts through the JNI jar of `crates/client-jvm`. Every binding host drives the Rust client's own state machine, so leader
+retry, request correlation, reconnection, execution identity and subscription restoration are the
+ones `nervix-client-core` tests, and no host reinterprets an uncertain outcome.
 The Go and TypeScript clients implement the protocol themselves: they correlate replies by request
 identity, follow a leader redirect with the same execution reference, and fail rather than report
-success when an outcome is unknown. Other JVM languages reach the binding through the same Foreign
-Function and Memory API as Java. Kotlin and Swift have no live probes in this inventory.
+success when an outcome is unknown. Other JVM languages reach the binding through the same Java classes and JNI library as Java. Kotlin and Swift have no live probes in this inventory.
 
 ## Build and run
 
@@ -50,27 +51,43 @@ pull request labeled `client-conformance`.
 | Shared binding | `cargo build --package nervix-client-ffi` | Loaded from `target/debug/libnervix_client_ffi.so` |
 | C | `cc -std=c11 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include tests/client_conformance/c/probe.c -L target/debug -lnervix_client_ffi -Wl,-rpath,target/debug -o target/client-conformance/c-probe` | `target/client-conformance/c-probe` |
 | C++ | `c++ -std=c++17 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include tests/client_conformance/cpp/probe.cpp -L target/debug -lnervix_client_ffi -Wl,-rpath,target/debug -o target/client-conformance/cpp-probe` | `target/client-conformance/cpp-probe` |
-| Python | None | `python3 tests/client_conformance/python/probe.py` |
-| Java | None; the launcher compiles the source file | `java --enable-native-access=ALL-UNNAMED tests/client_conformance/java/Probe.java` |
+| Python | `just build-client-python`: `maturin build` of `crates/client-python` into an abi3 wheel under `target/client-conformance/wheels`, installed with `pyarrow` into the CPython 3.12 environment `target/client-conformance/python` | `target/client-conformance/python/bin/python tests/client_conformance/python/probe.py` |
+| Java | `just build-client-jvm`: Java 21 classes, JNI library bundled into `target/client-conformance/java/nervix-client.jar`, and compiled probe | `java -Xcheck:jni -cp target/client-conformance/java/nervix-client.jar:target/client-conformance/java/probe Probe` |
 | Ruby | None | `ruby tests/client_conformance/ruby/probe.rb` |
 | Go | `flatc --go` into a copy of `tests/client_conformance/go`, then `go build` | `target/client-conformance/go-probe`, or `go-probe corpus <dir>` |
 | Node.js | `flatc --ts`, `npm ci`, then `esbuild probe.ts --bundle --platform=node --format=esm` | `node target/client-conformance/node/probe.mjs`, or with `corpus <dir>` |
 | Bun | The Node.js bundle; Bun is the release the probe's `package-lock.json` pins | `target/client-conformance/node-src/node_modules/.bin/bun target/client-conformance/node/probe.mjs` |
 
-A binding probe reads `NERVIX_CLIENT_LIBRARY`, and every probe reads its target from
+A probe of the C ABI reads `NERVIX_CLIENT_LIBRARY`, and every probe reads its target from
 `NERVIX_PROBE_GRPC_URI`, `NERVIX_PROBE_WEBSOCKET_URI`, `NERVIX_PROBE_USERNAME`,
 `NERVIX_PROBE_PASSWORD` and `NERVIX_PROBE_DOMAIN`, and its subscription from `NERVIX_PROBE_RELAY`,
-`NERVIX_PROBE_SUBSCRIPTION` and `NERVIX_PROBE_ROWS`. Run with the `clock` argument, a binding probe
-follows the domain's clock instead and reads no subscription. Run with the `io` argument, it
+`NERVIX_PROBE_SUBSCRIPTION` and `NERVIX_PROBE_ROWS`. An independent probe also reads the UUIDv7
+reference of its leader-only command from `NERVIX_PROBE_EXECUTION_REFERENCE`.
+Run with the `clock` argument, a binding probe follows the domain's clock instead and reads no
+subscription. Run with the `io` argument, it
 publishes to the ingestor `NERVIX_PROBE_INGESTOR` names, consumes the emitter
 `NERVIX_PROBE_EMITTER` names, and reads no subscription either.
 
 ## What every probe proves
 
 `A <runtime> client round-trips an operation, typed rows, an error and a closure` runs each runtime
-against a one- and a three-node cluster, starting on `node-1`, which is a follower in most
-three-node runs. Every probe prints the same report and the scenario holds all of them to one
-expected report:
+against a one- and a three-node cluster. The harness waits for every node to agree on the leader,
+chooses another node when one exists, and logs the leader and the probe's starting node. The
+one-node example is a direct-connection control. Every runtime repeats the typed-row scenario with
+an unpartitioned branch and with four partitions: the existing `acme` and `beta` keys select
+partitions three and one. Both declarations use the same complete report
+oracle, so partition ownership changes neither the public branch identity nor any typed value.
+The report compares row lines independently of their order across concrete branches while keeping
+the operation, schema and closure lines ordered.
+
+The independent Go, Node.js and Bun probes first create an otherwise unused schema, a leader-only
+command whose completion they require before the common read operation. In a three-node example,
+they must report its redirect. The harness supplies a UUIDv7 execution reference and checks the
+original request, the repeated request and the terminal outcome against that exact reference. Go
+follows a command reply's `LeaderRedirect`; TypeScript follows `SessionEnding{LeaderRedirect}`
+and keeps its subscription on the replacement console session. A successful operation without
+that redirect evidence fails the three-node example. The remaining report is shared by every
+runtime and held to one expected report:
 
 - An operation: `SHOW CREATE RELAY` completes.
 - An error: a malformed statement fails with one diagnostic at the exact source span.
@@ -85,6 +102,29 @@ expected report:
   and `nullif` calls before the client reads them, so the report covers function output through
   the final transport as well as the transport's scalar encoding.
 - A closure: deleting the subscription completes.
+
+The C ABI in process, C and C++ also run `A <runtime> C binding connects to an HTTPS seed and
+distinguishes session-local repeats from durable recovery` against one- and three-node HTTPS
+clusters with the fixture's private CA supplied through `nx_connect_options`. Those examples
+start at an unavailable HTTPS address and reach a live HTTPS seed. The probes set connect,
+request and retry deadlines, check that an empty subscription event stream waits to its call
+deadline rather than closing, and repeat the same prepared ATTACH, CREATE SUBSCRIPTION and DELETE
+SUBSCRIPTION executions. ATTACH and CREATE are refused on repeat; DELETE confirms the already
+absent subscription. None uses its reference for durable outcome recovery. The binding's owner
+tests also check both restoration event kinds' borrowed messages and nanosecond waits, wrong-kind
+and missing-output failures, and copied options buffers.
+
+`A <runtime> client reads the cause, message and retry wait of a restoration refused for now`
+opens a subscription through a forwarded gRPC endpoint on one and three nodes, cuts that
+connection, arms every node to refuse the next subscription opening as unavailable while it is
+down, and restores the connection. The C ABI in process, C, C++ and Java each report the
+interruption, then read the `unavailable` cause, the refusal message and a positive retry wait
+from the restoration failure event. `A <runtime> client reads why a subscription whose relay was
+dropped while it was disconnected ended` drops the relay instead while the connection is down, and
+the same runtimes read the `relay_removed` end reason from the ended event, which S-7 makes the
+answer to a reopening of a relay that no longer exists. The owner tests cover the matching
+clock-event accessors because no domain-removal request is available to make a live clock
+restoration fail on demand.
 
 `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its
 generations apart` runs every binding host, the C ABI in process, C, C++, Python, Java and Ruby,
@@ -163,9 +203,27 @@ Beyond the shared report, each kind of probe checks what only it can reach:
 | Binding hosts | Rows survive on a retained reference after the first is released, and read identically after collections, allocation churn, and release on another thread. Every column is copied in one call, and every string and bytes value borrowed from the frame equals its copy. A wait cancelled from another thread reports `NX_ERROR_CANCELLED`, an expired deadline `NX_ERROR_DEADLINE`, and a cancelled command keeps its execution reference. A clock wait of a session that follows no clock ends the same two ways, and the clock the attach reported and the first tick event read identically on a retained reference after the first is released on another thread. |
 | Binding hosts, producers and consumers | Every buffer a host passes a batch builder is overwritten as soon as the call returns, and the rows the consumer reads are still the ones the host built. The stream a host passes `nx_producer_submit_ipc` is overwritten or released as soon as the call returns, and the server still refuses it for its schema rather than as malformed. A delivery's batch borrows the stream the delivery carried. A delivery and its batch retained before the first reference is released on another thread read the same stream and rows, and the retained delivery settles the attempt. A submission's pending list names the one waiting submission, and a wait for its outcome ends by its deadline while its output is unacknowledged. |
 | Python | The frame is a `memoryview` whose buffer keeps the event alive; it stays readable after every other reference is dropped and collected. |
-| Java | References retained into automatic arenas are released by the collector while other references to the same event are read. A view of a released event throws instead of reading freed memory. |
+| Java | Cleaner releases unreachable handles. A read-only direct frame buffer retains its native event, including through slice/duplicate chains after explicit event close. Shared handle leases permit cross-thread cancellation and release. |
 | Ruby | References nothing reaches are released by the collector's free function while retained references are read. |
 | Go, TypeScript | A request that omits the required subscription type is rejected rather than defaulted, and cancelling an identity that is not in flight reports `NotInFlight`. The TypeScript client reads every 64-bit value as a `BigInt`. |
+
+## Host suites
+
+A probe holds every runtime to one report. A host suite holds one binding to the behaviour its
+guide documents, in that host's own test framework, asserting values and exceptions rather than
+report lines. A suite has two tiers: its boundary tier needs no cluster, and its cluster tier runs
+in `tests/features/runtime/client_suites.feature` against a cluster whose session listener serves
+TLS. `tests/client-suites-inventory.toml` registers every test by host, tier and stable identity,
+and a run of either tier fails on a registered test that did not run or did not pass, on a skipped
+test and on a test the inventory does not register. Each runner prints one
+`NERVIX-SUITE <outcome> <identity>` line per test, which the scenario harness and
+`scripts/client_suites.py check-run` read. `just validate-client-suites` holds each suite to its
+binding's whole public surface, measured by mypy over the typed suite, and its guide to the shared
+section list with every code block an include of an anchored test.
+
+| Host | Build | Boundary tier | Cluster tier | Covers | Runs in | Guide |
+| --- | --- | --- | --- | --- | --- | --- |
+| CPython 3.12+ | `just build-client-python`: the wheel with pytest, pyarrow, polars and mypy in `target/client-conformance/python`, and alone in `target/client-conformance/python-bare` | `just test-client-python-api`, which `just test` runs | `just test-client-python-cluster`, or the `@client_suite_python` rows of `just test-client-conformance` | Connection over TLS with seeds and timeouts, execution and recovery by the same execution, completion, subscriptions and their events, domain clocks across generations and a lost session, producers and every outcome class, consumers and every settlement, backup and restore, `with` blocks and collection-driven lifetimes, threads, typed exceptions, Arrow exchange with pyarrow and polars, and the wheel's packaging | The `client-conformance` job, for a pull request labeled `client-conformance` | [Python Client Library](../docs/src/client-library-python.md) |
 
 ## Batch buffers
 
@@ -186,18 +244,22 @@ and that decoding them prints exactly the report; `just update-client-wire-corpu
 for review. The corpus covers what the live relay does not: fixed and variable lists, nested lists,
 a NaN with a payload, infinity, a nullable and a sensitive branch key field, command outcomes with
 diagnostics, a leader redirect with and without a known leader, an unknown outcome, a rejection, a
-subscription ending, and client requests with a present-zero and an absent optional position, a
-preview fingerprint, and the largest request identity. It also covers the domain clock attachment:
-the attach and detach requests, a paced clock attached at the largest generation with the extreme
-signed timestamps and a time rate read by its bits, clock frames in the stopped, uninstalled and
-unpaced states, every refusal of an attach, a detach of a clock the session does not follow, and
-the end of an attachment with its typed reason.
+subscription refused with its typed refusal and diagnostic, a subscription ending, and client
+requests with a present-zero and an absent optional position, a preview fingerprint, a subscribe
+that restores a subscription under the branched schema it expects, and the largest request identity.
+It also covers the domain clock attachment: the attach and detach requests, a paced clock attached
+at the largest generation with the extreme signed timestamps and a time rate read by its bits, clock
+frames in the stopped, uninstalled and unpaced states, every refusal of an attach with its typed
+refusal, a detach of a clock the session does not follow, and the end of an attachment with its
+typed reason.
 A tick frame carries its generation, id, boundary, authority UTC observation, and
 serving node logical reading through the Rust, Go, and TypeScript readers. Producers are covered by
 the open, submit, and close requests with a batch carried as opaque bytes, an opened producer with
 its description under a parallel window, a refused open, a closed producer, a submission of
 each of the four outcome classes with a typed cause, and the admission-change and end frames of a
-producer.
+producer. Server notices are covered by one frame of each kind (membership, leadership, cluster
+parameters, runtime and control plane) across the three levels, whose reports print the level and
+the kind beside the text.
 
 `A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote` holds the Go
 reader and the TypeScript reader on Node.js and Bun to the same report. Together with the live
@@ -208,18 +270,18 @@ the independent interoperation with Rust in both encoding directions.
 
 [Client I/O 05](https://app.clickup.com/t/86bc8bj8d) added
 `examples/paced-simulation/python/paced_simulation.py`, a runnable application rather than a probe.
-It reaches the binding through the same `ctypes` path as the Python probe, with nothing but the
-standard library: it follows the domain clock and projects every wait and admission check through
-`nx_domain_clock_*`, builds its batches with `nx_batch_builder_*`, reads deliveries with
-`nx_batch_*`, and runs its producer, consumers, clock and inspection loops on one session from
-several threads. `paced_simulation.feature` runs it with `just test-scenarios` beside the Rust
-driver, on one and three nodes, against the published example graph; `just tests-deps` builds the
-binding it loads.
+It uses the native `nervix_client` package over the Rust client. Its `DomainClock` projects every
+wait and admission check, `BatchBuilder` constructs the input columns, and typed batches expose
+the delivery columns. Producer, consumer, clock and inspection loops share one session across
+Python threads; blocking calls release the GIL and Python owns each object's lifetime.
+`paced_simulation.feature` runs it with `just test-scenarios` beside the Rust driver, on one and
+three nodes, against the published example graph. `just tests-deps` builds and installs the wheel
+into the interpreter the scenario harness starts.
 The contract-change outline alters both emitters and the ingestor within one START generation and
 checks reopening, completed outcomes, and each ledger reading's exact effect. Separate one- and
 three-node cases check refusal after endpoint removal, schema change, and an unusable consumer
-credit request. Outcome threads retain the Python producer handle and its credit independently
-of the replacement, so neither a late outcome nor handle cleanup affects the replacement.
+credit request. Outcome threads retain the Python producer object and its credit independently
+of the replacement, so neither a late outcome nor object collection affects the replacement.
 The credit-wait outline changes the ingestor while a tick waits for the first batch's outcome,
 checks that its refusal leaves that reading unapplied, and explicitly replays it exactly once.
 A delayed consumer refusal after the last submitted tick also exits promptly instead of waiting
@@ -245,16 +307,22 @@ for the outstanding-outcome deadline or a producer close that cannot drain that 
   test `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain` does, and the
   settlement reports `NX_ERROR_UNCERTAIN`.
 - The probes connect over plaintext. TLS selection is the Rust client's and is not reimplemented by
-  the binding.
+  the binding; the Python suite's cluster tier connects over TLS with the fixture certificate
+  authority.
 - C and C++ consume the binding. No independent C or C++ reader is maintained.
 - Only the Rust client restores subscriptions and domain clock attachments after reconnection. The
   Go and TypeScript clients show that the protocol is implementable, not that they recover; a
   binding host inherits the Rust client's recovery.
 - An attach refusal reaches a binding host as a failed disposition and the server's message, not
   as a typed refusal; `nx_session_domain_clock` tells whether the session follows the clock after
-  it.
+  it. A refused restoration of a subscription or a clock reaches it with the typed cause
+  `nx_event_restoration_cause` or `nx_clock_event_restoration_cause` reads.
 - The Go and TypeScript clients read the attach reply and the clock frames only from the corpus;
   no live probe of theirs follows a domain clock.
+- The Go and TypeScript clients decode server notices, with their level and kind, only from the
+  corpus: a live probe skips the notices its session receives, which arrive whenever its node sees
+  a cluster event rather than at a point the report could fix. Binding hosts receive no notices,
+  because the shared binding does not expose them.
 
 
 Historical run results and audit findings are retained on [Client Wire 14](https://app.clickup.com/t/86bc1ahyr).

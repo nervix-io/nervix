@@ -979,10 +979,10 @@ pub(super) fn bind_processor_output_filter_map_program(
             .with_sensitivity(output_sensitivity.clone()),
     ];
     if let Some(tensors) = inferencer_tensors {
-        bindings.push(VmCompileBinding::readonly(
-            "generated",
-            tensors.output_arrow_schema(),
-        ));
+        bindings.push(
+            VmCompileBinding::readonly("generated", tensors.output_arrow_schema())
+                .with_sensitivity(input_sensitivity),
+        );
     } else {
         bindings.insert(
             0,
@@ -1227,8 +1227,11 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
         &node,
         parsed,
         schemas,
-        route.codec_route,
-        route.header_writes,
+        EmitterFilterMapScope {
+            codec_route: route.codec_route,
+            header_writes: route.header_writes,
+            branch_binding: None,
+        },
         error_sites,
         context,
     )?;
@@ -1239,16 +1242,27 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
     }))
 }
 
+/// The namespaces and header writes this emitter program is permitted to use.
+pub(super) struct EmitterFilterMapScope {
+    pub(super) codec_route: bool,
+    pub(super) header_writes: Option<HeaderValues>,
+    pub(super) branch_binding: Option<VmCompileBinding>,
+}
+
 pub(super) fn compile_emitter_filter_map_part(
     node: &ModelName,
     parsed: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     schemas: RuntimeVmSchemaPair,
-    codec_route: bool,
-    header_writes: Option<HeaderValues>,
+    scope: EmitterFilterMapScope,
     error_sites: CompiledMessageErrorSites,
     context: RuntimeVmCompileContext<'_>,
 ) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
     let failure = || RuntimeVmCompileError::CompileFilterMap { node: node.clone() };
+    let EmitterFilterMapScope {
+        codec_route,
+        header_writes,
+        branch_binding,
+    } = scope;
     let RuntimeVmSchemaPair {
         input: input_schema,
         input_sensitivity,
@@ -1269,11 +1283,15 @@ pub(super) fn compile_emitter_filter_map_part(
             VmCompileBinding::readonly("message", input_schema).with_sensitivity(input_sensitivity),
         ]
     };
-    let local_namespaces = HashSet::from_iter([
+    let mut local_namespaces = HashSet::from_iter([
         "input".to_string(),
         "message".to_string(),
         "output".to_string(),
     ]);
+    if let Some(branch) = branch_binding {
+        bindings.push(branch);
+        local_namespaces.insert(BRANCH_NAMESPACE.to_string());
+    }
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
         &parsed,
         &local_namespaces,
@@ -1531,7 +1549,7 @@ pub(super) fn compile_reorderer_program(
     })
 }
 
-/// Binds a lowered ingestor route, which reads the decoded message and the source's metadata, to
+/// Binds a lowered ingestor route, which reads the decoded message and the ingestor's metadata, to
 /// this node's schemas, state, lookups and UDFs.
 pub(super) fn bind_ingestor_filter_map_program(
     node: &ModelName,

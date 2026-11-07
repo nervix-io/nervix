@@ -13,7 +13,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumString, IntoStaticStr};
@@ -21,8 +21,8 @@ use thiserror::Error;
 
 use crate::{
     AckWindow, BatchUnavailability, ClientName, CodecName, EmitterBatchLegality, EmitterEntity,
-    EmitterName, ErrorPolicies, FlushPolicy, IcebergEmitter, InputCollectPolicy,
-    ProcessorInputWhere, ProcessorInputs, RelayName, RetryPolicy,
+    EmitterName, ErrorPolicies, FlushPolicy, InputCollectPolicy, ProcessorInputWhere,
+    ProcessorInputs, RelayName, RetryPolicy,
 };
 
 #[derive(
@@ -152,135 +152,188 @@ impl CreateEmitter {
             AlterEmitterOperation::AddFrom {
                 relay,
                 where_clause,
-            } => {
-                self.ensure_input_absent(relay)?;
-                self.from.from.push(relay.clone());
-                if let Some(where_clause) = where_clause {
-                    self.from.r#where.push(ProcessorInputWhere {
-                        relay: relay.clone(),
-                        where_clause: where_clause.clone(),
-                    });
-                }
-            }
-            AlterEmitterOperation::DropFrom { relay } => {
-                let index = self.input_index(relay)?;
-                if self.from.from.len() == 1 {
-                    return Err(Report::new(AlterEmitterError::CannotDropLastInput));
-                }
-                self.from.from.remove(index);
-                self.from
-                    .r#where
-                    .retain(|input_where| input_where.relay != *relay);
-            }
+            } => self.add_input(relay, where_clause.as_ref()),
+            AlterEmitterOperation::DropFrom { relay } => self.drop_input(relay),
             AlterEmitterOperation::AlterFromSetWhere {
                 relay,
                 where_clause,
-            } => {
-                self.input_index(relay)?;
-                if let Some(input_where) = self
-                    .from
-                    .r#where
-                    .iter_mut()
-                    .find(|input_where| input_where.relay == *relay)
-                {
-                    input_where.where_clause = where_clause.clone();
-                } else {
-                    self.from.r#where.push(ProcessorInputWhere {
-                        relay: relay.clone(),
-                        where_clause: where_clause.clone(),
-                    });
-                }
-            }
-            AlterEmitterOperation::AlterFromDropWhere { relay } => {
-                self.input_index(relay)?;
-                let Some(index) = self
-                    .from
-                    .r#where
-                    .iter()
-                    .position(|input_where| input_where.relay == *relay)
-                else {
-                    return Err(Report::new(AlterEmitterError::InputWhereNotConfigured {
-                        relay: relay.clone(),
-                    }));
-                };
-                self.from.r#where.remove(index);
-            }
+            } => self.set_input_where(relay, where_clause),
+            AlterEmitterOperation::AlterFromDropWhere { relay } => self.drop_input_where(relay),
             AlterEmitterOperation::SetTo {
                 destination,
                 body,
                 envelope,
                 construction,
-            } => {
-                if self.connector.kind() != destination.kind() {
-                    return Err(Report::new(AlterEmitterError::DestinationKindMismatch {
-                        stored: self.connector.kind(),
-                        requested: destination.kind(),
-                    }));
-                }
-                self.connector = destination.clone();
-                self.body = body.clone();
-                self.envelope = envelope.clone();
-                if let Some(construction) = construction {
-                    self.construction = construction.clone();
-                }
-            }
-            AlterEmitterOperation::SetClient { client } => {
-                let Some(current) = self.connector.client_mut() else {
-                    return Err(Report::new(AlterEmitterError::ClientUnsupported));
-                };
-                *current = client.clone();
-            }
+            } => self.set_destination(destination, body, envelope, construction.as_ref()),
+            AlterEmitterOperation::Change { change } => self.connector.apply_change(change),
+            AlterEmitterOperation::SetClient { client } => self.set_client(client),
             AlterEmitterOperation::SetEncodeUsing { codec } => {
                 self.body = EmitterBody::Codec {
                     codec: codec.clone(),
                 };
+                Ok(())
             }
-            AlterEmitterOperation::DropEncode => {
-                if self.connector.capabilities().body == crate::EmitterBodyForm::CodecOrWithoutBody
-                {
-                    return Err(Report::new(AlterEmitterError::BodySelectionRequired {
-                        entity: self.connector.kind(),
-                    }));
-                }
-                if self.body.codec().is_none() {
-                    return Err(Report::new(AlterEmitterError::EncodeNotConfigured));
-                }
-                self.body = EmitterBody::Values;
-            }
+            AlterEmitterOperation::DropEncode => self.drop_encode(),
+            AlterEmitterOperation::AlterEnvelope { alteration } => self
+                .envelope
+                .apply_alteration(self.connector.kind(), alteration)
+                .change_context(AlterEmitterError::Envelope),
+            AlterEmitterOperation::Construction { alteration } => self
+                .construction
+                .apply_alteration(alteration)
+                .change_context(AlterEmitterError::Construction),
             AlterEmitterOperation::SetCollect { policy } => {
                 self.from.collect_policy = Some(policy.clone());
+                Ok(())
             }
             AlterEmitterOperation::DropCollect => {
                 self.from.collect_policy = None;
+                Ok(())
             }
             AlterEmitterOperation::SetAttachment { mode } => {
                 self.mode = *mode;
-            }
-            AlterEmitterOperation::SetPublishingMode { mode } => {
-                self.connector.replace_mode(mode)?;
+                Ok(())
             }
             AlterEmitterOperation::SetBatch { policy } => {
                 self.batch = Some(*policy);
+                Ok(())
             }
-            AlterEmitterOperation::DropBatch => {
-                if self.batch.take().is_none() {
-                    return Err(Report::new(AlterEmitterError::BatchNotConfigured));
-                }
-            }
+            AlterEmitterOperation::DropBatch => self.drop_batch(),
             AlterEmitterOperation::SetFlush { flush_policy } => {
                 self.flush_policy = flush_policy.clone();
+                Ok(())
             }
-            AlterEmitterOperation::SetCommit {
-                commit_each,
-                max_commit_size,
-            } => {
-                let EmitterEntity::Iceberg(IcebergEmitter::Table(table)) = self.connector.as_mut()
-                else {
-                    return Err(Report::new(AlterEmitterError::CommitPolicyUnsupported));
-                };
-                table.commit_each = commit_each.clone();
-                table.max_commit_size = *max_commit_size;
+            AlterEmitterOperation::SetGeneralError { policy } => {
+                self.error_policies.general = policy.clone();
+                Ok(())
             }
+        }
+    }
+
+    /// `ADD FROM <relay> [WHERE <expression>]`.
+    fn add_input(
+        &mut self,
+        relay: &RelayName,
+        where_clause: Option<&crate::Expression>,
+    ) -> error_stack::Result<(), AlterEmitterError> {
+        self.ensure_input_absent(relay)?;
+        self.from.from.push(relay.clone());
+        if let Some(where_clause) = where_clause {
+            self.from.r#where.push(ProcessorInputWhere {
+                relay: relay.clone(),
+                where_clause: where_clause.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// `DROP FROM <relay>`, which leaves at least one input.
+    fn drop_input(&mut self, relay: &RelayName) -> error_stack::Result<(), AlterEmitterError> {
+        let index = self.input_index(relay)?;
+        if self.from.from.len() == 1 {
+            return Err(Report::new(AlterEmitterError::CannotDropLastInput));
+        }
+        self.from.from.remove(index);
+        self.from
+            .r#where
+            .retain(|input_where| input_where.relay != *relay);
+        Ok(())
+    }
+
+    /// `ALTER FROM <relay> SET WHERE <expression>`.
+    fn set_input_where(
+        &mut self,
+        relay: &RelayName,
+        where_clause: &crate::Expression,
+    ) -> error_stack::Result<(), AlterEmitterError> {
+        self.input_index(relay)?;
+        if let Some(input_where) = self
+            .from
+            .r#where
+            .iter_mut()
+            .find(|input_where| input_where.relay == *relay)
+        {
+            input_where.where_clause = where_clause.clone();
+        } else {
+            self.from.r#where.push(ProcessorInputWhere {
+                relay: relay.clone(),
+                where_clause: where_clause.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// `ALTER FROM <relay> DROP WHERE`.
+    fn drop_input_where(
+        &mut self,
+        relay: &RelayName,
+    ) -> error_stack::Result<(), AlterEmitterError> {
+        self.input_index(relay)?;
+        let Some(index) = self
+            .from
+            .r#where
+            .iter()
+            .position(|input_where| input_where.relay == *relay)
+        else {
+            return Err(Report::new(AlterEmitterError::InputWhereNotConfigured {
+                relay: relay.clone(),
+            }));
+        };
+        self.from.r#where.remove(index);
+        Ok(())
+    }
+
+    /// `SET TO <complete body>`: the entity, payload and envelope, and the construction where the
+    /// body writes one.
+    fn set_destination(
+        &mut self,
+        destination: &EmitterEntity,
+        body: &EmitterBody,
+        envelope: &crate::EmitterEnvelope,
+        construction: Option<&crate::RouteConstruction>,
+    ) -> error_stack::Result<(), AlterEmitterError> {
+        if self.connector.kind() != destination.kind() {
+            return Err(Report::new(AlterEmitterError::DestinationKindMismatch {
+                stored: self.connector.kind(),
+                requested: destination.kind(),
+            }));
+        }
+        *self.connector = destination.clone();
+        self.body = body.clone();
+        *self.envelope = envelope.clone();
+        if let Some(construction) = construction {
+            self.construction = construction.clone();
+        }
+        Ok(())
+    }
+
+    /// `SET CLIENT <client>`.
+    fn set_client(&mut self, client: &ClientName) -> error_stack::Result<(), AlterEmitterError> {
+        let Some(current) = self.connector.client_mut() else {
+            return Err(Report::new(AlterEmitterError::ClientUnsupported));
+        };
+        *current = client.clone();
+        Ok(())
+    }
+
+    /// `DROP ENCODE`: the emitter writes its mapped values directly.
+    fn drop_encode(&mut self) -> error_stack::Result<(), AlterEmitterError> {
+        if self.connector.capabilities().body == crate::EmitterBodyForm::CodecOrWithoutBody {
+            return Err(Report::new(AlterEmitterError::BodySelectionRequired {
+                entity: self.connector.kind(),
+            }));
+        }
+        if self.body.codec().is_none() {
+            return Err(Report::new(AlterEmitterError::EncodeNotConfigured));
+        }
+        self.body = EmitterBody::Values;
+        Ok(())
+    }
+
+    /// `DROP BATCH`.
+    fn drop_batch(&mut self) -> error_stack::Result<(), AlterEmitterError> {
+        if self.batch.take().is_none() {
+            return Err(Report::new(AlterEmitterError::BatchNotConfigured));
         }
         Ok(())
     }
@@ -343,6 +396,11 @@ pub enum AlterEmitterOperation {
         envelope: Box<crate::EmitterEnvelope>,
         construction: Option<crate::RouteConstruction>,
     },
+    /// `SET MODE`, `SET <locator>`, `SET <option>` or `DROP <option>`, as the entity's own grammar
+    /// writes it, changing that part of the body and leaving the rest as it was.
+    Change {
+        change: crate::EmitterChange,
+    },
     SetClient {
         client: ClientName,
     },
@@ -350,15 +408,22 @@ pub enum AlterEmitterOperation {
         codec: CodecName,
     },
     DropEncode,
+    /// `SET <envelope clause>`, `DROP <envelope clause>`, `SET PROPERTIES { … }` or
+    /// `DROP PROPERTIES`: one change to the emitter's envelope where it stands.
+    AlterEnvelope {
+        alteration: Box<crate::EmitterEnvelopeAlteration>,
+    },
+    /// `SET INHERIT …`, `ADD SET …`, `DROP INVOKE <n>`, `SET WHERE …` and the rest: one change to
+    /// the emitter's construction where it stands.
+    Construction {
+        alteration: crate::ConstructionAlteration,
+    },
     SetCollect {
         policy: InputCollectPolicy,
     },
     DropCollect,
     SetAttachment {
         mode: AckMode,
-    },
-    SetPublishingMode {
-        mode: crate::EmitterModeChange,
     },
     SetBatch {
         policy: crate::EmitterBatchPolicy,
@@ -367,9 +432,8 @@ pub enum AlterEmitterOperation {
     SetFlush {
         flush_policy: FlushPolicy,
     },
-    SetCommit {
-        commit_each: String,
-        max_commit_size: crate::PayloadSizeLimit,
+    SetGeneralError {
+        policy: crate::GeneralErrorPolicy,
     },
 }
 
@@ -404,12 +468,21 @@ pub enum AlterEmitterError {
     ClientUnsupported,
     #[error("{entity} emitters select an absent body with SET TO ... WITHOUT BODY")]
     BodySelectionRequired { entity: crate::EmitterEntityKind },
-    #[error("COMMIT policy is only supported by ICEBERG TABLE emitters")]
-    CommitPolicyUnsupported,
     #[error("emitter batching is not configured")]
     BatchNotConfigured,
+    #[error("the stored {entity} emitter writes no {option}, so there is no {option} to drop")]
+    OptionNotWritten {
+        entity: crate::EmitterEntityKind,
+        option: &'static str,
+    },
+    #[error("the {entity} emitter's ON CONFLICT cannot be written for its VALUES")]
+    ConflictAction { entity: crate::EmitterEntityKind },
+    #[error("the emitter's construction cannot take this alteration")]
+    Construction,
     #[error(transparent)]
     Batch(EmitterBatchContractError),
+    #[error("the emitter's envelope cannot take this alteration")]
+    Envelope,
 }
 
 /// Why an emitter's batching clause does not fit the emitter it publishes to.
@@ -441,10 +514,6 @@ pub enum EmitterPublishingModeKind {
     ClientAck,
     NoAck,
     BrokerAck,
-    MqttQos0,
-    MqttQos1,
-    MqttQos2,
-    NatsJetStream,
     RequestAck,
 }
 
@@ -464,24 +533,6 @@ pub enum EmitterPublishing<'a> {
         ack_timeout: &'a str,
         retry_policy: &'a RetryPolicy,
     },
-    MqttQos0 {
-        retry_policy: &'a RetryPolicy,
-    },
-    MqttQos1 {
-        window: &'a AckWindow,
-        ack_timeout: &'a str,
-        retry_policy: &'a RetryPolicy,
-    },
-    MqttQos2 {
-        window: &'a AckWindow,
-        ack_timeout: &'a str,
-        retry_policy: &'a RetryPolicy,
-    },
-    NatsJetStream {
-        window: &'a AckWindow,
-        ack_timeout: &'a str,
-        retry_policy: &'a RetryPolicy,
-    },
     RequestAck {
         retry_policy: &'a RetryPolicy,
     },
@@ -493,21 +544,15 @@ impl<'a> EmitterPublishing<'a> {
             Self::ClientAck { retry_policy, .. }
             | Self::NoAck { retry_policy }
             | Self::BrokerAck { retry_policy, .. }
-            | Self::MqttQos0 { retry_policy }
-            | Self::MqttQos1 { retry_policy, .. }
-            | Self::MqttQos2 { retry_policy, .. }
-            | Self::NatsJetStream { retry_policy, .. }
             | Self::RequestAck { retry_policy } => retry_policy,
         }
     }
     pub fn ack_timeout(self) -> Option<&'a str> {
         match self {
-            Self::ClientAck { ack_timeout, .. }
-            | Self::BrokerAck { ack_timeout, .. }
-            | Self::MqttQos1 { ack_timeout, .. }
-            | Self::MqttQos2 { ack_timeout, .. }
-            | Self::NatsJetStream { ack_timeout, .. } => Some(ack_timeout),
-            Self::NoAck { .. } | Self::MqttQos0 { .. } | Self::RequestAck { .. } => None,
+            Self::ClientAck { ack_timeout, .. } | Self::BrokerAck { ack_timeout, .. } => {
+                Some(ack_timeout)
+            }
+            Self::NoAck { .. } | Self::RequestAck { .. } => None,
         }
     }
     pub fn kind_label(self) -> &'static str {
@@ -518,10 +563,6 @@ impl<'a> EmitterPublishing<'a> {
             Self::ClientAck { .. } => EmitterPublishingModeKind::ClientAck,
             Self::NoAck { .. } => EmitterPublishingModeKind::NoAck,
             Self::BrokerAck { .. } => EmitterPublishingModeKind::BrokerAck,
-            Self::MqttQos0 { .. } => EmitterPublishingModeKind::MqttQos0,
-            Self::MqttQos1 { .. } => EmitterPublishingModeKind::MqttQos1,
-            Self::MqttQos2 { .. } => EmitterPublishingModeKind::MqttQos2,
-            Self::NatsJetStream { .. } => EmitterPublishingModeKind::NatsJetStream,
             Self::RequestAck { .. } => EmitterPublishingModeKind::RequestAck,
         }
     }
@@ -533,10 +574,6 @@ impl EmitterPublishingModeKind {
         match self {
             Self::ClientAck | Self::BrokerAck | Self::RequestAck => "ACK",
             Self::NoAck => "NO ACK",
-            Self::MqttQos0 => "QOS 0",
-            Self::MqttQos1 => "QOS 1 ACK",
-            Self::MqttQos2 => "QOS 2 ACK",
-            Self::NatsJetStream => "JETSTREAM ACK",
         }
     }
 
@@ -547,12 +584,6 @@ impl EmitterPublishingModeKind {
                 "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
             }
             Self::NoAck => "NO ACK RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::MqttQos0 => "QOS 0 RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::MqttQos1 => "QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::MqttQos2 => "QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::NatsJetStream => {
-                "JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
-            }
             Self::RequestAck => "ACK RETRY POLICY BACKOFF 1s MAX 30s",
         }
     }

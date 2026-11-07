@@ -31,6 +31,8 @@ pub(crate) enum WasmStateResetRuntimeError {
     GateNotHeld { processor: ModelName },
     #[error("WASM processor '{}' is not running on this node", .processor.as_str())]
     ProcessorUnavailable { processor: ModelName },
+    #[error("WASM processor '{processor}' execution unit {unit:?} is not running on this node")]
+    UnitUnavailable { processor: ModelName, unit: Unit },
     #[error(
         "WASM processor '{}' has not restored the branches its lifecycle checkpoint names yet",
         .processor.as_str()
@@ -78,7 +80,7 @@ pub(crate) enum WasmStateResetRuntimeError {
     ResponseDropped { processor: ModelName },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct WasmStateResetPreparation {
     pub(super) request: CommandExecutionReference,
     pub(super) scope: WasmStateResetScope,
@@ -153,7 +155,7 @@ impl BranchInstanceTemplate {
         domain: &DomainName,
         key: Option<BranchKey>,
     ) -> error_stack::Result<Vec<u8>, WasmStateResetRuntimeError> {
-        let processor = ModelName::from(&self.source);
+        let processor = self.owner.node.identifier.clone();
         let fresh = || WasmStateResetRuntimeError::FreshInitialization {
             processor: processor.clone(),
         };
@@ -267,22 +269,47 @@ impl Runtime {
         Ok(WasmStateResetScope::Branch(branch.fingerprint()))
     }
 
-    fn wasm_state_reset_commands(
+    pub(super) fn wasm_state_reset_commands(
         &self,
         domain: &DomainName,
         processor: &ModelName,
-    ) -> error_stack::Result<mpsc::Sender<ProcessorNodeCommand>, WasmStateResetRuntimeError> {
-        let commands = self.inner.executions.get(domain).and_then(|execution| {
-            execution
-                .node_tasks
-                .get(&NodeRef::new(ModelKind::WasmProcessor, processor.clone()))
-                .map(|task| task.commands.clone())
-        });
-        commands.ok_or_else(|| {
+        scope: WasmStateResetScope,
+    ) -> error_stack::Result<
+        Vec<error_stack::Result<mpsc::Sender<ProcessorNodeCommand>, WasmStateResetRuntimeError>>,
+        WasmStateResetRuntimeError,
+    > {
+        let dispatcher = self.inner.remote_dispatcher.load_full();
+        let local = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
+        let unavailable = || {
             Report::new(WasmStateResetRuntimeError::ProcessorUnavailable {
                 processor: processor.clone(),
             })
-        })
+        };
+        let execution = self.inner.executions.get(domain).ok_or_else(unavailable)?;
+        let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
+        let node = execution
+            .revision
+            .nodes
+            .get(&entity)
+            .ok_or_else(unavailable)?;
+        Ok(node
+            .units
+            .keys()
+            .filter(|unit| scope.selects_unit(**unit, node.resolved_branching.as_ref()))
+            .filter(|unit| Self::scheduled_unit_executes_locally(node, **unit, local))
+            .map(|unit| {
+                match execution
+                    .node_tasks
+                    .get(&NodeUnitRef::new(entity.clone(), *unit))
+                {
+                    Some(task) => Ok(task.commands.clone()),
+                    None => Err(Report::new(WasmStateResetRuntimeError::UnitUnavailable {
+                        processor: processor.clone(),
+                        unit: *unit,
+                    })),
+                }
+            })
+            .collect())
     }
 
     pub(crate) fn verify_wasm_state_reset_gate(
@@ -293,12 +320,28 @@ impl Runtime {
         scope: WasmStateResetScope,
     ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
         let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
-        if self.entity_gate_operation_owns_entity(
-            coordination,
-            domain,
-            &entity,
-            EntityGatePurpose::WasmStateReset(scope),
-        ) {
+        let units = match self.inner.executions.get(domain) {
+            Some(execution) => match execution.revision.nodes.get(&entity) {
+                Some(node) => node
+                    .units
+                    .keys()
+                    .copied()
+                    .filter(|unit| scope.selects_unit(*unit, node.resolved_branching.as_ref()))
+                    .collect::<Vec<_>>(),
+                None => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        if !units.is_empty()
+            && units.into_iter().all(|unit| {
+                self.entity_gate_operation_owns_unit(
+                    coordination,
+                    domain,
+                    &NodeUnitRef::new(entity.clone(), unit),
+                    EntityGatePurpose::WasmStateReset(scope),
+                )
+            })
+        {
             return Ok(());
         }
         Err(Report::new(WasmStateResetRuntimeError::GateNotHeld {
@@ -314,24 +357,36 @@ impl Runtime {
         preparation: WasmStateResetPreparation,
     ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
         self.verify_wasm_state_reset_gate(coordination, domain, processor, preparation.scope)?;
-        let commands = self.wasm_state_reset_commands(domain, processor)?;
-        let (response, receiver) = oneshot::channel();
-        commands
-            .send(ProcessorNodeCommand::PrepareWasmStateReset {
-                preparation,
-                response,
-            })
-            .await
-            .map_err(|_| {
-                Report::new(WasmStateResetRuntimeError::CommandUnavailable {
+        let commands = self.wasm_state_reset_commands(domain, processor, preparation.scope)?;
+        if commands.is_empty() {
+            return Err(Report::new(
+                WasmStateResetRuntimeError::ProcessorUnavailable {
+                    processor: processor.clone(),
+                },
+            ));
+        }
+        for commands in commands {
+            nervix_primitives::task::consume_budget().await;
+            let commands = commands?;
+            let (response, receiver) = oneshot::channel();
+            commands
+                .send(ProcessorNodeCommand::PrepareWasmStateReset {
+                    preparation: preparation.clone(),
+                    response,
+                })
+                .await
+                .map_err(|_| {
+                    Report::new(WasmStateResetRuntimeError::CommandUnavailable {
+                        processor: processor.clone(),
+                    })
+                })?;
+            receiver.await.map_err(|_| {
+                Report::new(WasmStateResetRuntimeError::ResponseDropped {
                     processor: processor.clone(),
                 })
-            })?;
-        receiver.await.map_err(|_| {
-            Report::new(WasmStateResetRuntimeError::ResponseDropped {
-                processor: processor.clone(),
-            })
-        })?
+            })??;
+        }
+        Ok(())
     }
 
     pub(crate) async fn abort_wasm_state_reset(
@@ -343,21 +398,42 @@ impl Runtime {
         scope: WasmStateResetScope,
     ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
         self.verify_wasm_state_reset_gate(coordination, domain, processor, scope)?;
-        let commands = self.wasm_state_reset_commands(domain, processor)?;
-        let (response, receiver) = oneshot::channel();
-        commands
-            .send(ProcessorNodeCommand::AbortWasmStateReset { request, response })
-            .await
-            .map_err(|_| {
-                Report::new(WasmStateResetRuntimeError::CommandUnavailable {
-                    processor: processor.clone(),
-                })
-            })?;
-        receiver.await.map_err(|_| {
-            Report::new(WasmStateResetRuntimeError::ResponseDropped {
-                processor: processor.clone(),
-            })
-        })?
+        let commands = self.wasm_state_reset_commands(domain, processor, scope)?;
+        let mut failure: Option<Report<WasmStateResetRuntimeError>> = None;
+        for commands in commands {
+            nervix_primitives::task::consume_budget().await;
+            let result = async {
+                let commands = commands?;
+                let (response, receiver) = oneshot::channel();
+                commands
+                    .send(ProcessorNodeCommand::AbortWasmStateReset {
+                        request: request.clone(),
+                        response,
+                    })
+                    .await
+                    .map_err(|_| {
+                        Report::new(WasmStateResetRuntimeError::CommandUnavailable {
+                            processor: processor.clone(),
+                        })
+                    })?;
+                receiver.await.map_err(|_| {
+                    Report::new(WasmStateResetRuntimeError::ResponseDropped {
+                        processor: processor.clone(),
+                    })
+                })?
+            }
+            .await;
+            if let Err(error) = result {
+                match &mut failure {
+                    Some(failure) => failure.extend_one(error),
+                    None => failure = Some(error),
+                }
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Make a fresh snapshot the first committed checkpoint of the selected branch's currently
@@ -374,6 +450,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         processor: &ModelName,
+        unit: Unit,
         key: Option<BranchKey>,
         bytes: Vec<u8>,
     ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
@@ -381,11 +458,12 @@ impl Runtime {
             processor: processor.clone(),
         };
         let placement = self
-            .state_placement(
+            .state_placement_for_unit(
                 domain,
                 RuntimeStateKind::WasmProcessor,
                 ModelKind::WasmProcessor,
                 processor,
+                unit,
                 key,
             )
             .change_context_lazy(failed)?;

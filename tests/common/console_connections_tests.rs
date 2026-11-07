@@ -15,23 +15,27 @@ use std::num::NonZeroU64;
 
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
-    BackupDownloadMessage, CommandDisposition, CommandOutcome, LeaderRedirect, Leadership,
-    LeadershipObserved, NodeEndpoints, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery,
-    RequestId, RestoreDisposition, RestoreReply, RestoreUploadFailure, ServerNotice,
-    SessionEndReason, SessionEnding, SessionLimits,
+    BackupDownloadMessage, CommandDisposition, CommandOutcome, DomainClockAttachDisposition,
+    DomainClockAttachOutcome, LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints,
+    NoticeKind, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId,
+    RestoreDisposition, RestoreReply, RestoreUploadFailure, ServerNotice, SessionEndReason,
+    SessionEnding, SessionLimits,
     websocket::{
         CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH,
         ServerBackupDownloadWebSocketCodec, ServerRestoreWebSocketCodec, ServerWebSocketCodec,
     },
 };
-use nervix_models::{ClusterNodeName, CommandExecutionReference};
+use nervix_models::{
+    ClusterNodeName, CommandExecutionReference, DomainClockObservation, DomainClockObservedState,
+    DomainName,
+};
 use serde_json::{Value, json};
 use url::Url;
 
 use crate::console_connections::{
-    BackupStream, ConnectionPurpose, ConnectionRecordViolation, ConsoleAddress,
-    ConsoleAddressError, ConsoleConnectionRecord, FrameReadFailure, ReportedLeaders,
-    UnreadableFrame,
+    BackupStream, ClockAttachmentEvidenceError, ConnectionPurpose, ConnectionRecordViolation,
+    ConsoleAddress, ConsoleAddressError, ConsoleConnectionRecord, FrameReadFailure,
+    ReportedLeaders, UnreadableFrame,
 };
 
 /// The console the page is opened on, which redirects its session to the leader's.
@@ -67,6 +71,66 @@ fn frame(received: u64, bytes: Vec<u8>) -> Value {
     json!({ "received": received, "bytes": bytes })
 }
 
+fn clock_attached(domain: &DomainName) -> Vec<u8> {
+    let reply = Reply {
+        request_id: RequestId::new(NonZeroU64::MIN),
+        body: ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
+            disposition: DomainClockAttachDisposition::Attached {
+                domain: domain.clone(),
+                clock: DomainClockObservation {
+                    generation: 1,
+                    state: DomainClockObservedState::Stopped,
+                },
+            },
+            message: "following the clock".to_string(),
+        }),
+    };
+    let ReplyDelivery::Frame(frame) = reply.encode(&LIMITS).assured("a clock reply fits a frame")
+    else {
+        panic!("the small clock reply is not transferred");
+    };
+    Vec::from(ServerWebSocketCodec::new(LIMITS).encode(frame))
+}
+
+#[test]
+fn clock_acknowledgements_belong_to_distinct_sessions_of_the_same_clock_generation() {
+    let domain = DomainName::parse("tenant").assured("a literal domain");
+    let mut connections = Vec::new();
+    for number in 0..3 {
+        connections.push(json!({
+            "address": LEADER, "path": CONSOLE_SESSION_PATH,
+            "opened": number * 4 + 1, "connected": number * 4 + 2,
+            "released": number * 4 + 4,
+            "frames": [frame(number * 4 + 3, clock_attached(&domain))],
+        }));
+    }
+    assert_eq!(
+        record(connections, &[])
+            .clock_attachment_count(&domain)
+            .assured("each session acknowledged the clock once"),
+        3
+    );
+}
+
+#[test]
+fn repeated_clock_acknowledgements_on_one_session_fail_the_observation() {
+    let domain = DomainName::parse("tenant").assured("a literal domain");
+    let record = record(
+        vec![json!({
+            "address": LEADER, "path": CONSOLE_SESSION_PATH,
+            "opened": 1, "connected": 2, "released": null,
+            "frames": [frame(3, clock_attached(&domain)), frame(4, clock_attached(&domain))],
+        })],
+        &[],
+    );
+    let error = record
+        .clock_attachment_count(&domain)
+        .expect_err("one session duplicated its acknowledgement");
+    assert!(
+        matches!(error.current_context(), ClockAttachmentEvidenceError::Repeated { connection: 1, domain: named } if named == &domain)
+    );
+}
+
 /// The leader whose node advertises `web_console`.
 fn leader_advertising(web_console: Url) -> NodeEndpoints {
     NodeEndpoints {
@@ -93,15 +157,94 @@ fn redirect_to(console: &str) -> LeaderRedirect {
 
 /// The report the leader opens every console session it serves with.
 fn serving() -> Vec<u8> {
+    serving_as("node-leader")
+}
+
+fn serving_as(node: &str) -> Vec<u8> {
     let observed = LeadershipObserved {
         leadership: Leadership::ServingNode(
-            ClusterNodeName::parse("node-leader").assured("a literal node name"),
+            ClusterNodeName::parse(node).assured("the test supplies a valid node name"),
         ),
     };
     let frame = observed
         .encode(&LIMITS)
         .assured("a leadership report fits a frame");
     Vec::from(ServerWebSocketCodec::new(LIMITS).encode(frame))
+}
+
+#[test]
+fn the_initial_serving_node_comes_from_the_session_that_connected_after_redirects() {
+    let record = record(
+        vec![
+            json!({ "address": FOLLOWER, "path": CONSOLE_SESSION_PATH,
+                    "opened": 1, "connected": 2, "released": 6,
+                    "frames": [frame(3, no_known_leader()),
+                               frame(4, leading_elsewhere(LEADER)),
+                               frame(5, session_ended(redirect_to(LEADER)))] }),
+            json!({ "address": FOLLOWER, "path": CONSOLE_BACKUP_DOWNLOAD_PATH,
+                    "opened": 7, "connected": 8, "released": 10,
+                    "frames": [frame(9, download_redirected(LEADER))] }),
+            json!({ "address": LEADER, "path": CONSOLE_SESSION_PATH,
+                    "opened": 11, "connected": 12, "released": 15,
+                    "frames": [frame(13, serving_as("initial-leader")),
+                               frame(14, session_ended(redirect_to(STRANGER)))] }),
+            json!({ "address": STRANGER, "path": CONSOLE_SESSION_PATH,
+                    "opened": 16, "connected": 17, "released": null,
+                    "frames": [frame(18, serving_as("later-leader"))] }),
+        ],
+        &[],
+    );
+    assert_eq!(
+        record
+            .first_serving_node()
+            .assured("the record contains valid wire frames"),
+        Some(ClusterNodeName::parse("initial-leader").assured("a literal node name")),
+    );
+    let setup = record
+        .setup_observation()
+        .assured("the session frames decode under the public codec");
+    assert_eq!(setup.connections, vec![1, 11, 16]);
+    assert_eq!(setup.domain_selections, 0);
+    assert_eq!(setup.clock_attachments, 0);
+    assert_eq!(setup.subscriptions, 0);
+}
+
+#[test]
+fn an_unserved_session_has_no_initial_serving_node() {
+    for record in [
+        record(vec![], &[]),
+        record(
+            vec![json!({ "address": FOLLOWER, "path": CONSOLE_SESSION_PATH,
+                         "opened": 1, "connected": 2, "released": 5,
+                         "frames": [frame(3, no_known_leader()),
+                                    frame(4, session_ended(redirect_to(LEADER)))] })],
+            &[],
+        ),
+    ] {
+        assert_eq!(
+            record
+                .first_serving_node()
+                .assured("the record contains valid wire frames"),
+            None,
+        );
+    }
+}
+
+#[test]
+fn an_unreadable_initial_session_report_keeps_its_frame_identity_and_cause() {
+    let record = record(
+        vec![json!({ "address": FOLLOWER, "path": CONSOLE_SESSION_PATH,
+                     "opened": 1, "connected": 2, "released": null,
+                     "frames": [frame(3, vec![0, 1, 2])] })],
+        &[],
+    );
+    let error = record
+        .first_serving_node()
+        .expect_err("the first session frame is malformed");
+    assert_eq!(error.current_context().connection, 1);
+    assert_eq!(error.current_context().purpose, ConnectionPurpose::Session);
+    assert_eq!(error.current_context().received, 3);
+    assert!(error.contains::<FrameReadFailure>());
 }
 
 /// A report that the node at `console` leads, as a node that does not lead observes it.
@@ -130,6 +273,7 @@ fn no_known_leader() -> Vec<u8> {
 fn notice() -> Vec<u8> {
     let notice = ServerNotice {
         level: NoticeLevel::Info,
+        kind: NoticeKind::Membership,
         message: "a notice for every session".to_string(),
     };
     let frame = notice

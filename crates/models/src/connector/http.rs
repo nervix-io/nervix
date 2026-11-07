@@ -2,11 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The HTTP client Model and transport declaration, the polled request source with its delivery mode, the source
+//! - **Owns.** The HTTP client Model and transport declaration, the polled request ingestor with its delivery mode, the ingestor
 //!   that reads an HTTP endpoint this cluster serves, the request emitter Model, and what each entity
 //!   declares.
-//!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations, expressions, the domain clock's
+//!   Client declarations also own public configuration keys, types and confidentiality, and a polled
+//!   request owns how its headers read them.
+//! - **Depends on.** The shared ingestor and emitter declarations, expressions, the domain clock's
 //!   period and the names a body references.
 //! - **Must not know.** The HTTP client library, how a request is built,
 //!   sent or classified, or how an endpoint is published, routed to or served.
@@ -16,8 +17,12 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use std::collections::BTreeSet;
+
+use error_stack::{Report, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::{
     bounds::{
@@ -32,11 +37,11 @@ use crate::{
     DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod, EmitterBatchLegality, EmitterBodyForm,
     EmitterClientReference, EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities,
     EmitterReference, EmitterReferenceKind, EndpointIngestMode, EndpointName, EndpointType,
-    Expression, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
-    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
-    IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PayloadSizeLimit, PositionClass,
+    Expression, HeaderLayout, HeaderModel, HttpApplicationHeaders, HttpHeaderName, HttpHeaderValue,
+    IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
+    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorMetadataField,
+    IngestorMetadataType, IngestorReference, IngestorReferenceKind, OptionDeclaration, OptionForm,
+    OptionPresence, OptionValue, PayloadSizeLimit, PositionClass,
 };
 
 configured_client!(Http: unpooled, config CLIENT_CONFIG, CreateClientHttp => HttpConfigEntry);
@@ -64,6 +69,10 @@ impl CreateClientHttp {
     };
 }
 
+/// The prefix of the secret keys an operator names on an HTTP client. A polled request's header
+/// reads one by its whole key.
+pub const HTTP_CLIENT_SECRET_KEY_PREFIX: &str = "secret.";
+
 /// The current keys this connector reads, shared by validation, completion and inspection.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
@@ -80,6 +89,7 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
         &[],
         &[],
     )
+    .with_secret_keys(HTTP_CLIENT_SECRET_KEY_PREFIX)
 };
 
 /// The most bytes a polling request reads when its statement omits `MAX BODY SIZE`.
@@ -89,13 +99,57 @@ pub const HTTP_DEFAULT_MAX_BODY_SIZE: PayloadSizeLimit =
         None => panic!("16 MiB fits in a 64-bit byte count"),
     };
 
-/// One literal request header, in the polling statement's written order.
+/// One request header, in the polling statement's written order.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct HttpRequestHeader {
     pub name: String,
-    pub value: String,
+    pub value: HttpRequestHeaderValue,
+}
+
+/// Where a polled request's header takes its value from.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum HttpRequestHeaderValue {
+    /// The value itself, which the statement states and so every inspection prints.
+    Literal(String),
+    /// The whole key of a secret on the ingestor's client. The statement holds only this name, so
+    /// inspection prints the name and never the value.
+    ClientSecret(String),
+}
+
+/// Why a polling ingestor cannot send the `HEADERS` its statement declares.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "pure validation of a polled request's headers against its client's keys"
+    )
+)]
+pub enum HttpRequestHeadersError {
+    #[error("header '{name}' is invalid or reserved")]
+    InvalidName { name: String },
+    #[error("header '{name}' has an invalid value")]
+    InvalidValue { name: String },
+    #[error("header '{name}' is set more than once")]
+    RepeatedName { name: String },
+    #[error("headers exceed the HTTP application-header bounds")]
+    Limit,
+    #[error(
+        "header '{name}' reads client secret '{key}', which client '{client}' does not declare"
+    )]
+    UndeclaredSecret {
+        name: String,
+        key: String,
+        client: ClientName,
+    },
+    #[error("header '{name}' reads client key '{key}', which is not a secret")]
+    NotSecret { name: String, key: String },
+    #[error("client secret '{key}' of header '{name}' is not a valid header value")]
+    InvalidSecret { name: String, key: String },
 }
 
 /// The request an HTTP client sends on a cadence of domain time, whose response is the payload.
@@ -115,6 +169,103 @@ pub struct HttpRequestIngestor {
 impl HttpRequestIngestor {
     pub fn max_body_size_in_effect(&self) -> PayloadSizeLimit {
         self.max_body_size.unwrap_or(HTTP_DEFAULT_MAX_BODY_SIZE)
+    }
+
+    /// Holds `HEADERS` to the fields a request can carry, reading each client secret from `client`.
+    ///
+    /// A refusal names keys and headers and never quotes a secret's value. A secret that keeps a
+    /// mount or instance template has its value only where the ingestor opens, so here it is held
+    /// only to being declared, and the connector refuses at open what it renders to.
+    pub fn validate_headers(
+        &self,
+        client: &CreateClientHttp,
+    ) -> error_stack::Result<(), HttpRequestHeadersError> {
+        let mut names = BTreeSet::new();
+        let mut validated =
+            HttpApplicationHeaders::with_limits(crate::HttpHeaderLimits::representable());
+        for header in &self.headers {
+            let name = HttpHeaderName::parse(&header.name).change_context_lazy(|| {
+                HttpRequestHeadersError::InvalidName {
+                    name: header.name.clone(),
+                }
+            })?;
+            if !names.insert(name.clone()) {
+                return Err(Report::new(HttpRequestHeadersError::RepeatedName {
+                    name: header.name.clone(),
+                }));
+            }
+            let Some(value) = header.value_from(client)? else {
+                continue;
+            };
+            validated
+                .insert(name, value)
+                .change_context(HttpRequestHeadersError::Limit)?;
+        }
+        validated
+            .validate_total()
+            .change_context(HttpRequestHeadersError::Limit)?;
+        Ok(())
+    }
+}
+
+impl HttpRequestHeader {
+    /// Projects the value available to size planning. Unresolved clients or secret bindings,
+    /// and values awaiting template rendering, have no known value yet. Graph validation owns
+    /// the complete declaration's validity before it can commit.
+    pub fn known_value_from<'a>(&'a self, client: Option<&'a CreateClientHttp>) -> Option<&'a str> {
+        match &self.value {
+            HttpRequestHeaderValue::Literal(value) => Some(value.as_str()),
+            HttpRequestHeaderValue::ClientSecret(key) => {
+                if !CLIENT_CONFIG.is_secret(key) {
+                    return None;
+                }
+                let value = &client?.config.iter().find(|entry| entry.key == *key)?.value;
+                (!value.contains("{{")).then_some(value.as_str())
+            }
+        }
+    }
+
+    /// The value this header sends through `client`, or `None` for a client secret whose value
+    /// keeps a template until the ingestor opens.
+    fn value_from(
+        &self,
+        client: &CreateClientHttp,
+    ) -> error_stack::Result<Option<HttpHeaderValue>, HttpRequestHeadersError> {
+        let key = match &self.value {
+            HttpRequestHeaderValue::Literal(value) => {
+                let value = HttpHeaderValue::parse(value).change_context_lazy(|| {
+                    HttpRequestHeadersError::InvalidValue {
+                        name: self.name.clone(),
+                    }
+                })?;
+                return Ok(Some(value));
+            }
+            HttpRequestHeaderValue::ClientSecret(key) => key,
+        };
+        // A client configuration holds a few keys, each of them written in its statement.
+        let Some(entry) = client.config.iter().find(|entry| entry.key == *key) else {
+            return Err(Report::new(HttpRequestHeadersError::UndeclaredSecret {
+                name: self.name.clone(),
+                key: key.clone(),
+                client: client.name.clone(),
+            }));
+        };
+        if !CLIENT_CONFIG.is_secret(key) {
+            return Err(Report::new(HttpRequestHeadersError::NotSecret {
+                name: self.name.clone(),
+                key: key.clone(),
+            }));
+        }
+        if entry.value.contains("{{") {
+            return Ok(None);
+        }
+        let value = HttpHeaderValue::parse(&entry.value).change_context_lazy(|| {
+            HttpRequestHeadersError::InvalidSecret {
+                name: self.name.clone(),
+                key: key.clone(),
+            }
+        })?;
+        Ok(Some(value))
     }
 }
 
@@ -198,6 +349,7 @@ const HTTP_REQUEST_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecla
 
 impl IngestorDeclaration for HttpRequestIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         // An HTTP response's fields, as the client's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
@@ -222,7 +374,7 @@ impl IngestorDeclaration for HttpRequestIngestor {
                 keywords: "HEADERS",
                 presence: OptionPresence::Optional { default: None },
                 form: OptionForm::Value {
-                    value: OptionValue::LiteralMapping,
+                    value: OptionValue::RequestHeaders,
                     example: "HEADERS { 'accept' = 'application/json' }",
                 },
             },
@@ -245,6 +397,10 @@ impl IngestorDeclaration for HttpRequestIngestor {
 impl IngestorEntityBody for HttpRequestIngestor {
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -277,7 +433,7 @@ impl HttpRequestIngestMode {
     }
 }
 
-/// One endpoint of `TYPE HTTP` this cluster serves, whose requests are the payloads. Every node of
+/// One `HTTP ENDPOINT` this cluster serves, whose requests are the payloads. Every node of
 /// the cluster serves it.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -300,6 +456,7 @@ const HTTP_ENDPOINT_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecl
 
 impl IngestorDeclaration for HttpEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         // An HTTP request's fields, as the server's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
@@ -334,16 +491,129 @@ impl IngestorEntityBody for HttpEndpointIngestor {
     }
 }
 
+/// One change an `ALTER HTTP REQUEST INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum HttpRequestIngestorChange {
+    /// `SET METHOD '<method>'`.
+    Method(String),
+    /// `SET HEADERS { … }`.
+    Headers(Vec<HttpRequestHeader>),
+    /// `DROP HEADERS`: the request sends no header of its own.
+    DropHeaders,
+    /// `SET MAX BODY SIZE <bytes>`.
+    MaxBodySize(PayloadSizeLimit),
+    /// `DROP MAX BODY SIZE`: the declared default bounds a response again.
+    DropMaxBodySize,
+    /// `SET EVERY <duration>`.
+    Every(DomainClockPeriod),
+    /// `SET MODE <mode>`.
+    Mode(HttpRequestIngestMode),
+}
+
+impl HttpRequestIngestorChange {
+    /// Why dropping `option` from a body that does not write it does not apply.
+    fn not_written(option: &'static str) -> error_stack::Report<crate::AlterIngestorError> {
+        error_stack::Report::new(crate::AlterIngestorError::OptionNotWritten {
+            kind: <HttpRequestIngestor as crate::IngestorEntityModel>::KIND,
+            option,
+        })
+    }
+}
+
+impl crate::IngestorEntityChange for HttpRequestIngestorChange {
+    type Entity = HttpRequestIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut HttpRequestIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Method(method) => entity.method = method.clone(),
+            Self::Headers(headers) => entity.headers = headers.clone(),
+            Self::DropHeaders => {
+                if entity.headers.is_empty() {
+                    return Err(Self::not_written("HEADERS"));
+                }
+                entity.headers.clear();
+            }
+            Self::MaxBodySize(limit) => entity.max_body_size = Some(*limit),
+            Self::DropMaxBodySize => {
+                if entity.max_body_size.take().is_none() {
+                    return Err(Self::not_written("MAX BODY SIZE"));
+                }
+            }
+            Self::Every(every) => entity.every = *every,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Method(method) => format!("SET METHOD {}", crate::string_literal(method)),
+            Self::Headers(headers) => format!(
+                "SET HEADERS {}",
+                crate::canonical::request_headers_to_plexus(headers)
+            ),
+            Self::DropHeaders => "DROP HEADERS".to_owned(),
+            Self::MaxBodySize(limit) => format!("SET MAX BODY SIZE {limit}"),
+            Self::DropMaxBodySize => "DROP MAX BODY SIZE".to_owned(),
+            Self::Every(every) => format!(
+                "SET EVERY {}",
+                crate::canonical::duration_literal(every.as_nanos())
+            ),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER HTTP ENDPOINT INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum HttpEndpointIngestorChange {
+    /// `SET MODE <mode>`.
+    Mode(EndpointIngestMode),
+}
+
+impl crate::IngestorEntityChange for HttpEndpointIngestorChange {
+    type Entity = HttpEndpointIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut HttpEndpointIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Http = "HTTP";
-    /// What an HTTP source reads.
+    /// What an HTTP ingestor reads.
     pub enum HttpIngestor;
     /// The alterations of the ingestors that read an HTTP entity.
     pub enum HttpRequestIngestorAlteration;
-    /// The entities an HTTP source reads.
+    /// The entities an HTTP ingestor reads.
     pub enum HttpIngestorEntity {
-        Request(HttpRequestIngestor) = "REQUEST", "HTTP polling";
-        Endpoint(HttpEndpointIngestor) = "ENDPOINT", "HTTP endpoint";
+        Request(HttpRequestIngestor => HttpRequestIngestorChange) = "REQUEST", "HTTP polling";
+        Endpoint(HttpEndpointIngestor => HttpEndpointIngestorChange) = "ENDPOINT", "HTTP endpoint";
     }
 }
 
@@ -366,6 +636,7 @@ impl EmitterDeclaration for HttpRequestEmitter {
         headers: Some(HeaderModel::lowercase(HeaderLayout::SortedByName)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Http),
         body: EmitterBodyForm::CodecOrWithoutBody,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Unavailable {
             reason: BatchUnavailability::OneRequestPerRecord,
         },
@@ -409,15 +680,55 @@ impl EmitterEntityBody for HttpRequestEmitter {
     }
 }
 
+/// One change an `ALTER HTTP REQUEST EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum HttpRequestEmitterChange {
+    /// `SET METHOD <expression>`.
+    Method(Expression),
+    /// `SET PATH <expression>`.
+    Path(Expression),
+    /// `SET MODE <mode>`.
+    Mode(HttpRequestPublishingMode),
+}
+
+impl crate::EmitterEntityChange for HttpRequestEmitterChange {
+    type Entity = HttpRequestEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut HttpRequestEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Method(method) => entity.method = method.clone(),
+            Self::Path(path) => entity.path = path.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Method(method) => format!("SET METHOD {}", crate::expression_to_plexus(method)?),
+            Self::Path(path) => format!("SET PATH {}", crate::expression_to_plexus(path)?),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Http = "HTTP";
     /// What an HTTP emitter writes.
     pub enum HttpEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum HttpRequestEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum HttpEmitterChange;
     /// The entities an HTTP emitter writes.
     pub enum HttpEmitterEntity {
-        Request(HttpRequestEmitter, HttpRequestPublishingMode) = "REQUEST";
+        Request(HttpRequestEmitter, HttpRequestPublishingMode, HttpRequestEmitterChange) = "REQUEST";
     }
 }
 
@@ -432,9 +743,178 @@ mod tests {
     use meticulous::ResultExt as _;
 
     use super::*;
+    use crate::ClientConfigEntry;
+
+    fn client(secrets: &[(&str, &str)]) -> CreateClientHttp {
+        let mut config = vec![
+            ClientConfigEntry {
+                key: "endpoint".to_string(),
+                value: "https://api.example.com".to_string(),
+            },
+            ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: "5000".to_string(),
+            },
+        ];
+        for (key, value) in secrets {
+            config.push(ClientConfigEntry {
+                key: (*key).to_string(),
+                value: (*value).to_string(),
+            });
+        }
+        CreateClientHttp {
+            name: ClientName::parse("source").assured("a valid client name"),
+            mount: None,
+            config,
+        }
+    }
+
+    fn polling(headers: Vec<HttpRequestHeader>) -> HttpRequestIngestor {
+        HttpRequestIngestor {
+            client: ClientName::parse("source").assured("a valid client name"),
+            method: "GET".to_string(),
+            headers,
+            max_body_size: None,
+            every: "1s".parse().assured("a valid period"),
+            mode: HttpRequestIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        }
+    }
+
+    fn literal(name: &str, value: &str) -> HttpRequestHeader {
+        HttpRequestHeader {
+            name: name.to_string(),
+            value: HttpRequestHeaderValue::Literal(value.to_string()),
+        }
+    }
+
+    fn secret(name: &str, key: &str) -> HttpRequestHeader {
+        HttpRequestHeader {
+            name: name.to_string(),
+            value: HttpRequestHeaderValue::ClientSecret(key.to_string()),
+        }
+    }
+
+    fn refusal(
+        headers: Vec<HttpRequestHeader>,
+        client: &CreateClientHttp,
+    ) -> HttpRequestHeadersError {
+        polling(headers)
+            .validate_headers(client)
+            .expect_err("the headers are refused")
+            .current_context()
+            .clone()
+    }
 
     #[test]
-    fn polling_declares_literal_request_fields_and_its_response_bound() {
+    fn polling_headers_read_literals_and_the_secrets_their_client_declares() {
+        let declared = client(&[("secret.api_token", "Bearer fixture-token")]);
+        polling(vec![
+            literal("accept", "application/json"),
+            secret("authorization", "secret.api_token"),
+        ])
+        .validate_headers(&declared)
+        .assured("both fields can be sent");
+    }
+
+    #[test]
+    fn a_polling_header_is_refused_for_a_secret_its_client_cannot_give_it() {
+        let declared = client(&[("secret.padded", " fixture-padded")]);
+        assert_eq!(
+            refusal(vec![secret("authorization", "secret.absent")], &declared),
+            HttpRequestHeadersError::UndeclaredSecret {
+                name: "authorization".to_string(),
+                key: "secret.absent".to_string(),
+                client: ClientName::parse("source").assured("a valid client name"),
+            }
+        );
+        assert_eq!(
+            refusal(vec![secret("authorization", "timeout_ms")], &declared),
+            HttpRequestHeadersError::NotSecret {
+                name: "authorization".to_string(),
+                key: "timeout_ms".to_string(),
+            }
+        );
+        let invalid = refusal(vec![secret("authorization", "secret.padded")], &declared);
+        assert_eq!(
+            invalid,
+            HttpRequestHeadersError::InvalidSecret {
+                name: "authorization".to_string(),
+                key: "secret.padded".to_string(),
+            }
+        );
+        assert!(
+            !invalid.to_string().contains("fixture-padded"),
+            "a refusal names the key and never quotes its value: {invalid}"
+        );
+    }
+
+    /// A template renders only where the ingestor opens, so the secret is held to being declared
+    /// and the connector refuses at open what it renders to.
+    #[test]
+    fn a_templated_secret_is_held_only_to_being_declared() {
+        let declared = client(&[("secret.mounted", "{{ tokens }}")]);
+        polling(vec![secret("authorization", "secret.mounted")])
+            .validate_headers(&declared)
+            .assured("a template has no value to refuse yet");
+    }
+
+    #[test]
+    fn a_polling_header_is_refused_for_a_name_or_value_no_request_can_carry() {
+        let declared = client(&[("secret.api_token", "Bearer fixture-token")]);
+        for name in ["bad name", "Host", ""] {
+            assert_eq!(
+                refusal(vec![literal(name, "value")], &declared),
+                HttpRequestHeadersError::InvalidName {
+                    name: name.to_string(),
+                }
+            );
+        }
+        assert_eq!(
+            refusal(vec![literal("accept", "two\nlines")], &declared),
+            HttpRequestHeadersError::InvalidValue {
+                name: "accept".to_string(),
+            }
+        );
+    }
+
+    /// Writing a name twice would replace the first value on the wire while `SHOW CREATE` printed
+    /// both, so the statement is refused instead, whichever form either value takes.
+    #[test]
+    fn a_polling_header_written_twice_is_refused_ignoring_letter_case() {
+        let declared = client(&[("secret.api_token", "Bearer fixture-token")]);
+        assert_eq!(
+            refusal(
+                vec![
+                    literal("x-event", "one"),
+                    secret("X-Event", "secret.api_token"),
+                ],
+                &declared,
+            ),
+            HttpRequestHeadersError::RepeatedName {
+                name: "X-Event".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn polling_header_syntax_uses_the_request_representation_bounds() {
+        let filler = "x".repeat(16 * 1024);
+        let declared = client(&[("secret.filler", filler.as_str())]);
+        polling(vec![
+            literal("x-first", &filler),
+            secret("x-second", "secret.filler"),
+        ])
+        .validate_headers(&declared)
+        .assured("registry policy owns the byte cap; syntax checks representability");
+        let headers = (0..=crate::HttpHeaderFields::MAXIMUM)
+            .map(|index| literal(&format!("x-field-{index}"), "v"))
+            .collect();
+        assert_eq!(refusal(headers, &declared), HttpRequestHeadersError::Limit);
+    }
+
+    #[test]
+    fn polling_declares_its_request_fields_and_its_response_bound() {
         let [method, headers, body_size, every] = HttpRequestIngestor::CAPABILITIES.options else {
             panic!("HTTP polling declares four request options");
         };
@@ -452,7 +932,7 @@ mod tests {
         assert!(matches!(
             headers.form,
             OptionForm::Value {
-                value: OptionValue::LiteralMapping,
+                value: OptionValue::RequestHeaders,
                 ..
             }
         ));

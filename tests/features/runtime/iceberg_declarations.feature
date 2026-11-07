@@ -184,16 +184,15 @@ Feature: Iceberg declarations
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-namespace-{{test_id}}.example.com;
-      CREATE ENDPOINT notification_ingress
+      CREATE HTTP ENDPOINT notification_ingress
       ON edge
-      PATH '/notifications'
-      TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR notification_source
+      PATH '/notifications';
+      CREATE HTTP ENDPOINT INGESTOR notification_ingestor
       FROM notification_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO notifications
@@ -282,16 +281,15 @@ Feature: Iceberg declarations
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-alteration-{{test_id}}.example.com;
-      CREATE ENDPOINT notification_ingress
+      CREATE HTTP ENDPOINT notification_ingress
       ON edge
-      PATH '/notifications'
-      TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR notification_source
+      PATH '/notifications';
+      CREATE HTTP ENDPOINT INGESTOR notification_ingestor
       FROM notification_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO notifications

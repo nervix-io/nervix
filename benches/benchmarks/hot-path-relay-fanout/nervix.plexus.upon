@@ -7,13 +7,12 @@ CREATE WIRE JSON SCHEMA benchmark_wire MODE STRICT (
   id string,
   value string
 );
-CREATE CODEC benchmark_codec
-  FROM WIRE JSON SCHEMA benchmark_wire
+CREATE WIRE JSON CODEC benchmark_codec
+  FROM WIRE SCHEMA benchmark_wire
   TO SCHEMA benchmark_record;
 CREATE KAFKA CLIENT kafka_input
   CONFIG {
-    'bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
-    'auto.offset.reset' = 'earliest'
+    'bootstrap.servers' = '{{ kafka_bootstrap_servers }}'
   };
 CREATE KAFKA CLIENT kafka_output
   CONFIG {
@@ -26,7 +25,7 @@ CREATE RELAY benchmark_ingested SCHEMA benchmark_record UNBRANCHED;
 CREATE KAFKA TOPIC INGESTOR kafka_in_{{ lane }}
   FROM kafka_input
   TOPIC '{{ input_topic }}'
-  OFFSET BY CONSUMER GROUP '{{ consumer_group }}'
+  OFFSET BY CONSUMER GROUP '{{ consumer_group }}' START AT EARLIEST
   INSTANCES 1
   MODE NO ACK
   ON QUIESCE SUSPEND DECODE USING benchmark_codec

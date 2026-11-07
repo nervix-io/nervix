@@ -503,6 +503,9 @@ name = "arrow-schema"
 version = "58.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8506ad465ebb9483bb6efa1e2e78a313549122c6dd67dc2f7087297b762eaede"
+dependencies = [
+ "bitflags 2.13.2",
+]
 
 [[package]]
 name = "arrow-select"
@@ -687,13 +690,14 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.49.1"
-source = "git+https://github.com/glebpom/nats.rs.git?rev=d131b7bc954fc57b8447e0d402a896b4b67010b1#d131b7bc954fc57b8447e0d402a896b4b67010b1"
+source = "git+https://github.com/nervix-io/nats.rs.git?rev=572ef042d3afaeb2eff67896843599cd7ee5c6f7#572ef042d3afaeb2eff67896843599cd7ee5c6f7"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
  "bytes",
  "futures-util",
  "memchr",
+ "nkeys 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "pin-project",
  "portable-atomic",
  "rand 0.10.3",
@@ -705,6 +709,7 @@ dependencies = [
  "serde_json",
  "serde_nanos",
  "serde_repr",
+ "smallvec",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -810,6 +815,16 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite 0.29.0",
+]
+
+[[package]]
+name = "asyncband"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94a214ba60d6231afd0e805e3c27c45a1626d9debaa5a5061c45a1ea1b2f1ed0"
+dependencies = [
+ "hashbrown 0.17.1",
+ "slab",
 ]
 
 [[package]]
@@ -933,23 +948,9 @@ version = "1.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
 dependencies = [
- "aws-lc-sys 0.46.0",
+ "aws-lc-sys",
  "untrusted 0.7.1",
  "zeroize",
-]
-
-[[package]]
-name = "aws-lc-sys"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09fae7be8bb3174e05c6afdb34199e6dc0c7c04ba9fa237b1967adfbde27483"
-dependencies = [
- "bindgen",
- "cc",
- "cmake",
- "dunce",
- "fs_extra",
- "pkg-config",
 ]
 
 [[package]]
@@ -958,6 +959,7 @@ version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1622d8446a2d4b2ce0c7eefc73dd43a99779028d5ee5c2dd8073a658ba8a2bc"
 dependencies = [
+ "bindgen",
  "cc",
  "cmake",
  "dunce",
@@ -1452,22 +1454,21 @@ checksum = "230c5f1ca6a325a32553f8640d31ac9b49f2411e901e427570154868b46da4f7"
 
 [[package]]
 name = "bindgen"
-version = "0.72.1"
+version = "0.73.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+checksum = "787ef8ef523575546b106a58213d6e6b06198a05c2f757258c68a74273670cfa"
 dependencies = [
  "bitflags 2.13.2",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
  "log",
- "prettyplease 0.2.37",
+ "prettyplease 0.3.0",
  "proc-macro2",
  "quote",
  "regex",
  "rustc-hash",
- "shlex 1.3.0",
- "syn 2.0.119",
+ "shlex",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2006,7 +2007,7 @@ dependencies = [
  "find-msvc-tools",
  "jobserver",
  "libc",
- "shlex 2.0.1",
+ "shlex",
 ]
 
 [[package]]
@@ -2842,12 +2843,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
-name = "crc32c"
-version = "0.6.8"
+name = "crc-fast"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a47af21622d091a8f0fb295b88bc886ac74efcc613efc19f5d0b21de5c89e47"
+checksum = "e75b2483e97a5a7da73ac68a05b629f9c53cff58d8ed1c77866079e18b00dba5"
 dependencies = [
- "rustc_version",
+ "digest 0.10.7",
+ "spin 0.10.1",
 ]
 
 [[package]]
@@ -3155,6 +3157,32 @@ dependencies = [
  "rustls-ffi",
  "vcpkg",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "curve25519-dalek"
+version = "4.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "curve25519-dalek-derive",
+ "digest 0.10.7",
+ "fiat-crypto",
+ "rustc_version",
+ "subtle",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3644,6 +3672,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ed25519"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+dependencies = [
+ "signature",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "sha2 0.10.9",
+ "signature",
+ "subtle",
+]
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3872,6 +3922,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiat-crypto"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3963,7 +4019,7 @@ checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
 dependencies = [
  "futures-core",
  "futures-sink",
- "spin",
+ "spin 0.9.9",
 ]
 
 [[package]]
@@ -4908,9 +4964,9 @@ dependencies = [
 
 [[package]]
 name = "iceberg"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e50fb53c7480f414911ab76b6e14c0042d54ad5c30f6ac2bf2f52a487a25716"
+checksum = "25dd5d1aa2fa92d2c9bc426f72bc16717a27eb73255805beb8845afcca31e58d"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4931,12 +4987,15 @@ dependencies = [
  "bimap",
  "bytes",
  "chrono",
+ "crc32fast",
  "derive_builder",
  "expect-test",
  "fastnum",
  "flate2",
  "fnv",
+ "form_urlencoded",
  "futures",
+ "iceberg-property-macro",
  "itertools 0.13.0",
  "moka",
  "murmur3",
@@ -4965,9 +5024,9 @@ dependencies = [
 
 [[package]]
 name = "iceberg-catalog-rest"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1500a26a9b18f286a319e914ce7290dddb7e2eef810edf535afc4ce0c8a6f45"
+checksum = "6adef6989310849467f1d8fdccf4bdb78c736db7c06d302a3b1663a32236373b"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4979,15 +5038,27 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tokio",
+ "tracing",
  "typed-builder 0.20.1",
  "uuid",
 ]
 
 [[package]]
-name = "iceberg-storage-opendal"
-version = "0.10.1"
+name = "iceberg-property-macro"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "983efbae430ed40c074af69a8b0aff99bee73e54686cf26ecde97f84127812a2"
+checksum = "6de7eea6577fed2290867f7604483e3649297514b873cdac108e0cc7f783c9e1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "iceberg-storage-opendal"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08691d92b8e3ce0d827fa3d6e858b6d5fd948fb337bc57c244eb7d6bed1cddbc"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5445,6 +5516,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "java-locator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09c46c1fe465c59b1474e665e85e1256c3893dd00927b8d55f63b09044c1e64f"
+dependencies = [
+ "glob",
+]
+
+[[package]]
 name = "jiff"
 version = "0.2.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5508,8 +5588,10 @@ checksum = "5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498"
 dependencies = [
  "cfg-if",
  "combine",
+ "java-locator",
  "jni-macros",
  "jni-sys",
+ "libloading 0.8.9",
  "log",
  "simd_cesu8",
  "thiserror 2.0.21",
@@ -5618,7 +5700,7 @@ version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 dependencies = [
- "spin",
+ "spin 0.9.9",
 ]
 
 [[package]]
@@ -6210,16 +6292,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
 
 [[package]]
-name = "mea"
-version = "0.6.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c709842c4ce65cb91e2666ad5319dfc1efc3af0d34f02075eddca9000d9f8afb"
-dependencies = [
- "hashbrown 0.17.1",
- "slab",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6433,7 +6505,7 @@ dependencies = [
  "httparse",
  "memchr",
  "mime",
- "spin",
+ "spin 0.9.9",
  "version_check",
 ]
 
@@ -6725,10 +6797,12 @@ dependencies = [
  "bolero",
  "bytes",
  "error-stack",
+ "flatbuffers",
  "hyper-util",
  "indexmap 2.14.2",
  "meticulous",
  "nervix-client-wire",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -6736,12 +6810,15 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "nervix-test-environment",
- "rustls",
+ "serde",
+ "serde_json",
  "shuttle",
  "strum 0.26.3",
  "tar",
  "tempfile",
  "thiserror 2.0.21",
+ "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
  "tokio",
  "tonic 0.13.1",
  "tracing",
@@ -6754,11 +6831,32 @@ name = "nervix-client-ffi"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "arrow-ipc",
+ "bolero",
+ "bytes",
+ "error-stack",
+ "meticulous",
+ "nervix-arbitrary",
+ "nervix-client-core",
+ "nervix-client-host",
+ "nervix-models",
+ "nervix-primitives",
+ "serde_json",
+ "tonic 0.13.1",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "nervix-client-host"
+version = "0.1.0-dev"
+dependencies = [
+ "arch-into",
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-ipc",
  "arrow-schema",
+ "arrow-select",
  "bolero",
  "bytes",
  "error-stack",
@@ -6768,9 +6866,41 @@ dependencies = [
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
- "serde_json",
  "strum 0.26.3",
+ "uuid",
+]
+
+[[package]]
+name = "nervix-client-jvm"
+version = "0.1.0-dev"
+dependencies = [
+ "bolero",
+ "bytes",
+ "jni",
+ "meticulous",
+ "nervix-client-core",
+ "nervix-client-host",
+ "nervix-models",
+ "nervix-primitives",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "nervix-client-python"
+version = "0.1.0-dev"
+dependencies = [
+ "arrow-array",
+ "bytes",
+ "meticulous",
+ "nervix-client-core",
+ "nervix-client-host",
+ "nervix-models",
+ "nervix-primitives",
+ "pyo3",
+ "pyo3-build-config",
  "tonic 0.13.1",
+ "url",
  "uuid",
 ]
 
@@ -6832,6 +6962,7 @@ dependencies = [
  "error-stack",
  "humantime",
  "meticulous",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-execution",
  "nervix-model-harness",
@@ -6839,6 +6970,7 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "percent-encoding",
+ "rcgen",
  "reqwest 0.13.5",
  "rustls",
  "rustls-native-certs",
@@ -6890,6 +7022,7 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-connector",
+ "nervix-execution",
  "nervix-models",
  "nervix-primitives",
 ]
@@ -6910,6 +7043,7 @@ dependencies = [
  "hyper-util",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-models",
  "nervix-primitives",
@@ -6947,12 +7081,14 @@ dependencies = [
  "iceberg-catalog-rest",
  "meticulous",
  "nervix-connector",
+ "nervix-connector-fake",
  "nervix-dns",
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
  "nervix-test-environment",
  "opendal",
+ "opendal-http-transport-reqwest",
  "parquet",
  "reqsign-core",
  "reqwest 0.12.28",
@@ -6989,7 +7125,6 @@ dependencies = [
  "nervix-recovery",
  "rdkafka",
  "shuttle",
- "strum 0.26.3",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -7047,7 +7182,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -7066,6 +7200,7 @@ dependencies = [
  "mysql_common",
  "nervix-arbitrary",
  "nervix-connector",
+ "nervix-connector-fake",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
@@ -7081,16 +7216,26 @@ version = "0.1.0-dev"
 dependencies = [
  "async-nats",
  "async-trait",
+ "bolero",
  "bytes",
+ "crc",
+ "data-encoding",
  "error-stack",
  "futures-util",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-connector",
+ "nervix-crypto",
+ "nervix-execution",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
+ "nkeys 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nkeys 0.4.5 (git+https://github.com/nervix-io/nkeys.git?rev=248dc49a1a8d4ebc47504358cc011f5c26583dfe)",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -7142,6 +7287,7 @@ dependencies = [
  "faster-hex",
  "meticulous",
  "nervix-connector",
+ "nervix-connector-fake",
  "nervix-models",
  "nervix-primitives",
  "serde_json",
@@ -7156,10 +7302,9 @@ name = "nervix-connector-prometheus"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
- "chrono",
+ "bolero",
  "error-stack",
  "meticulous",
- "nervix-approx-into",
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
@@ -7178,6 +7323,7 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "async-trait",
+ "base64 0.22.1",
  "bolero",
  "error-stack",
  "futures-util",
@@ -7188,7 +7334,6 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "pulsar",
- "tempfile",
  "thiserror 2.0.21",
  "tokio-util",
  "tracing",
@@ -7208,6 +7353,7 @@ dependencies = [
  "lapin",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7288,6 +7434,7 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7317,6 +7464,7 @@ dependencies = [
  "memchr",
  "meticulous",
  "nervix-connector",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
@@ -7327,11 +7475,13 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "shuttle",
+ "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "tracing",
+ "x509-parser",
 ]
 
 [[package]]
@@ -7353,6 +7503,8 @@ dependencies = [
  "nervix-test-environment",
  "prost 0.13.5",
  "prost-reflect",
+ "rcgen",
+ "rustls-pki-types",
  "serde_json",
  "shuttle",
  "tempfile",
@@ -7412,6 +7564,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-crypto"
+version = "0.1.0-dev"
+dependencies = [
+ "aws-lc-rs",
+ "error-stack",
+ "meticulous",
+ "nervix-primitives",
+ "nervix-recovery",
+ "rustls",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nervix-dataflow-graph"
 version = "0.1.0-dev"
 dependencies = [
@@ -7458,6 +7623,7 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.2",
  "meticulous",
+ "nervix-crypto",
  "nervix-primitives",
  "nervix-test-environment",
  "reqwest 0.12.28",
@@ -7521,6 +7687,7 @@ dependencies = [
  "imbl",
  "meticulous",
  "nervix-arbitrary",
+ "nervix-crypto",
  "nervix-dns",
  "nervix-execution",
  "nervix-model-harness",
@@ -7723,6 +7890,23 @@ name = "nervix-primitives-macros"
 version = "0.1.0-dev"
 
 [[package]]
+name = "nervix-rate-limit"
+version = "0.1.0-dev"
+dependencies = [
+ "bolero",
+ "chrono",
+ "cucumber",
+ "error-stack",
+ "governor",
+ "meticulous",
+ "nervix-deadlock",
+ "nervix-expiry-map",
+ "nervix-model-harness",
+ "nervix-primitives",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nervix-recovery"
 version = "0.1.0-dev"
 dependencies = [
@@ -7788,7 +7972,6 @@ dependencies = [
  "flate2",
  "futures-util",
  "h2",
- "hdrhistogram",
  "http",
  "http-body-util",
  "httparse",
@@ -7806,9 +7989,11 @@ dependencies = [
  "nervix-backup",
  "nervix-client-core",
  "nervix-client-ffi",
+ "nervix-client-host",
  "nervix-client-wire",
  "nervix-connector-kafka",
  "nervix-consensus",
+ "nervix-crypto",
  "nervix-deadlock",
  "nervix-dns",
  "nervix-execution",
@@ -7824,6 +8009,7 @@ dependencies = [
  "opentelemetry-proto",
  "ort",
  "playwright-rs",
+ "prost 0.13.5",
  "prost 0.14.4",
  "pulsar",
  "rcgen",
@@ -7844,6 +8030,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
  "tokio-util",
+ "toml 0.8.2",
  "tonic 0.13.1",
  "tracing",
  "ubyte",
@@ -7880,6 +8067,7 @@ dependencies = [
  "chitchat",
  "chrono",
  "ciborium",
+ "ciborium-ll",
  "clap",
  "clap_complete",
  "criterion 0.5.1",
@@ -7897,6 +8085,7 @@ dependencies = [
  "hyper-util",
  "imbl",
  "indexmap 2.14.2",
+ "jiff",
  "memmap2",
  "meticulous",
  "multer",
@@ -7931,6 +8120,7 @@ dependencies = [
  "nervix-connector-websockets",
  "nervix-connector-zeromq",
  "nervix-consensus",
+ "nervix-crypto",
  "nervix-dataflow-graph",
  "nervix-deadlock",
  "nervix-dns",
@@ -7975,6 +8165,7 @@ dependencies = [
  "sorted-vec",
  "storekey",
  "strum 0.26.3",
+ "syslog_rfc5424",
  "tar",
  "tempfile",
  "thiserror 2.0.21",
@@ -8156,6 +8347,7 @@ dependencies = [
  "error-stack",
  "futures-util",
  "gloo-net 0.7.0",
+ "indexmap 2.14.2",
  "js-sys",
  "leptos",
  "meticulous",
@@ -8201,6 +8393,31 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "nkeys"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "879011babc47a1c7fdf5a935ae3cfe94f34645ca0cac1c7f6424b36fc743d1bf"
+dependencies = [
+ "data-encoding",
+ "ed25519",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "log",
+ "rand 0.8.8",
+ "signatory",
+]
+
+[[package]]
+name = "nkeys"
+version = "0.4.5"
+source = "git+https://github.com/nervix-io/nkeys.git?rev=248dc49a1a8d4ebc47504358cc011f5c26583dfe#248dc49a1a8d4ebc47504358cc011f5c26583dfe"
+dependencies = [
+ "data-encoding",
+ "log",
+ "zeroize",
 ]
 
 [[package]]
@@ -8484,12 +8701,13 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "opendal"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96c9c85ce253ff87225e7669979d877a20c98a06604ec9d6dd5f4473e08f1ae1"
+checksum = "33dbff14cc9bb085224256d6a81289d2f3202e85b06f408d42534b42162a4231"
 dependencies = [
  "ctor",
  "opendal-core",
+ "opendal-http-transport-reqwest",
  "opendal-layer-concurrent-limit",
  "opendal-layer-logging",
  "opendal-layer-retry",
@@ -8502,24 +8720,22 @@ dependencies = [
 
 [[package]]
 name = "opendal-core"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4f8607c90e2c963a91467f50fb49fbc7fb3d573f88cea219ca59ccd3740b309"
+checksum = "48dbcef97d3eb7591db2c18d5cae95c836bcce07359b98d98dd6f4e861eb77b7"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "asyncband 0.6.7",
+ "base64 0.23.1",
  "bytes",
  "futures",
  "http",
- "http-body",
  "jiff",
  "log",
  "md-5",
- "mea",
  "percent-encoding",
- "quick-xml 0.39.4",
+ "quick-xml 0.41.0",
  "reqsign-core",
- "reqwest 0.13.5",
  "serde",
  "serde_json",
  "tokio",
@@ -8529,22 +8745,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "opendal-layer-concurrent-limit"
-version = "0.57.0"
+name = "opendal-http-transport-reqwest"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d6f81ba6960e3fae1882f253b114b21d7e444e1534f209c7737a79f6243eb6f"
+checksum = "85663452ea32bbc17e8f79ab29788c846d116ec7de31451be9c787e462dcb36c"
 dependencies = [
+ "bytes",
  "futures",
  "http",
- "mea",
+ "http-body",
+ "opendal-core",
+ "reqwest 0.13.5",
+]
+
+[[package]]
+name = "opendal-layer-concurrent-limit"
+version = "0.58.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03f9e144b5228d741c3763ade8711d9b72e5fb6d998e779f2d7a09da0b5a3eba"
+dependencies = [
+ "asyncband 0.6.7",
+ "futures",
+ "http",
  "opendal-core",
 ]
 
 [[package]]
 name = "opendal-layer-logging"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58ada45c6d81d1aa4c9305d0c7d4bc317c59c85866a0908a2d75a7a978aa5ee2"
+checksum = "c2de17c61cd32e9d8d7d8efb91795e714dbccbafbc3c4e219e1542f4d6324161"
 dependencies = [
  "log",
  "opendal-core",
@@ -8552,9 +8782,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-layer-retry"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b2a25a718afb81fad81cb9a0580a1cb989221fa2317f888c6a37f8dad408eb7"
+checksum = "e94db301964a25366090484d61e6da16d5979cc8faf02c3e12210dc74fafed38"
 dependencies = [
  "backon",
  "log",
@@ -8563,9 +8793,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-layer-timeout"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e91f731724c213af81e9d03517859c8fc47b4578e64ad61ae4f099f10fe36e3"
+checksum = "08956ddda07465449bfd48825f4f0f25e0351278ac974eaa659895d9d74f2c80"
 dependencies = [
  "opendal-core",
  "tokio",
@@ -8573,17 +8803,18 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-azdls"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6dea4908d490143a9b0b7f7a790e139ff829b06a023f670455ed3d44f664b361"
+checksum = "2d564484a8f7d091827e825cfc91ed45bd48e64d262451ee041fe843db81bd8a"
 dependencies = [
- "base64 0.22.1",
+ "asyncband 0.6.7",
+ "base64 0.23.1",
  "bytes",
  "http",
  "log",
  "opendal-core",
  "opendal-service-azure-common",
- "quick-xml 0.39.4",
+ "quick-xml 0.41.0",
  "reqsign-azure-storage",
  "reqsign-core",
  "reqsign-file-read-tokio",
@@ -8593,9 +8824,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-azure-common"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b489f13c42e69d69bdd72952b634356ec43a7881a20259b38b540fcecdf4051"
+checksum = "cfcc1bfdac4f54d9018c462dd32ad9e2f68fdf584f825c811550c8ffc87894cd"
 dependencies = [
  "http",
  "opendal-core",
@@ -8603,9 +8834,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-fs"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e89a665fef0e6bd249cf5ea47fc174b7ba892159bee4b9382528b1ca873a2c"
+checksum = "c7ef1e1c45f3f89282a59073897e0d685e51385fed0aea771714789525cff996"
 dependencies = [
  "bytes",
  "log",
@@ -8617,9 +8848,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-gcs"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48de101aac565ed06af4b47903c24eafd249075553ec1fb18256751c45148d47"
+checksum = "da1f2a8c975fd22fea01f0409bcb8774f1ac02ad79863a3490098203121555d3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8627,7 +8858,7 @@ dependencies = [
  "log",
  "opendal-core",
  "percent-encoding",
- "quick-xml 0.39.4",
+ "quick-xml 0.41.0",
  "reqsign-core",
  "reqsign-file-read-tokio",
  "reqsign-google",
@@ -8638,18 +8869,18 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-s3"
-version = "0.57.0"
+version = "0.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "313d46c9f5ae70bca26b7c3e3fbb9b639292625f28af73aa016f47e788af9deb"
+checksum = "c64335f9f24ccb62ac36f1d976342b48611a75ba61979813a4f78a4ebd94de42"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
- "crc32c",
+ "crc-fast",
  "http",
  "log",
  "md-5",
  "opendal-core",
- "quick-xml 0.39.4",
+ "quick-xml 0.41.0",
  "reqsign-aws-v4",
  "reqsign-core",
  "reqsign-file-read-tokio",
@@ -8660,8 +8891,7 @@ dependencies = [
 [[package]]
 name = "openraft"
 version = "0.10.0-alpha.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba6e911fb3c97faeecb8324b803a37d77a7387d02ee7019fc2a9777569e7f7b8"
+source = "git+https://github.com/nervix-io/openraft.git?rev=1fa0ac5345475d6f00d219ad55bea39b7f40a87d#1fa0ac5345475d6f00d219ad55bea39b7f40a87d"
 dependencies = [
  "anyerror",
  "backoff-series",
@@ -9698,7 +9928,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-message-size-ack-receipts#1545163035670abe8996be7bd2610e45421c47ce"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-rustls-client-config#39fa340c6a5a2c846cae4cc0cba948975997867c"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -9730,6 +9960,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyo3"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "229ca13b8a15bb0d1487b81ab975bfcd97513416499a8312011b6036e42e0de4"
+dependencies = [
+ "libc",
+ "once_cell",
+ "portable-atomic",
+ "pyo3-build-config",
+ "pyo3-ffi",
+ "pyo3-macros",
+]
+
+[[package]]
+name = "pyo3-build-config"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70130e2b6dd1ee589a8788026a429561ca5c40fa7a2fa7914c2282eddae24700"
+dependencies = [
+ "target-lexicon",
+]
+
+[[package]]
+name = "pyo3-ffi"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e7ff73c555c286d212d4ce7e5fbda845a973c4f61bd5f160f5f2c3c2a04d1c4"
+dependencies = [
+ "libc",
+ "pyo3-build-config",
+]
+
+[[package]]
+name = "pyo3-macros"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c46d2e5862c7bb8207e3b639f713dda3c499933444784154c11d013c5a691b60"
+dependencies = [
+ "proc-macro2",
+ "pyo3-macros-backend",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "pyo3-macros-backend"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38b89f066f2ae72a2aef52d1537ca2fcd104440ebfadee06e97aa90738a25b9b"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "quad-rand"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9752,9 +10039,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.39.4"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
  "serde",
@@ -10078,7 +10365,7 @@ dependencies = [
 [[package]]
 name = "rdkafka"
 version = "0.39.0"
-source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop#af028e3d8a11ffb8c1d842f036361a3ac74acfa1"
+source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop#07dc1275b8d4e0475e4f1f082071f979a81080bf"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -10095,9 +10382,9 @@ dependencies = [
 [[package]]
 name = "rdkafka-sys"
 version = "4.10.0+2.12.1"
-source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop#af028e3d8a11ffb8c1d842f036361a3ac74acfa1"
+source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop#07dc1275b8d4e0475e4f1f082071f979a81080bf"
 dependencies = [
- "aws-lc-sys 0.44.0",
+ "aws-lc-sys",
  "cmake",
  "curl-sys",
  "libc",
@@ -10398,7 +10685,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7260e6c1d89422ba62d624a32c491b561386fb364ac4bf0959c740e34b251a2e"
 dependencies = [
  "anyhow",
- "asyncband",
+ "asyncband 0.7.4",
  "base64 0.23.1",
  "bytes",
  "form_urlencoded",
@@ -10420,7 +10707,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85fed85c436b6b920e4b36310f699a77771a91e38ae483df48447bd7d162671c"
 dependencies = [
  "anyhow",
- "asyncband",
+ "asyncband 0.7.4",
  "base64 0.23.1",
  "bytes",
  "hex",
@@ -11527,12 +11814,6 @@ dependencies = [
 
 [[package]]
 name = "shlex"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
-
-[[package]]
-name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
@@ -11794,6 +12075,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "signatory"
+version = "0.27.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1e303f8205714074f6068773f0e29527e0453937fe837c9717d066635b65f31"
+dependencies = [
+ "pkcs8",
+ "rand_core 0.6.4",
+ "signature",
+ "zeroize",
+]
+
+[[package]]
 name = "signature"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11936,6 +12229,12 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
 ]
+
+[[package]]
+name = "spin"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "spinning_top"
@@ -12298,6 +12597,16 @@ dependencies = [
  "quote",
  "sealed",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "syslog_rfc5424"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "909628010ce00835517125bf1b71bfe17df49d3a3d194d77568032ab662a74c7"
+dependencies = [
+ "thiserror 2.0.21",
+ "time",
 ]
 
 [[package]]

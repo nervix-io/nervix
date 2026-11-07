@@ -17,8 +17,8 @@ Feature: Reingestor output flushing
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+      CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event;
       CREATE SCHEMA tenant_seq_branch (
         tenant STRING,
@@ -32,8 +32,8 @@ Feature: Reingestor output flushing
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_ingress;
       CREATE RELAY repartitioned SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge reingestor-flush-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming

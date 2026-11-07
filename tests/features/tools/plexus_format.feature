@@ -136,12 +136,13 @@ Feature: Plexus file formatting
   Scenario: HTTP REQUEST emitters keep their attachment, request expressions and explicit body selection when formatted
     Given a Plexus file "http_emitters.plexus" containing
       """
-      create attached HTTP REQUEST EMITTER deliver_event from outgoing to api method input.request_method
+      create HTTP REQUEST EMITTER deliver_event from outgoing ATTACHED to api method input.request_method
         path input.request_path mode ack retry policy backoff 250ms max 30s
         encode using event_body_codec inherit event_id, payload
         invoke write_header('Content-Type', 'application/json'), write_header('X-Tenant', input.tenant)
         flush each 100ms max batch size 1MiB on message error log on general error log;
-      create detached HTTP REQUEST EMITTER delete_event from outgoing where input.request_method = 'DELETE'
+      create HTTP REQUEST EMITTER delete_event from outgoing where input.request_method = 'DELETE'
+        DETACHED
         to api method 'DELETE' path concat('/v1/events/', input.event_id)
         mode ack retry policy backoff 250ms max 30s without body
         invoke write_header('Idempotency-Key', input.event_id)
@@ -151,8 +152,9 @@ Feature: Plexus file formatting
     Then the formatter exits with code 0
     And the Plexus file "http_emitters.plexus" contains
       """
-      CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
+      CREATE HTTP REQUEST EMITTER deliver_event
         FROM outgoing
+        ATTACHED
         TO api METHOD input.request_method PATH input.request_path
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_body_codec
@@ -161,8 +163,9 @@ Feature: Plexus file formatting
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED HTTP REQUEST EMITTER delete_event
+      CREATE HTTP REQUEST EMITTER delete_event
         FROM outgoing WHERE input.request_method = 'DELETE'
+        DETACHED
         TO api METHOD 'DELETE' PATH concat('/v1/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
@@ -360,7 +363,7 @@ Feature: Plexus file formatting
   Scenario: A Protobuf message name holding a closing brace keeps its value
     Given a Plexus file "pipeline.plexus" containing
       """
-      create codec notification_codec from protobuf using resource proto_bundle version 2
+      create PROTOBUF CODEC notification_codec using resource proto_bundle version 2
         config { 'file' = 'notification.proto' } message 'nervix.test.Notification}'
         to schema notification_schema with jaq transformations on ingestion '.';
       """
@@ -467,16 +470,18 @@ Feature: Plexus file formatting
     Then the formatter exits with code 0
     And the Plexus file "pipeline.plexus" contains
       """
-      CREATE ATTACHED JUNCTION peaks
+      CREATE JUNCTION peaks
         FROM sensors WHERE max(input.readings) > 10
+        ATTACHED
         FILTER WHERE output.total > 0
         UNBRANCHED
         TO alerts
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE ATTACHED DEDUPLICATOR distinct_peaks
+      CREATE DEDUPLICATOR distinct_peaks
         FROM sensors
+        ATTACHED
         DEDUPLICATE ON max(input.readings), input.id
         MAX TIME 10m
         UNBRANCHED
@@ -484,8 +489,9 @@ Feature: Plexus file formatting
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE ATTACHED REORDERER peaks_in_order
+      CREATE REORDERER peaks_in_order
         FROM sensors
+        ATTACHED
         BY max(input.readings)
         MAX TIME 10s
         UNBRANCHED
@@ -493,9 +499,10 @@ Feature: Plexus file formatting
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE ATTACHED CORRELATOR suffix_matches
+      CREATE CORRELATOR suffix_matches
         LEFT FROM sensors WHERE right(left.name, 2) = right.suffix
         RIGHT FROM labels WHERE output.id > 0
+        ATTACHED
         CORRELATE WHERE left.id = right.id
         MATCH EARLIEST
         MAX TIME 5s
@@ -525,7 +532,7 @@ Feature: Plexus file formatting
         correlate where left.to = right.match match earliest max time 5s
         on correlation timeout drop, drop unbranched to matched set to = left.to
         flush immediate on message error log;
-      create attached HTTP REQUEST EMITTER trip_requests from routed to api method mode path path
+      create HTTP REQUEST EMITTER trip_requests from routed ATTACHED to api method mode path path
         mode ack retry policy backoff 250ms max 30s without body
         invoke write_header('X-Trip-Mode', mode)
         flush immediate on message error log on general error log;
@@ -537,8 +544,9 @@ Feature: Plexus file formatting
     Then the formatter exits with code 0
     And the Plexus file "trips.plexus" contains
       """
-      CREATE ATTACHED JUNCTION route_trips
+      CREATE JUNCTION route_trips
         FROM trips WHERE input.to > 0 AND on > by
+        ATTACHED
         FILTER WHERE output.to != max
         UNBRANCHED
         TO routed
@@ -548,8 +556,9 @@ Feature: Plexus file formatting
           WHERE on > 0
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE ATTACHED DEDUPLICATOR distinct_trips
+      CREATE DEDUPLICATOR distinct_trips
         FROM trips
+        ATTACHED
         DEDUPLICATE ON input.to, by
         MAX TIME 10m
         UNBRANCHED
@@ -557,8 +566,9 @@ Feature: Plexus file formatting
           INHERIT to, on
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE ATTACHED REORDERER ordered_trips
+      CREATE REORDERER ordered_trips
         FROM trips
+        ATTACHED
         BY input.by, max
         MAX TIME 10s
         UNBRANCHED
@@ -566,9 +576,10 @@ Feature: Plexus file formatting
           INHERIT ALL EXCEPT on
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE ATTACHED CORRELATOR matched_trips
+      CREATE CORRELATOR matched_trips
         LEFT FROM trips WHERE left.to > 0
         RIGHT FROM stops
+        ATTACHED
         CORRELATE WHERE left.to = right.match
         MATCH EARLIEST
         MAX TIME 5s
@@ -578,8 +589,9 @@ Feature: Plexus file formatting
           SET to = left.to
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE ATTACHED HTTP REQUEST EMITTER trip_requests
+      CREATE HTTP REQUEST EMITTER trip_requests
         FROM routed
+        ATTACHED
         TO api METHOD mode PATH path
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
@@ -605,8 +617,9 @@ Feature: Plexus file formatting
     Then the formatter exits with code 0
     And the Plexus file "spans.plexus" contains
       """
-      CREATE ATTACHED JUNCTION closed_spans
+      CREATE JUNCTION closed_spans
         FROM spans WHERE input.end > input.from AND `end` > 0
+        ATTACHED
         UNBRANCHED
         USING MATERIALIZED STATE limits DEFAULT { `end` = 1 }
         TO closed

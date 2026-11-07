@@ -10,7 +10,7 @@ sections standard tools can list and extract, and whose records every reader val
 trusts them.
 
 A normal backup pauses each running domain in turn, waits for its intake and acknowledged work to
-drain, then captures its committed configuration, WASM guest checkpoints, Kafka source offsets,
+drain, then captures its committed configuration, WASM guest checkpoints, Kafka ingestor offsets,
 branch lifecycle, fresh materialized relay generations, deduplicator keyspaces and the rows every
 window retains. It resumes that domain before transferring the captured sections into the
 archive. Stopped domains need no pause. `WITHOUT PAUSE` captures the latest published state while
@@ -82,7 +82,7 @@ A `WITHOUT PAUSE` capture holds no lease, and a placement that failover or reloc
 runs can be left out. Send the backup again once the node is back, or once failover has moved its
 placements; with replicas, failover promotes one as soon as the failed cut has released its lease.
 
-The cut captures every kind of runtime state the archive holds: WASM guest saves, Kafka source
+The cut captures every kind of runtime state the archive holds: WASM guest saves, Kafka ingestor
 offsets, branch lifecycle, fresh materialized relay generations, deduplicator keyspaces and the rows
 every window retains. Each owner stages its share one checkpoint at a time, so state larger than the
 node's bulk memory budget is archived within it. [The Quiesced
@@ -289,7 +289,7 @@ deduplicator keys.
 
 ```text
 backup: ./cluster.nvxb
-format: 1
+format: 3
 producer_version: 0.1.0
 language_version: 0.1.0
 cluster: nervix-3f1c
@@ -341,7 +341,7 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   Omit it to leave the restored domain stopped. It precedes `ON EXISTING USER` and `DRY RUN`.
 - `WITHOUT STATE` restores the configuration and purges state for the target domain.
 - `WITHOUT SOURCE OFFSETS` restores WASM, branch lifecycle, materialized, deduplicator and window
-  state but starts sources without the archived Kafka positions.
+  state but starts ingestors without the archived Kafka positions.
 - A state section whose entity is absent or whose schema fingerprint differs from the published
   schedule is skipped. The restore succeeds and reports a warning naming the skipped state in its
   command diagnostics and CLI output; that entity starts without the skipped checkpoint. A dry run
@@ -396,8 +396,8 @@ complete restored one; nodes without assigned checkpoints publish an empty set. 
 installation gate refuses `START` until every target node has published its complete
 set; it survives failure, lease release and node restart. [State
 Installation](./backup-and-restore-architecture.md#state-installation) describes the staging,
-publication and gate. A source uses its restored next offset when it starts, clamped to the
-partitions its current source assignment contains and clamped to their live low and high
+publication and gate. An ingestor uses its restored next offset when it starts, clamped to the
+partitions its current ingestor assignment contains and clamped to their live low and high
 watermarks. Materialized state binds to the exact restored schema fingerprint and archived start
 generation before a branch or generator starts. Its rows, typed keys, watermarks, revision and
 branch generation are preserved. A new assignment establishes its own ownership fence.
@@ -420,7 +420,7 @@ admission sequences, watermarks and aggregate argument values are preserved exac
 
 Archived Kafka positions follow acknowledged records, and a window acknowledges a row only when it
 steps past it. The positions of a domain that reads Kafka records into a window therefore stand
-before the rows its windows retain at the cut, and a source that resumes from them reads those rows
+before the rows its windows retain at the cut, and an ingestor that resumes from them reads those rows
 again, which the restored window then admits beside the rows it restored. A restart has the same
 effect; see [Shutdown And Recovery](shutdown.md).
 
@@ -431,7 +431,7 @@ admission follows the projected reached windows. A paced archive without its com
 cannot resume and is refused before admission. An unpaced resume needs no clock mapping.
 
 A normal `START` after a default stopped restore, or after `STOP`, advances the start generation
-and clears materialized state. It preserves compatible WASM state, source positions, branch
+and clears materialized state. It preserves compatible WASM state, ingestor positions, branch
 lifecycle, deduplicator keys and windows. To establish a new clock at the saved logical frontier
 instead, leave the domain stopped and use `START AT '<frontier>' TIME RATE <rate>` explicitly.
 
@@ -578,12 +578,12 @@ completes:
       and UDFs prepare. The batch is not bounded by the statement and source-byte limits of a
       transaction. Before recording this step, admit an installation generation bound to the
       leader tenure, restore execution and mutation lease. Stage compatible branch lifecycle,
-      source offsets, WASM saves, materialized generations, deduplicator keyspaces and windows on
+      ingestor offsets, WASM saves, materialized generations, deduplicator keyspaces and windows on
       the newly scheduled owners and replicas, then publish the complete set on every target node.
       Recording completion releases the replicated start gate.
       With `RESUME`, that same effect installs the archived clock mapping and makes the domain
       running; a delayed coordinator cannot republish after activation.
-      `WITHOUT STATE` publishes an empty set, and `WITHOUT SOURCE OFFSETS` omits source positions.
+      `WITHOUT STATE` publishes an empty set, and `WITHOUT SOURCE OFFSETS` omits ingestor positions.
 
 A completed restore reports what it recreated, and each step:
 
@@ -655,6 +655,20 @@ no other command changes those domains while it applies.
 The staged archive is released when its restore's outcome is recorded, or when the retry validity
 of the execution reference ends; a dry run releases it when it answers.
 
+A malformed or oversized native restore reply leaves the outcome uncertain even if the restore
+already completed. Keep the original statement, archive and execution reference and repeat them
+to recover that outcome. The CLI exits with status 3 and prints the reference. If no earlier
+attempt could have been admitted, a local archive error, an authentication refusal or a valid
+declared stream refusal remains definitive. A later archive read failure, stream refusal or
+expired reference cannot settle an earlier complete upload whose outcome was lost or reported
+`OutcomeUnknown`; keep its original reference and restore the same archive for recovery. See
+[Restoring](client-library.md#restoring) for the native-client contract.
+
+In the [web console](client-tools-web-console.md#backup-and-restore), an unrecorded request failure
+on a later attempt also leaves an earlier possibly admitted restore unknown. Keep the same
+statement, archive and execution reference to recover its recorded outcome. A recovered failure
+or a restore step report remains definitive and preserves the steps already applied.
+
 ### Restoring From The Command Line
 
 `nervix-cli restore` runs one restore and exits:
@@ -678,7 +692,7 @@ nervix-cli restore cluster --input cluster.nvxb --on-existing-user replace --for
 | `--dry-run` | Verifies the archive and plans the restore, changing nothing. |
 | `--resume` | Makes the complete restored domain running at its archived generation and clock mapping. |
 | `--without-state` | Installs configuration without runtime checkpoints. |
-| `--without-source-offsets` | Installs WASM, branch and materialized state, and leaves Kafka source positions unset. |
+| `--without-source-offsets` | Installs WASM, branch and materialized state, and leaves Kafka ingestor positions unset. |
 | `--format text` or `--format json` | How the report is printed. Text is the default. |
 
 While the archive streams, the command shows how much of it was sent on standard error, when
@@ -760,7 +774,12 @@ describes the dialog itself.
 - **Retries.** Every attempt of a restore sends the same execution reference, statement, and
   archive. A redirect streams it again to the leader, and a lost connection or an unknown outcome
   streams it again from its first byte, for about ten minutes; after that the console reports the
-  outcome as unknown and names the reference.
+  outcome as unknown and names the reference. An attempt that sent the whole archive without
+  learning the outcome, or an answer that the outcome is not known yet, may have had the restore
+  admitted. The console then also reports the outcome as unknown under the reference, never as
+  refused, when the restore ends without it: when the browser can no longer read the archive file,
+  a reply cannot be read, the leader refuses a later stream, or the leader no longer holds the
+  reference.
 - **What the browser shows.** The dialog shows the summary a backup reports and the report a
   restore returns, and never what an archive holds beyond them. `DESCRIBE BACKUP` runs only in
   `nervix-cli`.
@@ -831,17 +850,16 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Users | 2 | 1 | Every user's name and password hash as a PHC string |
 | Domain | 3 | 1 | Pace, default placement policy, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
-| WASM guest state descriptor | 5 | 2 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
-| Kafka domain offsets | 6 | 3 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
-| Branch lifecycle | 7 | 2 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
-| Materialized relay descriptor | 8 | 2 | Domain and relay names, scheduled unit, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
-| Materialized record identities | 9 | 2 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
-| Deduplicator keyspace descriptor | 10 | 2 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
-| Window state descriptor | 11 | 2 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
+| WASM guest state descriptor | 5 | 4 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
+| Kafka domain offsets | 6 | 5 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
+| Branch lifecycle | 7 | 4 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
+| Materialized relay descriptor | 8 | 4 | Domain and relay names, scheduled unit, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
+| Materialized record identities | 9 | 4 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
+| Deduplicator keyspace descriptor | 10 | 4 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
+| Window state descriptor | 11 | 4 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
 
-The archive format major version is `2`. An archive with another major version fails before any
-state section can be skipped or installed; capture a new archive in the current unit-bearing
-format. A reader refuses invalid record magic, an unsupported
+The archive format major version is `5`. An archive with another major version fails before any
+state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, an unknown record kind in the manifest, a first entry
 other than the manifest, and any section whose place, length or digest differs from what the
 manifest declares. A state record whose header names another state kind than the manifest declares,
@@ -1025,8 +1043,9 @@ A restore that failed at a step reports `restore failed at step '<step>':`, the 
 steps before it stay applied, together with the report of every step. The reasons are a consensus
 refusal of the step, a created domain whose stopped state did not become usable on every live node,
 a resource version that could not be installed or completed on every live node, a domain that holds
-models the restore did not apply, a model batch the leader refused, such as lookup data that does
-not load at its path or TLS material that does not load, a node that did not apply the installation
+models the restore did not apply, a model batch the leader refused, such as a committed parameter
+cap that its Models exceed, lookup data that does not load at its path or TLS material that does
+not load, a node that did not apply the installation
 revision within five seconds, and state that does not convert or install. Installation converts
 each keyspace and window as planning did, with the same wait for room, so a momentarily busy node
 does not fail the step; a refusal for room that outlasts the wait does. An admitted restore that
@@ -1035,3 +1054,9 @@ restore no longer plans against the cluster, reports `restore failed:`, the reas
 steps it recorded stay applied. A restore whose archive no client sent to a new leader before the
 retry validity of its execution reference ended reports `restore stopped after the steps it
 recorded`. No message includes password hashes or resource bytes.
+
+Ingestor offset and branch-lifecycle records retain their global `Instance(i)` placement. A
+quiesced cut observes and checkpoints each locally owned ingestor unit; restore preserves those
+identities and lets the current scheduler choose their owners. Canonical Models retain fixed
+counts or `INSTANCES PER PARTITION`. The current major fences this ownership contract before any
+configuration or state is installed.

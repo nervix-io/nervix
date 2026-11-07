@@ -8,12 +8,15 @@ Manual](./client-implementation-manual.md), and [Client Session
 Protocol](./client-session-protocol.md) explains the protocol behavior it relies on.
 
 For a complete graph, data-handle lifetimes, credit and failure decisions, read
-[Client Ingestors And Emitters](./client-io-architecture.md).
+[Client Ingestors And Emitters](./client-io-architecture.md). A Python program uses the same client
+through the [Python Client Library](./client-library-python.md), which this chapter does not
+describe.
 
 Capabilities:
 
 - `Client::connect(...)` and `Client::connect_with_options(...)`
 - `Client::execute(...)`, and `Client::prepare_execution(...)` with `Client::execute_prepared(...)`
+  and `Client::execute_prepared_with_cancellation(...)`
 - `Client::transaction_status()`, `Client::attach_transaction(...)` and
   `Client::inspect_transaction(...)`
 - `Client::list_domains()`, `Client::domain()` and `Client::set_domain(...)`
@@ -26,7 +29,8 @@ Capabilities:
 - `Client::subscribe_emitter(...)`, with `EmitterConsumer::next_batch()`,
   `EmitterDelivery::ack()`, `EmitterDelivery::retry()`, `EmitterDelivery::reject(...)` and
   `EmitterConsumer::close()`
-- `Client::upload_resource_from_directory(...)`
+- `Client::upload_resource_from_directory(...)` and
+  `Client::upload_resource_from_directory_with_identity(...)`
 - `Client::download_backup(...)`
 - `Client::restore(...)` and `Client::restore_with_reference(...)`
 - `Client::next_server_event()`, `Client::next_domain_list()` and `Client::leadership()`
@@ -37,7 +41,8 @@ Suggestion pages report `Ready`, `MissingContext`, `StaleContext`, or `LookupFai
 candidate carries a UTF-8 byte text edit against the full input and a continuation requests the
 next bounded page. The shared C binding exposes the same result through `nx_session_suggest`,
 `nx_suggestions_at`, and `nx_suggestions_continuation`; its header is
-`crates/client-ffi/include/nervix_client.h`.
+`crates/client-ffi/include/nervix_client.h`. The [Python Client Library](client-library-python.md)
+returns it from `Session.suggest`.
 
 Structured choice pages carry typed enum variants or domain, resource, and model references beside
 separate presentation metadata. The request includes typed dependencies, search, and a
@@ -52,11 +57,48 @@ leader's endpoints when discovery knows them, `TransactionDetached`, `Transactio
 
 Each `execute` call creates one stable execution reference and retains it through leader redirects,
 transaction reattachment, and transport reconnects. A successful outcome means the command's
-administrative effect is usable on the current live-node set. If the caller cancels its future, the
+administrative effect is usable on the current live-node set. If the caller drops its future, the
 cluster still owns any already-admitted effect; the client sends no cancellation and discards the
 reply when it arrives. To submit the same logical request again, prepare it once with
 `prepare_execution`, which fixes its execution reference, domain, and upload identity, and pass the
-same `ExecutionHandle` to `execute_prepared` after an uncertain, cancelled, or timed-out attempt.
+same `ExecutionHandle` to `execute_prepared` after an uncertain, cancelled, or timed-out attempt. A
+process that recovers what an earlier one left uncertain builds the handle again from the reported
+reference or identity, with `ExecutionHandle::with_reference` or
+`ExecutionHandle::with_upload_identity`.
+
+A command reply naming another execution reference ends its session as a protocol violation.
+Every request still waiting on that session is interrupted, and the client repeats the original
+command through normal session recovery, preserving its reference, query, domain, transaction
+position and preview. If recovery cannot finish, the call reports `UncertainCommand` under the
+original reference. It never returns the foreign outcome or adopts its transaction or redirect.
+
+A reply of a kind that cannot answer its request, such as a domain listing under a command's
+request identity, ends its session the same way, before the client applies anything it carries.
+Every request still waiting on that session ends as interrupted and is recovered as after any
+other lost session: a command is repeated under its original reference. When recovery cannot
+finish, a command reports `UncertainCommand` under that reference and a read such as
+`list_domains` reports `RequestInterrupted`, each above the typed `ReplyKindMismatch` that names
+the request and the reply's kind. The client adopts no subscription, clock attachment, producer, transaction or
+redirect from such a reply. A late reply, whose call stopped waiting, completes nothing and is
+followed as before.
+
+`execute_prepared_with_cancellation` takes a `CancellationToken` its caller may cancel. While a
+command, `BACKUP` included, waits for its reply, cancelling the token sends `CancelRequest` for it,
+and the call keeps waiting for the reply that ends the command. A command the server cancelled
+before admitting it fails with `ClientError::RequestCancelled` at `BeforeAdmission` and had no
+effect; one it had admitted keeps running, and the call fails with `UncertainCommand` above the
+cancellation; one that finished first returns its outcome. A call cancelled while no request of it
+waits for a reply, between attempts or while it reopens a session or follows a redirect, sends
+nothing more and fails with `ClientError::CallCancelled`, beneath `UncertainCommand` when it may
+already have sent the command. A statement the client serves itself, or streams on a call of its
+own, stops where it waits, as when its caller drops the future: an upload then fails with
+`UncertainUpload`, and a restore with `UncertainCommand`. The archive download of a `BACKUP` that
+completed is not stopped.
+
+The client classifies a command's statements before it sends them, with the Plexus statement
+grammar. It builds the grammar once on each thread that prepares a command and keeps it for the
+life of that thread: the first command a thread prepares pays for building it, and each such thread
+holds about 1.7 MB for it.
 
 Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection attempt (10
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
@@ -144,14 +186,27 @@ instead. See [Sessions](sessions.md#subscription-lifecycle).
 
 A subscription the server acknowledged, and did not end, outlives its session. When the session
 ends, `next_subscription()` reports `Interrupted`, the gap before the subscription opens again, and
-the client opens it again as a new generation on its next session. When that session refuses it, for
-example because its relay no longer exists, `next_subscription()` reports `RestorationFailed` with
-the server's message and the wait before the next attempt; the client keeps trying on that session,
-after a wait that starts at one second and doubles up to thirty seconds, until the subscription
-opens, the session ends, or the subscription is deleted. `Client::subscription_lifecycle(&name)`
-reads the state a subscription is in. `subscribe` and `unsubscribe` reopen a closed session like
-every other call. Deleting a subscription that no open session holds, because its session ended or
-the current session refused to open it again, completes without a request and releases the name.
+the client opens it again as a new generation on its next session, expecting the schema the
+generation it replaces announced. When that session refuses it because its relay or the relay's
+domain no longer exists, or because the relay was redefined so that it announces another schema, the
+subscription ends: `next_subscription()` reports `Ended` with `RelayRemoved` or `RelayChanged` and
+the server's message, exactly as when the server ends a generation, and the client never opens it
+again on its own. When the session refuses it for any other reason, `next_subscription()` reports
+`RestorationFailed` with its `SubscriptionRestorationCause`, the server's message and the wait
+before the next attempt: the session holds a transaction, the statement, name or filter was refused,
+the serving node could not open it now, the session rejected the request without serving it, or the
+attempt failed in the client. The client keeps trying on that session, after a wait that starts at
+one second and doubles up to thirty seconds, until the subscription opens, the session ends, or the
+subscription is deleted. `Client::subscription_lifecycle(&name)` reads the state a subscription is
+in. `subscribe` and `unsubscribe` reopen a closed session like every other call. Deleting a
+subscription that no open session holds, because its session ended or the current session refused to
+open it again, completes without a request and releases the name.
+
+An unanswered reopening ends its session at `request_timeout`. The exchange reader then stops
+routing frames and wakes the subscription reader, which opens the next session even when the
+preceding transport is still connected. The client reports no `RestorationFailed` event for an
+unanswered request. The subscription stays desired and resumes at the new session's live edge;
+records published during its gap are not replayed.
 
 ## Backing Up
 
@@ -204,11 +259,60 @@ change resumes a restore instead of repeating it. An error that may hide an admi
 `ClientError::UncertainCommand` with the restore's execution reference, and running the restore
 again under that reference recovers its outcome.
 
+A restore reply naming another execution reference ends the session used for its attempt and
+returns `UncertainCommand` under the restore's own reference, above
+`ExecutionReferenceMismatch`. The outcome remains unknown even if the foreign reply reports a
+failure. Repeat with `restore_with_reference` and the original reference, statement and archive to
+learn the restore's own outcome.
+
+An unreadable restore reply, including a malformed frame, a message above the receive limit,
+a verified reply that cannot be decoded or one naming another transport request, leaves that
+original execution uncertain. The client ends the session selected for the stream and interrupts
+its pending requests, preserving any replacement installed while its reply was outstanding. Keep
+the exact statement and archive and pass their original reference to `restore_with_reference` to
+recover the outcome. The report retains the typed validation cause or tonic's bounded receive
+failure. Missing or empty local archives, authentication refusals and valid declared stream
+refusals remain definitive if no earlier attempt could have been admitted. The shared bindings
+classify uncertainty as `NX_ERROR_UNCERTAIN`; the CLI exits with status 3 and prints the execution
+reference.
+
+Uncertainty survives a later attempt. After the client handed over a whole archive without
+learning its outcome, or received `OutcomeUnknown`, a later archive-open/read error, refusal
+before admission, or expired execution reference cannot establish what that earlier attempt did.
+The client returns `UncertainCommand` with the original reference and retains the typed later
+cause beneath it. Restore the original file if needed and repeat the same statement and archive
+under that reference to recover the outcome. An outcome recovered from the command record, or a
+failure carrying the restore's report, still establishes the result, including any steps applied
+before a recorded failure.
+
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.
-A stream the leader refused before the restore ran is a failed outcome whose message names the
-typed failure. The C binding runs `RESTORE` through `nx_session_execute` and reports the report's
+With no earlier uncertain attempt, a stream the leader refused before the restore ran is a failed
+outcome whose message names the typed failure. The C binding runs `RESTORE` through
+`nx_session_execute` and reports the report's
 counts, whether it was a dry run, and whether a step failed through `nx_outcome_restore`.
+
+## Uploading A Resource
+
+`execute` serves `UPLOAD RESOURCE` itself, under the upload identity its `ExecutionHandle` fixed.
+`Client::upload_resource_from_directory(identifier, directory, on_progress)` uploads a directory as a
+version of a resource in the selected domain under a new identity, and
+`Client::upload_resource_from_directory_with_identity(identifier, directory, domain, identity,
+on_progress)` under one the caller chose. Every call of one upload carries the same identity and
+archive, so sending the same archive again under the identity recovers the version an earlier call
+installed rather than installing another. An error that may hide an installed version is
+`ClientError::UncertainUpload` with the identity. While the session holds an active transaction,
+both refuse the upload before sending anything, as `execute` refuses every client-local statement:
+a version is never transaction content, so reverting the transaction could not take it back.
+
+`CommandOutcome::resource_upload` retains the upload identity, assigned version, answering call's
+origin and call count, and optional typed `UploadFailure`. `IdentityConflict` means the identity
+already names another archive; its `version` is the version bound to that identity. Preserve the
+original identity and bytes when recovering that upload, and use a fresh identity for a different
+logical upload. The host outcome exposes the failure through `Outcome::upload_failure()`, Python's
+`Outcome.upload_failure`, Java's `Outcome.uploadFailure()` and the C ABI's
+`nx_outcome_upload_failure`. The optional result is absent for a successful upload or any other
+command. These accessors return the typed cause directly, without matching the diagnostic text.
 
 ## Following A Domain Clock
 
@@ -293,8 +397,10 @@ newer tick. A new session
 that answers the attach with the domain not found ends the attachment with `Ended`, as the server
 would. A node that is still starting answers that attach only once it has installed the cluster's
 committed domains, so a restart never ends an attachment. When the new session refuses that attach
-for any other reason, the event is `RestorationFailed` with the server's message and the wait
-before the client sends the attach again on the same session; the wait starts at one second on
+for any other reason, the event is `RestorationFailed` with its `DomainClockRestorationCause`, the
+server's message and the wait before the client sends the attach again on the same session: the
+session holds a transaction, it rejected the request without serving it, or the attempt failed in
+the client. The wait starts at one second on
 each new session and doubles up to thirty seconds. An attach the session leaves unanswered past
 `request_timeout` ends that session, and the next one attaches the clock again. Waiting for the
 next event reopens a closed session when a followed clock waits for it, including a call already
@@ -310,8 +416,8 @@ during the detach waits for it to end and attaches the clock only if the client 
 
 ### Through The Shared C Binding
 
-The shared C binding reads the same events and attached clocks for C, C++, Python, JVM and Ruby
-hosts; its header is `crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and
+The shared C binding reads the same events and attached clocks for C, C++ and Ruby hosts; its
+header is `crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and
 `DETACH DOMAIN CLOCK;` run through `nx_session_prepare` and `nx_session_execute` like any statement,
 for the session's selected domain, and fail with `NX_ERROR_INVALID_ARGUMENT` when none is selected.
 `nx_session_next_clock_event` waits for the next event, bounded by the same `nx_cancel` tokens and
@@ -324,8 +430,10 @@ attempt, and the next call tries again. The events are the Rust client's, coales
   `NX_CLOCK_EVENT_ENDED`, `NX_CLOCK_EVENT_INTERRUPTED` or `NX_CLOCK_EVENT_RESTORATION_FAILED` event
   apart, and `nx_clock_event_domain` borrows the name of the domain it concerns. A restoration
   failure reports that the session refused to attach an interrupted clock again, which it tries
-  again after the growing wait the Rust client reports. The event carries only its kind and domain:
-  the binding exposes neither the server's message nor the wait.
+  again after the growing wait the Rust client reports. `nx_clock_event_restoration_cause` reads its
+  cause, `NX_RESTORATION_IN_TRANSACTION`, `NX_RESTORATION_REJECTED` or `NX_RESTORATION_FAILED`. The
+  event also carries the refusal message as borrowed UTF-8 bytes and that wait in nanoseconds, read
+  with `nx_clock_event_restoration_message` and `nx_clock_event_restoration_retry_after`.
 - `nx_clock_event_generation` reads the `START` generation of a state or tick event,
   `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
   skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
@@ -337,6 +445,15 @@ attempt, and the next call tries again. The events are the Rust client's, coales
   reading an event allocates nothing on the host's side.
 - `nx_clock_event_retain` and `nx_clock_event_release` count references the way `nx_event_retain`
   and `nx_event_release` do, and a reference may be released on any thread.
+
+For C and C++ hosts, `nx_connect_options_new` starts with the Rust client's defaults. The host
+may set basic credentials, a TLS requirement, a copied CA certificate, seed URLs and the four
+deadlines before it calls `nx_session_connect`. The session copies the options, so the host may
+release them after the call. The Rust client validates endpoint origins and the 1 ms to 24 hour
+deadline bounds when connecting, and an HTTPS initial endpoint requires HTTPS for every later
+server. A subscription's `NX_EVENT_RESTORATION_FAILED` carries its refusal message and retry wait
+through `nx_event_restoration_message` and `nx_event_restoration_retry_after`, with the same
+borrowed-byte and nanosecond rules as the clock event. A wrong event kind returns `NX_ERROR_TYPE`.
 
 `nx_session_domain_clock` reads `domain_clock` for a domain the session follows as an
 `nx_domain_clock` reference, and writes NULL for a domain whose clock the session does not follow.
@@ -368,8 +485,21 @@ An attach the server refuses completes as failed with the server's reason, and
 `nx_session_domain_clock` still reads the earlier attachment's clock when the refusal is that the
 session already follows it. An attach whose session was lost is sent again on the next session the
 client opens. An attach cancelled or expired after its request was sent can still attach the
-session: executing the same prepared execution again is answered after the earlier attempt, and
-`nx_session_domain_clock` then tells whether the session follows the clock.
+session: executing the same prepared execution again sends another session-local request, which
+may be refused as already attached even when the first succeeded. `nx_session_domain_clock` tells
+whether the session follows the clock.
+
+### Through The JVM Library
+
+Java 21 and later use `io.nervix.client.Nervix` from `crates/client-jvm`. Its `Session`, prepared
+`Execution`, `Outcome`, `ClockEvent` and immutable `DomainClock` expose the shared Rust client's
+state and projection arithmetic. `Event.endReason()` reads why an ended subscription ended,
+`RELAY_REMOVED` or `RELAY_CHANGED`, and a subscription's or clock's `RestorationFailure` carries
+its typed `RestorationCause`, the message and the physical wait.
+`Cancel` supports deadlines and cancellation from another Java thread while a native call waits.
+Close handles with try-with-resources; Cleaner supplies fallback cleanup. Build the jar and its
+native library with `just build-client-jvm`. The [implementation manual](./client-implementation-manual.md#using-the-jvm-library)
+owns the Java lifetime, unsigned-width, error and threading rules.
 
 ## Events Across Reconnects
 
@@ -384,7 +514,9 @@ belong to the client rather than to one session, so a reader keeps calling them 
   as described above.
 - `next_server_event()` never opens a session itself. Notices end with the session that delivered
   them, including the ones not read yet, and the stream continues with the notices of the next
-  session.
+  session. Each `ServerEvent` carries the notice's `level`, its `kind` (`NoticeKind::Membership`,
+  `Leadership`, `ClusterParameters`, `Runtime` or `ControlPlane`) and its display text; a reader
+  routes notices by `kind` and never by their text.
 
 A failed read leaves its stream open. `ClientError::EventOverflow` from `next_server_event()` means
 notices arrived faster than they were read: the client dropped the ones it held, and the next read
@@ -527,8 +659,8 @@ submissions with their original handle rather than resending them.
 
 ### Endpoints Through The Shared C Binding
 
-The shared C binding exposes the same producers and consumers to C, C++, Python, JVM and Ruby
-hosts, through `crates/client-ffi/include/nervix_client.h`. Every call forwards to the Rust handles
+The shared C binding exposes the same producers and consumers to C, C++ and Ruby hosts,
+through `crates/client-ffi/include/nervix_client.h`. Every call forwards to the Rust handles
 above, so credit, retries of temporary refusals, restoration, outcomes and settlements behave
 exactly as described; the binding keeps no acknowledgement or reconnect state of its own.
 
@@ -574,6 +706,16 @@ exactly as described; the binding keeps no acknowledgement or reconnect state of
   from one thread at a time. A producer, a consumer and a delivery keep their session running until
   they are released, and a borrowed stream or value stays valid until the reference it was read from
   is released.
+
+### Endpoints Through The JVM Library
+
+The JNI library exposes `Session.openProducer` and `openConsumer`, `Fields`, `Schema`,
+`BatchBuilder`, `Batch`, `Delivery` and `Submission`. Builders copy one column level per call;
+readers copy states, offsets and scalar bytes in bulk. `Batch.fromIpc` and `ipc` exchange canonical
+Arrow IPC with Arrow Java. Direct `ipcBuffer` views retain their data through every derived buffer.
+Endpoint `description`, `pending`, `state`, `admission` and `reopen` read the shared client's typed
+results. `submit`, `rejoin`, `next`, `ack`, `retry`, `reject` and `end` take optional cancellation
+and deadline tokens; none owns a Java retry policy. `close` releases ownership and settles nothing.
 
 ## Transaction Handles And Attach
 

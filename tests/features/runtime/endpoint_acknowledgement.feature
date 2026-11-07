@@ -9,10 +9,10 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       """
     When these Plexus statements are executed
       """
@@ -51,10 +51,10 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR acknowledged
         FROM intake MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -105,10 +105,10 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR acknowledged
         FROM intake MODE ACK MAX 8 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -140,10 +140,10 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR acknowledged
         FROM intake MODE ACK MAX 1 ACK TIMEOUT <ack_timeout>
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -183,13 +183,12 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
       CREATE SIGNALING PROTOCOL ack_frames FORMAT JSON
         ON CONNECT ACCEPT DATA SEND JAQ '{"ready":true}' WAIT JAQ '.ready == true' TIMEOUT 30s;
-      CREATE ENDPOINT intake ON edge PATH '/events'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL ack_frames;
+      CREATE WEBSOCKETS ENDPOINT intake ON edge PATH '/events' WITH SIGNALING PROTOCOL ack_frames;
       CREATE WEBSOCKETS ENDPOINT INGESTOR acknowledged
         FROM intake MODE ACK MAX 8 ACK TIMEOUT 5s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -236,17 +235,17 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY first_events SCHEMA event UNBRANCHED;
       CREATE RELAY second_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge fanout-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR first_source
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR first_ingestor
         FROM intake MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO first_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR second_source
+      CREATE HTTP ENDPOINT INGESTOR second_ingestor
         FROM intake MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO second_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

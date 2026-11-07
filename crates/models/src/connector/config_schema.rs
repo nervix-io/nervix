@@ -2,7 +2,8 @@
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Key names, presence, types, confidentiality, file roles, the entities that read each
-//!   key, delegated namespaces and the other names a driver reads for one property.
+//!   key, exclusion groups, delegated namespaces, the clause that sets a reserved key a statement
+//!   owns, the other names a driver reads for one property and the family of secret keys an operator names.
 //! - **Depends on.** Configuration entries, the shared deadline contract and URL values.
 //! - **Must not know.** Driver implementations, resource installation or network operations.
 
@@ -216,6 +217,8 @@ pub enum ClientConfigValue {
     UnsignedInteger,
     PositiveInteger,
     Milliseconds,
+    NonnegativeMilliseconds,
+    WholeSecondsMilliseconds,
     TcpKeepaliveMilliseconds,
     Url(&'static [&'static str]),
     /// A URL with one of these schemes that names a host and a nonzero port and nothing else: no
@@ -241,6 +244,10 @@ impl ClientConfigValue {
             Self::UnsignedInteger => "unsigned integer",
             Self::PositiveInteger => "positive integer",
             Self::Milliseconds => "positive, schedulable whole milliseconds",
+            Self::NonnegativeMilliseconds => "nonnegative, schedulable whole milliseconds",
+            Self::WholeSecondsMilliseconds => {
+                "positive, schedulable whole seconds written in milliseconds"
+            }
             Self::TcpKeepaliveMilliseconds => {
                 "whole seconds from 1000 through 32767000 milliseconds"
             }
@@ -288,6 +295,19 @@ impl ClientConfigValue {
         self != Self::PositiveInteger || count != 0
     }
 
+    /// Zero has a duration meaning for the nonnegative millisecond kind, including decimal zero
+    /// written with leading zeroes.
+    fn is_zero_milliseconds(value: &str) -> bool {
+        !value.is_empty() && value.bytes().all(|byte| byte == b'0')
+    }
+
+    /// Whether a parsed interval fits the whole-second kind, including the socket option's bound
+    /// when that kind describes TCP keepalive.
+    fn admits_whole_seconds(self, interval: Duration) -> bool {
+        interval.subsec_nanos() == 0
+            && (self != Self::TcpKeepaliveMilliseconds || interval <= MAX_TCP_KEEPALIVE)
+    }
+
     fn validate(self, key: &str, value: &str) -> Result<(), Report<ClientConfigSchemaError>> {
         let invalid = || ClientConfigSchemaError::InvalidValue {
             key: key.to_string(),
@@ -309,14 +329,15 @@ impl ClientConfigValue {
                     return Err(Report::new(invalid()));
                 }
             }
-            Self::Milliseconds => {
+            Self::NonnegativeMilliseconds if Self::is_zero_milliseconds(value) => {}
+            Self::Milliseconds | Self::NonnegativeMilliseconds => {
                 ClientDeadline::parse(value).change_context(invalid())?;
             }
-            Self::TcpKeepaliveMilliseconds => {
+            Self::WholeSecondsMilliseconds | Self::TcpKeepaliveMilliseconds => {
                 let interval = ClientDeadline::parse(value)
                     .change_context(invalid())?
                     .duration();
-                if interval.subsec_nanos() != 0 || interval > MAX_TCP_KEEPALIVE {
+                if !self.admits_whole_seconds(interval) {
                     return Err(Report::new(invalid()));
                 }
             }
@@ -369,6 +390,8 @@ impl ClientConfigValue {
             | Self::UnsignedInteger
             | Self::PositiveInteger
             | Self::Milliseconds
+            | Self::NonnegativeMilliseconds
+            | Self::WholeSecondsMilliseconds
             | Self::TcpKeepaliveMilliseconds
             | Self::HostPort
             | Self::DriverUrl(_)
@@ -608,6 +631,16 @@ impl ClientConfigStrippedPrefix {
     }
 }
 
+/// A reserved key Nervix sets from a statement rather than from the client, with the clause that
+/// sets it, which the key's refusal names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientConfigStatementKey {
+    /// The reserved key.
+    pub key: &'static str,
+    /// The clause to write instead, and the statement that holds it.
+    pub clause: &'static str,
+}
+
 /// A pass-through namespace, explicitly including the case where the driver reads every key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientConfigNamespace {
@@ -630,9 +663,14 @@ pub struct ClientConfigSchema {
     keys: &'static [ClientConfigKey],
     namespaces: &'static [ClientConfigNamespace],
     reserved: &'static [&'static str],
+    /// The reserved keys a statement sets, sorted by key.
+    statement_keys: &'static [ClientConfigStatementKey],
     /// The other names the driver reads for its properties, sorted by the name each refuses.
     aliases: &'static [ClientConfigAlias],
     stripped_prefix: Option<ClientConfigStrippedPrefix>,
+    /// The prefix of the secret keys an operator names on this client, when it declares them.
+    secret_key_prefix: Option<&'static str>,
+    mutually_exclusive: Option<&'static [&'static str]>,
 }
 
 #[derive(Clone, Copy)]
@@ -647,6 +685,11 @@ pub enum ClientConfigSchemaError {
     UnknownKey { key: String },
     #[error("duplicate client config key '{key}'")]
     DuplicateKey { key: String },
+    #[error("client config keys '{first}' and '{second}' are mutually exclusive")]
+    MutuallyExclusive {
+        first: &'static str,
+        second: &'static str,
+    },
     #[error("missing required client config key '{key}'")]
     MissingRequired { key: &'static str },
     #[error("client config key '{key}' must be lowercase")]
@@ -701,6 +744,8 @@ pub enum ClientConfigSchemaError {
     },
     #[error("client config key '{key}' is reserved for Nervix")]
     Reserved { key: String },
+    #[error("client config key '{key}' is set by a statement; write {clause}")]
+    SetByStatement { key: String, clause: &'static str },
     #[error(
         "client config key '{key}' is the driver's other name for '{accepted}'; write '{accepted}'"
     )]
@@ -745,8 +790,87 @@ impl ClientConfigSchema {
             keys,
             namespaces,
             reserved,
+            statement_keys: &[],
             aliases: &[],
             stripped_prefix: None,
+            secret_key_prefix: None,
+            mutually_exclusive: None,
+        }
+    }
+
+    /// Declares a family of secret keys: the operator names each one after `prefix`, and each holds
+    /// a string that a statement reads by the whole key.
+    ///
+    /// Nervix owns these keys, so this is not a delegated namespace: no driver reads them, and a
+    /// client that declares them stays strict about every other key. Inspection masks each one as
+    /// it does any key without a public declaration.
+    pub const fn with_secret_keys(self, prefix: &'static str) -> Self {
+        Self {
+            secret_key_prefix: Some(prefix),
+            ..self
+        }
+    }
+
+    /// Declares keys of which an authored or rendered configuration may hold at most one.
+    /// Names are sorted, unique and declared by this schema.
+    ///
+    /// ```
+    /// use nervix_models::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    /// const SCHEMA: ClientConfigSchema = ClientConfigSchema::new(
+    ///     &[K::optional("key", V::String), K::optional("token", V::String)], &[], &[],
+    /// ).with_mutually_exclusive(&["key", "token"]);
+    /// assert_eq!(SCHEMA.mutually_exclusive_keys(), Some(["key", "token"].as_slice()));
+    /// ```
+    ///
+    /// A constraint cannot name a key outside its declaration:
+    ///
+    /// ```compile_fail
+    /// use nervix_models::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    /// const SCHEMA: ClientConfigSchema = ClientConfigSchema::new(
+    ///     &[K::optional("token", V::String)], &[], &[],
+    /// ).with_mutually_exclusive(&["key", "token"]);
+    /// ```
+    pub const fn with_mutually_exclusive(mut self, keys: &'static [&'static str]) -> Self {
+        assert!(
+            keys.len() >= 2,
+            "an exclusion group names at least two keys"
+        );
+        let mut index = 0;
+        while index < keys.len() {
+            assert!(
+                Self::declares(self.keys, keys[index]),
+                "an exclusion key is declared"
+            );
+            if index > 0 {
+                assert!(
+                    Self::name_precedes(keys[index - 1], keys[index]),
+                    "exclusion keys are sorted and unique"
+                );
+            }
+            index += 1;
+        }
+        self.mutually_exclusive = Some(keys);
+        self
+    }
+
+    /// The declared group from which a client may set at most one key.
+    pub const fn mutually_exclusive_keys(self) -> Option<&'static [&'static str]> {
+        self.mutually_exclusive
+    }
+
+    /// Declares the reserved keys a statement sets: `keys`, sorted by key, each one reserved.
+    pub const fn with_statement_keys(self, keys: &'static [ClientConfigStatementKey]) -> Self {
+        let mut index = 0;
+        while index < keys.len() {
+            assert!(Self::holds_name(self.reserved, keys[index].key));
+            if index > 0 {
+                assert!(Self::name_precedes(keys[index - 1].key, keys[index].key));
+            }
+            index += 1;
+        }
+        Self {
+            statement_keys: keys,
+            ..self
         }
     }
 
@@ -971,12 +1095,33 @@ impl ClientConfigSchema {
         self.reserved
     }
 
+    pub const fn statement_keys(self) -> &'static [ClientConfigStatementKey] {
+        self.statement_keys
+    }
+
     pub const fn aliases(self) -> &'static [ClientConfigAlias] {
         self.aliases
     }
 
     pub const fn stripped_prefix(self) -> Option<ClientConfigStrippedPrefix> {
         self.stripped_prefix
+    }
+
+    /// The refusal of the reserved key `key`, which names the clause that sets it when a statement
+    /// does.
+    fn reserved_refusal(self, key: &str) -> ClientConfigSchemaError {
+        let declared = self
+            .statement_keys
+            .binary_search_by_key(&key, |statement_key| statement_key.key);
+        match declared {
+            Ok(index) => ClientConfigSchemaError::SetByStatement {
+                key: key.to_string(),
+                clause: self.statement_keys[index].clause,
+            },
+            Err(_) => ClientConfigSchemaError::Reserved {
+                key: key.to_string(),
+            },
+        }
     }
 
     /// The pair that refuses `name`, if the driver reads `name` as another name for a property this
@@ -1012,6 +1157,11 @@ impl ClientConfigSchema {
         }))
     }
 
+    /// The prefix of the secret keys an operator names on this client, when it declares them.
+    pub const fn secret_key_prefix(self) -> Option<&'static str> {
+        self.secret_key_prefix
+    }
+
     /// The summary is derived from the same per-key and namespace declarations as validation.
     pub fn ownership_label(self) -> &'static str {
         if !self.namespaces.is_empty() {
@@ -1040,6 +1190,29 @@ impl ClientConfigSchema {
         self.namespaces
             .iter()
             .any(|namespace| namespace.accepts(key))
+    }
+
+    /// Whether `key` is a key of the family `with_secret_keys` declares: its prefix and a name.
+    fn names_secret_key(self, key: &str) -> bool {
+        let Some(prefix) = self.secret_key_prefix else {
+            return false;
+        };
+        match key.strip_prefix(prefix) {
+            Some(name) => !name.is_empty(),
+            None => false,
+        }
+    }
+
+    /// Whether `key` holds a value no inspection prints, which is what lets a statement read it by
+    /// name instead of writing the value itself.
+    pub fn is_secret(self, key: &str) -> bool {
+        if self.names_secret_key(key) {
+            return true;
+        }
+        match self.key(key) {
+            Some(declared) => declared.confidential,
+            None => false,
+        }
     }
 
     pub fn validate(
@@ -1101,13 +1274,11 @@ impl ClientConfigSchema {
                 }));
             }
             if self.reserved.contains(&entry.key.as_str()) {
-                return Err(Report::new(ClientConfigSchemaError::Reserved {
-                    key: entry.key.clone(),
-                }));
+                return Err(Report::new(self.reserved_refusal(&entry.key)));
             }
             self.refuse_driver_alias(&entry.key)?;
             let Some(key) = self.key(&entry.key) else {
-                if self.delegates(&entry.key) {
+                if self.delegates(&entry.key) || self.names_secret_key(&entry.key) {
                     continue;
                 }
                 return Err(Report::new(ClientConfigSchemaError::UnknownKey {
@@ -1130,6 +1301,7 @@ impl ClientConfigSchema {
                 }));
             }
         }
+        self.validate_exclusion(&values)?;
         self.validate_identity_pair(&values)?;
         self.validate_conditional_presence(&values, stage)?;
         self.validate_query_presence(&values, stage)?;
@@ -1165,6 +1337,29 @@ impl ClientConfigSchema {
             if !choices.contains(selected) {
                 return Err(refused());
             }
+        }
+        Ok(())
+    }
+
+    fn validate_exclusion(
+        self,
+        values: &BTreeMap<&str, &str>,
+    ) -> Result<(), Report<ClientConfigSchemaError>> {
+        let Some(keys) = self.mutually_exclusive else {
+            return Ok(());
+        };
+        let mut selected = None;
+        for &key in keys {
+            if !values.contains_key(key) {
+                continue;
+            }
+            if let Some(first) = selected {
+                return Err(Report::new(ClientConfigSchemaError::MutuallyExclusive {
+                    first,
+                    second: key,
+                }));
+            }
+            selected = Some(key);
         }
         Ok(())
     }
@@ -1339,8 +1534,9 @@ impl ClientConfigSchema {
         effective
     }
 
-    /// Delegated keys without an explicit public declaration remain confidential. Complete
-    /// serialization never calls this projection, so the stored configuration is preserved.
+    /// Delegated keys without an explicit public declaration remain confidential, as do the secret
+    /// keys an operator names. Complete serialization never calls this projection, so the stored
+    /// configuration is preserved.
     pub fn inspection_entries(self, entries: &[ClientConfigEntry]) -> Vec<ClientConfigEntry> {
         entries
             .iter()

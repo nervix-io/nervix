@@ -13,14 +13,14 @@ Feature: Entity-pause model alterations
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE SCHEMA routed_event ( tenant STRING, seq I64, route STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch_schema TTL 5m;
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY outgoing SCHEMA routed_event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}-entity-swap.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL
@@ -119,12 +119,12 @@ Feature: Entity-pause model alterations
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge http-{{test_id}}-entity-timeout.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -135,12 +135,12 @@ Feature: Entity-pause model alterations
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER blocked_sink FROM outgoing
+      CREATE ZEROMQ PUSH EMITTER blocked_emitter FROM outgoing
         TO emitter MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And emitter "blocked_sink" enters stall mode
+    And emitter "blocked_emitter" enters stall mode
     When http payload is posted to node "node-1" with host "http-{{test_id}}-entity-timeout.example.com" path "/events"
       """
       {"seq":1}
@@ -173,7 +173,7 @@ Feature: Entity-pause model alterations
       """
       {"seq":8}
       """
-    Then within "5s" DESCRIBE EMITTER "blocked_sink" on the leader node contains
+    Then within "5s" DESCRIBE EMITTER "blocked_emitter" on the leader node contains
       """
       transient error: fault injector stalled emitter publish
       """
@@ -188,9 +188,9 @@ Feature: Entity-pause model alterations
       """
     Then the last command output contains
       """
-      CREATE ATTACHED JUNCTION altered_path
+      CREATE JUNCTION altered_path
       """
-    When emitter "blocked_sink" leaves stall mode
+    When emitter "blocked_emitter" leaves stall mode
     Then within "5s" the observed broker receives payloads
       """
       "seq":1
@@ -227,21 +227,21 @@ Feature: Entity-pause model alterations
       CREATE SCHEMA scoped_event ( seq I64 );
       CREATE SCHEMA scoped_output ( seq I64, route STRING );
       CREATE WIRE JSON SCHEMA scoped_wire MODE STRICT ( seq integer );
-      CREATE CODEC scoped_codec FROM WIRE JSON SCHEMA scoped_wire TO SCHEMA scoped_event;
+      CREATE WIRE JSON CODEC scoped_codec FROM WIRE SCHEMA scoped_wire TO SCHEMA scoped_event;
       CREATE RELAY affected_input SCHEMA scoped_event UNBRANCHED;
       CREATE RELAY affected_output SCHEMA scoped_output UNBRANCHED;
       CREATE RELAY disjoint_input SCHEMA scoped_event UNBRANCHED;
       CREATE RELAY disjoint_output SCHEMA scoped_output UNBRANCHED;
       CREATE VHOST affected_edge http-{{test_id}}-affected-scope.example.com;
       CREATE VHOST disjoint_edge http-{{test_id}}-disjoint-scope.example.com;
-      CREATE ENDPOINT affected_ingress ON affected_edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT disjoint_ingress ON disjoint_edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR affected_source
+      CREATE HTTP ENDPOINT affected_ingress ON affected_edge PATH '/events';
+      CREATE HTTP ENDPOINT disjoint_ingress ON disjoint_edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR affected_ingestor
         FROM affected_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
         TO affected_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR disjoint_source
+      CREATE HTTP ENDPOINT INGESTOR disjoint_ingestor
         FROM disjoint_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
         TO disjoint_input INHERIT ALL UNBRANCHED
@@ -309,8 +309,8 @@ Feature: Entity-pause model alterations
         value string,
         state string OPTIONAL
       );
-      CREATE CODEC parked_event_codec
-        FROM WIRE JSON SCHEMA parked_event_wire
+      CREATE WIRE JSON CODEC parked_event_codec
+        FROM WIRE SCHEMA parked_event_wire
         TO SCHEMA parked_event;
       CREATE SCHEMA parked_tenant ( tenant STRING );
       CREATE BRANCH by_parked_tenant SCHEMA parked_tenant TTL 5m;
@@ -321,9 +321,9 @@ Feature: Entity-pause model alterations
       CREATE RELAY parked_input SCHEMA parked_event BRANCHED BY by_parked_tenant;
       CREATE RELAY parked_output SCHEMA parked_event BRANCHED BY by_parked_tenant;
       CREATE VHOST edge http-{{test_id}}-parked-gate.example.com;
-      CREATE ENDPOINT parked_state_ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE ENDPOINT parked_input_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR parked_state_source
+      CREATE HTTP ENDPOINT parked_state_ingress ON edge PATH '/state';
+      CREATE HTTP ENDPOINT parked_input_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR parked_state_ingestor
         FROM parked_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
         TO parked_state
@@ -333,7 +333,7 @@ Feature: Entity-pause model alterations
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR parked_input_source
+      CREATE HTTP ENDPOINT INGESTOR parked_input_ingestor
         FROM parked_input_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
         TO parked_input
@@ -368,7 +368,7 @@ Feature: Entity-pause model alterations
       """
     Then the last command output contains
       """
-      CREATE ATTACHED JUNCTION enrich_parked
+      CREATE JUNCTION enrich_parked
       """
     When these Plexus commands are executed on the leader node
       """

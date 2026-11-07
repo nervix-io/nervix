@@ -35,8 +35,9 @@ Feature: Altering deduplicators and reorderers
       """
     Then the last command output contains
       """
-      CREATE DETACHED DEDUPLICATOR dedup_events
+      CREATE DEDUPLICATOR dedup_events
         FROM incoming_a, incoming_b WHERE input.key > 0 COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        DETACHED
         FILTER WHERE input.alternate > 0
         DEDUPLICATE ON input.alternate, input.key
         MAX TIME 20m
@@ -93,8 +94,9 @@ Feature: Altering deduplicators and reorderers
       """
     Then the last command output contains
       """
-      CREATE DETACHED REORDERER order_events
+      CREATE REORDERER order_events
         FROM incoming_a, incoming_b WHERE input.primary_key > 0 COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        DETACHED
         FILTER WHERE input.secondary_key > 0
         BY input.secondary_key, input.primary_key
         MAX TIME 20m
@@ -127,12 +129,12 @@ Feature: Altering deduplicators and reorderers
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-dedup-dynamic.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -190,12 +192,12 @@ Feature: Altering deduplicators and reorderers
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-dedup-key.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -256,12 +258,12 @@ Feature: Altering deduplicators and reorderers
       """
       CREATE SCHEMA event ( primary_key I64, secondary_key I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( primary_key integer, secondary_key integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reorder-dynamic.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -310,13 +312,13 @@ Feature: Altering deduplicators and reorderers
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( primary_key I64, secondary_key I64 );
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reorder-key.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED

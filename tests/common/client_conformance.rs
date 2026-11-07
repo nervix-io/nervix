@@ -17,6 +17,7 @@
 
 mod c_abi_endpoints;
 mod c_abi_probe;
+mod c_abi_upload;
 
 use std::{
     collections::BTreeMap, env, fmt, io, path::PathBuf, process::Stdio, str::FromStr,
@@ -65,9 +66,9 @@ pub(crate) enum ProbeRuntime {
     C,
     /// C++ over the shared Rust binding.
     Cpp,
-    /// CPython over the shared Rust binding, through ctypes.
+    /// CPython over the Python package, `nervix_client`, on pyo3.
     Python,
-    /// Java over the shared Rust binding, through the Foreign Function and Memory API.
+    /// Java 21 over the shared Rust binding, through JNI.
     Java,
     /// Ruby over the shared Rust binding, through Fiddle.
     Ruby,
@@ -109,15 +110,22 @@ impl ProbeRuntime {
             Self::C => Command::new(Self::artifacts()?.join("c-probe")),
             Self::Cpp => Command::new(Self::artifacts()?.join("cpp-probe")),
             Self::Python => {
-                let mut command = Command::new("python3");
+                // The CPython the package was installed into, with pyarrow beside it.
+                let mut command = Command::new(Self::artifacts()?.join("python/bin/python"));
                 command.arg(sources.join("python/probe.py"));
                 command
             }
             Self::Java => {
                 let mut command = Command::new("java");
                 command
-                    .arg("--enable-native-access=ALL-UNNAMED")
-                    .arg(sources.join("java/Probe.java"));
+                    .arg("-Xcheck:jni")
+                    .arg("-cp")
+                    .arg(format!(
+                        "{}:{}",
+                        Self::artifacts()?.join("java/nervix-client.jar").display(),
+                        Self::artifacts()?.join("java/probe").display()
+                    ))
+                    .arg("Probe");
                 command
             }
             Self::Ruby => {
@@ -161,7 +169,7 @@ impl ProbeRuntime {
     }
 
     /// Whether the probe implements the protocol itself, and so can decode the corpus frames.
-    fn decodes_corpus(self) -> bool {
+    pub(crate) fn implements_protocol(self) -> bool {
         match self {
             Self::Go | Self::Node | Self::Bun => true,
             Self::CAbiInProcess | Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => {
@@ -170,16 +178,19 @@ impl ProbeRuntime {
         }
     }
 
-    /// Whether the probe loads the shared Rust binding rather than implementing the protocol.
+    /// Whether the probe loads the C ABI of the shared Rust binding, which it is told the path of.
     fn loads_binding(self) -> bool {
         match self {
-            Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => true,
-            Self::CAbiInProcess | Self::Go | Self::Node | Self::Bun => false,
+            Self::C | Self::Cpp | Self::Ruby => true,
+            Self::CAbiInProcess | Self::Python | Self::Java | Self::Go | Self::Node | Self::Bun => {
+                false
+            }
         }
     }
 
-    /// Whether the probe drives the shared Rust binding, in process or loaded, and so reaches the
-    /// domain clock events and the producer and consumer handles the binding exposes.
+    /// Whether the probe drives the Rust client through the shared binding, in process, through
+    /// its C ABI or through the Python or JNI package, and so reaches the domain clock events and the
+    /// producer and consumer handles the binding exposes.
     fn drives_binding(self) -> bool {
         match self {
             Self::CAbiInProcess | Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => {
@@ -199,7 +210,13 @@ pub(crate) struct ProbeTarget {
     pub(crate) websocket_uri: String,
     pub(crate) username: String,
     pub(crate) password: String,
+    /// Custom trust root for an HTTPS gRPC target; empty for ordinary HTTP scenarios.
+    pub(crate) ca_pem: Option<String>,
+    /// A configured endpoint that should recover an unavailable initial address.
+    pub(crate) seed_uri: Option<String>,
     pub(crate) domain: String,
+    /// The leader-only operation's identity, held to its redirect and outcome by the fixture.
+    pub(crate) execution_reference: String,
     pub(crate) exercise: ProbeExercise,
 }
 
@@ -221,6 +238,15 @@ pub(crate) enum ProbeExercise {
     /// publishes typed batches and settles their output, holds one delivery while the scenario
     /// ends the probe's session, and finishes on the restored attachments.
     Endpoints { ingestor: String, emitter: String },
+    /// Repeats a prepared local upload, then changes its source file under the same identity.
+    ResourceUpload { query: String, payload: PathBuf },
+    /// Connects through a live seed after an unavailable initial address, then checks that
+    /// session-local execution is a new request rather than durable outcome recovery.
+    Connection,
+    /// Reports how a restored session answers the reopening of a subscription after the scenario
+    /// ends its session: a refusal for now with its cause, message and wait, or the end of the
+    /// subscription with its reason.
+    Restoration { relay: String, subscription: String },
 }
 
 impl ProbeExercise {
@@ -230,6 +256,9 @@ impl ProbeExercise {
             Self::Subscription { .. } => None,
             Self::DomainClock => Some("clock"),
             Self::Endpoints { .. } => Some("io"),
+            Self::ResourceUpload { .. } => Some("upload"),
+            Self::Connection => Some("connection"),
+            Self::Restoration { .. } => Some("restoration"),
         }
     }
 
@@ -237,7 +266,11 @@ impl ProbeExercise {
     fn needs_binding(&self) -> bool {
         match self {
             Self::Subscription { .. } => false,
-            Self::DomainClock | Self::Endpoints { .. } => true,
+            Self::DomainClock
+            | Self::Endpoints { .. }
+            | Self::ResourceUpload { .. }
+            | Self::Connection
+            | Self::Restoration { .. } => true,
         }
     }
 }
@@ -251,7 +284,17 @@ impl ProbeTarget {
             ("NERVIX_PROBE_USERNAME", self.username.clone()),
             ("NERVIX_PROBE_PASSWORD", self.password.clone()),
             ("NERVIX_PROBE_DOMAIN", self.domain.clone()),
+            (
+                "NERVIX_PROBE_EXECUTION_REFERENCE",
+                self.execution_reference.clone(),
+            ),
         ]);
+        if let Some(pem) = &self.ca_pem {
+            environment.insert("NERVIX_PROBE_CA_PEM", pem.clone());
+        }
+        if let Some(seed) = &self.seed_uri {
+            environment.insert("NERVIX_PROBE_SEED_URI", seed.clone());
+        }
         match &self.exercise {
             ProbeExercise::Subscription {
                 relay,
@@ -263,9 +306,21 @@ impl ProbeTarget {
                 environment.insert("NERVIX_PROBE_ROWS", rows.to_string());
             }
             ProbeExercise::DomainClock => {}
+            ProbeExercise::Connection => {}
+            ProbeExercise::Restoration {
+                relay,
+                subscription,
+            } => {
+                environment.insert("NERVIX_PROBE_RELAY", relay.clone());
+                environment.insert("NERVIX_PROBE_SUBSCRIPTION", subscription.clone());
+            }
             ProbeExercise::Endpoints { ingestor, emitter } => {
                 environment.insert("NERVIX_PROBE_INGESTOR", ingestor.clone());
                 environment.insert("NERVIX_PROBE_EMITTER", emitter.clone());
+            }
+            ProbeExercise::ResourceUpload { query, payload } => {
+                environment.insert("NERVIX_PROBE_UPLOAD_QUERY", query.clone());
+                environment.insert("NERVIX_PROBE_UPLOAD_FILE", payload.display().to_string());
             }
         }
         environment
@@ -302,7 +357,7 @@ impl fmt::Debug for ClientProbe {
 impl ClientProbe {
     /// Starts an independent implementation's probe decoding the checked-in conformance corpus.
     pub(crate) async fn start_corpus(runtime: ProbeRuntime) -> io::Result<Self> {
-        if !runtime.decodes_corpus() {
+        if !runtime.implements_protocol() {
             return Err(io::Error::other(format!(
                 "the {runtime:?} probe uses the shared Rust binding and reads no frames itself"
             )));

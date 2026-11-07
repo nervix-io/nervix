@@ -122,6 +122,13 @@ impl SessionServiceImpl {
             upload_identity: upload_identity.clone(),
         };
 
+        if let Err(error) = self.available_cluster_parameters() {
+            return Ok(identity.failed(
+                UploadFailure::InstallationFailed,
+                format!("{error:#}"),
+                None,
+            ));
+        }
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             let redirect = self.redirect_to_leader(leader.into()).await;
@@ -277,12 +284,42 @@ impl SessionServiceImpl {
                         });
                     }
                 }
-                let assigned_version = match error.downcast_ref::<ResourceUploadError>() {
-                    Some(upload_error) => upload_error.assigned_version().map(wire_version),
-                    None => None,
+                let (failure, assigned_version) = match error.downcast_ref::<ResourceUploadError>()
+                {
+                    Some(upload_error) => {
+                        let failure = match upload_error {
+                            ResourceUploadError::DigestConflict { .. } => {
+                                UploadFailure::IdentityConflict
+                            }
+                            _ => UploadFailure::InstallationFailed,
+                        };
+                        let assigned_version = upload_error.assigned_version().map(wire_version);
+                        (failure, assigned_version)
+                    }
+                    None => (UploadFailure::InstallationFailed, None),
                 };
-                Ok(identity.failed(UploadFailure::InstallationFailed, message, assigned_version))
+                Ok(identity.failed(failure, message, assigned_version))
             }
         }
+    }
+}
+
+#[cfg(feature = "testing")]
+impl SessionServiceImpl {
+    /// Whether `reply` answers an upload call that installed a version on this node, and a
+    /// scenario armed the node to lose the reply to such a call. A reply that recovered a recorded
+    /// upload, redirected it or failed it is kept.
+    pub(in crate::application) fn loses_installed_upload_reply(&self, reply: &UploadReply) -> bool {
+        let UploadDisposition::Installed {
+            origin: OutcomeOrigin::Executed,
+            ..
+        } = &reply.disposition
+        else {
+            return false;
+        };
+        self.inner
+            .runtime
+            .fault_injection()
+            .loses_installed_resource_upload_reply(self.inner.consensus.local_node_id())
     }
 }

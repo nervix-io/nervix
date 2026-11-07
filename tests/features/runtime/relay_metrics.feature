@@ -17,16 +17,16 @@ Feature: Relay metrics
         user_id integer,
         occurred_at string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_relay_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT relay_metrics_ingress ON edge PATH '/relay-metrics' TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR relay_metrics_source
+        CREATE HTTP ENDPOINT relay_metrics_ingress ON edge PATH '/relay-metrics';
+        CREATE HTTP ENDPOINT INGESTOR relay_metrics_ingestor
         FROM relay_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP AT occurred_at
@@ -147,8 +147,8 @@ Feature: Relay metrics
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -158,7 +158,7 @@ Feature: Relay metrics
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_relay_buffer_source;
 
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
-      CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR relay_buffer_source
+      CREATE HTTP ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer'; CREATE HTTP ENDPOINT INGESTOR relay_buffer_ingestor
         FROM relay_buffer_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -220,16 +220,16 @@ Feature: Relay metrics
         user_id integer,
         occurred_at string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_relay_metrics_drain_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_metrics_drain_source;
         CREATE VHOST edge http-{{test_id}}-drain.example.com;
-        CREATE ENDPOINT relay_metrics_drain_ingress ON edge PATH '/relay-metrics-drain' TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR relay_metrics_drain_source
+        CREATE HTTP ENDPOINT relay_metrics_drain_ingress ON edge PATH '/relay-metrics-drain';
+        CREATE HTTP ENDPOINT INGESTOR relay_metrics_drain_ingestor
         FROM relay_metrics_drain_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP AT occurred_at
@@ -246,12 +246,12 @@ Feature: Relay metrics
       """
       {"user_id":42,"occurred_at":"2026-04-07T00:00:00Z"}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "relay_metrics_drain_source" as "messages_total sent relay=notifications physical_node=node-1 total=1"
+    Then within "5s" node "node-1" eventually reports describe ingestor "relay_metrics_drain_ingestor" as "messages_total sent relay=notifications physical_node=node-1 total=1"
     When http payload is posted to node "node-1" with host "http-{{test_id}}-drain.example.com" path "/relay-metrics-drain"
       """
       {"user_id":42,"occurred_at":"2026-04-07T00:00:02Z"}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "relay_metrics_drain_source" as "messages_total sent relay=notifications physical_node=node-1 total=2"
+    Then within "5s" node "node-1" eventually reports describe ingestor "relay_metrics_drain_ingestor" as "messages_total sent relay=notifications physical_node=node-1 total=2"
     And the last command output metric "messages_total" "sent" relay "notifications" physical node "node-1" has values
       """
       total=2
@@ -260,7 +260,7 @@ Feature: Relay metrics
     When these Plexus commands are executed through the client on node "node-1"
       """
       DRAIN NODE node-1;
-      DESCRIBE INGESTOR relay_metrics_drain_source;
+      DESCRIBE INGESTOR relay_metrics_drain_ingestor;
       """
     Then the last command output contains
       """
@@ -294,16 +294,16 @@ Feature: Relay metrics
         user_id integer,
         occurred_at string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_relay_metrics_restart_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_metrics_restart_source;
         CREATE VHOST edge http-{{test_id}}-restart.example.com;
-        CREATE ENDPOINT relay_metrics_restart_ingress ON edge PATH '/relay-metrics-restart' TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR relay_metrics_restart_source
+        CREATE HTTP ENDPOINT relay_metrics_restart_ingress ON edge PATH '/relay-metrics-restart';
+        CREATE HTTP ENDPOINT INGESTOR relay_metrics_restart_ingestor
         FROM relay_metrics_restart_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP AT occurred_at
@@ -320,14 +320,14 @@ Feature: Relay metrics
       """
       {"user_id":42,"occurred_at":"2026-04-07T00:00:00Z"}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "relay_metrics_restart_source" as "messages_total sent relay=notifications physical_node=node-1 total=1"
+    Then within "5s" node "node-1" eventually reports describe ingestor "relay_metrics_restart_ingestor" as "messages_total sent relay=notifications physical_node=node-1 total=1"
     When http payload is posted to node "node-1" with host "http-{{test_id}}-restart.example.com" path "/relay-metrics-restart"
       """
       {"user_id":42,"occurred_at":"2026-04-07T00:00:02Z"}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "relay_metrics_restart_source" as "messages_total sent relay=notifications physical_node=node-1 total=2"
+    Then within "5s" node "node-1" eventually reports describe ingestor "relay_metrics_restart_ingestor" as "messages_total sent relay=notifications physical_node=node-1 total=2"
     When the cluster is restarted
-    Then within "10s" node "node-1" eventually reports describe ingestor "relay_metrics_restart_source" as "messages_total sent relay=notifications physical_node=node-1 total=2"
+    Then within "10s" node "node-1" eventually reports describe ingestor "relay_metrics_restart_ingestor" as "messages_total sent relay=notifications physical_node=node-1 total=2"
     And the last command output metric "batches_total" "sent" relay "notifications" physical node "node-1" has values
       """
       total=2
@@ -338,7 +338,7 @@ Feature: Relay metrics
       """
     And these Plexus commands are executed through the client on node "node-1"
       """
-      DESCRIBE INGESTOR relay_metrics_restart_source;
+      DESCRIBE INGESTOR relay_metrics_restart_ingestor;
       """
     Then the last command output metric "messages_total" "sent" relay "notifications" physical node "node-1" has values
       """

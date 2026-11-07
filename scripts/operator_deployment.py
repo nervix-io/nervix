@@ -2,7 +2,8 @@
 
 The operator's main-branch chart and example remain the deployment owners. This check replaces
 only the example's server image, records both resolved images, observes initialization, three
-ready pods and public Raft membership, and collects diagnostics before deleting its own profile.
+ready pods and public Raft membership, and checks the requested replica policy across a bootstrap
+pod replacement on its persistent volume. It collects diagnostics before deleting its own profile.
 """
 
 from __future__ import annotations
@@ -56,6 +57,9 @@ def with_server_image(documents: str, image: str) -> dict:
     clusters = [item for item in items if item["kind"] == "NervixCluster"]
     if len(clusters) != 1:
         raise ValueError("the shipped example must contain exactly one NervixCluster")
+    replica_count = clusters[0]["spec"].get("initialClusterParameters", {}).get("replicaCount")
+    if type(replica_count) is not int or replica_count != 2:
+        raise ValueError("the shipped three-node example must request initialClusterParameters.replicaCount: 2")
     clusters[0]["spec"]["image"] = image
     return {"apiVersion": "v1", "kind": "List", "items": items}
 
@@ -87,6 +91,23 @@ def cluster_ready(status: str) -> bool:
     return leader is not None and len(set(voters)) == 3 and leader.group(1) in voters
 
 
+def replica_policy_revision(description: str, replica_count: int) -> int | None:
+    committed = re.findall(r"^replica-count committed=([0-9]+) revision=([0-9]+)$", description, re.M)
+    if len(committed) != 1 or int(committed[0][0]) != replica_count:
+        return None
+    revision = int(committed[0][1])
+    running = list(re.finditer(
+        r"^node=(?P<node>\S+) replica-count running=(?P<value>[0-9]+) revision=(?P<revision>[0-9]+)$",
+        description, re.M,
+    ))
+    if len(running) != 3 or {entry["node"] for entry in running} != {"node-1", "node-2", "node-3"}:
+        return None
+    for entry in running:
+        if int(entry["value"]) != replica_count or int(entry["revision"]) != revision:
+            return None
+    return revision
+
+
 class DeploymentCheck:
     def __init__(self, image: str, revision: str, architecture: str, source: Path, output: Path):
         self.image = image
@@ -97,6 +118,7 @@ class DeploymentCheck:
         self.profile = f"nervix-operator-{uuid.uuid4().hex[:12]}"
         self.started = False
         self.cli_container = f"{self.profile}-cli"
+        self.policy_revision: int | None = None
 
     def command(self, *args: str, timeout: int = 120, required: bool = True) -> subprocess.CompletedProcess:
         print(shlex.join(args), flush=True)
@@ -148,6 +170,33 @@ class DeploymentCheck:
         (self.output / "cluster-status.txt").write_text(status.stdout + status.stderr)
         return status.returncode == 0 and cluster_ready(status.stdout)
 
+    def public_policy(self, image: str, endpoint: str, phase: str) -> bool:
+        description = self.command(
+            "docker", "run", "--rm", "--name", self.cli_container, "--network", "host",
+            "--entrypoint", "/usr/local/bin/nervix-cli", image, "--server", endpoint,
+            "--password", "nervix", "--command", "DESCRIBE CLUSTER;", timeout=45, required=False,
+        )
+        (self.output / f"replica-policy-{phase}.txt").write_text(description.stdout + description.stderr)
+        if description.returncode != 0:
+            return False
+        revision = replica_policy_revision(description.stdout, 2)
+        if revision is None:
+            return False
+        if self.policy_revision is None:
+            self.policy_revision = revision
+        return revision == self.policy_revision
+
+    def bootstrap_restarted(self, image: str, previous_uid: str, claim_uid: str) -> bool:
+        pods = json.loads(self.kubectl("-n", "nervix", "get", "pods", "-o", "json").stdout)
+        claim = json.loads(self.kubectl("-n", "nervix", "get", "pvc/data-nervix-0", "-o", "json").stdout)
+        self.save("pods-after-restart.json", pods)
+        self.save("volume-claim-after-restart.json", claim)
+        if not pods_ready(pods, image) or claim["metadata"]["uid"] != claim_uid:
+            return False
+        bootstrap = next(pod for pod in pods["items"] if pod["metadata"]["name"] == "nervix-0")
+        uid = bootstrap["metadata"]["uid"]
+        return bool(uid) and uid != previous_uid
+
     def deploy(self) -> None:
         server_pull = self.command("docker", "pull", self.image, timeout=600)
         server = json.loads(self.command("docker", "image", "inspect", self.image).stdout)
@@ -182,7 +231,26 @@ class DeploymentCheck:
         self.kubectl("-n", "nervix", "rollout", "status", "statefulset/nervix", "--timeout=300s", timeout=330)
         self.wait("three ready pods on the tested image", lambda: self.ready(image), 120)
         address = self.command("minikube", "-p", self.profile, "ip").stdout.strip()
-        self.wait("public three-voter cluster status", lambda: self.public_status(image, f"http://{address}:31390"), 120)
+        endpoint = f"http://{address}:31390"
+        self.wait("public three-voter cluster status", lambda: self.public_status(image, endpoint), 120)
+        self.wait("replica count 2 committed and running on every node",
+                  lambda: self.public_policy(image, endpoint, "before-restart"), 120)
+
+        pod = json.loads(self.kubectl("-n", "nervix", "get", "pod/nervix-0", "-o", "json").stdout)
+        claim = json.loads(self.kubectl("-n", "nervix", "get", "pvc/data-nervix-0", "-o", "json").stdout)
+        self.save("bootstrap-pod-before-restart.json", pod)
+        self.save("volume-claim-before-restart.json", claim)
+        uid = pod["metadata"]["uid"]
+        claim_uid = claim["metadata"]["uid"]
+        self.save("replica-policy.json", {"replica_count": 2, "revision": self.policy_revision,
+                                         "bootstrap_pod_uid": uid, "volume_claim_uid": claim_uid})
+        self.kubectl("-n", "nervix", "delete", "pod/nervix-0", "--wait=true", "--timeout=180s", timeout=210)
+        self.wait("bootstrap pod replaced on its volume with all three pods ready",
+                  lambda: self.bootstrap_restarted(image, uid, claim_uid), 300)
+        self.wait("public three-voter cluster status after bootstrap restart",
+                  lambda: self.public_status(image, endpoint), 120)
+        self.wait("every node keeps the replica policy and its committed revision after bootstrap restart",
+                  lambda: self.public_policy(image, endpoint, "after-restart"), 120)
 
     def diagnostics(self) -> None:
         if not self.started:

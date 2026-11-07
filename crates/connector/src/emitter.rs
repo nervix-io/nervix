@@ -36,6 +36,8 @@ use nervix_models::{
 use nervix_primitives::{sync::Arc, time::Instant};
 use thiserror::Error;
 
+use crate::{EmitterPayloadMeasurement, EmitterPayloadObserver};
+
 /// How many publishes may await confirmation at once, and how long each one may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AckConfirmation {
@@ -227,6 +229,43 @@ impl TypedRecordHeader {
     }
 }
 
+/// The exact value of an explicit record key. An empty value is distinct from an absent key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordKey {
+    String(String),
+    Bytes(Vec<u8>),
+}
+
+impl RecordKey {
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::String(value) => value.as_bytes(),
+            Self::Bytes(value) => value,
+        }
+    }
+}
+
+/// The destination contract the host evaluates before source branch identity collapses.
+/// Connectors receive an ordinal, never a branch key or a graph configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordDestination {
+    pub key: Option<RecordKey>,
+    pub source_partition: Option<u64>,
+}
+
+impl RecordDestination {
+    /// The retained destination object's fixed storage and its owned key bytes. The host counts
+    /// the object once where it owns the evaluated value, rather than again for payload sharers.
+    pub fn held_bytes(&self) -> u64 {
+        let fixed: u64 = std::mem::size_of::<Self>().arch_into();
+        let key: u64 = match &self.key {
+            Some(key) => key.as_bytes().len().arch_into(),
+            None => 0,
+        };
+        fixed.checked_add(key).assured(HELD_IN_MEMORY)
+    }
+}
+
 /// One codec-encoded record ready for a connector to write.
 ///
 /// A record carries no runtime acknowledgement. The host retains the acknowledgements of the
@@ -240,7 +279,8 @@ impl TypedRecordHeader {
 #[derive(Debug)]
 pub struct EmitterRecord {
     pub id: EmitterRecordId,
-    pub key: Option<String>,
+    /// The explicit destination values evaluated once and retained through every attempt.
+    pub destination: Option<Arc<RecordDestination>>,
     pub payload: Vec<u8>,
     /// The writes in written order, each value a `STRING`, where the entity declares text values.
     pub headers: Vec<(String, String)>,
@@ -253,26 +293,42 @@ pub struct EmitterRecord {
     /// What the record carries beside its payload, as the emitter's envelope clauses and
     /// properties set it. Empty where the emitter writes none.
     pub envelope: RecordEnvelope,
+    /// The execution time of the batch this record's first source row came from. The host retains
+    /// it with the record, so every attempt to publish the record carries the same instant.
     pub occurred_at: Timestamp,
 }
 
 impl EmitterRecord {
     pub fn new(
         id: EmitterRecordId,
-        key: Option<String>,
+        destination: Option<Arc<RecordDestination>>,
         payload: Vec<u8>,
         headers: Vec<(String, String)>,
         occurred_at: Timestamp,
     ) -> Self {
         Self {
             id,
-            key,
+            destination,
             payload,
             headers,
             typed_headers: Vec::new(),
             message_group: None,
             envelope: RecordEnvelope::default(),
             occurred_at,
+        }
+    }
+
+    pub fn key(&self) -> Option<&RecordKey> {
+        match &self.destination {
+            Some(destination) => destination.key.as_ref(),
+            None => None,
+        }
+    }
+
+    pub fn source_partition(&self) -> Option<u64> {
+        match &self.destination {
+            Some(destination) => destination.source_partition,
+            None => None,
         }
     }
 
@@ -992,6 +1048,7 @@ pub trait EmitterHostServices:
     + EmitterStagingDirectory
     + EmitterGeneralErrorHandler
     + EmitterBoundedExecution
+    + EmitterPayloadObserver
     + Send
     + Sync
     + 'static
@@ -1004,6 +1061,7 @@ impl<T> EmitterHostServices for T where
         + EmitterStagingDirectory
         + EmitterGeneralErrorHandler
         + EmitterBoundedExecution
+        + EmitterPayloadObserver
         + Send
         + Sync
         + 'static
@@ -1037,6 +1095,18 @@ impl EmitterHost {
 
     pub fn clear_transient_error(&self) {
         self.inner.services.clear_transient_error();
+    }
+
+    /// Records a native payload once its encoder or file writer has prepared it.
+    pub fn record_prepared_payload(&self, measurement: EmitterPayloadMeasurement) {
+        self.inner.services.record_prepared_payload(measurement);
+    }
+
+    /// Reports the existing size divider's candidate halvings, excluding count boundaries.
+    pub fn record_payload_subdivisions(&self, subdivisions: u64) {
+        self.inner
+            .services
+            .record_payload_subdivisions(subdivisions);
     }
 
     pub fn report_error(&self, message: String) {

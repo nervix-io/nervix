@@ -50,6 +50,7 @@ mod ingest_metadata;
 // Reached through its own path rather than re-exported here, so the owner the clock-boundary check
 // declares stays the only file in this crate that names the capability constructor and UTC read.
 mod emitter;
+mod emitter_observation;
 mod ingestor;
 pub mod physical_time;
 mod row_requests;
@@ -75,15 +76,16 @@ pub use emitter::{
     EmitterRowRequest, EmitterStagedCommit, EmitterStagingDirectory, EmitterStartResult,
     EmitterTransientErrorStatus, EmitterWriteError, EmitterWriteResult, HttpRequestEmitter,
     MappedEmitterCarrier, MappedEmitterMember, MappedEmitterRows, PerRecordOutcome,
-    PerRecordOutcomeParts, PreparedRowRequest, PropertyValue, RecordEmitter, RecordEnvelope,
-    RecordProperty, RejectedEmitterMember, RowEmitter, RowRequestEmitter, RowRequestPreparation,
-    TypedRecordHeader,
+    PerRecordOutcomeParts, PreparedRowRequest, PropertyValue, RecordDestination, RecordEmitter,
+    RecordEnvelope, RecordKey, RecordProperty, RejectedEmitterMember, RowEmitter,
+    RowRequestEmitter, RowRequestPreparation, TypedRecordHeader,
 };
+pub use emitter_observation::{EmitterPayloadMeasurement, EmitterPayloadObserver};
 pub use http_client::{DeclaredProxy, HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{
-    IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow, IngestMetadataValues,
-    IngestRowHeaders, IngestTransportPosition, NoIngestHeaders, NoIngestMetadata,
-    RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue,
+    IngestMessageHeaders, IngestMessageMetadata, IngestMetadataFailure, IngestMetadataRow,
+    IngestMetadataValues, IngestRowHeaders, IngestTransportPosition, NoIngestHeaders,
+    NoIngestMetadata, RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue,
 };
 pub use ingestor::{
     BrokerIngestorConnector, IngestorAckPolicy, IngestorAcknowledgementOutcome,
@@ -98,4 +100,4 @@ pub use row_requests::{
     ExceededLimit, MeasuredRequest, RowOversize, RowRequest, RowRequestLimits, RowRequests,
 };
 pub use service_url::{ServiceUrl, ServiceUrlError};
-pub use tls::{RustlsClientConfigProvider, TlsClientConfigError, install_rustls_crypto_provider};
+pub use tls::{RustlsClientConfigProvider, ServerCertificateTrust, TlsClientConfigError};

@@ -5,6 +5,12 @@
       "description": "Three-node baseline, a leader crash with its restart, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, and the lifetimes workloads through a three-node owner crash",
       "entries": [
         {
+          "id": "stateful-partitions-3-owner-crash",
+          "shard": 4,
+          "budget_minutes": 25,
+          "run": ["stateful", "--nodes", "3", "--state-partitions", "4", "--fault", "owner-crash"]
+        },
+        {
           "id": "baseline-3",
           "shard": 1,
           "budget_minutes": 4,
@@ -42,9 +48,32 @@
         }
       ]
     },
+    "intake-recovery": {
+      "description": "Spread ingestor instances through an owner crash and recover stateful intake after a single-node cluster restart",
+      "entries": [
+        {
+          "id": "ingestor-instances-owner-crash",
+          "shard": 1,
+          "budget_minutes": 7,
+          "run": ["ingestor-instances-owner-crash"]
+        },
+        {
+          "id": "stateful-1-cluster-restart",
+          "shard": 1,
+          "budget_minutes": 22,
+          "run": ["stateful", "--nodes", "1", "--fault", "cluster-restart"]
+        }
+      ]
+    },
     "soak": {
       "description": "Every delivered scenario, topology, case, profile and fault, with fixed and rotating mixed-instability seeds",
       "entries": [
+        {
+          "id": "stateful-partitions-3-owner-crash",
+          "shard": 15,
+          "budget_minutes": 25,
+          "run": ["stateful", "--nodes", "3", "--state-partitions", "4", "--fault", "owner-crash"]
+        },
         {
           "id": "mixed-seed-42",
           "shard": 1,
@@ -111,6 +140,12 @@
           "shard": 3,
           "budget_minutes": 6,
           "run": ["ingestor-owner-crash"]
+        },
+        {
+          "id": "ingestor-instances-owner-crash",
+          "shard": 3,
+          "budget_minutes": 7,
+          "run": ["ingestor-instances-owner-crash"]
         },
         {
           "id": "emitter-owner-crash",

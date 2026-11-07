@@ -1,13 +1,13 @@
-//! The record of a source payload its ingestor's codec definitively refused, and how the ingestor's
+//! The record of a payload its ingestor's codec definitively refused, and how the ingestor's
 //! general error policy reports it.
 //!
 //! Layer: data plane.
-//! - **Owns.** Turning one codec refusal of a source payload into its decode rejection, naming the
+//! - **Owns.** Turning one codec refusal of an ingestor payload into its decode rejection, naming the
 //!   transport position its ingest metadata row carries, and reporting the rejection under the
 //!   ingestor's `ON GENERAL ERROR` policy.
-//! - **Depends on.** The codec's report, the source's ingest metadata row, the message-error
+//! - **Depends on.** The codec's report, the ingestor's ingest metadata row, the message-error
 //!   vocabulary and the node's runtime event bus.
-//! - **Must not know.** The payload's bytes, the source's driver, or how the host settles the
+//! - **Must not know.** The payload's bytes, the ingestor's driver, or how the host settles the
 //!   payload's position on its transport.
 
 #![cfg_attr(
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::*;
 
-/// Where on its transport a refused payload was read, as its source's ingest metadata row names
+/// Where on its transport a refused payload was read, as its ingestor's ingest metadata row names
 /// it, owned so that it outlives the message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TransportPosition {
@@ -86,7 +86,7 @@ impl fmt::Display for TransportPosition {
     }
 }
 
-/// A source payload its ingestor's codec definitively refused, as the message error that remains of
+/// A payload its ingestor's codec definitively refused, as the message error that remains of
 /// it once the ingestor consumed it.
 ///
 /// Presenting the payload again would only repeat the refusal, so the payload is consumed rather
@@ -98,7 +98,7 @@ pub(crate) struct DecodeRejection {
     /// The rejection's stable reference, a UUIDv7.
     pub(crate) reference: Uuid,
     pub(crate) codec: CodecName,
-    /// Where the source read the payload, when its metadata names a position.
+    /// Where the ingestor read the payload, when its metadata names a position.
     pub(crate) position: Option<TransportPosition>,
     /// The fields the codec named at fault.
     pub(crate) fields: SortedSet<FieldPath>,
@@ -112,8 +112,8 @@ impl DecodeRejection {
     pub(crate) const CODE: MessageErrorCode = MessageErrorCode::Validation;
     pub(crate) const OPERATION: MessageErrorOperation = MessageErrorOperation::Decode;
 
-    /// The rejection of the payload a source read at `metadata` and `codec` refused with `report`,
-    /// when the source took it in at `occurred_at`.
+    /// The rejection of the payload an ingestor read at `metadata` and `codec` refused with `report`,
+    /// when the ingestor took it in at `occurred_at`.
     pub(super) fn new(
         codec: &CompiledCodec,
         metadata: &IngestMetadataRow<'_>,
@@ -208,9 +208,9 @@ impl Runtime {
     /// the payload.
     ///
     /// No policy fails the payload, because presenting it again would repeat the refusal: its
-    /// source consumes it whatever the policy says. `IGNORE` reports nothing, and `LOG` publishes
+    /// ingestor consumes it whatever the policy says. `IGNORE` reports nothing, and `LOG` publishes
     /// the rejection as a runtime event and logs its fields. Either way the record stays visible
-    /// in `DESCRIBE INGESTOR`, which the source host publishes it to.
+    /// in `DESCRIBE INGESTOR`, which the ingestor host publishes it to.
     pub(in crate::runtime) fn report_decode_rejection(
         &self,
         domain: &DomainName,

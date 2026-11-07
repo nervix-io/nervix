@@ -44,6 +44,7 @@ use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use authentication::user_credentials;
 use background_task::{
     await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
+    request_shutdown_on_return,
 };
 use clap::Parser;
 use clap_complete::Shell;
@@ -61,8 +62,8 @@ use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_rat
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
 use domain_clock::{
-    DomainClockRetirements, DomainClockTask, reconcile_domain_clock_tasks,
-    run_domain_clock_authority_reconciliation,
+    DomainClockAttachmentSenders, DomainClockRetirements, DomainClockTask,
+    reconcile_domain_clock_tasks, run_domain_clock_authority_reconciliation,
 };
 use error_stack::{Report, ResultExt};
 use futures_util::{
@@ -73,6 +74,7 @@ use futures_util::{
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_client_wire::NoticeKind;
 use nervix_consensus::{ConsensusSettings, TransactionState};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
@@ -117,6 +119,7 @@ use nervix_primitives::{
 };
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
+use public_listener::{PublicListener, PublicListenerKind};
 #[cfg(feature = "testing")]
 use scheduling::VOTER_OBSERVATION_GRACE;
 use scheduling::{
@@ -156,7 +159,9 @@ mod cli_values;
 mod client_consumers;
 mod client_description;
 mod client_producers;
+mod client_traffic;
 mod cluster_description;
+mod cluster_parameters;
 mod cluster_status;
 mod command_execution;
 mod command_result;
@@ -174,11 +179,13 @@ mod leader_redirect;
 mod model_mutation;
 mod model_validation;
 mod node_identity;
+mod node_initialization;
 mod node_settings;
 mod observability_http;
 mod observation;
 mod ownership_handoff;
 mod preflight;
+mod public_listener;
 mod relocation;
 mod resource;
 mod restore;
@@ -194,6 +201,7 @@ mod session_service;
 mod shutdown;
 mod startup;
 mod state_replication_requests;
+mod statement_grammar;
 mod statement_routing;
 mod subscription;
 mod termination_signals;
@@ -211,7 +219,7 @@ pub use command_execution::{
 };
 use join_supervision::{JoinOutcome, JoinStanding, JoinSupervision};
 use nervix_primitives::sync::Arc;
-pub use node_identity::NodeIdentity;
+pub use node_identity::{GrpcTransport, NodeIdentity};
 pub use node_settings::NodeSettings;
 use preflight::{Preflight, PreflightOutcome};
 pub use scheduling::{ReplicaCount, SchedulingSettings};
@@ -339,13 +347,10 @@ impl Application {
         tracing: Option<&TracingGuard>,
     ) -> Result<(), Report<AppError>> {
         let addr = self.identity.addr;
-        let grpc_mode = self.identity.grpc_mode;
-        let grpc_listen_addr = match grpc_mode {
-            InternalTransportMode::Http => addr,
-            InternalTransportMode::Https => self
-                .identity
-                .grpc_https_listen_addr
-                .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsListenAddress))?,
+        let grpc_mode = self.identity.grpc_transport.mode();
+        let grpc_listen_addr = match &self.identity.grpc_transport {
+            GrpcTransport::Http => addr,
+            GrpcTransport::Https { listen_addr, .. } => *listen_addr,
         };
         let http_listen_addr = self.identity.http_listen_addr;
         let https_listen_addr = self.identity.https_listen_addr;
@@ -362,13 +367,9 @@ impl Application {
         let drain_timeout = self.settings.shutdown.drain_timeout();
         let cluster_id = self.identity.cluster_id.clone();
         let node_id = self.identity.node_id.clone();
-        let grpc_advertise_addr = match grpc_mode {
-            InternalTransportMode::Http => self.identity.grpc_advertise_addr.clone(),
-            InternalTransportMode::Https => self
-                .identity
-                .grpc_https_advertise_addr
-                .clone()
-                .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsAdvertiseAddress))?,
+        let grpc_advertise_addr = match &self.identity.grpc_transport {
+            GrpcTransport::Http => self.identity.grpc_advertise_addr.clone(),
+            GrpcTransport::Https { advertise_addr, .. } => advertise_addr.clone(),
         };
         let grpc_advertise_url = NodeServiceUrl::new(grpc_mode.scheme(), &grpc_advertise_addr)
             .change_context(AppError::BuildClientAdvertiseUrl)?;
@@ -384,14 +385,21 @@ impl Application {
         let default_user = self.identity.default_user.clone();
         let init_default_user_password = self.identity.init_default_user_password.clone();
         let settings = self.settings;
+        let parameter_seeds = settings
+            .bootstrap_parameters()
+            .change_context(AppError::InvalidClusterParameters)?;
+        if !allow_bootstrap
+            && let Some(parameter) = settings.parameter_seeds.explicit_parameters().first()
+        {
+            return Err(Report::new(
+                AppError::ClusterParameterSeedOnExistingCluster {
+                    parameter: *parameter,
+                },
+            ));
+        }
         let node_unavailability_timeout = settings.membership.node_unavailability_timeout();
         let raft_timings = settings.raft;
         let raft_retention = settings.raft_retention;
-        let transaction_idle_timeout = settings.transactions.idle_timeout();
-        let transaction_tombstone_retention = settings.transactions.tombstone_retention();
-        let transaction_max_statements = settings.transactions.max_statements();
-        let transaction_max_source_bytes = settings.transactions.max_source_bytes();
-        let transaction_max_open = settings.transactions.max_open();
         let replica_count = settings.scheduling.replica_count();
         let runtime_settings = settings.runtime;
         let state_snapshot_interval = runtime_settings.state_snapshot_interval();
@@ -418,17 +426,25 @@ impl Application {
         let shutdown_coordinator = self.shutdown.clone();
         let shutdown = shutdown_coordinator.drain_support_token();
         let fault_injection = self.fault_injection.clone();
-        let grpc_tls_server_config = if grpc_mode.is_tls() {
-            let config = match load_grpc_tls_server_config().await {
-                Ok(config) => config,
-                Err(error) => {
-                    error!(?error, "failed to build grpc tls server config");
-                    return Err(error);
-                }
-            };
-            Some(config)
-        } else {
-            None
+        let grpc_tls_server_config = match &self.identity.grpc_transport {
+            GrpcTransport::Http => None,
+            GrpcTransport::Https {
+                certificate,
+                private_key,
+                ..
+            } => {
+                let config = match load_grpc_tls_server_config(certificate, private_key).await {
+                    Ok(config) => config,
+                    Err(error) => {
+                        error!(
+                            error = format!("{error:#}"),
+                            "failed to build grpc tls server config"
+                        );
+                        return Err(error);
+                    }
+                };
+                Some(config)
+            }
         };
         let web_console_tls_server_config = match (
             &self.identity.web_console_tls_cert,
@@ -475,6 +491,7 @@ impl Application {
             dns,
             memory,
             restore_staging_max_bytes,
+            database_volume,
         } = match preflight {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -565,7 +582,7 @@ impl Application {
             match Registry::from_database(db.clone(), Some(db_path.as_path())) {
                 Ok(registry) => registry,
                 Err(err) => {
-                    error!(db_path = db_path.display().to_string(), error = %err, "failed to open registry");
+                    error!(db_path = db_path.display().to_string(), error = %format_args!("{err:#}"), "failed to open registry");
                     return Err(err.change_context(AppError::OpenRegistry));
                 }
             },
@@ -602,7 +619,7 @@ impl Application {
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(err) => Err({
-                    error!(db_path = db_path.display().to_string(), error = %err, "failed to open resource store");
+                    error!(db_path = db_path.display().to_string(), error = %format_args!("{err:#}"), "failed to open resource store");
                     Report::new(AppError::OpenResourceStore)
                 }),
             }
@@ -612,7 +629,7 @@ impl Application {
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(err) => Err({
-                    error!(db_path = db_path.display().to_string(), error = %err, "failed to clean resource staging paths");
+                    error!(db_path = db_path.display().to_string(), error = %format_args!("{err:#}"), "failed to clean resource staging paths");
                     Report::new(AppError::OpenResourceStore)
                 }),
             }
@@ -634,14 +651,7 @@ impl Application {
             runtime_state_snapshot_interval = ?startup.runtime.state_snapshot_interval(),
             "initialized runtime persistence"
         );
-        if let Err(error) = startup.apply_stored_runtime_changes().await {
-            error!(
-                error = format!("{error:#}"),
-                "failed to apply startup runtime changes"
-            );
-            startup.terminate().await;
-            return Err(error);
-        }
+
         let interconnect_result = Transport::bind(
             interconnect_listen_addr,
             TransportIdentity {
@@ -685,6 +695,26 @@ impl Application {
                 return Err(error);
             }
         };
+        if allow_bootstrap
+            && consensus.observer().cluster_parameters().is_none()
+            && let Err(error) =
+                preflight::validate_resource_volume(&parameter_seeds, database_volume, &db_path)
+        {
+            startup.consensus = Some(consensus);
+            startup.terminate().await;
+            return Err(error.change_context(AppError::Preflight));
+        }
+        if consensus.observer().cluster_parameters().is_some()
+            && let Some(parameter) = settings.parameter_seeds.explicit_parameters().first()
+        {
+            startup.consensus = Some(consensus);
+            startup.terminate().await;
+            return Err(Report::new(
+                AppError::ClusterParameterSeedOnExistingCluster {
+                    parameter: *parameter,
+                },
+            ));
+        }
         let recovered_members = consensus.observer().stored_membership_nodes();
         startup.consensus = Some(consensus);
         let join_standing = if recovered_members.contains_key(&node_id) {
@@ -736,6 +766,10 @@ impl Application {
         };
         let cluster = Arc::new(cluster);
         let local_health_identity = cluster.local_node_identity().await;
+        let application_progress =
+            completion::ApplicationProgressState::new(local_health_identity.clone());
+        let (domain_clock_attachments, mut clock_attachment_installation) =
+            domain_clock::DomainClockAttachments::new(application_progress.identity());
         #[cfg(feature = "testing")]
         let health_fault_injection = fault_injection.clone();
         let health_handler = interconnect.register_handler::<ApplicationHealthProbe, _, _>({
@@ -764,7 +798,7 @@ impl Application {
             .require_handler_registration(&cluster, health_handler)
             .await?;
         let application_revision_handler = completion::register_application_revision_handler(
-            cluster.clone(),
+            application_progress.clone(),
             &interconnect,
             #[cfg(feature = "testing")]
             fault_injection.clone(),
@@ -779,10 +813,24 @@ impl Application {
                 .as_ref()
                 .verified("startup assigns consensus before registering completion handlers")
                 .observer(),
+            application_progress.clone(),
             &interconnect,
         );
         let startup = startup
             .require_handler_registration(&cluster, completion_peers_handler)
+            .await?;
+        let progress_report_handler = completion::register_application_progress_report_handler(
+            application_progress.clone(),
+            cluster.clone(),
+            startup
+                .consensus
+                .as_ref()
+                .verified("startup assigns consensus before registering completion handlers")
+                .observer(),
+            &interconnect,
+        );
+        let startup = startup
+            .require_handler_registration(&cluster, progress_report_handler)
             .await?;
         let clock_probe_handler = cluster::register_clock_probe_handler(&interconnect);
         let startup = startup
@@ -836,6 +884,7 @@ impl Application {
         let reconcile_shutdown = shutdown.clone();
         let cluster_for_membership_reconcile = cluster.clone();
         let administrator_for_membership_reconcile = consensus.administrator();
+        let proposer_for_parameter_seeding = consensus.proposer();
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
@@ -902,15 +951,38 @@ impl Application {
                             initialized = did_initialize;
                         }
                         Err(error) => {
-                            warn!(%error, "raft bootstrap attempt failed");
+                            warn!(error = %format_args!("{error:#}"), "raft bootstrap attempt failed");
                         }
                     }
+                }
+                if allow_bootstrap
+                    && proposer_for_parameter_seeding
+                        .cluster_parameters()
+                        .is_none()
+                    && proposer_for_parameter_seeding
+                        .current_leader()
+                        .await
+                        .as_ref()
+                        == Some(proposer_for_parameter_seeding.local_node_id())
+                    && let Err(error) = proposer_for_parameter_seeding
+                        .seed_cluster_parameters(parameter_seeds)
+                        .await
+                {
+                    warn!(
+                        error = format!("{error:#}"),
+                        "failed to seed cluster parameters"
+                    );
+                }
+                if let Some(record) = proposer_for_parameter_seeding.cluster_parameters() {
+                    cluster_for_membership_reconcile
+                        .publish_cluster_parameters(record, false)
+                        .await;
                 }
                 if let Err(error) = administrator_for_membership_reconcile
                     .reconcile_nodes(cluster_for_membership_reconcile.gossip_state())
                     .await
                 {
-                    warn!(%error, "raft membership reconciliation failed");
+                    warn!(error = %format_args!("{error:#}"), "raft membership reconciliation failed");
                 }
                 // Published whether or not a membership change failed: the verdicts were judged
                 // before any change was attempted, and a node that stopped leading withdraws them.
@@ -924,6 +996,216 @@ impl Application {
                 }
             }
         }));
+        let certificates =
+            HttpsListenerCertificates::new(&resource_store, &fault_injection, &cluster);
+        certificates
+            .register_installation_handler(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
+        let service = SessionServiceImpl {
+            inner: Arc::new(SessionServiceInner {
+                cluster: cluster.clone(),
+                consensus: consensus.proposer(),
+                consensus_administrator: consensus.administrator(),
+                registry,
+                resource_store,
+                https_certificates: certificates,
+                runtime: runtime.clone(),
+                runtime_admission: runtime_admission.clone(),
+                initialization: Arc::new(node_initialization::NodeInitialization::default()),
+                admission_shutdown: shutdown_coordinator.admission_token(),
+                drain_support_shutdown: shutdown.clone(),
+                events: events.clone(),
+                subscription_interests: SubscriptionInterests::new(
+                    cluster.clone(),
+                    runtime.metrics(),
+                ),
+                subscription_sampler: SubscriptionSampler::default(),
+                interconnect: interconnect.clone(),
+                application_progress: application_progress.clone(),
+                domain_clock_attachments,
+                client_producers: ClientProducerRouter::new(
+                    runtime.clone(),
+                    interconnect.clone(),
+                    consensus.proposer().local_node_id().clone(),
+                ),
+                client_consumers: ClientConsumerRouter::new(
+                    runtime.clone(),
+                    interconnect.clone(),
+                    consensus.proposer().local_node_id().clone(),
+                ),
+                service_tasks: ServiceTasks::default(),
+                authentication_pacing: SessionServiceImpl::new_authentication_pacing(),
+                traffic: client_traffic::ClientTraffic::new(runtime.metrics().client_traffic()),
+                transaction_bindings: DashMap::with_hasher(RandomState::new()),
+                command_executions: Default::default(),
+                transaction_executions: DashMap::with_hasher(RandomState::new()),
+                transaction_recovery: Default::default(),
+                ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
+                resource_upload_executions: Default::default(),
+                resource_replication_executions: DashMap::with_hasher(RandomState::new()),
+                retained_backups: Default::default(),
+                captured_backup_sections: DashMap::with_hasher(RandomState::new()),
+                restored_state_uploads: DashMap::with_hasher(RandomState::new()),
+                restore_archives: Default::default(),
+            }),
+        };
+        info!(mode = grpc_mode.scheme(), addr = %grpc_listen_addr, "nervix gRPC server listening");
+        info!(addr = %http_listen_addr, "nervix HTTP server listening");
+        info!(addr = %https_listen_addr, "nervix HTTPS server listening");
+        info!(addr = %observability_listen_addr, "nervix observability server listening");
+        info!(addr = %web_console_listen_addr, "nervix web console server listening");
+        if let Some(addr) = web_console_https_listen_addr {
+            info!(addr = %addr, "nervix web console TLS server listening");
+        }
+
+        let listener_shutdown = shutdown_coordinator.admission_token();
+        let grpc_listener =
+            PublicListener::new(grpc_listener, PublicListenerKind::Grpc, &fault_injection);
+        let http_listener =
+            PublicListener::new(http_listener, PublicListenerKind::Http, &fault_injection);
+        let https_listener =
+            PublicListener::new(https_listener, PublicListenerKind::Https, &fault_injection);
+        let observability_listener = PublicListener::new(
+            observability_listener,
+            PublicListenerKind::Observability,
+            &fault_injection,
+        );
+        let web_console_listener = PublicListener::new(
+            web_console_listener,
+            PublicListenerKind::Console,
+            &fault_injection,
+        );
+        let web_console_https_listener = web_console_https_listener.map(|listener| {
+            PublicListener::new(listener, PublicListenerKind::ConsoleTls, &fault_injection)
+        });
+
+        let grpc_service = service.clone();
+        let grpc_shutdown = listener_shutdown.clone();
+        let grpc_connections_cut = shutdown_coordinator.connections_cut_token();
+        let api_server = async move {
+            let mut builder = Server::builder();
+            if let Some(config) = grpc_tls_server_config {
+                builder = builder
+                    .tls_config(config)
+                    .change_context(AppError::LoadGrpcTls)?;
+            }
+            // Closing admission stops this listener accepting and ends every call it carries, a
+            // session's after its ending. The connections it accepted are cut only once
+            // shutdown's grace period has passed, so a client that reads nothing holds the
+            // server's graceful shutdown no longer than that.
+            let grpc_incoming =
+                AdmittingListener::new(grpc_listener, grpc_connections_cut).into_connections();
+            builder
+                .add_service(SessionGrpcService::new(grpc_service.clone()))
+                .serve_with_incoming_shutdown(grpc_incoming, grpc_shutdown.cancelled_owned())
+                .await
+                .map_err(|e| Report::new(e).change_context(AppError::Serve))
+        };
+        let http_server = serve_http(
+            runtime.clone(),
+            service.inner.initialization.clone(),
+            service.inner.service_tasks.clone(),
+            http_listener,
+            listener_shutdown.clone(),
+        );
+        let https_server = serve_https(
+            runtime.clone(),
+            service.inner.initialization.clone(),
+            service.inner.service_tasks.clone(),
+            service.inner.https_certificates.clone(),
+            https_listener,
+            listener_shutdown.clone(),
+        );
+        let observability_server = serve_observability_http(
+            consensus.observer(),
+            service.inner.initialization.clone(),
+            runtime.clone(),
+            observability_listener,
+            listener_shutdown.clone(),
+        );
+        let web_console_server = serve_web_console_http(
+            service.clone(),
+            web_console_listener,
+            listener_shutdown.clone(),
+        );
+        let web_console_https_shutdown = listener_shutdown;
+        let web_console_https_service = service.clone();
+        let web_console_https_server = async move {
+            if let (Some(config), Some(listener)) =
+                (web_console_tls_server_config, web_console_https_listener)
+            {
+                serve_web_console_https(
+                    web_console_https_service,
+                    config,
+                    listener,
+                    web_console_https_shutdown.clone(),
+                )
+                .await;
+            } else {
+                web_console_https_shutdown.cancelled().await;
+            }
+        };
+
+        let public_listeners_shutdown = shutdown_coordinator.clone();
+        let public_listeners = nervix_primitives::task::spawn(async move {
+            // Only the gRPC server can fail; the other listeners return once admission closes.
+            let (api_result, (), (), (), (), ()) = tokio::join!(
+                request_shutdown_on_completion(api_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_return(http_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_return(https_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_return(observability_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_return(web_console_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_return(
+                    web_console_https_server,
+                    public_listeners_shutdown.clone()
+                ),
+            );
+            api_result
+        });
+
+        // Public observation stays available while live policy discovery fences execution.
+        // Cancelling this future leaves every task it already started in the same supervised
+        // collection that normal node shutdown owns.
+        let initialization_result = nervix_primitives::select! {
+            biased;
+            _ = shutdown_coordinator.requested() => Ok(()),
+            result = Box::pin(async {
+        let registry = service.inner.registry.clone();
+        let certificates = service.inner.https_certificates.clone();
+        #[cfg(feature = "testing")]
+        fault_injection.pause_initial_cluster_parameters_if_armed(&node_id).await;
+        let record = loop {
+            nervix_primitives::task::consume_budget().await;
+            let record = if has_bootstrap_candidates {
+                cluster.live_cluster_parameters().await
+            } else {
+                consensus.observer().cluster_parameters()
+            };
+            if let Some(record) = record {
+                preflight::validate_resource_volume(&record.values, database_volume, &db_path)
+                    .change_context(AppError::Preflight)?;
+                break record;
+            }
+            sleep(settings.membership.gossip_interval()).await;
+        };
+        runtime.install_cluster_parameters(record.values);
+        registry.install_cluster_parameters(record.values);
+        // Runtime admission waits for the same or a later committed publication before installing
+        // the graph; a returning node never runs its stale local policy or schedule.
+        runtime.set_construction_parameters(record);
+        loop {
+            match service.caught_up_cluster_parameters() {
+                Ok(_) => break,
+                Err(cluster_parameters::ClusterParameterAdmissionError::AwaitingPublication
+                    | cluster_parameters::ClusterParameterAdmissionError::AwaitingCatchUp) => {
+                    sleep(settings.membership.gossip_interval()).await;
+                }
+                Err(error) => {
+                    return Err(Report::new(error).change_context(AppError::InvalidClusterParameters));
+                }
+            }
+        }
         #[cfg(feature = "testing")]
         {
             let mut leadership_transfer_rx = runtime.subscribe_leadership_transfers();
@@ -1024,7 +1306,7 @@ impl Application {
                                 Err(error) => {
                                     warn!(
                                         domain = domain.as_str(),
-                                        error = %error,
+                                        error = %format_args!("{error:#}"),
                                         "failed to resume orphaned ALTER pause"
                                     );
                                 }
@@ -1264,7 +1546,7 @@ impl Application {
                             {
                                 Ok(()) => automatic_decision_published = true,
                                 Err(error) => {
-                                    warn!(%error, "failed to republish domain schedule after node failover");
+                                    warn!(error = %format_args!("{error:#}"), "failed to republish domain schedule after node failover");
                                 }
                             }
                             break;
@@ -1286,7 +1568,7 @@ impl Application {
                                 let mut schedule = graph.schedule_for_domain_with_mode(
                                     &domain,
                                     &schedulable_node_ids,
-                                    replica_count,
+                                    usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     domain_state.config.placement,
                                     scheduler_mode,
                                 );
@@ -1294,7 +1576,7 @@ impl Application {
                                 let mut schedule = graph.schedule_for_domain(
                                     &domain,
                                     &schedulable_node_ids,
-                                    replica_count,
+                                    usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     domain_state.config.placement,
                                 );
                                 let current_domain = current_schedule.domain(&domain);
@@ -1378,7 +1660,7 @@ impl Application {
                                 {
                                     Ok(()) => automatic_decision_published = true,
                                     Err(error) => {
-                                        warn!(%error, "failed to republish domain schedule after membership or schedulability change");
+                                        warn!(error = %format_args!("{error:#}"), "failed to republish domain schedule after membership or schedulability change");
                                     }
                                 }
                                 break;
@@ -1544,17 +1826,20 @@ impl Application {
                 }
             }
         }));
-        background_tasks.push(completion::spawn_authoritative_revision_reporting(
-            cluster.clone(),
+        background_tasks.push(completion::spawn_authoritative_progress_recording(
+            application_progress.clone(),
             consensus.observer(),
             shutdown.clone(),
         ));
+        background_tasks.push(completion::spawn_application_progress_reporting(
+            application_progress.clone(),
+            consensus.observer(),
+            interconnect.clone(),
+            fault_injection.clone(),
+            shutdown.clone(),
+        ));
 
-        let certificates =
-            HttpsListenerCertificates::new(&resource_store, &fault_injection, &cluster);
-        certificates
-            .register_installation_handler(&interconnect)
-            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let parameter_events = events.clone();
         let certificates_for_schedule = certificates.clone();
         let runtime_for_schedule = runtime.clone();
         let registry_for_schedule = registry.clone();
@@ -1563,6 +1848,7 @@ impl Application {
         let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
         let interconnect_for_schedule = interconnect.clone();
+        let progress_for_schedule = application_progress.clone();
         let schedule_shutdown = shutdown.clone();
         let schedule_runtime_admission = runtime_admission.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
@@ -1573,6 +1859,7 @@ impl Application {
                 interconnect: &interconnect_for_schedule,
                 registry: &registry_for_schedule,
                 consensus: &consensus_for_schedule,
+                progress: &progress_for_schedule,
                 admission: &schedule_runtime_admission,
                 shutdown: &schedule_shutdown,
             };
@@ -1581,72 +1868,53 @@ impl Application {
                 domains_rx,
                 schedule_shutdown.clone(),
             )
-            .run(|| {
-                apply_current_cluster_runtime_state(application, ApplicationBound::ClusterBudget)
+            .run(None, |mut announced_parameters| {
+                let events = &parameter_events;
+                let cluster = &cluster_for_schedule;
+                let consensus = &consensus_for_schedule;
+                async move {
+                    let outcome = apply_current_cluster_runtime_state(
+                        application,
+                        ApplicationBound::ClusterBudget,
+                    )
+                    .await;
+                    if outcome.is_ok() {
+                        cluster_parameters::announce_parameter_installation(
+                            events,
+                            cluster,
+                            consensus,
+                            &mut announced_parameters,
+                        )
+                        .await;
+                    }
+                    (announced_parameters, outcome)
+                }
             })
             .await;
         }));
-        let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
-        let service = SessionServiceImpl {
-            inner: Arc::new(SessionServiceInner {
-                cluster: cluster.clone(),
-                consensus: consensus.proposer(),
-                consensus_administrator: consensus.administrator(),
-                registry,
-                resource_store,
-                https_certificates: certificates,
-                runtime: runtime.clone(),
-                runtime_admission: runtime_admission.clone(),
-                replica_count,
-                admission_shutdown: shutdown_coordinator.admission_token(),
-                drain_support_shutdown: shutdown.clone(),
-                events: events.clone(),
-                subscription_interests: SubscriptionInterests::new(
-                    cluster.clone(),
-                    runtime.metrics(),
-                ),
-                subscription_sampler: SubscriptionSampler::default(),
-                interconnect: interconnect.clone(),
-                client_producers: ClientProducerRouter::new(
-                    runtime.clone(),
-                    interconnect.clone(),
-                    consensus.proposer().local_node_id().clone(),
-                ),
-                client_consumers: ClientConsumerRouter::new(
-                    runtime.clone(),
-                    interconnect.clone(),
-                    consensus.proposer().local_node_id().clone(),
-                ),
-                service_tasks: ServiceTasks::default(),
-                auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-                failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
-                transaction_idle_timeout,
-                transaction_tombstone_retention,
-                transaction_max_statements,
-                transaction_max_source_bytes,
-                transaction_max_open,
-                transaction_bindings: DashMap::with_hasher(RandomState::new()),
-                command_execution_policy: settings.commands,
-                command_executions: Default::default(),
-                transaction_executions: DashMap::with_hasher(RandomState::new()),
-                transaction_recovery: Default::default(),
-                ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
-                resource_upload_executions: DashMap::with_hasher(RandomState::new()),
-                resource_replication_executions: DashMap::with_hasher(RandomState::new()),
-                retained_backups: Default::default(),
-                captured_backup_sections: DashMap::with_hasher(RandomState::new()),
-                restored_state_uploads: DashMap::with_hasher(RandomState::new()),
-                restore_archives: Default::default(),
-            }),
-        };
         #[cfg(feature = "testing")]
         service.register_wasm_state_reset_test_coordinator(&fault_injection, shutdown.clone());
+        #[cfg(feature = "testing")]
+        service.register_application_progress_test_queries(&fault_injection, shutdown.clone());
         let domain_clock_progress_service = service.clone();
         interconnect
             .register_handler::<RemoteDomainClockProgressRequest, _, _>(move |context, request| {
                 let service = domain_clock_progress_service.clone();
                 async move {
                     service.handle_domain_clock_progress(context.peer_node_id(), request);
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let clock_attach_service = service.clone();
+        interconnect
+            .register_handler::<nervix_interconnect::DomainClockAttachRequest, _, _>(move |context, request| {
+                let service = clock_attach_service.clone();
+                async move {
+                    let availability = service.inner.cluster.availability_state().await;
+                    service.inner.domain_clock_attachments.attach(
+                        context.peer_node_id(), context.peer_process_epoch(), &request,
+                        &availability.live_identities(),
+                    )
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
@@ -1817,7 +2085,7 @@ impl Application {
                                 &request.coordination,
                                 &request.domain,
                                 &request.relays,
-                                &request.affected_entities,
+                                &request.targets,
                                 request.purpose,
                                 EntityGateLease {
                                     deadline,
@@ -1858,7 +2126,7 @@ impl Application {
                         &request.coordination,
                         &request.domain,
                         &request.relays,
-                        &request.affected_entities,
+                        &request.targets,
                         request.purpose,
                     );
                     if let Ok(status) = &result
@@ -1958,6 +2226,25 @@ impl Application {
                 move |context, request| {
                     let service = subscription_interest_service.clone();
                     async move {
+                        #[cfg(feature = "testing")]
+                        if service
+                            .inner
+                            .runtime
+                            .fault_injection()
+                            .take_interest_visibility_refusal(
+                                service.inner.consensus.local_node_id(),
+                            )
+                        {
+                            return RemoteSubscriptionInterestVisibilityResponse {
+                                result: Err(RemoteOperationFailure::rejected(
+                                    RemoteOperationSubject::subscription_interest(
+                                        &request.domain,
+                                        &request.relay,
+                                        &request.subscriber,
+                                    ),
+                                )),
+                            };
+                        }
                         let result = if request.subscriber.node_id() != context.peer_node_id() {
                             Err(RemoteOperationFailure::rejected(
                                 RemoteOperationSubject::subscription_interest(
@@ -2016,7 +2303,9 @@ impl Application {
                                 .map_err(|failure| {
                                     OwnershipHandoffError::participant(failure.to_string())
                                 })?;
-                            if !scheduled.is_primary_on(service.inner.consensus.local_node_id()) {
+                            if !scheduled.unit(request.unit).is_some_and(|unit| {
+                                unit.is_primary_on(service.inner.consensus.local_node_id())
+                            }) {
                                 return Err(OwnershipHandoffError::participant(format!(
                                     "{} '{}' is not owned by this source node",
                                     request.entity.kind.as_str(),
@@ -2026,12 +2315,13 @@ impl Application {
                             service
                                 .inner
                                 .runtime
-                                .capture_ownership_handoff_state(
+                                .capture_selected_ownership_handoff_state(
                                     &request.coordination,
                                     &request.domain,
                                     &request.entity,
                                     request.unit,
                                     request.base_schedule_fingerprint,
+                                    request.selection,
                                 )
                                 .await
                         }
@@ -2184,7 +2474,7 @@ impl Application {
                         Err(error) => {
                             warn!(
                                 is_leader,
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to synchronize registry after leadership state change"
                             );
                             nervix_primitives::select! {
@@ -2267,7 +2557,7 @@ impl Application {
                                 {
                                     warn!(
                                         %node_id,
-                                        error = %error,
+                                        error = %format_args!("{error:#}"),
                                         "failed to fan out runtime error event"
                                     );
                                 }
@@ -2306,25 +2596,28 @@ impl Application {
         background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domain_state_rx = clock_service.inner.runtime.subscribe_domain_state();
             // The clock owner installs committed authority fences ahead of graph installation and
-            // advertises each runtime revision its domain clocks match, so it follows committed
+            // attaches after each runtime revision its domain clocks match, so it follows committed
             // domain and schedule changes itself.
             let mut committed_domains_rx = clock_service.inner.consensus.subscribe_domains();
             let mut committed_schedule_rx = clock_service.inner.consensus.subscribe_schedule();
             let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
             let mut retirements = DomainClockRetirements::default();
+            let mut attachment_senders = DomainClockAttachmentSenders::default();
 
             loop {
                 nervix_primitives::task::consume_budget().await;
                 let state = clock_service.inner.consensus.current_runtime_state().await;
-                clock_service.install_committed_domain_clocks(&state).await;
+                clock_service.install_committed_domain_clocks(&state);
                 reconcile_domain_clock_tasks(
                     &clock_service,
                     &clock_shutdown,
                     &state,
                     &mut tasks,
                     &mut retirements,
+                    &mut clock_attachment_installation,
                 )
                 .await;
+                attachment_senders.reconcile(&clock_service, &clock_shutdown, &state).await;
                 nervix_primitives::select! {
                     _ = clock_shutdown.cancelled() => break,
                     changed = domain_state_rx.changed() => {
@@ -2346,6 +2639,8 @@ impl Application {
                 }
             }
 
+            clock_attachment_installation.clear();
+            attachment_senders.stop_all().await;
             for (_, task) in tasks {
                 task.task.stop().await;
             }
@@ -2443,7 +2738,7 @@ impl Application {
                                 ) {
                                     Ok(placement) => placement,
                                     Err(error) => {
-                                        warn!(error = %error, "failed to decode state replication ack placement");
+                                        warn!(error = %format_args!("{error:#}"), "failed to decode state replication ack placement");
                                         continue;
                                     }
                                 };
@@ -2467,7 +2762,10 @@ impl Application {
                                     );
                             }
                             Envelope::Control(ControlEnvelope::RuntimeErrorEvent(event)) => {
-                                service_for_interconnect.broadcast_error(event.message);
+                                service_for_interconnect
+                                    .inner
+                                    .events
+                                    .report_error(NoticeKind::Runtime, event.message);
                             }
                         }
                     }
@@ -2483,7 +2781,9 @@ impl Application {
                 nervix_primitives::select! {
                     _ = cluster_events_shutdown.cancelled() => break,
                     received = cluster_event_rx.recv() => match received {
-                        Ok(message) => cluster_events.relay_info(message),
+                        Ok(change) => {
+                            cluster_events.relay_info(NoticeKind::Membership, change.to_string());
+                        }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "cluster event relay fell behind the event bus");
                         }
@@ -2501,7 +2801,9 @@ impl Application {
                 nervix_primitives::select! {
                     _ = consensus_events_shutdown.cancelled() => break,
                     received = consensus_event_rx.recv() => match received {
-                        Ok(message) => consensus_events.relay_info(message),
+                        Ok(message) => {
+                            consensus_events.relay_info(NoticeKind::Leadership, message);
+                        }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "consensus event relay fell behind the event bus");
                         }
@@ -2511,116 +2813,21 @@ impl Application {
             }
         }));
 
-        info!(mode = grpc_mode.scheme(), addr = %grpc_listen_addr, "nervix gRPC server listening");
-        info!(addr = %http_listen_addr, "nervix HTTP server listening");
-        info!(addr = %https_listen_addr, "nervix HTTPS server listening");
-        info!(addr = %observability_listen_addr, "nervix observability server listening");
-        info!(addr = %web_console_listen_addr, "nervix web console server listening");
-        if let Some(addr) = web_console_https_listen_addr {
-            info!(addr = %addr, "nervix web console TLS server listening");
-        }
-
-        let listener_shutdown = shutdown_coordinator.admission_token();
-
-        let grpc_service = service.clone();
-        let grpc_shutdown = listener_shutdown.clone();
-        let api_server = async move {
-            let mut builder = Server::builder();
-            builder = if grpc_mode.is_tls() {
-                builder
-                    .tls_config(
-                        grpc_tls_server_config.ok_or_else(|| Report::new(AppError::LoadGrpcTls))?,
-                    )
-                    .change_context(AppError::LoadGrpcTls)?
-            } else {
-                builder
-            };
-            // Closing admission ends every connection this listener accepted, so the server's
-            // graceful shutdown never waits for a client to finish or abandon a request.
-            let grpc_incoming =
-                AdmittingListener::new(grpc_listener, grpc_shutdown.clone()).into_connections();
-            builder
-                .add_service(SessionGrpcService::new(grpc_service.clone()))
-                .serve_with_incoming_shutdown(grpc_incoming, grpc_shutdown.cancelled_owned())
-                .await
-                .map_err(|e| Report::new(e).change_context(AppError::Serve))
+                service.inner.initialization.complete();
+                Ok::<(), Report<AppError>>(())
+            }) => result,
         };
-        let http_server = serve_http(
-            runtime.clone(),
-            service.inner.service_tasks.clone(),
-            http_listener,
-            listener_shutdown.clone(),
-        );
-        let https_server = serve_https(
-            runtime.clone(),
-            service.inner.service_tasks.clone(),
-            service.inner.https_certificates.clone(),
-            https_listener,
-            listener_shutdown.clone(),
-        );
-        let observability_server = serve_observability_http(
-            consensus.observer(),
-            runtime.clone(),
-            observability_listener,
-            listener_shutdown.clone(),
-        );
-        let web_console_server = serve_web_console_http(
-            service.clone(),
-            web_console_listener,
-            listener_shutdown.clone(),
-        );
-        let web_console_https_shutdown = listener_shutdown;
-        let web_console_https_service = service.clone();
-        let web_console_https_server = async move {
-            if let (Some(config), Some(listener)) =
-                (web_console_tls_server_config, web_console_https_listener)
-            {
-                serve_web_console_https(
-                    web_console_https_service,
-                    config,
-                    listener,
-                    web_console_https_shutdown.clone(),
-                )
-                .await
-            } else {
-                web_console_https_shutdown.cancelled().await;
-                Ok(())
+        if let Err(error) = &initialization_result {
+            error!(error = %format_args!("{error:#}"), "node initialization was refused");
+            match shutdown_coordinator.request_stop() {
+                ShutdownRequestOutcome::Accepted(_) => {
+                    debug!("node initialization refusal requested shutdown");
+                }
+                ShutdownRequestOutcome::AlreadyRequested(_) => {
+                    debug!("the node was already stopping when initialization was refused");
+                }
             }
-        };
-
-        let public_listeners_shutdown = shutdown_coordinator.clone();
-        let public_listeners = nervix_primitives::task::spawn(async move {
-            let (
-                api_result,
-                http_result,
-                https_result,
-                observability_result,
-                web_console_result,
-                web_console_https_result,
-            ) = tokio::join!(
-                request_shutdown_on_completion(api_server, public_listeners_shutdown.clone()),
-                request_shutdown_on_completion(http_server, public_listeners_shutdown.clone()),
-                request_shutdown_on_completion(https_server, public_listeners_shutdown.clone()),
-                request_shutdown_on_completion(
-                    observability_server,
-                    public_listeners_shutdown.clone()
-                ),
-                request_shutdown_on_completion(
-                    web_console_server,
-                    public_listeners_shutdown.clone()
-                ),
-                request_shutdown_on_completion(
-                    web_console_https_server,
-                    public_listeners_shutdown.clone()
-                ),
-            );
-            api_result
-                .and(http_result)
-                .and(https_result)
-                .and(observability_result)
-                .and(web_console_result)
-                .and(web_console_https_result)
-        });
+        }
 
         // The node serves until its first stop request, whether a termination signal, the caller
         // embedding the application, or a failed listener made it. That request's deadline bounds
@@ -2638,13 +2845,14 @@ impl Application {
             }
         };
         shutdown_coordinator.stop_admission();
-        let listeners = join_public_listeners(public_listeners, deadline).await;
+        let listeners =
+            join_public_listeners(public_listeners, &shutdown_coordinator, deadline).await;
         let stop_admission_outcome = advertisement_outcome
             .combine(listeners.outcome)
             .unless_deadline_passed(deadline);
         shutdown_coordinator.begin_drain_support(stop_admission_outcome);
 
-        let drain_support_outcome = if graceful_shutdown_drain {
+        let drain_support_outcome = if graceful_shutdown_drain && runtime_admission.is_admitted() {
             let drain = service.drain_local_node_before_shutdown(drain_timeout, deadline);
             let drained = deadline.bound(drain).await;
             match drained {
@@ -2711,6 +2919,7 @@ impl Application {
         if let Some(refusal) = refused_join {
             return Err(Report::new(refusal).change_context(AppError::JoinRefused));
         }
+        initialization_result?;
         listeners.result?;
         cluster_shutdown_result?;
         database_owner_outcome?;

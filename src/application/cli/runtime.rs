@@ -28,10 +28,9 @@ pub struct RuntimeArgs {
     #[arg(
         long = StateSnapshotInterval::NAME,
         env = "NERVIX_STATE_SNAPSHOT_INTERVAL",
-        default_value_t = HumanDuration(StateSnapshotInterval::default_value(&())),
-        help = "How often the owner of runtime state publishes a snapshot of it to its replicas"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::StateSnapshotInterval, "How often the owner of runtime state publishes a snapshot of it to its replicas")
     )]
-    pub state_snapshot_interval: HumanDuration,
+    pub state_snapshot_interval: Option<HumanDuration>,
     #[arg(
         long = RestoreStagingMaxBytes::NAME,
         env = "NERVIX_RESTORE_STAGING_MAX_BYTES",
@@ -44,21 +43,21 @@ pub struct RuntimeArgs {
 impl RuntimeArgs {
     pub(super) fn settings(&self) -> RuntimeSettings {
         RuntimeSettings::resolve(
-            Some(self.state_snapshot_interval.0),
+            self.state_snapshot_interval.map(|value| value.0),
             self.restore_staging_max_bytes.map(|bytes| bytes.0),
         )
-        .assured("the runtime settings declare no validation")
+        .assured("the runtime settings have valid bounds")
     }
 
     pub(super) fn from_settings(settings: &RuntimeSettings) -> Self {
         Self {
-            state_snapshot_interval: HumanDuration(settings.state_snapshot_interval()),
+            state_snapshot_interval: Some(HumanDuration(settings.state_snapshot_interval())),
             restore_staging_max_bytes: settings.restore_staging_max_bytes().map(HumanBytes),
         }
     }
 
     pub(super) fn render(&self, command_line: &mut CommandLine) {
-        command_line.option(StateSnapshotInterval::NAME, self.state_snapshot_interval);
+        command_line.optional(StateSnapshotInterval::NAME, self.state_snapshot_interval);
         if let Some(bytes) = self.restore_staging_max_bytes {
             command_line.option(RestoreStagingMaxBytes::NAME, bytes);
         }

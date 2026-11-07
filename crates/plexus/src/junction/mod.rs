@@ -1,6 +1,18 @@
+//! Plexus junction statements.
+//!
+//! Layer: language.
+//! - **Owns.** The junction grammar, lowering into Models and grammar-derived completion.
+//! - **Depends on.** Shared parser clauses, tokens and the vocabulary.
+//! - **Must not know.** Registry validation, execution planning or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{AckMode, AlterJunction, CreateJunction, CreateStatement};
+use nervix_models::{AlterJunction, CreateJunction, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
@@ -18,11 +30,11 @@ pub fn create_junction_parser<'src>()
 + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Identifier::Junction))
         .then(junction_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(ack_mode().or_not())
         .then(filter_where_clause().or_not())
         .boxed()
         .then(branch_selection())
@@ -32,7 +44,7 @@ pub fn create_junction_parser<'src>()
         .map(
             |(
                 (
-                    (((((if_not_exists, mode), name), from_inputs), filter_where), branched_by),
+                    (((((if_not_exists, name), from_inputs), mode), filter_where), branched_by),
                     materialized_state,
                 ),
                 outputs,
@@ -43,7 +55,7 @@ pub fn create_junction_parser<'src>()
                         from: from_inputs,
                         output_routes: outputs,
                         branched_by,
-                        mode: mode.unwrap_or(AckMode::Attached),
+                        mode: mode.unwrap_or_default(),
                         filter_where,
                         materialized_state,
                     },
@@ -131,10 +143,31 @@ pub fn suggest_alter_junction(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{AlterProcessorOperation, FlushPolicy};
+    use nervix_models::{AckMode, AlterProcessorOperation, FlushPolicy};
 
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn input_acknowledgement_clause_with_filtered_inputs() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE IF NOT EXISTS JUNCTION tested FROM incoming WHERE input.value > 0, other \
+             WHERE input.value < 100",
+            "UNBRANCHED TO outgoing INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG",
+        );
+    }
+
+    #[test]
+    fn input_acknowledgement_clause() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE JUNCTION tested FROM incoming",
+            "UNBRANCHED TO outgoing INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG",
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE JUNCTION tested FROM incoming DETACHED ",
+            &["FILTER WHERE", "BRANCHED BY", "UNBRANCHED"],
+        );
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)
@@ -647,7 +680,7 @@ mod tests {
     #[test]
     fn parses_create_detached_junction() {
         let tokens = to_tokens(
-            "CREATE DETACHED JUNCTION join_streams FROM ss1, ss2 BRANCHED BY tenant TO ss10 \
+            "CREATE JUNCTION join_streams FROM ss1, ss2 DETACHED BRANCHED BY tenant TO ss10 \
              INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");

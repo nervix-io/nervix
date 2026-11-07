@@ -260,19 +260,20 @@ async fn process_command_preserves_detached_deduplicator_and_emitter_modes() {
     let commands = [
         "CREATE SCHEMA notification ( user_id I64 );",
         "CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );",
-        "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
+        "CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
          notification;",
         "CREATE RELAY notifications SCHEMA notification UNBRANCHED;",
         "CREATE RELAY forwarded_notifications SCHEMA notification UNBRANCHED;",
         "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
         "CREATE KAFKA TOPIC INGESTOR notifications_ingestor FROM kafka_main TOPIC 'notifications' \
-         OFFSET BY CONSUMER GROUP 'notifications_group' MODE NO ACK ON QUIESCE SUSPEND DECODE \
-         USING notification_codec TIMESTAMP NOW TO notifications INHERIT ALL UNBRANCHED FLUSH \
-         EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
-        "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications DEDUPLICATE ON input.user_id \
+         OFFSET BY CONSUMER GROUP 'notifications_group' START AT EARLIEST MODE NO ACK ON QUIESCE \
+         SUSPEND DECODE USING notification_codec TIMESTAMP NOW TO notifications INHERIT ALL \
+         UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR \
+         LOG;",
+        "CREATE DEDUPLICATOR passthrough FROM notifications DETACHED DEDUPLICATE ON input.user_id \
          MAX TIME 10m UNBRANCHED TO forwarded_notifications INHERIT ALL FLUSH EACH 100ms MAX \
          BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
-        "CREATE DETACHED KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC \
+        "CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications DETACHED TO kafka_main TOPIC \
          'notifications_out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
          notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
          ON GENERAL ERROR LOG;",
@@ -323,20 +324,20 @@ async fn process_command_creates_junction_model() {
     for command in [
         "CREATE SCHEMA notification ( user_id I64 );",
         "CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );",
-        "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
+        "CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA \
          notification;",
         "CREATE RELAY notifications_a SCHEMA notification UNBRANCHED;",
         "CREATE RELAY notifications_b SCHEMA notification UNBRANCHED;",
         "CREATE RELAY notifications_all SCHEMA notification UNBRANCHED;",
         "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
         "CREATE KAFKA TOPIC INGESTOR ingest_a FROM kafka_main TOPIC 'notifications_a' OFFSET BY \
-         CONSUMER GROUP 'notifications_a_group' MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
-         notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED FLUSH EACH \
-         100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+         CONSUMER GROUP 'notifications_a_group' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND \
+         DECODE USING notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED \
+         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         "CREATE KAFKA TOPIC INGESTOR ingest_b FROM kafka_main TOPIC 'notifications_b' OFFSET BY \
-         CONSUMER GROUP 'notifications_b_group' MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
-         notification_codec TIMESTAMP NOW TO notifications_b INHERIT ALL UNBRANCHED FLUSH EACH \
-         100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+         CONSUMER GROUP 'notifications_b_group' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND \
+         DECODE USING notification_codec TIMESTAMP NOW TO notifications_b INHERIT ALL UNBRANCHED \
+         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         "CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO \
          notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
     ] {
@@ -385,15 +386,15 @@ async fn process_command_creates_deduplicator_model() {
         "CREATE SCHEMA transaction ( transaction_id STRING, amount I64 );",
         "CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT ( transaction_id string, amount \
          integer );",
-        "CREATE CODEC transaction_codec FROM WIRE JSON SCHEMA transaction_wire TO SCHEMA \
+        "CREATE WIRE JSON CODEC transaction_codec FROM WIRE SCHEMA transaction_wire TO SCHEMA \
          transaction;",
         "CREATE RELAY inbound SCHEMA transaction UNBRANCHED;",
         "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",
         "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
         "CREATE KAFKA TOPIC INGESTOR inbound_ingestor FROM kafka_main TOPIC 'inbound' OFFSET BY \
-         CONSUMER GROUP 'inbound_group' MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
-         transaction_codec TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX \
-         BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+         CONSUMER GROUP 'inbound_group' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE \
+         USING transaction_codec TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms \
+         MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         "CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME \
          10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
          ERROR LOG;",

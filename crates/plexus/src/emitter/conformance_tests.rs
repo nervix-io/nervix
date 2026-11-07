@@ -18,9 +18,9 @@
 use std::collections::BTreeMap;
 
 use nervix_models::{
-    CreateEmitter, EmitterBatchContractError, EmitterBatchLegality, EmitterBody, EmitterBodyForm,
-    EmitterEntityKind, EmitterPublishingModeKind, EmitterReference, EmitterReferenceKind,
-    EnvelopeClauseKind, Model, OptionDeclaration, OptionForm, OptionValue,
+    ChoiceRequirement, CreateEmitter, EmitterBatchContractError, EmitterBatchLegality, EmitterBody,
+    EmitterBodyForm, EmitterEntityKind, EmitterPublishingModeKind, EmitterReference,
+    EmitterReferenceKind, EnvelopeClauseKind, Model, OptionDeclaration, OptionForm, OptionValue,
 };
 use strum::IntoEnumIterator as _;
 
@@ -48,6 +48,30 @@ fn first_example(option: &OptionDeclaration) -> &'static str {
     }
 }
 
+/// The option written in the first form `requires` admits: a mode's requirement decides which
+/// choice of a required option stands beside it.
+fn first_admitted_example(
+    option: &OptionDeclaration,
+    requires: &[ChoiceRequirement],
+) -> &'static str {
+    let OptionForm::Choice(choices) = option.form else {
+        return first_example(option);
+    };
+    let Some(requirement) = requires
+        .iter()
+        .find(|requirement| requirement.option == option.keywords)
+    else {
+        return first_example(option);
+    };
+    let Some(admitted) = choices
+        .iter()
+        .find(|choice| requirement.accepts(choice.name))
+    else {
+        panic!("{} declares no choice its mode admits", option.keywords);
+    };
+    admitted.example
+}
+
 /// An option a generated statement writes besides its required ones: its keywords and the option
 /// written in full.
 #[derive(Debug, Clone, Copy)]
@@ -58,12 +82,17 @@ struct WrittenOption {
 
 /// The declared reference, locator and required entity options, before MODE.
 fn reference(kind: EmitterEntityKind) -> String {
-    destination(kind, None)
+    destination(kind, None, &[])
 }
 
 /// The declared reference and locator, then the entity's options in declared order: every required
-/// one, and `written` in its declared place, or after them where only another entity declares it.
-fn destination(kind: EmitterEntityKind, written: Option<WrittenOption>) -> String {
+/// one in the first form `requires` admits, and `written` in its declared place, or after them
+/// where only another entity declares it.
+fn destination(
+    kind: EmitterEntityKind,
+    written: Option<WrittenOption>,
+    requires: &[ChoiceRequirement],
+) -> String {
     let declared = kind.capabilities();
     let mut words = vec![through_locator(kind)];
     let mut placed = false;
@@ -76,7 +105,7 @@ fn destination(kind: EmitterEntityKind, written: Option<WrittenOption>) -> Strin
             continue;
         }
         if option.is_required() {
-            words.push(first_example(option).to_owned());
+            words.push(first_admitted_example(option, requires).to_owned());
         }
     }
     if let Some(written) = written
@@ -124,6 +153,8 @@ struct Generated {
     /// An option written besides the destination's required options.
     option: Option<WrittenOption>,
     mode: &'static str,
+    /// The option choices `mode` needs written beside it.
+    requires: &'static [ChoiceRequirement],
     body: &'static str,
     /// An envelope clause or a property set written after the body.
     envelope: Option<&'static str>,
@@ -149,7 +180,8 @@ impl Generated {
         Self {
             kind,
             option: None,
-            mode: mode.example(),
+            mode: mode.kind.example(),
+            requires: mode.requires,
             body,
             envelope: None,
             batch,
@@ -158,15 +190,27 @@ impl Generated {
 
     /// The statement up to the publishing mode `MODE` introduces.
     fn through_mode(&self) -> String {
-        // A direct `VALUES` emitter writes its option after the body.
         let before_mode = self
             .option
-            .filter(|_| self.kind.capabilities().body != EmitterBodyForm::Values);
+            .filter(|option| !self.written_after_body(option));
         format!(
             "CREATE {} EMITTER generated FROM events TO {} MODE ",
             self.kind.phrase(),
-            destination(self.kind, before_mode)
+            destination(self.kind, before_mode, self.requires)
         )
+    }
+
+    /// Whether the statement writes `option` after its body: a direct `VALUES` emitter writes its
+    /// optional options there, and every required option before `MODE`.
+    fn written_after_body(&self, option: &WrittenOption) -> bool {
+        let declared = self.kind.capabilities();
+        if declared.body != EmitterBodyForm::Values {
+            return false;
+        }
+        let Some(declaration) = declared.option(option.keywords) else {
+            return true;
+        };
+        !declaration.is_required()
     }
 
     fn text(&self) -> String {
@@ -174,10 +218,7 @@ impl Generated {
         if !self.body.is_empty() {
             words.push(self.body.to_owned());
         }
-        if let Some(option) = self
-            .option
-            .filter(|_| self.kind.capabilities().body == EmitterBodyForm::Values)
-        {
+        if let Some(option) = self.option.filter(|option| self.written_after_body(option)) {
             words.push(option.example.to_owned());
         }
         if let Some(envelope) = self.envelope {
@@ -269,14 +310,15 @@ fn every_declared_mode_body_and_batching_parses_into_its_kind() {
             for body in bodies(declared.body) {
                 for batched in batching(declared.batch) {
                     let generated = Generated {
-                        mode: mode.example(),
+                        mode: mode.kind.example(),
+                        requires: mode.requires,
                         body,
                         batch: batched.then(|| BATCH.to_owned()),
                         ..Generated::of(kind)
                     };
                     let emitter = generated.parse();
                     let text = generated.text();
-                    assert_eq!(emitter.connector.publishing().kind(), *mode, "{text}");
+                    assert_eq!(emitter.connector.publishing().kind(), mode.kind, "{text}");
                     assert!(wrote(&emitter.body, body), "{text}");
                     assert_eq!(emitter.batch.is_some(), batched, "{text}");
                     assert!(emitter.validate_batch().is_ok(), "{text}");
@@ -365,7 +407,7 @@ fn a_publishing_mode_the_entity_does_not_declare_is_refused() {
         let declared = kind.capabilities();
         let mut declared_spellings = Vec::new();
         for mode in declared.publishing_modes {
-            declared_spellings.push(mode.example());
+            declared_spellings.push(mode.kind.example());
         }
         for mode in EmitterPublishingModeKind::iter() {
             // A kind spelled as a declared one, such as an application acknowledgement written
@@ -378,6 +420,42 @@ fn a_publishing_mode_the_entity_does_not_declare_is_refused() {
                 ..Generated::of(kind)
             };
             generated.assert_refused(&format!("MODE {}", mode.label()));
+        }
+    }
+}
+
+#[test]
+fn a_publishing_mode_beside_a_choice_it_does_not_admit_is_refused() {
+    for kind in EmitterEntityKind::all() {
+        let declared = kind.capabilities();
+        for mode in declared.publishing_modes {
+            for requirement in mode.requires {
+                let Some(option) = declared.option(requirement.option) else {
+                    panic!("{kind} requires an option it does not declare");
+                };
+                let OptionForm::Choice(choices) = option.form else {
+                    panic!("{kind} requires a choice of {}", option.keywords);
+                };
+                for choice in choices {
+                    if requirement.accepts(choice.name) {
+                        continue;
+                    }
+                    let generated = Generated {
+                        mode: mode.kind.example(),
+                        requires: mode.requires,
+                        option: Some(WrittenOption {
+                            keywords: option.keywords,
+                            example: choice.example,
+                        }),
+                        ..Generated::of(kind)
+                    };
+                    generated.assert_refused(&format!(
+                        "MODE {} beside {}",
+                        mode.kind.label(),
+                        choice.example
+                    ));
+                }
+            }
         }
     }
 }
@@ -508,14 +586,23 @@ fn completion_after_the_body_offers_exactly_the_declared_envelope_clauses() {
 }
 
 #[test]
-fn completion_offers_exactly_the_declared_publishing_modes() {
+fn completion_offers_exactly_the_declared_publishing_modes_the_written_choices_admit() {
     for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
-        let mut spellings = Vec::new();
         for mode in declared.publishing_modes {
-            spellings.push(mode.example());
+            let mut spellings = Vec::new();
+            for other in declared.publishing_modes {
+                if other.requires == mode.requires {
+                    spellings.push(other.kind.example());
+                }
+            }
+            let generated = Generated {
+                mode: mode.kind.example(),
+                requires: mode.requires,
+                ..Generated::of(kind)
+            };
+            assert_offers_exactly(&generated.through_mode(), &spellings);
         }
-        assert_offers_exactly(&Generated::of(kind).through_mode(), &spellings);
     }
 }
 
@@ -587,3 +674,6 @@ fn through_locator(kind: EmitterEntityKind) -> String {
         None => reference,
     }
 }
+
+#[path = "alter_conformance_tests.rs"]
+mod alter;

@@ -16,11 +16,11 @@ Feature: Pulsar receipt bounds and finishing accepted records
       """
       CREATE SCHEMA delivery_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA delivery_wire MODE STRICT ( sequence integer );
-      CREATE CODEC delivery_codec FROM WIRE JSON SCHEMA delivery_wire TO SCHEMA delivery_event;
+      CREATE WIRE JSON CODEC delivery_codec FROM WIRE SCHEMA delivery_wire TO SCHEMA delivery_event;
       CREATE RELAY delivery_events SCHEMA delivery_event UNBRANCHED;
       CREATE VHOST edge pulsar-{{test_id}}.example.com;
-      CREATE ENDPOINT delivery_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR delivery_source
+      CREATE HTTP ENDPOINT delivery_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR delivery_ingestor
         FROM delivery_ingress MODE ACK MAX 100 ACK TIMEOUT 60s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING delivery_codec
         TIMESTAMP NOW
@@ -81,11 +81,11 @@ Feature: Pulsar receipt bounds and finishing accepted records
       """
       CREATE SCHEMA delivery_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA delivery_wire MODE STRICT ( sequence integer );
-      CREATE CODEC delivery_codec FROM WIRE JSON SCHEMA delivery_wire TO SCHEMA delivery_event;
+      CREATE WIRE JSON CODEC delivery_codec FROM WIRE SCHEMA delivery_wire TO SCHEMA delivery_event;
       CREATE RELAY delivery_events SCHEMA delivery_event UNBRANCHED;
       CREATE VHOST edge pulsar-{{test_id}}.example.com;
-      CREATE ENDPOINT delivery_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR delivery_source
+      CREATE HTTP ENDPOINT delivery_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR delivery_ingestor
         FROM delivery_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING delivery_codec
         TIMESTAMP NOW

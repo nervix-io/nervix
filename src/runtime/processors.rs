@@ -1,3 +1,10 @@
+//! Prepared processor programs and concrete branch execution.
+//!
+//! Layer: data plane.
+//! - **Owns.** Shared compiled processor artifacts and the state of one concrete processor branch.
+//! - **Depends on.** Typed processor plans, execution units, Arrow and the execution engines.
+//! - **Must not know.** Semantic Models, Plexus parsing or control-plane placement decisions.
+
 use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
 
 use ahash::HashMap;
@@ -6,8 +13,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     Assignment, AssignmentTarget, BranchName, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     ErrorPolicies, FieldName, InferencerTensorDeclaration, InferencerTensorMapping,
-    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName,
-    RouteConstruction, StructuredMessageError, Timestamp,
+    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeUnitRef, RelayName,
+    ResourceName, RouteConstruction, StructuredMessageError, Timestamp,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
@@ -29,7 +36,7 @@ use super::{
     RelayMessage, RelayRecordBatch, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
     RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence,
     WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState,
-    inferencer::OnnxInferencerSession,
+    inferencer::{OnnxInferencerSession, PreparedStatefulInference, StatefulInferenceSession},
 };
 use crate::{
     registry::{BranchInstanceAckBoundary, BranchedProcessorNodeSpec},
@@ -67,8 +74,50 @@ impl ProcessorPlanRevision {
 /// One fully bound node plan published as part of a complete domain routing revision.
 #[derive(Debug, Clone)]
 pub(super) struct PublishedProcessorPlan {
-    pub(super) source: BranchedProcessorNodeSpec,
+    pub(super) source: Arc<BranchedProcessorNodeSpec>,
+    pub(super) unit_revision: ProcessorUnitRevision,
     pub(super) template: StdArc<BranchInstanceTemplate>,
+}
+
+/// The state lifetime of one unit, independent of the programs its logical node shares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ProcessorUnitRevision {
+    Stateless,
+    Wasm {
+        generations: nervix_models::WasmStateGenerations,
+        reset: Option<nervix_models::WasmStateReset>,
+    },
+}
+
+impl ProcessorUnitRevision {
+    pub(super) fn of(
+        node: &crate::registry::ExecutionNode,
+        unit: nervix_models::Unit,
+    ) -> error_stack::Result<Self, super::planning::PlanningError> {
+        let owner = NodeUnitRef::new(node.identity(), unit);
+        let scheduled = node.units.get(&unit).ok_or_else(|| {
+            Report::new(super::planning::PlanningError::MissingProcessorUnit {
+                owner: owner.clone(),
+            })
+        })?;
+        if node.kind() != ModelKind::WasmProcessor {
+            return Ok(Self::Stateless);
+        }
+        let generations = scheduled.wasm_state_generations.clone().ok_or_else(|| {
+            Report::new(super::planning::PlanningError::MissingWasmUnitGenerations { owner })
+        })?;
+        Ok(Self::Wasm {
+            generations,
+            reset: scheduled.wasm_state_reset.clone(),
+        })
+    }
+
+    pub(super) fn reset(&self) -> Option<&nervix_models::WasmStateReset> {
+        match self {
+            Self::Stateless => None,
+            Self::Wasm { reset, .. } => reset.as_ref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -82,8 +131,7 @@ pub(super) struct WasmAckContext {
 #[derive(Debug, Clone)]
 pub(super) struct BranchInstanceTemplate {
     pub(super) revision: ProcessorPlanRevision,
-    pub(super) entity_kind: ModelKind,
-    pub(super) source: RelayName,
+    pub(super) owner: NodeUnitRef,
     pub(super) root_relay: RelayName,
     pub(super) branch: Option<BranchName>,
     pub(super) branch_ttl: Option<Duration>,
@@ -173,6 +221,17 @@ pub(super) enum RelayProcessorOperationTemplate {
         output_schema: Vec<InferencerTensorDeclaration>,
         compiled_input_program: CompiledInferencerInputProgram,
     },
+    StatefulInferencer {
+        output_routes: RelayProcessorOutputsTemplate,
+        resource: ResourceName,
+        resource_version: u64,
+        file: String,
+        inputs: Vec<InferencerTensorMapping>,
+        output_schema: Vec<InferencerTensorDeclaration>,
+        state: crate::registry::InferencerStatePlan,
+        compiled_input_program: Box<CompiledProgramWithMaterializedInterest>,
+        prepared: Option<Arc<PreparedStatefulInference>>,
+    },
     WasmProcessor {
         output_routes: RelayProcessorOutputsTemplate,
         resource: ResourceName,
@@ -200,6 +259,7 @@ pub(super) struct RelayProcessorOutputTemplate {
 
 #[derive(Debug)]
 pub(super) struct RelayProcessorNode {
+    pub(super) unit: nervix_models::Unit,
     pub(super) kind: ModelKind,
     pub(super) processor: ModelName,
     pub(super) input_relays: Vec<RelayName>,
@@ -269,6 +329,15 @@ pub(super) enum RelayProcessorOperationNode {
         compiled_input_program: CompiledInferencerInputProgram,
         output_buffers: Vec<InferencerOutputBuffer>,
         session: Option<OnnxInferencerSession>,
+    },
+    StatefulInferencer {
+        output_routes: RelayProcessorOutputsNode,
+        resource: ResourceName,
+        resource_version: u64,
+        file: String,
+        compiled_input_program: Box<CompiledProgramWithMaterializedInterest>,
+        prepared: Arc<PreparedStatefulInference>,
+        session: Box<StatefulInferenceSession>,
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsNode,
@@ -390,6 +459,37 @@ impl CompiledInferencerInputProgram {
         input_schema: &CompiledSchema,
         udfs: Option<&UdfExecutor>,
     ) -> error_stack::Result<Self, ProcessorCompileError> {
+        Self::compile_inner(processor, mappings, input_schema, udfs, false)
+            .map(|(program, _)| program)
+    }
+
+    pub(super) fn compile_stateful(
+        processor: &ModelName,
+        mappings: &[InferencerTensorMapping],
+        input_schema: &CompiledSchema,
+        udfs: Option<&UdfExecutor>,
+    ) -> error_stack::Result<CompiledProgramWithMaterializedInterest, ProcessorCompileError> {
+        let (program, error_sites) =
+            Self::compile_inner(processor, mappings, input_schema, udfs, true)?;
+        Ok(CompiledProgramWithMaterializedInterest {
+            compiled: program.program,
+            materialized_interest: super::MaterializedProgramInterest::default(),
+            output_namespace_input: super::vm_compile::OutputNamespaceInput::Uninitialized,
+            lookup_hash_maps: Vec::new(),
+            error_sites,
+        })
+    }
+
+    fn compile_inner(
+        processor: &ModelName,
+        mappings: &[InferencerTensorMapping],
+        input_schema: &CompiledSchema,
+        udfs: Option<&UdfExecutor>,
+        capture_errors: bool,
+    ) -> error_stack::Result<
+        (Self, super::vm_compile::CompiledMessageErrorSites),
+        ProcessorCompileError,
+    > {
         let mut assignments = Vec::with_capacity(mappings.len());
         for mapping in mappings {
             let target = FieldName::parse(&mapping.tensor).change_context_lazy(|| {
@@ -458,9 +558,26 @@ impl CompiledInferencerInputProgram {
         .change_context_lazy(|| ProcessorCompileError::InferencerInputsCompile {
             processor: processor.clone(),
         })?;
-        Ok(Self {
-            program: Arc::new(program),
-        })
+        let error_sites = if capture_errors {
+            super::vm_compile::compiled_message_error_sites(
+                &parsed,
+                &vec![MessageErrorOperation::Inferencer; mappings.len()],
+                None,
+            )
+            .change_context_lazy(|| {
+                ProcessorCompileError::InferencerInputsCompile {
+                    processor: processor.clone(),
+                }
+            })?
+        } else {
+            super::vm_compile::CompiledMessageErrorSites::new()
+        };
+        Ok((
+            Self {
+                program: Arc::new(program),
+            },
+            error_sites,
+        ))
     }
 }
 
@@ -473,6 +590,7 @@ impl RelayProcessorOperationNode {
             | Self::Correlator { output_routes, .. }
             | Self::Junction { output_routes, .. }
             | Self::Inferencer { output_routes, .. }
+            | Self::StatefulInferencer { output_routes, .. }
             | Self::WasmProcessor { output_routes, .. } => output_routes,
         }
     }
@@ -485,6 +603,7 @@ impl RelayProcessorOperationNode {
             | Self::Correlator { output_routes, .. }
             | Self::Junction { output_routes, .. }
             | Self::Inferencer { output_routes, .. }
+            | Self::StatefulInferencer { output_routes, .. }
             | Self::WasmProcessor { output_routes, .. } => output_routes,
         }
     }

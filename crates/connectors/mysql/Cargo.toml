@@ -1,5 +1,5 @@
 [package]
-description = "The MySQL sink connector for Nervix"
+description = "The MySQL emitter connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-mysql"
@@ -10,7 +10,11 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "nervix-connector-fake/shuttle",
+  "nervix-connector/shuttle",
+  "nervix-primitives/shuttle",
+]
 
 [dependencies]
 arrow-array = { workspace = true }
@@ -35,4 +39,5 @@ url = { workspace = true }
 bolero = { workspace = true }
 mysql_common = { workspace = true }
 nervix-arbitrary = { workspace = true }
+nervix-connector-fake = { workspace = true }
 nervix-primitives = { workspace = true, features = ["test-util"] }

@@ -288,7 +288,10 @@ impl SqsTrust {
     /// The HTTP client every request of the SQS client travels over, whose every new connection
     /// resolves the endpoint host through `dns` and takes no proxy.
     fn http_client(self, dns: DnsResolver) -> SharedHttpClient {
-        let builder = Builder::new().tls_provider(Provider::Rustls(CryptoMode::AwsLc));
+        let mode = match nervix_crypto::tls::outward_tls_provider() {
+            nervix_crypto::tls::OutwardTlsProvider::AwsLc => CryptoMode::AwsLc,
+        };
+        let builder = Builder::new().tls_provider(Provider::Rustls(mode));
         match self {
             Self::Platform => builder.build_with_resolver(dns),
             Self::Ca(tls_context) => builder.tls_context(tls_context).build_with_resolver(dns),
@@ -302,6 +305,8 @@ pub(crate) enum SqsRequest {
     QueueLookup,
     Receive,
     Delete,
+    DeleteBatch,
+    ChangeVisibilityBatch,
     Send,
     SendBatch,
 }
@@ -313,6 +318,8 @@ impl SqsRequest {
             Self::QueueLookup => "SQS GetQueueUrl failed",
             Self::Receive => "SQS ReceiveMessage failed",
             Self::Delete => "SQS DeleteMessage failed",
+            Self::DeleteBatch => "SQS DeleteMessageBatch failed",
+            Self::ChangeVisibilityBatch => "SQS ChangeMessageVisibilityBatch failed",
             Self::Send => "SQS SendMessage failed",
             Self::SendBatch => "SQS SendMessageBatch failed",
         }
@@ -324,6 +331,8 @@ impl SqsRequest {
             Self::QueueLookup => "the SQS queue lookup",
             Self::Receive => "an SQS receive after its long poll",
             Self::Delete => "an SQS delete",
+            Self::DeleteBatch => "an SQS batch delete",
+            Self::ChangeVisibilityBatch => "an SQS visibility change",
             Self::Send => "an SQS send",
             Self::SendBatch => "an SQS batch send",
         }

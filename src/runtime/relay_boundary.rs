@@ -21,11 +21,20 @@
     )
 )]
 
-use super::*;
+use super::{
+    relay_channel::{RelayAudience, RelayConsumerSelection, RelayPublication},
+    *,
+};
 
 #[path = "relay_channels.rs"]
 mod channels;
 use channels::{RelayBranchChannels, RelayChannels};
+
+#[path = "relay_boundary_routed.rs"]
+mod routed;
+pub(super) use routed::{
+    RemoteRuntimeConsumer, RoutedDelivery, RuntimeConsumerDispatch, routed_payload,
+};
 
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "relay_boundary_shuttle_tests.rs"]
@@ -53,10 +62,107 @@ pub(super) fn addressable_count(configured: NonZeroU64) -> NonZeroUsize {
         .assured("a non-zero configured count is still non-zero at this target's pointer width")
 }
 
-/// The concrete branches this node's owner of one relay holds, as `DESCRIBE`, materialized reads
-/// and the console's graph observe them. The relay's owner task alone changes it, and only when a
-/// branch appears, is evicted or expires, or the owner starts or stops.
+/// The concrete branches this node's owner of one unit of a relay holds, as `DESCRIBE`,
+/// materialized reads and the console's graph observe them. The unit's owner task alone changes it,
+/// and only when a branch appears, is evicted or expires, or the owner starts or stops.
 pub(super) type RelayBranchPresence = Arc<BranchPresence<BranchKey>>;
+
+/// The branch presence of every unit of one relay, and how the relay divides its keys among those
+/// units, fixed when the relay's services are built. A key's branch is present only in the
+/// presence of the unit that owns it.
+#[derive(Debug, Clone)]
+pub(super) struct RelayBranchPresences {
+    partitioning: RelayPartitioning,
+    by_unit: BTreeMap<Unit, RelayBranchPresence>,
+}
+
+impl RelayBranchPresences {
+    pub(super) fn new(
+        partitioning: RelayPartitioning,
+        by_unit: BTreeMap<Unit, RelayBranchPresence>,
+    ) -> Self {
+        Self {
+            partitioning,
+            by_unit,
+        }
+    }
+
+    /// The presence of a relay that is not divided into partitions: its one `Single` unit's.
+    #[cfg(test)]
+    pub(super) fn single(presence: RelayBranchPresence) -> Self {
+        Self {
+            partitioning: RelayPartitioning::Whole,
+            by_unit: BTreeMap::from([(Unit::SINGLE, presence)]),
+        }
+    }
+
+    /// One fresh presence for each unit of a relay divided as `partitioning`, for a relay this
+    /// node does not own.
+    pub(super) fn fresh(partitioning: RelayPartitioning) -> Self {
+        Self {
+            partitioning,
+            by_unit: partitioning
+                .units()
+                .into_iter()
+                .map(|unit| (unit, Arc::new(BranchPresence::new())))
+                .collect(),
+        }
+    }
+
+    /// How the relay divides its keys among the units these presences belong to.
+    pub(super) fn partitioning(&self) -> RelayPartitioning {
+        self.partitioning
+    }
+
+    pub(super) fn of(&self, unit: Unit) -> Option<&RelayBranchPresence> {
+        self.by_unit.get(&unit)
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&Unit, &RelayBranchPresence)> {
+        self.by_unit.iter()
+    }
+}
+
+/// Where the owner of each unit of one relay runs, as the committed schedule places it. A unit the
+/// table does not name is owned wherever the relay runs, as on a graph no schedule has placed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RelayOwnerRoutes {
+    by_unit: BTreeMap<Unit, ClusterNodeName>,
+}
+
+impl RelayOwnerRoutes {
+    pub(super) fn new(by_unit: BTreeMap<Unit, ClusterNodeName>) -> Self {
+        Self { by_unit }
+    }
+
+    pub(super) fn owner_of(&self, unit: Unit) -> Option<&ClusterNodeName> {
+        self.by_unit.get(&unit)
+    }
+
+    /// The owner table of a relay that is not divided into partitions, owned on `owner`.
+    #[cfg(test)]
+    pub(super) fn single(owner: ClusterNodeName) -> Self {
+        Self {
+            by_unit: BTreeMap::from([(Unit::SINGLE, owner)]),
+        }
+    }
+
+    /// Whether a committed schedule places the relay's owners at all. Every unit of a relay is
+    /// placed by the same schedule, so either every unit has an owner here or none has.
+    pub(super) fn is_placed(&self) -> bool {
+        !self.by_unit.is_empty()
+    }
+
+    /// The units whose owner differs between this table and `other`.
+    fn changed_units(&self, other: &Self) -> Vec<Unit> {
+        let mut units = self.by_unit.keys().copied().collect::<BTreeSet<_>>();
+        units.extend(other.by_unit.keys().copied());
+        units
+            .into_iter()
+            .filter(|unit| self.by_unit.get(unit) != other.by_unit.get(unit))
+            .collect()
+    }
+}
 
 pub(super) struct ConcreteRelayRuntime {
     pub(super) key: Option<BranchKey>,
@@ -64,6 +170,9 @@ pub(super) struct ConcreteRelayRuntime {
     pub(super) domain: DomainName,
     pub(super) relay: RelayName,
     pub(super) services: Arc<RelayBoundaryServices>,
+    /// The unit of the relay that owns this producer's branch, resolved once when the producer is
+    /// bound, or why the branch names none.
+    unit: Result<Unit, RelayPartitionError>,
     channels: RelayProducerChannels,
 }
 
@@ -93,12 +202,16 @@ pub(super) struct RelayBoundaryServices {
     pub(super) fanout: RelayBoundaryFanout,
     pub(super) attached_runtime_consumer_count: AtomicUsize,
     pub(super) detached_runtime_consumer_count: AtomicUsize,
+    unit_runtime_consumers: BTreeMap<Unit, UnitRuntimeConsumers>,
     pub(super) remote_runtime_consumers: ArcSwap<Vec<RemoteRuntimeConsumer>>,
     pub(super) remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
-    pub(super) owner_node: ArcSwapOption<ClusterNodeName>,
-    /// The concrete branches this node's owner of the relay holds, shared with the relay's state
+    /// How the relay's concrete keys are divided among its units, as its branch declares.
+    pub(super) partitioning: RelayPartitioning,
+    /// Where each unit's owner runs, published whole whenever the committed schedule moves one.
+    pub(super) owners: ArcSwap<RelayOwnerRoutes>,
+    /// The concrete branches this node's owner of each unit holds, shared with the unit's state
     /// placement so materialized reads observe the same membership across execution rebuilds.
-    pub(super) branch_presence: RelayBranchPresence,
+    pub(super) branch_presences: RelayBranchPresences,
     /// Record ACK roots retain this domain drain tracker after the relay service's borrow ends.
     pub(super) domain_ack_tracker: Arc<AckRootTracker>,
     channels: RelayChannels,
@@ -267,7 +380,8 @@ pub(super) struct RelayBoundaryBuilder {
     pub(super) fanout: RelayBoundaryFanout,
     pub(super) attached_runtime_consumer_count: usize,
     pub(super) detached_runtime_consumer_count: usize,
-    pub(super) branch_presence: RelayBranchPresence,
+    pub(super) unit_runtime_consumer_counts: BTreeMap<Unit, (usize, usize)>,
+    pub(super) branch_presences: RelayBranchPresences,
     pub(super) remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
 }
 
@@ -277,12 +391,33 @@ pub(super) struct RelayConsumerFanout {
     /// Branch-scoped fences published under a short whole-relay fence. Dispatch reads one immutable
     /// set and takes permits only from entries selecting its branch.
     branch_dispatch_gates: Arc<BranchRelayDispatchGates>,
-    pub(super) owner_buffer: ArcSwapOption<RelayOwnerBuffer>,
+    /// The owner buffer of every unit of this relay this node owns. Each owner task publishes its
+    /// unit's buffer when it starts and withdraws it when it ends, and producers read the buffer of
+    /// their unit from the published table.
+    pub(super) owner_buffers: ArcSwap<RelayOwnerBuffers>,
     pub(super) owner_capacity: AtomicUsize,
     pub(super) transit: Arc<RelayTransit>,
     pub(super) subscriptions: RelaySubscriptions,
     pub(super) attached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
     pub(super) detached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
+    /// Lifecycle-only registration. Delivery retains the selected audience in its services.
+    unit_audiences:
+        nervix_primitives::sync::blocking::Mutex<BTreeMap<Unit, Arc<UnitRuntimeAudiences>>>,
+}
+
+#[derive(Debug)]
+struct UnitRuntimeAudiences {
+    dispatch_gate: Arc<RelayDispatchGate>,
+    transit: Arc<RelayTransit>,
+    attached: RelayAudience<RelayRecordBatch>,
+    detached: RelayAudience<RelayRecordBatch>,
+}
+
+#[derive(Debug)]
+struct UnitRuntimeConsumers {
+    audiences: Arc<UnitRuntimeAudiences>,
+    attached: AtomicUsize,
+    detached: AtomicUsize,
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +496,42 @@ impl RelayOwnerBuffer {
     }
 }
 
+/// The owner buffers one node holds for the units of a relay it owns, keyed by unit and published
+/// whole. A relay without partitions holds at most its `Single` unit's buffer; a partitioned relay
+/// holds one buffer, of the relay's whole `CAPACITY`, for each partition this node owns.
+#[derive(Debug, Default)]
+pub(super) struct RelayOwnerBuffers {
+    by_unit: BTreeMap<Unit, StdArc<RelayOwnerBuffer>>,
+}
+
+impl RelayOwnerBuffers {
+    fn get(&self, unit: Unit) -> Option<&StdArc<RelayOwnerBuffer>> {
+        self.by_unit.get(&unit)
+    }
+
+    fn with(&self, unit: Unit, buffer: StdArc<RelayOwnerBuffer>) -> Self {
+        let mut by_unit = self.by_unit.clone();
+        by_unit.insert(unit, buffer);
+        Self { by_unit }
+    }
+
+    /// This table without `unit`'s buffer, when the published buffer is still `buffer`.
+    fn without(&self, unit: Unit, buffer: &StdArc<RelayOwnerBuffer>) -> Self {
+        let mut by_unit = self.by_unit.clone();
+        if by_unit
+            .get(&unit)
+            .is_some_and(|published| StdArc::ptr_eq(published, buffer))
+        {
+            by_unit.remove(&unit);
+        }
+        Self { by_unit }
+    }
+
+    fn buffers(&self) -> std::collections::btree_map::Values<'_, Unit, StdArc<RelayOwnerBuffer>> {
+        self.by_unit.values()
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct BranchCollapseNode {
     pub(super) fanout: RelayConsumerFanout,
@@ -378,77 +549,6 @@ pub(super) struct BranchCollapseNode {
 pub(super) enum RelayBoundaryFanout {
     Direct(Arc<RelayConsumerFanout>),
     BranchCollapse(Arc<BranchCollapseNode>),
-}
-
-/// One destination's share of a relay fanout.
-///
-/// The body is a parameter rather than something this builds, because the fanout encodes it once
-/// and every destination carries a handle to that one allocation. Only the target relay and the
-/// acknowledgement obligations differ between destinations.
-pub(super) struct RoutedDelivery<'a> {
-    pub(super) delivery: RelayDelivery,
-    pub(super) domain: &'a DomainName,
-    pub(super) consumer: &'a RemoteRuntimeConsumer,
-    pub(super) batch: &'a RelayRecordBatch,
-    pub(super) batch_ipc: ChargedBytes,
-    pub(super) acks: Vec<Option<RemoteAckRegistration>>,
-}
-
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "retained relay handles route each admitted record and keep channel ordering and \
-                  fences"
-    )
-)]
-pub(super) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
-    RelayPayload {
-        delivery: delivery.delivery,
-        kind: RelayPayloadKind::Routed,
-        domain: delivery.domain.clone(),
-        relay: delivery.consumer.relay.clone(),
-        key: BranchKey::to_remote_key(&delivery.batch.key),
-        batch_ipc: delivery.batch_ipc,
-        metadata: delivery.batch.metadata.to_remote(),
-        acks: delivery.acks,
-        admission: None,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RemoteRuntimeConsumer {
-    pub(super) node_id: ClusterNodeName,
-    pub(super) relay: RelayName,
-    pub(super) mode: AckMode,
-}
-
-/// How a batch reaches this node's runtime consumers of a relay, which decides what reaching no
-/// attached consumer here means.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum RuntimeConsumerDispatch {
-    /// The relay owner fans out a batch of its own relay. Its remote consumers can take what no
-    /// local consumer does, and a relay that no attached consumer reads leaves nothing to wait for.
-    Owner,
-    /// The owner of the relay on another node routed the batch here, because its schedule places an
-    /// attached consumer of the relay on this node.
-    Routed,
-}
-
-impl RuntimeConsumerDispatch {
-    /// Whether a batch that carries record acknowledgements must reach an attached consumer on this
-    /// node.
-    ///
-    /// A routed batch that finds none was routed for a consumer that has since left the node, as
-    /// when a forced recovery moves it off a node the scheduler judged unavailable while the batch
-    /// was in flight. Nothing here can complete the work its acknowledgements stand for, so
-    /// completing them would report records no consumer processed.
-    fn requires_local_attached_consumer(self) -> bool {
-        match self {
-            Self::Owner => false,
-            Self::Routed => true,
-        }
-    }
 }
 
 pub(super) struct RelayOwnerTask {
@@ -490,6 +590,7 @@ impl RelayOwnerBranchState {
 }
 
 pub(super) struct RelayStateTask {
+    pub(super) unit: Unit,
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) task: JoinHandle<()>,
 }
@@ -576,12 +677,13 @@ impl RelayConsumerFanout {
                 entries: ArcSwap::from_pointee(Vec::new()),
                 next_id: AtomicU64::new(0),
             }),
-            owner_buffer: ArcSwapOption::empty(),
+            owner_buffers: ArcSwap::from_pointee(RelayOwnerBuffers::default()),
             owner_capacity: AtomicUsize::new(capacity.get()),
             transit: Arc::new(RelayTransit::default()),
             subscriptions: RelaySubscriptions::new(),
             attached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
             detached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
+            unit_audiences: Default::default(),
         }
     }
 
@@ -592,44 +694,53 @@ impl RelayConsumerFanout {
 
     pub(super) fn set_capacity(&self, capacity: NonZeroUsize) {
         self.owner_capacity.store(capacity.get(), Ordering::Release);
-        let owner_buffer = self.owner_buffer.load();
-        if let Some(buffer) = owner_buffer.as_deref() {
+        let owner_buffers = self.owner_buffers.load();
+        for buffer in owner_buffers.buffers() {
             buffer.set_capacity(capacity);
         }
     }
 
+    /// Publishes a buffer for `unit`, of the relay's current capacity, and returns the receiver its
+    /// owner task drains together with the buffer it withdraws when it ends.
     pub(super) fn activate_owner_buffer(
         &self,
+        unit: Unit,
         metrics: RelayMetricsHandle,
-    ) -> RelayRuntimeConsumerReceiver {
+    ) -> (RelayRuntimeConsumerReceiver, StdArc<RelayOwnerBuffer>) {
         let capacity = NonZeroUsize::new(self.owner_capacity.load(Ordering::Acquire))
             .verified("relay capacity is validated as nonzero before it is stored");
         let buffer = StdArc::new(RelayOwnerBuffer::with_capacity(capacity, metrics));
         let receiver = buffer.new_receiver();
-        self.owner_buffer.store(Some(buffer));
-        receiver
+        self.owner_buffers
+            .rcu(|current| current.with(unit, buffer.clone()));
+        (receiver, buffer)
     }
 
-    pub(super) fn deactivate_owner_buffer(&self) {
-        self.owner_buffer.store(None);
+    /// Withdraws `unit`'s buffer while it is still `buffer`, so an ending owner never withdraws the
+    /// buffer a successor of the same unit already published.
+    pub(super) fn deactivate_owner_buffer(&self, unit: Unit, buffer: &StdArc<RelayOwnerBuffer>) {
+        self.owner_buffers
+            .rcu(|current| current.without(unit, buffer));
     }
 
-    /// The owner buffer held in full, for a caller that keeps it across an await.
-    pub(super) fn owner_buffer(&self) -> Option<StdArc<RelayOwnerBuffer>> {
-        self.owner_buffer.load_full()
+    /// The owner buffer of `unit` held in full, for a caller that keeps it across an await.
+    pub(super) fn owner_buffer(&self, unit: Unit) -> Option<StdArc<RelayOwnerBuffer>> {
+        self.owner_buffers.load().get(unit).cloned()
     }
 
-    pub(super) fn owner_buffer_len(&self) -> Option<(usize, usize)> {
-        let owner_buffer = self.owner_buffer.load();
-        owner_buffer
-            .as_deref()
+    pub(super) fn owner_buffer_len(&self, unit: Unit) -> Option<(usize, usize)> {
+        let owner_buffers = self.owner_buffers.load();
+        owner_buffers
+            .get(unit)
             .map(|buffer| (buffer.len(), buffer.capacity()))
     }
 
+    #[cfg(all(test, any(feature = "shuttle", feature = "loom")))]
     pub(super) fn begin_owner_admission(&self) -> RelayOwnerAdmission {
         RelayOwnerAdmission::new(self.transit.clone())
     }
 
+    #[cfg(all(test, any(feature = "shuttle", feature = "loom")))]
     pub(super) fn begin_owner_batch_completion(&self) -> RelayOwnerBatchCompletion {
         RelayOwnerBatchCompletion::new(self.transit.clone())
     }
@@ -640,6 +751,32 @@ impl RelayConsumerFanout {
     ) -> RelayRuntimeConsumerReceiver {
         self.runtime_consumer_broadcast_for_mode(mode)
             .new_receiver()
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "unit registration retains its audiences before delivery starts"
+        )
+    )]
+    fn unit_audiences(&self, unit: Unit) -> Arc<UnitRuntimeAudiences> {
+        let mut audiences = self.unit_audiences.lock();
+        audiences
+            .entry(unit)
+            .or_insert_with(|| {
+                Arc::new(UnitRuntimeAudiences {
+                    dispatch_gate: Arc::new(RelayDispatchGate::new()),
+                    transit: Arc::new(RelayTransit::within(self.transit.clone())),
+                    attached: self.attached_runtime_consumers.new_audience().assured(
+                        "each audience is retained in memory before another identity is allocated",
+                    ),
+                    detached: self.detached_runtime_consumers.new_audience().assured(
+                        "each audience is retained in memory before another identity is allocated",
+                    ),
+                })
+            })
+            .clone()
     }
 
     pub(super) fn dispatch_gate(&self) -> Arc<RelayDispatchGate> {
@@ -761,12 +898,35 @@ impl RelayConsumerFanout {
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
+        self.dispatch_publications(
+            dispatch,
+            attached_runtime_consumer_count,
+            detached_runtime_consumer_count,
+            self.attached_runtime_consumers.publication(),
+            || self.detached_runtime_consumers.publication(),
+            batch,
+        )
+        .await
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the two local publication callbacks borrow their retained \
+                                   common or unit fan-out and only read its immutable \
+                                   registration snapshot")
+    )]
+    async fn dispatch_publications<'a, Selection: RelayConsumerSelection<RelayRecordBatch>>(
+        &self,
+        dispatch: RuntimeConsumerDispatch,
+        attached_runtime_consumer_count: usize,
+        detached_runtime_consumer_count: usize,
+        attached: RelayPublication<'_, RelayRecordBatch, Selection>,
+        detached_publication: impl Fn() -> RelayPublication<'a, RelayRecordBatch, Selection>,
+        batch: &RelayRecordBatch,
+    ) -> RelayDispatchResult {
         // The shares reserved for the attached consumers and the deliveries to them come from the
         // same registration snapshot, so a consumer that registers meanwhile never receives the
         // batch without a share of its own.
-        let attached = self
-            .runtime_consumer_broadcast_for_mode(AckMode::Attached)
-            .publication();
         let attached_receiver_count = attached.receivers();
         if attached_runtime_consumer_count > 0
             && attached_receiver_count < attached_runtime_consumer_count
@@ -800,26 +960,21 @@ impl RelayConsumerFanout {
             }
         }
 
-        let detached_receiver_count = self
-            .runtime_consumer_broadcast_for_mode(AckMode::Detached)
-            .receiver_count();
+        // Detached observation and publication both start after attached admission. Keep their
+        // separate reads so a consumer joining between the count and broadcast receives the batch.
+        let detached_receiver_count = detached_publication().receivers();
         if detached_runtime_consumer_count > 0
             && detached_receiver_count < detached_runtime_consumer_count
         {
             warn!("detached runtime consumer receiver is unavailable");
         }
-        if detached_receiver_count > 0 {
-            let detached = batch.detached();
-            if let Err(error) = self
-                .runtime_consumer_broadcast_for_mode(AckMode::Detached)
-                .broadcast(detached)
-                .await
-            {
-                warn!(
-                    error = %error,
-                    "detached runtime consumer relay broadcast failed"
-                );
-            }
+        if detached_receiver_count > 0
+            && let Err(error) = detached_publication().broadcast(batch.detached()).await
+        {
+            warn!(
+                error = %error,
+                "detached runtime consumer relay broadcast failed"
+            );
         }
 
         Ok(())
@@ -872,6 +1027,52 @@ impl BranchCollapseNode {
 }
 
 impl RelayBoundaryFanout {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "a selected-unit drain observes retained transit and dedicated consumer \
+                      queues"
+        )
+    )]
+    pub(super) fn unit_outstanding_work_len(&self, units: &BTreeSet<Unit>) -> usize {
+        let audiences = self.consumers().unit_audiences.lock();
+        units
+            .iter()
+            .filter_map(|unit| audiences.get(unit))
+            .map(|audience| {
+                audience
+                    .transit
+                    .held()
+                    .checked_add(audience.attached.dedicated_len())
+                    .and_then(|count| count.checked_add(audience.detached.dedicated_len()))
+                    .assured("the counts total batches retained in memory")
+            })
+            .sum()
+    }
+
+    fn consumers(&self) -> &RelayConsumerFanout {
+        match self {
+            Self::Direct(fanout) => fanout,
+            Self::BranchCollapse(collapse) => &collapse.fanout,
+        }
+    }
+
+    /// Lifecycle binding of the fixed dispatch fence for one partition. Record delivery retains
+    /// this gate through its services and never returns to the audience registry.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "installation and handoff retain the partition dispatch gate before use"
+        )
+    )]
+    pub(super) fn unit_dispatch_gate(&self, unit: Unit) -> Option<Arc<RelayDispatchGate>> {
+        if unit == Unit::SINGLE {
+            return None;
+        }
+        Some(self.consumers().unit_audiences(unit).dispatch_gate.clone())
+    }
     pub(super) fn direct_with_capacity(capacity: NonZeroUsize) -> Self {
         Self::Direct(Arc::new(RelayConsumerFanout::with_capacity(capacity)))
     }
@@ -896,43 +1097,37 @@ impl RelayBoundaryFanout {
 
     pub(super) fn activate_owner_buffer(
         &self,
+        unit: Unit,
         metrics: RelayMetricsHandle,
-    ) -> RelayRuntimeConsumerReceiver {
+    ) -> (RelayRuntimeConsumerReceiver, StdArc<RelayOwnerBuffer>) {
         match self {
-            Self::Direct(fanout) => fanout.activate_owner_buffer(metrics),
+            Self::Direct(fanout) => fanout.activate_owner_buffer(unit, metrics),
             Self::BranchCollapse(branch_collapse) => {
-                branch_collapse.fanout.activate_owner_buffer(metrics)
+                branch_collapse.fanout.activate_owner_buffer(unit, metrics)
             }
         }
     }
 
-    pub(super) fn deactivate_owner_buffer(&self) {
+    pub(super) fn deactivate_owner_buffer(&self, unit: Unit, buffer: &StdArc<RelayOwnerBuffer>) {
         match self {
-            Self::Direct(fanout) => fanout.deactivate_owner_buffer(),
+            Self::Direct(fanout) => fanout.deactivate_owner_buffer(unit, buffer),
             Self::BranchCollapse(branch_collapse) => {
-                branch_collapse.fanout.deactivate_owner_buffer();
+                branch_collapse.fanout.deactivate_owner_buffer(unit, buffer);
             }
         }
     }
 
-    pub(super) fn owner_buffer(&self) -> Option<StdArc<RelayOwnerBuffer>> {
+    pub(super) fn owner_buffer(&self, unit: Unit) -> Option<StdArc<RelayOwnerBuffer>> {
         match self {
-            Self::Direct(fanout) => fanout.owner_buffer(),
-            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.owner_buffer(),
+            Self::Direct(fanout) => fanout.owner_buffer(unit),
+            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.owner_buffer(unit),
         }
     }
 
-    pub(super) fn owner_buffer_len(&self) -> Option<(usize, usize)> {
+    pub(super) fn owner_buffer_len(&self, unit: Unit) -> Option<(usize, usize)> {
         match self {
-            Self::Direct(fanout) => fanout.owner_buffer_len(),
-            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.owner_buffer_len(),
-        }
-    }
-
-    pub(super) fn begin_owner_admission(&self) -> RelayOwnerAdmission {
-        match self {
-            Self::Direct(fanout) => fanout.begin_owner_admission(),
-            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.begin_owner_admission(),
+            Self::Direct(fanout) => fanout.owner_buffer_len(unit),
+            Self::BranchCollapse(branch_collapse) => branch_collapse.fanout.owner_buffer_len(unit),
         }
     }
 
@@ -941,15 +1136,6 @@ impl RelayBoundaryFanout {
         match self {
             Self::Direct(fanout) => &fanout.transit,
             Self::BranchCollapse(branch_collapse) => &branch_collapse.fanout.transit,
-        }
-    }
-
-    pub(super) fn begin_owner_batch_completion(&self) -> RelayOwnerBatchCompletion {
-        match self {
-            Self::Direct(fanout) => fanout.begin_owner_batch_completion(),
-            Self::BranchCollapse(branch_collapse) => {
-                branch_collapse.fanout.begin_owner_batch_completion()
-            }
         }
     }
 
@@ -1135,36 +1321,120 @@ impl RelayRuntimeFanIn {
 /// A relay owner consumes the retention decision made with the rest of its domain plan.
 pub(super) use crate::registry::PlannedRelayRetention as RelayRetention;
 
-/// One materialized relay's runtime task: the relay it serves, the replicated state it maintains,
-/// the branch retention limits it enforces, and the fan-in it consumes.
+/// One materialized relay unit's runtime task: the relay and unit it serves, the replicated state
+/// it maintains, the branch retention limits it enforces, and the fan-in it consumes.
 pub(super) struct RelayStateTaskSpec {
     pub(super) relay: RelayName,
+    /// The unit whose keys this task materializes. Its fan-in registers with this partition's
+    /// fixed audience, so sibling partitions occupy none of its queue capacity.
+    pub(super) unit: Unit,
+    pub(super) partitioning: RelayPartitioning,
     pub(super) state: MaterializedRelayStateOriginator,
     pub(super) retention: RelayRetention,
     pub(super) receiver: RelayRuntimeFanIn,
 }
 
 impl RelayBoundaryServices {
+    fn transit_for_unit(&self, unit: Unit) -> &Arc<RelayTransit> {
+        match self.unit_runtime_consumers.get(&unit) {
+            Some(consumers) => &consumers.audiences.transit,
+            None => self.fanout.transit(),
+        }
+    }
+    fn unit_dispatch_gate(&self, unit: Unit) -> Option<&Arc<RelayDispatchGate>> {
+        self.unit_runtime_consumers
+            .get(&unit)
+            .map(|consumers| &consumers.audiences.dispatch_gate)
+    }
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "execution binding retains all declared unit audiences and gates once"
+        )
+    )]
     pub(super) fn new(
         fanout: RelayBoundaryFanout,
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
         remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
-        branch_presence: RelayBranchPresence,
+        branch_presences: RelayBranchPresences,
         domain_ack_tracker: Arc<AckRootTracker>,
     ) -> Self {
+        let partitioning = branch_presences.partitioning();
+        let unit_runtime_consumers = partitioning
+            .units()
+            .into_iter()
+            .filter(|unit| *unit != Unit::SINGLE)
+            .map(|unit| {
+                (
+                    unit,
+                    UnitRuntimeConsumers {
+                        audiences: fanout.consumers().unit_audiences(unit),
+                        attached: AtomicUsize::new(0),
+                        detached: AtomicUsize::new(0),
+                    },
+                )
+            })
+            .collect();
         Self {
             fanout,
             attached_runtime_consumer_count: AtomicUsize::new(attached_runtime_consumer_count),
             detached_runtime_consumer_count: AtomicUsize::new(detached_runtime_consumer_count),
+            unit_runtime_consumers,
             remote_runtime_consumers: ArcSwap::from_pointee(remote_runtime_consumers),
             remote_dispatcher,
-            owner_node: ArcSwapOption::empty(),
-            branch_presence,
+            partitioning,
+            owners: ArcSwap::from_pointee(RelayOwnerRoutes::default()),
+            branch_presences,
             domain_ack_tracker,
-            channels: RelayChannels::default(),
+            channels: RelayChannels::for_units(&partitioning.units()),
         }
+    }
+
+    /// The unit that owns the branch `key` names, refusing a keyless batch of a partitioned relay.
+    pub(super) fn unit_of(
+        &self,
+        key: &Option<BranchKey>,
+    ) -> error_stack::Result<Unit, RelayPartitionError> {
+        self.partitioning.unit_of(key)
+    }
+
+    /// Whether this node's owner of the unit that owns `key` holds `key`'s branch. A key that names
+    /// no unit of the relay is held by none.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "DESCRIBE and materialized reads observe one key's published branch presence"
+        )
+    )]
+    pub(super) fn holds_branch(&self, key: &Option<BranchKey>) -> bool {
+        let Ok(unit) = self.partitioning.unit_of(key) else {
+            return false;
+        };
+        match self.branch_presences.of(unit) {
+            Some(presence) => presence.contains(key.as_ref()),
+            None => false,
+        }
+    }
+
+    /// The fingerprint of every concrete branch this node's owners of the relay's units hold.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "the console's graph enumerates the published presence of each unit"
+        )
+    )]
+    pub(super) fn held_branch_fingerprints(&self) -> BTreeSet<BranchKeyFingerprint> {
+        let mut fingerprints = BTreeSet::new();
+        for (_, presence) in self.branch_presences.iter() {
+            let membership = presence.load();
+            fingerprints.extend(membership.branches().map(BranchKey::fingerprint));
+        }
+        fingerprints
     }
 
     #[cfg(test)]
@@ -1179,12 +1449,16 @@ impl RelayBoundaryServices {
             reason = "schedule publication replaces the relay's owner route"
         )
     )]
-    pub(super) fn replace_owner_node(&self, owner_node: Option<ClusterNodeName>) {
-        if self.owner_node.load().as_deref() == owner_node.as_ref() {
+    pub(super) fn replace_owner_routes(&self, routes: RelayOwnerRoutes) {
+        let current = self.owners.load_full();
+        let changed = current.changed_units(&routes);
+        if changed.is_empty() {
             return;
         }
-        self.channels.replace_owner();
-        self.owner_node.store(owner_node.map(StdArc::new));
+        // Only the branches of a unit whose owner moved retire their channels; every other unit's
+        // producers keep delivering to the owner they already reach.
+        self.channels.replace_owner_of(&changed);
+        self.owners.store(StdArc::new(routes));
     }
 
     /// A committed forced move cannot drain through its fenced former owner. Retire only a
@@ -1199,38 +1473,57 @@ impl RelayBoundaryServices {
     )]
     pub(super) fn fence_routing_change(
         &self,
-        owner_node: Option<&ClusterNodeName>,
+        routes: &RelayOwnerRoutes,
         consumers: &[RemoteRuntimeConsumer],
     ) {
-        if self.owner_node.load().as_deref() == owner_node
-            && self.remote_runtime_consumers.load().as_slice() == consumers
-        {
-            return;
+        let mut changed = self.owners.load().changed_units(routes);
+        changed.extend(self.changed_consumer_units(consumers));
+        changed.sort_unstable();
+        changed.dedup();
+        if !changed.is_empty() {
+            self.channels.fence_routing_of(&changed);
         }
-        self.channels.fence_routing();
     }
 
-    pub(super) fn dispatch_is_fenced(&self) -> bool {
+    pub(super) fn dispatch_is_fenced(&self, unit: Unit) -> bool {
         self.fanout.dispatch_is_fenced()
+            || self
+                .unit_dispatch_gate(unit)
+                .is_some_and(|gate| gate.is_engaged())
     }
 
-    pub(super) fn is_owned_by(&self, node_id: Option<&ClusterNodeName>) -> bool {
-        let owner_node = self.owner_node.load();
-        owner_node
-            .as_deref()
+    /// Whether `node_id` owns `unit`. A unit no schedule places is owned wherever it runs.
+    pub(super) fn is_owned_by(&self, node_id: Option<&ClusterNodeName>, unit: Unit) -> bool {
+        let owners = self.owners.load();
+        owners
+            .owner_of(unit)
             .is_none_or(|owner| Some(owner) == node_id)
     }
 
-    pub(super) fn activate_owner_buffer(&self, metrics: RelayMetricsHandle) -> RelayRuntimeFanIn {
-        RelayRuntimeFanIn::new(self.fanout.activate_owner_buffer(metrics))
+    /// The cluster node the owner of `unit` runs on, when a schedule places it.
+    pub(super) fn owner_of(&self, unit: Unit) -> Option<ClusterNodeName> {
+        self.owners.load().owner_of(unit).cloned()
     }
 
-    pub(super) fn deactivate_owner_buffer(&self) {
-        self.fanout.deactivate_owner_buffer();
+    pub(super) fn activate_owner_buffer(
+        &self,
+        unit: Unit,
+        metrics: RelayMetricsHandle,
+    ) -> (RelayRuntimeFanIn, StdArc<RelayOwnerBuffer>) {
+        let (receiver, buffer) = self.fanout.activate_owner_buffer(unit, metrics);
+        (RelayRuntimeFanIn::new(receiver), buffer)
     }
 
-    pub(super) fn ingress_slot(&self, branch: &Option<BranchKey>) -> StdArc<RelayOutboundSlot> {
-        self.channels.bind(branch).ingress()
+    pub(super) fn deactivate_owner_buffer(&self, unit: Unit, buffer: &StdArc<RelayOwnerBuffer>) {
+        self.fanout.deactivate_owner_buffer(unit, buffer);
+    }
+
+    pub(super) fn ingress_slot(
+        &self,
+        branch: &Option<BranchKey>,
+        unit: Unit,
+    ) -> StdArc<RelayOutboundSlot> {
+        self.channels.bind(branch, unit).ingress()
     }
 
     pub(super) fn outbound_slot(
@@ -1239,23 +1532,27 @@ impl RelayBoundaryServices {
         relay: &RelayName,
         kind: RelayPayloadKind,
         branch: &Option<BranchKey>,
+        unit: Unit,
     ) -> StdArc<RelayOutboundSlot> {
-        self.channels.bind(branch).outbound(RelayOutboundChannel {
-            node_id: node_id.clone(),
-            relay: relay.clone(),
-            kind,
-        })
+        self.channels
+            .bind(branch, unit)
+            .outbound(RelayOutboundChannel {
+                node_id: node_id.clone(),
+                relay: relay.clone(),
+                kind,
+            })
     }
 
     pub(super) fn subscription_channels(
         &self,
         branch: &Option<BranchKey>,
+        unit: Unit,
         snapshot: StdArc<crate::runtime::SubscriptionInterestIndex>,
         domain: &DomainName,
         relay: &RelayName,
     ) -> StdArc<channels::SubscriptionChannels> {
         self.channels
-            .bind(branch)
+            .bind(branch, unit)
             .subscriptions(snapshot, domain, relay)
     }
 
@@ -1270,17 +1567,22 @@ impl RelayBoundaryServices {
     pub(super) async fn enqueue_owner_batch(
         &self,
         batch: &RelayRecordBatch,
+        unit: Unit,
     ) -> RelayDispatchResult {
+        let _unit_permit = match self.unit_dispatch_gate(unit) {
+            Some(gate) => Some(gate.acquire_dispatch().await),
+            None => None,
+        };
         let dispatch_gate = self.fanout.dispatch_gate();
         let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
         let _branch_dispatch_permits = self.fanout.acquire_branch_dispatch_gates(&batch.key).await;
-        let Some(buffer) = self.fanout.owner_buffer() else {
+        let Some(buffer) = self.fanout.owner_buffer(unit) else {
             for ack in batch.acks.iter() {
                 ack.no_ack("relay owner buffer is unavailable");
             }
             return Err(Box::new(batch.clone()));
         };
-        let admission = self.fanout.begin_owner_admission();
+        let admission = RelayOwnerAdmission::new(self.transit_for_unit(unit).clone());
         if let Err(error) = buffer.batches.broadcast(batch.attached()).await {
             for ack in error.batch.acks.iter() {
                 ack.no_ack("relay owner buffer is unavailable");
@@ -1292,8 +1594,8 @@ impl RelayBoundaryServices {
         Ok(())
     }
 
-    pub(super) fn begin_owner_batch_completion(&self) -> RelayOwnerBatchCompletion {
-        self.fanout.begin_owner_batch_completion()
+    pub(super) fn begin_owner_batch_completion(&self, unit: Unit) -> RelayOwnerBatchCompletion {
+        RelayOwnerBatchCompletion::new(self.transit_for_unit(unit).clone())
     }
 
     #[cfg_attr(
@@ -1311,9 +1613,16 @@ impl RelayBoundaryServices {
         domain: &DomainName,
         relay: &RelayName,
         batch: &RelayRecordBatch,
+        unit: Unit,
     ) -> RelayDispatchResult {
-        self.dispatch_to_owner_on(domain, relay, batch, self.ingress_slot(&batch.key))
-            .await
+        self.dispatch_to_owner_on(
+            domain,
+            relay,
+            unit,
+            batch,
+            self.ingress_slot(&batch.key, unit),
+        )
+        .await
     }
 
     /// Delivers `batch` to the relay's owner through `ingress_slot`.
@@ -1321,17 +1630,24 @@ impl RelayBoundaryServices {
     /// The owner reports the batch's records alive to their sources once it has admitted them, and
     /// not before. Until then this node holds them on their sources' behalf, so it reports them
     /// alive itself while the delivery waits for its gates, its channel, the storage of its
-    /// records, a grant or the owner's admission. A source's `ACK TIMEOUT` therefore measures how
+    /// records, a grant or the owner's admission. An ingestor's `ACK TIMEOUT` therefore measures how
     /// long its records make no progress, not how long they take to reach their owner.
     async fn dispatch_to_owner_on(
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         batch: &RelayRecordBatch,
         ingress_slot: StdArc<RelayOutboundSlot>,
     ) -> RelayDispatchResult {
         batch
-            .keep_alive_while_pending(self.deliver_to_owner_on(domain, relay, batch, ingress_slot))
+            .keep_alive_while_pending(self.deliver_to_owner_on(
+                domain,
+                relay,
+                unit,
+                batch,
+                ingress_slot,
+            ))
             .await
     }
 
@@ -1339,13 +1655,18 @@ impl RelayBoundaryServices {
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         batch: &RelayRecordBatch,
         ingress_slot: StdArc<RelayOutboundSlot>,
     ) -> RelayDispatchResult {
+        let _unit_permit = match self.unit_dispatch_gate(unit) {
+            Some(gate) => Some(gate.acquire_dispatch().await),
+            None => None,
+        };
         let dispatch_gate = self.fanout.dispatch_gate();
         let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
         let _branch_dispatch_permits = self.fanout.acquire_branch_dispatch_gates(&batch.key).await;
-        let Some(owner_node) = self.owner_node.load_full() else {
+        let Some(owner_node) = self.owner_of(unit) else {
             for ack in batch.acks.iter() {
                 ack.no_ack("relay owner is unavailable");
             }
@@ -1424,6 +1745,7 @@ impl RelayBoundaryServices {
                     kind: RelayPayloadKind::Ingress,
                     domain: domain.clone(),
                     relay: relay.clone(),
+                    unit,
                     key: BranchKey::to_remote_key(&batch.key),
                     batch_ipc,
                     metadata: batch.metadata.to_remote(),
@@ -1457,8 +1779,8 @@ impl RelayBoundaryServices {
         Ok(())
     }
 
-    pub(super) fn observe_owner_buffer_length(&self, metrics: &RelayMetricsHandle) {
-        let Some((len, capacity)) = self.fanout.owner_buffer_len() else {
+    pub(super) fn observe_owner_buffer_length(&self, unit: Unit, metrics: &RelayMetricsHandle) {
+        let Some((len, capacity)) = self.fanout.owner_buffer_len(unit) else {
             return;
         };
         metrics.observe_buffer(len, capacity);
@@ -1472,6 +1794,7 @@ impl RelayBoundaryServices {
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         batch: &RelayRecordBatch,
     ) {
         let Some(dispatcher) = &self.remote_dispatcher else {
@@ -1480,18 +1803,51 @@ impl RelayBoundaryServices {
         let remote_runtime_consumers = self.remote_runtime_consumers.load_full();
         let excluded_nodes = remote_runtime_consumers
             .iter()
+            .filter(|consumer| consumer.mode_for(unit).is_some())
             .map(|consumer| consumer.node_id.clone())
             .collect::<BTreeSet<_>>();
         dispatcher
-            .dispatch_subscription_fanout(self, domain, relay, &batch.detached(), &excluded_nodes)
+            .dispatch_subscription_fanout(
+                self,
+                domain,
+                relay,
+                unit,
+                &batch.detached(),
+                &excluded_nodes,
+            )
             .await;
     }
 
     pub(super) async fn dispatch_local_runtime_consumers(
         &self,
         dispatch: RuntimeConsumerDispatch,
+        unit: Unit,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
+        if let Some(consumers) = self.unit_runtime_consumers.get(&unit) {
+            let attached = self
+                .attached_runtime_consumer_count
+                .load(Ordering::Acquire)
+                .checked_add(consumers.attached.load(Ordering::Acquire))
+                .assured("registered consumers are held in memory");
+            let detached = self
+                .detached_runtime_consumer_count
+                .load(Ordering::Acquire)
+                .checked_add(consumers.detached.load(Ordering::Acquire))
+                .assured("registered consumers are held in memory");
+            return self
+                .fanout
+                .consumers()
+                .dispatch_publications(
+                    dispatch,
+                    attached,
+                    detached,
+                    consumers.audiences.attached.publication(),
+                    || consumers.audiences.detached.publication(),
+                    batch,
+                )
+                .await;
+        }
         self.fanout
             .dispatch_runtime_consumers(
                 dispatch,
@@ -1515,6 +1871,7 @@ impl RelayBoundaryServices {
     pub(super) async fn dispatch_remote_runtime_consumers(
         &self,
         domain: &DomainName,
+        unit: Unit,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         let remote_runtime_consumers = self.remote_runtime_consumers.load_full();
@@ -1526,6 +1883,7 @@ impl RelayBoundaryServices {
         batch
             .keep_alive_while_pending(self.deliver_to_remote_runtime_consumers(
                 domain,
+                unit,
                 batch,
                 &remote_runtime_consumers,
             ))
@@ -1535,13 +1893,14 @@ impl RelayBoundaryServices {
     async fn deliver_to_remote_runtime_consumers(
         &self,
         domain: &DomainName,
+        unit: Unit,
         batch: &RelayRecordBatch,
         remote_runtime_consumers: &[RemoteRuntimeConsumer],
     ) -> RelayDispatchResult {
         let Some(dispatcher) = &self.remote_dispatcher else {
             if remote_runtime_consumers
                 .iter()
-                .any(|consumer| consumer.mode == AckMode::Attached)
+                .any(|consumer| consumer.mode_for(unit) == Some(AckMode::Attached))
             {
                 for ack in batch.acks.iter() {
                     ack.no_ack("remote dispatcher unavailable for attached delivery");
@@ -1560,12 +1919,16 @@ impl RelayBoundaryServices {
         // and reach the slot ahead of an earlier one, delivering the relay out of order.
         let mut encoded_body: Option<ChargedBytes> = None;
         for consumer in remote_runtime_consumers.iter() {
+            let Some(mode) = consumer.mode_for(unit) else {
+                continue;
+            };
             nervix_primitives::task::consume_budget().await;
             let outbound_slot = self.outbound_slot(
                 &consumer.node_id,
                 &consumer.relay,
                 RelayPayloadKind::Routed,
                 &batch.key,
+                unit,
             );
             let Some(_slot) = outbound_slot.lock_for_delivery().await else {
                 for ack in batch.acks.iter() {
@@ -1573,14 +1936,14 @@ impl RelayBoundaryServices {
                 }
                 return Err(Box::new(batch.clone()));
             };
-            let remote_batch = match consumer.mode {
+            let remote_batch = match mode {
                 AckMode::Attached => batch.attached(),
                 AckMode::Detached => batch.detached(),
             };
             // The records are stored before the body is encoded, so the first destination that
             // waits for room to store them holds no encoded body meanwhile.
             let deadline = RemoteDispatcher::delivery_deadline();
-            let mut registration_owner = if consumer.mode == AckMode::Attached {
+            let mut registration_owner = if mode == AckMode::Attached {
                 let storage = dispatcher
                     .store_pending_acks(
                         &consumer.node_id,
@@ -1623,7 +1986,7 @@ impl RelayBoundaryServices {
                         }
                         if remote_runtime_consumers
                             .iter()
-                            .any(|consumer| consumer.mode == AckMode::Attached)
+                            .any(|consumer| consumer.mode_for(unit) == Some(AckMode::Attached))
                         {
                             for ack in batch.acks.iter() {
                                 ack.no_ack(format!("{error:#}"));
@@ -1649,6 +2012,7 @@ impl RelayBoundaryServices {
                     routed_payload(RoutedDelivery {
                         delivery,
                         domain,
+                        unit,
                         consumer,
                         batch: &remote_batch,
                         batch_ipc: batch_ipc.clone(),
@@ -1660,7 +2024,7 @@ impl RelayBoundaryServices {
                 )
                 .await;
 
-            match (consumer.mode, result) {
+            match (mode, result) {
                 (AckMode::Attached, Ok(())) => {
                     registration_owner
                         .as_mut()
@@ -1705,6 +2069,63 @@ impl RelayBoundaryServices {
         RelayRuntimeFanIn::new(self.fanout.runtime_consumer_receiver_for_mode(mode))
     }
 
+    pub(super) fn with_unit_runtime_consumer_counts(
+        self,
+        counts: BTreeMap<Unit, (usize, usize)>,
+    ) -> Self {
+        for (unit, (attached, detached)) in counts {
+            let consumers = self
+                .unit_runtime_consumers
+                .get(&unit)
+                .verified("scoped registrations name a unit declared by the relay");
+            consumers.attached.store(attached, Ordering::Release);
+            consumers.detached.store(detached, Ordering::Release);
+        }
+        self
+    }
+
+    pub(super) fn add_local_unit_runtime_consumer(
+        &self,
+        mode: AckMode,
+        unit: Unit,
+    ) -> RelayRuntimeFanIn {
+        if unit == Unit::SINGLE {
+            return self.add_local_runtime_consumer(mode);
+        }
+        let consumers = self
+            .unit_runtime_consumers
+            .get(&unit)
+            .verified("the validated processor and its input share partition units");
+        let (count, audience) = match mode {
+            AckMode::Attached => (&consumers.attached, &consumers.audiences.attached),
+            AckMode::Detached => (&consumers.detached, &consumers.audiences.detached),
+        };
+        count
+            .fetch_add(1, Ordering::AcqRel)
+            .checked_add(1)
+            .assured("registered consumers occupy memory");
+        RelayRuntimeFanIn::new(audience.new_receiver())
+    }
+
+    pub(super) fn remove_local_unit_runtime_consumer(&self, mode: AckMode, unit: Unit) {
+        if unit == Unit::SINGLE {
+            self.remove_local_runtime_consumer(mode);
+            return;
+        }
+        let consumers = self
+            .unit_runtime_consumers
+            .get(&unit)
+            .verified("the installed consumer belongs to a declared partition");
+        let count = match mode {
+            AckMode::Attached => &consumers.attached,
+            AckMode::Detached => &consumers.detached,
+        };
+        count
+            .fetch_sub(1, Ordering::AcqRel)
+            .checked_sub(1)
+            .verified("an installed consumer is removed once");
+    }
+
     pub(super) fn remove_local_runtime_consumer(&self, mode: AckMode) {
         let counter = match mode {
             AckMode::Attached => &self.attached_runtime_consumer_count,
@@ -1725,20 +2146,58 @@ impl RelayBoundaryServices {
         if *self.remote_runtime_consumers.load().as_ref() == consumers {
             return;
         }
-        self.channels.replace_destinations();
+        self.channels
+            .replace_owner_of(&self.changed_consumer_units(&consumers));
         self.remote_runtime_consumers.store(StdArc::new(consumers));
+    }
+
+    fn changed_consumer_units(&self, next: &[RemoteRuntimeConsumer]) -> Vec<Unit> {
+        let current = self.remote_runtime_consumers.load();
+        self.partitioning
+            .units()
+            .into_iter()
+            .filter(|unit| {
+                let before = current.iter().filter_map(|consumer| {
+                    consumer
+                        .mode_for(*unit)
+                        .map(|mode| (&consumer.node_id, &consumer.relay, mode))
+                });
+                let after = next.iter().filter_map(|consumer| {
+                    consumer
+                        .mode_for(*unit)
+                        .map(|mode| (&consumer.node_id, &consumer.relay, mode))
+                });
+                !before.eq(after)
+            })
+            .collect()
     }
 
     pub(super) async fn fanout_owner_batch(
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         batch: &RelayRecordBatch,
         fault_injection: &ConfiguredFaultInjection,
     ) -> RelayDispatchResult {
         fault_injection
             .pause_owner_relay_fanout_if_armed(domain)
             .await;
+        fault_injection
+            .pause_owner_relay_partition_fanout_if_armed(domain, relay, unit)
+            .await;
+        let _unit_permit = if let Some(gate) = self.unit_dispatch_gate(unit) {
+            let Some(permit) = gate.try_acquire_dispatch() else {
+                for ack in batch.acks.iter() {
+                    ack.no_ack("relay partition routing changed before owner fan-out");
+                }
+                batch.ack_success();
+                return Err(Box::new(batch.clone()));
+            };
+            Some(permit)
+        } else {
+            None
+        };
         let gate = self.fanout.dispatch_gate();
         let Some(_dispatch_permit) = gate.try_acquire_dispatch() else {
             for ack in batch.acks.iter() {
@@ -1748,15 +2207,18 @@ impl RelayBoundaryServices {
             return Err(Box::new(batch.clone()));
         };
         self.fanout_local_subscriptions(batch).await;
-        self.fanout_remote_subscriptions(domain, relay, batch).await;
+        self.fanout_remote_subscriptions(domain, relay, unit, batch)
+            .await;
         if let Err(failed) = self
-            .dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, batch)
+            .dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, unit, batch)
             .await
         {
             batch.ack_success();
             return Err(failed);
         }
-        let result = self.dispatch_remote_runtime_consumers(domain, batch).await;
+        let result = self
+            .dispatch_remote_runtime_consumers(domain, unit, batch)
+            .await;
         batch.ack_success();
         result
     }
@@ -1767,13 +2229,25 @@ impl RelayBoundaryServices {
     /// current routes rather than committing a record no consumer processed.
     pub(super) async fn inject_remote_message(
         &self,
+        unit: Unit,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
+        let _unit_permit = if let Some(gate) = self.unit_dispatch_gate(unit) {
+            let Some(permit) = gate.try_acquire_dispatch() else {
+                for ack in batch.acks.iter() {
+                    ack.no_ack("relay partition routing changed before routed delivery");
+                }
+                return Err(Box::new(batch.clone()));
+            };
+            Some(permit)
+        } else {
+            None
+        };
         self.fanout_local_subscriptions(batch).await;
         // The routed batch enters this relay on this node here, and the relay holds it until its
         // consumers here have it.
-        let _routed = RelayRoutedAdmission::new(self.fanout.transit());
-        self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Routed, batch)
+        let _routed = RelayRoutedAdmission::new(self.transit_for_unit(unit));
+        self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Routed, unit, batch)
             .await
     }
 }
@@ -1787,13 +2261,21 @@ impl ConcreteRelayRuntime {
             relay,
             services,
         } = build;
-        let channels = RelayProducerChannels::Bound(services.channels.bind(&key));
+        let unit = services
+            .partitioning
+            .unit_of(&key)
+            .map_err(|refusal| refusal.current_context().clone());
+        let channels = match &unit {
+            Ok(unit) => RelayProducerChannels::Bound(services.channels.bind(&key, *unit)),
+            Err(_) => RelayProducerChannels::Ended,
+        };
         Self {
             runtime,
             domain,
             relay,
             services,
             key,
+            unit,
             channels,
         }
     }
@@ -1807,6 +2289,16 @@ impl ConcreteRelayRuntime {
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         debug_assert_eq!(&self.key, &batch.key);
+        let unit = match &self.unit {
+            Ok(unit) => *unit,
+            Err(refusal) => {
+                let reason = refusal.to_string();
+                for ack in batch.acks.iter() {
+                    ack.no_ack(reason.clone());
+                }
+                return Err(Box::new(batch.clone()));
+            }
+        };
         let RelayProducerChannels::Bound(channels) = &mut self.channels else {
             for ack in batch.acks.iter() {
                 ack.no_ack("relay producer lifetime ended");
@@ -1816,7 +2308,7 @@ impl ConcreteRelayRuntime {
         // The receiver's relay branch may expire independently of this producer. Its explicit
         // invalidation is a cold rebind; ending this producer never permits such a rebind.
         if channels.is_retired() {
-            *channels = self.services.channels.bind(&self.key);
+            *channels = self.services.channels.bind(&self.key, unit);
             if channels.is_retired() {
                 for ack in batch.acks.iter() {
                     ack.no_ack("relay service lifetime ended");
@@ -1824,16 +2316,35 @@ impl ConcreteRelayRuntime {
                 return Err(Box::new(batch.clone()));
             }
         }
-        if self.runtime.owns_relay(&self.services) {
-            return self.services.enqueue_owner_batch(batch).await;
+        if self.runtime.owns_relay_unit(&self.services, unit) {
+            return self.services.enqueue_owner_batch(batch, unit).await;
         }
         self.services
-            .dispatch_to_owner_on(&self.domain, &self.relay, batch, channels.ingress())
+            .dispatch_to_owner_on(&self.domain, &self.relay, unit, batch, channels.ingress())
             .await
     }
 }
 
 impl RelayBoundaryBuilder {
+    pub(super) fn runtime_consumer_fan_in_for_unit(
+        &mut self,
+        mode: AckMode,
+        unit: Unit,
+    ) -> RelayRuntimeFanIn {
+        if unit == Unit::SINGLE {
+            return self.runtime_consumer_fan_in_for_mode(mode);
+        }
+        let counts = self.unit_runtime_consumer_counts.entry(unit).or_default();
+        let audiences = self.fanout.consumers().unit_audiences(unit);
+        let (count, audience) = match mode {
+            AckMode::Attached => (&mut counts.0, &audiences.attached),
+            AckMode::Detached => (&mut counts.1, &audiences.detached),
+        };
+        *count = count
+            .checked_add(1)
+            .assured("registered consumers occupy memory");
+        RelayRuntimeFanIn::new(audience.new_receiver())
+    }
     pub(super) fn runtime_consumer_receiver_for_mode(
         &mut self,
         mode: AckMode,
@@ -1855,8 +2366,8 @@ impl RelayBoundaryBuilder {
 }
 
 impl Runtime {
-    /// Whether this node owns the relay `services` serve. A relay whose schedule names no owner is
-    /// owned wherever it runs.
+    /// Whether this node owns `unit` of the relay `services` serve. A unit whose schedule names no
+    /// owner is owned wherever it runs.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1865,15 +2376,23 @@ impl Runtime {
                       and fences"
         )
     )]
-    pub(in crate::runtime) fn owns_relay(&self, services: &RelayBoundaryServices) -> bool {
+    pub(in crate::runtime) fn owns_relay_unit(
+        &self,
+        services: &RelayBoundaryServices,
+        unit: Unit,
+    ) -> bool {
         let dispatcher = self.inner.remote_dispatcher.load();
-        services.is_owned_by(dispatcher.as_deref().map(RemoteDispatcher::local_node_id))
+        services.is_owned_by(
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            unit,
+        )
     }
 
     pub(super) async fn fanout_relay_owner_batch(
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         services: &RelayBoundaryServices,
         branches: &mut RelayOwnerBranchState,
         batch: &RelayRecordBatch,
@@ -1905,6 +2424,7 @@ impl Runtime {
                         self.inner.metrics.resolve_relay_metric_recorders(
                             domain,
                             relay,
+                            unit,
                             physical_node_id,
                             RELAY_BUFFER_DIRECTION_CONCRETE,
                             Some(branch_key.fingerprint()),
@@ -1925,9 +2445,9 @@ impl Runtime {
             batch.estimated_bytes(),
             batch.domain_timestamp(),
         );
-        services.observe_owner_buffer_length(&metrics);
+        services.observe_owner_buffer_length(unit, &metrics);
         let result = services
-            .fanout_owner_batch(domain, relay, batch, &self.inner.fault_injection)
+            .fanout_owner_batch(domain, relay, unit, batch, &self.inner.fault_injection)
             .await;
         self.inner
             .fault_injection
@@ -1935,19 +2455,42 @@ impl Runtime {
         result
     }
 
-    /// The branch presence of `relay`, kept with the relay-wide materialized state in the lifetime
-    /// the committed schedule publishes for it, so materialized reads observe the membership of
-    /// whichever owner the relay has on this node.
+    /// The branch presence of every unit of `relay`: the one kept with the unit's state placement
+    /// for each unit `shared` selects, and a fresh one for every other unit.
+    pub(in crate::runtime) fn relay_branch_presences(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        partitioning: RelayPartitioning,
+        shared: impl Fn(Unit) -> bool,
+    ) -> error_stack::Result<RelayBranchPresences, StateIdentityError> {
+        let mut by_unit = BTreeMap::new();
+        for unit in partitioning.units() {
+            let presence = if shared(unit) {
+                self.relay_branch_presence(domain, relay, unit)?
+            } else {
+                Arc::new(BranchPresence::new())
+            };
+            by_unit.insert(unit, presence);
+        }
+        Ok(RelayBranchPresences::new(partitioning, by_unit))
+    }
+
+    /// The branch presence of `unit` of `relay`, kept with the unit's materialized state in the
+    /// lifetime the committed schedule publishes for it, so materialized reads observe the
+    /// membership of whichever owner the unit has on this node.
     pub(in crate::runtime) fn relay_branch_presence(
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
     ) -> error_stack::Result<RelayBranchPresence, StateIdentityError> {
-        let placement = self.state_placement(
+        let placement = self.state_placement_for_unit(
             domain,
             RuntimeStateKind::MaterializedRelay,
             ModelKind::Relay,
             relay,
+            unit,
             None,
         )?;
         if let Some(existing) = self.inner.relay_branch_presences.get(&placement) {
@@ -2007,13 +2550,24 @@ impl Runtime {
         }
     }
 
+    /// Starts the owner task of `unit` of `relay` on this node: its buffer, its branch presence and
+    /// retention, its metric series and its fan-out. A partitioned relay has one such task for each
+    /// partition this node owns, and each enforces `CAPACITY`, TTL and `MAX INSTANCES` on the keys
+    /// of its own partition only.
     pub(in crate::runtime) fn spawn_relay_owner_task(
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         services: Arc<RelayBoundaryServices>,
         retention: RelayRetention,
-    ) -> RelayOwnerTask {
+    ) -> error_stack::Result<RelayOwnerTask, ExecutionBuildError> {
+        let Some(presence) = services.branch_presences.of(unit).cloned() else {
+            return Err(Report::new(ExecutionBuildError::RelayUnitNotScheduled {
+                relay: relay.clone(),
+                unit,
+            }));
+        };
         let (shutdown, mut shutdown_rx) = watch::channel(false);
         let dispatcher = self.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher
@@ -2023,11 +2577,13 @@ impl Runtime {
         let global_metrics = self.inner.metrics.resolve_relay_metrics(
             domain,
             relay,
+            unit,
             physical_node_id.as_ref(),
             RELAY_BUFFER_DIRECTION_CONCRETE,
             None,
         );
-        let mut receiver = services.activate_owner_buffer(global_metrics.clone());
+        let (mut receiver, owner_buffer) =
+            services.activate_owner_buffer(unit, global_metrics.clone());
         let runtime = self.clone();
         let domain = domain.clone();
         let relay = relay.clone();
@@ -2038,7 +2594,7 @@ impl Runtime {
         let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
         // Claiming before the task starts makes this owner the presence's only publisher from here
         // on: a predecessor that is still ending can no longer change what observers read.
-        let instances = OwnedBranches::claim(services.branch_presence.clone());
+        let instances = OwnedBranches::claim(presence);
         let task = nervix_primitives::task::spawn(async move {
             let mut branches = RelayOwnerBranchState {
                 instances,
@@ -2061,11 +2617,12 @@ impl Runtime {
                         let Some(batch) = batch else {
                             break;
                         };
-                        let _completion = services.begin_owner_batch_completion();
+                        let _completion = services.begin_owner_batch_completion(unit);
                         runtime
                             .fanout_relay_owner_batch(
                                 &domain,
                                 &relay,
+                                unit,
                                 &services,
                                 &mut branches,
                                 &batch,
@@ -2113,23 +2670,33 @@ impl Runtime {
                         break;
                     }
                 };
-                let _completion = services.begin_owner_batch_completion();
+                let _completion = services.begin_owner_batch_completion(unit);
                 runtime
-                    .fanout_relay_owner_batch(&domain, &relay, &services, &mut branches, &batch)
+                    .fanout_relay_owner_batch(
+                        &domain,
+                        &relay,
+                        unit,
+                        &services,
+                        &mut branches,
+                        &batch,
+                    )
                     .await
                     .discarded(
                         "the batch is acknowledged inside the fanout, and the owner task has no \
                          second consumer for a rejected copy",
                     );
             }
-            services.observe_owner_buffer_length(&branches.global_metrics);
-            services.deactivate_owner_buffer();
-            // Releasing the owner's branches publishes an empty presence before the relay's metrics
+            services.observe_owner_buffer_length(unit, &branches.global_metrics);
+            services.deactivate_owner_buffer(unit, &owner_buffer);
+            // Releasing the owner's branches publishes an empty presence before the unit's metrics
             // are removed, unless a successor already claimed the presence.
             drop(branches);
-            runtime.inner.metrics.remove_relay(&domain, &relay);
+            runtime
+                .inner
+                .metrics
+                .remove_relay_unit(&domain, &relay, unit);
         });
-        RelayOwnerTask { shutdown, task }
+        Ok(RelayOwnerTask { shutdown, task })
     }
 
     pub(in crate::runtime) fn spawn_relay_state_task(
@@ -2139,6 +2706,8 @@ impl Runtime {
     ) -> RelayStateTask {
         let RelayStateTaskSpec {
             relay,
+            unit,
+            partitioning,
             mut state,
             retention:
                 RelayRetention {
@@ -2169,7 +2738,10 @@ impl Runtime {
             let relay_model_name = ModelName::from(&relay);
             let ownership_entity =
                 DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay_model_name);
-            let freeze_watch = OwnershipHandoffFreezeWatch::new(&runtime, ownership_entity);
+            let freeze_watch = OwnershipHandoffFreezeWatch::for_unit(
+                &runtime,
+                DomainNodeUnitRef::new(ownership_entity, unit),
+            );
             let clock = match runtime.bind_domain_clock(&domain) {
                 Ok(clock) => clock,
                 Err(error) => {
@@ -2277,6 +2849,12 @@ impl Runtime {
                         batch,
                     } => {
                         debug_assert_eq!(input_relay, relay);
+                        // The fan-in carries the batches of every unit this node owns and of the
+                        // units whose owners route to its consumers; another unit's keys are that
+                        // unit's state, never this one's.
+                        if partitioning.unit_of(&batch.key).ok() != Some(unit) {
+                            continue;
+                        }
                         batch
                     }
                     RelayInteractionEvent::Wake => continue,
@@ -2362,7 +2940,11 @@ impl Runtime {
                 }
             }
         });
-        RelayStateTask { shutdown, task }
+        RelayStateTask {
+            unit,
+            shutdown,
+            task,
+        }
     }
 }
 

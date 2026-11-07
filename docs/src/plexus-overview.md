@@ -29,8 +29,27 @@ The current top-level surface includes:
 - session subscription statements
 - explicit transaction controls: `BEGIN`, `COMMIT`, and `REVERT`
 - describe and show commands
+- cluster administration with `ALTER CLUSTER SET`
+
+`ALTER CLUSTER SET` changes one or more committed cluster parameters atomically, without a node
+restart. It runs outside domain transactions and needs no selected domain. See
+[Node Settings](node-settings.md#committed-parameter-changes) for the parameter names, value types,
+transition checks and bootstrap seed rules.
 
 Core create statements:
+
+The `<json_type>` in a declared JSON wire schema is one of `string`, `number`, `integer`, `boolean`,
+or `array`. `DATETIME` uses `string` with an `RFC3339` codec rule, and `BYTES` uses `string` with a
+`BASE64` codec rule.
+
+The `<avro_type>` in a declared AVRO wire schema is one of `boolean`, `int`, `long`, `float`,
+`double`, `string`, `bytes`, or `array<avro_type>`, which names its item type at every depth. A JSON
+or CBOR `array` is bare; the codec's `ENCODE <field> AS ...` rule on a list field governs its
+innermost elements.
+
+The `<cbor_type>` in a declared CBOR wire schema is one of `integer`, `float`, `boolean`, `text`,
+`bytes`, or `array`. `DATETIME` uses `text` with an `RFC3339` codec rule, and `BYTES` uses native
+CBOR byte strings.
 
 ```plexus,ignore
 CREATE [IF NOT EXISTS] USER <name> WITH PASSWORD '<password>';
@@ -40,30 +59,29 @@ CREATE [IF NOT EXISTS] WIRE JSON SCHEMA <name> MODE STRICT|LOOSE (<field> <json_
 CREATE [IF NOT EXISTS] WIRE CBOR SCHEMA <name> MODE STRICT|LOOSE (<field> <cbor_type> [OPTIONAL], ...);
 CREATE [IF NOT EXISTS] WIRE AVRO SCHEMA <name> MODE STRICT|LOOSE (<field> <avro_type> [OPTIONAL], ...);
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM WIRE JSON SCHEMA <wire_schema>
+CREATE [IF NOT EXISTS] WIRE JSON CODEC <name>
+  FROM WIRE SCHEMA <wire_schema>
+  TO SCHEMA <schema>
+  [ENCODE <field> AS RFC3339|BASE64, ...];
+
+CREATE [IF NOT EXISTS] WIRE CBOR CODEC <name>
+  FROM WIRE SCHEMA <wire_schema>
   TO SCHEMA <schema>
   [ENCODE <field> AS RFC3339, ...];
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM WIRE CBOR SCHEMA <wire_schema>
+CREATE [IF NOT EXISTS] WIRE AVRO CODEC <name>
+  FROM WIRE SCHEMA <wire_schema>
   TO SCHEMA <schema>
-  [ENCODE <field> AS RFC3339, ...];
+  [ENCODE <field> AS RFC3339|BASE64, ...];
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM WIRE AVRO SCHEMA <wire_schema>
-  TO SCHEMA <schema>
-  [ENCODE <field> AS RFC3339, ...];
-
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM JSON|YAML|TOML|XML|CBOR
+CREATE [IF NOT EXISTS] JAQ JSON|YAML|TOML|XML|CBOR CODEC <name>
   TO SCHEMA <schema>
   WITH JAQ TRANSFORMATIONS
   [ON INGESTION '<program>']
-  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']];
+  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']]
+  [ENCODE <field> AS RFC3339|BASE64, ...];
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM PROTOBUF
+CREATE [IF NOT EXISTS] PROTOBUF CODEC <name>
   USING RESOURCE <resource> VERSION <n> | LATEST
   CONFIG {'file' = '<path.proto>', 'include' = '.'}
   MESSAGE '<package.Message>'
@@ -71,11 +89,15 @@ CREATE [IF NOT EXISTS] CODEC <name>
   TO SCHEMA <schema>
   WITH JAQ TRANSFORMATIONS
   [ON INGESTION '<program>']
-  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']];
+  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']]
+  [ENCODE <field> AS RFC3339|BASE64, ...];
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM SYSLOG
+CREATE [IF NOT EXISTS] SYSLOG CODEC <name>
   TO SCHEMA <schema>;
+
+CREATE [IF NOT EXISTS] BRANCH <name> SCHEMA <schema> TTL <duration>
+  [PARTITIONS <n>]
+  [MAX INSTANCES <n> EVICT LRU];
 
 CREATE [IF NOT EXISTS] RELAY <name> SCHEMA <schema> [CAPACITY <n>]
   [WITH MATERIALIZED STATE LAST BY TIMESTAMP];
@@ -95,6 +117,9 @@ Core alter statements:
 ```plexus,ignore
 ALTER DOMAIN SET PLACEMENT
   REQUIRE COLOCATION|PREFER COLOCATION|NEUTRAL|SUGGEST SEPARATION;
+
+ALTER BRANCH <name>
+  SET PARTITIONS <n>;
 
 ALTER RELAY <name>
   SET CAPACITY <n> |
@@ -150,23 +175,35 @@ ALTER <CONNECTOR> <ENTITY> EMITTER <name>
   ALTER FROM <relay> SET WHERE <expr> |
   ALTER FROM <relay> DROP WHERE |
   SET TO <complete entity body including MODE and payload> |
-  SET MODE <transport-specific publishing mode body> |
   SET CLIENT <client> |
+  SET <locator> | SET <option> | DROP <option> |
+  SET MODE <declared publishing mode> |
   SET ENCODE USING <codec> | DROP ENCODE |
+  SET <envelope clause> | DROP <envelope clause> |
+  SET PROPERTIES { ... } | DROP PROPERTIES |
+  SET INHERIT ... | DROP INHERIT |
+  ADD SET <field> = <expr> | DROP SET <field> |
+  ADD INVOKE <call> | DROP INVOKE <n> |
+  SET WHERE <expr> | DROP WHERE |
   SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>] | DROP COLLECT |
   SET ATTACHED | SET DETACHED |
   SET BATCH MAX MESSAGES <n> MAX SIZE <bytes> | DROP BATCH |
   SET FLUSH EACH <duration> MAX BATCH SIZE <bytes> | SET FLUSH IMMEDIATE |
-  SET COMMIT EACH <duration> MAX SIZE <bytes>
+  SET GENERAL ERROR IGNORE|LOG
   [, ...];
 
 ALTER <CONNECTOR> <ENTITY> INGESTOR <name>
   SET FROM <body> |
-  SET QUIESCE <quiesce body> |
+  SET CLIENT <client> |
+  SET <locator> | SET <option> | DROP <option> |
+  SET MODE <declared delivery mode> |
+  SET START AT EARLIEST|LATEST |
+  SET QUIESCE <declared quiesce body> |
   SET DECODE USING <codec> |
   SET TIMESTAMP NOW | SET TIMESTAMP AT <field> | DROP TIMESTAMP |
   SET FILTER WHERE <expr> | DROP FILTER WHERE |
   ADD|DROP|REPLACE ROUTE ... |
+  ALTER ROUTE TO <relay> <construction change> |
   SET GENERAL ERROR IGNORE|LOG
   [, ...];
 
@@ -216,7 +253,9 @@ Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER 
 `ALTER PLACEMENT` execute in written order. An ingestor or emitter `ALTER` repeats its stored
 connector and entity, such as `ALTER KAFKA TOPIC INGESTOR` or `ALTER OTEL METRICS EMITTER`, and
 preserves that pair. Its replacement body uses the same entity's grammar. See
-[Streams And State](relay.md#altering-relays) for relay operations,
+[Streams And State](relay.md#altering-relays) for relay operations and
+[Relay Partitions](relay.md#relay-partitions) for `ALTER BRANCH ... SET PARTITIONS`, which a domain
+accepts only while it is stopped,
 [Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and
 [Ingestors](ingestors.md#altering-ingestors) for boundary-node operations. See
@@ -234,7 +273,8 @@ The rest of the graph is built with:
 - `CREATE USER`
 - `CREATE <CONNECTOR> CLIENT`, such as `CREATE KAFKA CLIENT`
 - `CREATE VHOST`
-- `CREATE ENDPOINT`
+- `CREATE HTTP ENDPOINT`
+- `CREATE WEBSOCKETS ENDPOINT`
 - `CREATE <CONNECTOR> <ENTITY> INGESTOR`, such as `CREATE KAFKA TOPIC INGESTOR` or
   `CREATE CLIENT PRODUCER INGESTOR`; see [Ingestors](ingestors.md)
 - `CREATE GENERATOR`
@@ -255,6 +295,10 @@ Completion offers each composed head as one item. Inspection and addressing use 
 kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`.
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
+
+`CREATE INFERENCER` may declare model-carried `STATE` between `INPUTS` and `OUTPUT SCHEMA`.
+The [Inferencer](processors.md#state-tensors) section defines its port pairs, fixed tensor shapes,
+initial expressions, per-branch invocation order and reset behavior.
 
 Domain creation may declare a placement default, and named placement rules may overlay paths in
 the active domain. Omission means `NEUTRAL`, which preserves ordinary scheduler heuristics. See
@@ -370,6 +414,7 @@ source-level filter to `FROM`:
 ```plexus,ignore
 FROM <relay> [WHERE <expr>], ...
 [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
+[ATTACHED | DETACHED]
 [FILTER WHERE <expr>]
 TO <relay>
   [INHERIT ...]
@@ -381,7 +426,7 @@ TO <relay>
 ```
 
 `COLLECT FOR` is optional on graph nodes that consume relay input through `FROM`. It is unavailable
-to ingestors, which read external sources rather than relays. When omitted, each incoming Arrow
+to ingestors, which read external systems rather than relays. When omitted, each incoming Arrow
 batch proceeds directly to node execution. When present, Nervix maintains an input batch
 independently for each source relay and concrete branch, then executes the node when the duration
 expires or the optional size boundary is reached. Correlators configure the clause independently
@@ -391,6 +436,13 @@ they may belong to differently named branches; collection remains independent fo
 relay and concrete branch. Generators do not read a `FROM` relay and therefore have no input
 collection clause. The duration is measured on the domain clock and starts when the source and
 branch collector changes from empty to non-empty. A paced domain's `TIME RATE` scales that wait.
+
+Relay-consuming processors and emitters may write `ATTACHED | DETACHED` after their complete
+input list and optional `COLLECT FOR`; correlators place it after `RIGHT FROM` and that side's
+collection policy. The default is `ATTACHED`. Canonical rendering writes the mode explicitly as
+its own body clause, including through `SHOW CREATE`, the formatter and configuration backups.
+See [Processors](processors.md#shared-input-and-branch-contracts) and
+[Emitters](emitters.md#statement-heads-and-external-names) for the complete clause order.
 
 `FROM ... WHERE` runs first. `FILTER WHERE` runs next, before the node accepts rows into its state,
 buffer, inferencer, or guest. Every route then creates a new empty output, performs its own ordered
@@ -443,7 +495,7 @@ illustrative, not recommended defaults. Two measured facts decide what a `FLUSH`
 `MAX BATCH SIZE` only clamps a batch; it never grows one. The batch a route emits is roughly its
 arrival rate multiplied by the `FLUSH EACH` interval, cut off at the byte cap, so raising a cap
 that never fires changes nothing and the only way to grow batches is a longer interval, paid in
-latency. Upstream of every route, ingestors build their first Arrow batches from source groups that
+latency. Upstream of every route, ingestors build their first Arrow batches from ingest groups that
 close at 1,024 messages, or earlier after a 5 ms idle gap, independent of any `FLUSH` policy; a
 payload a JAQ-backed codec unfolds is never split, so its group may close above 1,024. Larger
 batches downstream come only from route buffering across an interval. Read actual batch sizes
@@ -473,16 +525,17 @@ Larger batches genuinely pay only at boundaries that do work per batch rather th
 
 - OTEL emitters send one export request per batch, so batch size sets request count and the
   compression ratio.
-- Iceberg emitters write one staging file per flush and one commit per `COMMIT EACH ... MAX SIZE`
-  boundary, so batch and commit sizes set file counts and Parquet file sizes.
+- Iceberg emitters append every flush to one staging file per commit and make one commit per
+  `COMMIT EACH ... MAX SIZE` boundary, so commit sizes set file counts and Parquet file sizes.
 - Inferencers whose tensor shapes declare a batch dimension run one model invocation per batch.
 - WASM processors serialize one Arrow IPC payload per batch, and cluster interconnect sends one
   frame per batch, with a fixed 8 MiB frame limit.
 
 Broker emitters — Kafka, Pulsar, NATS, RabbitMQ, MQTT, Redis, ZeroMQ, Sentry, and syslog — encode
 and publish one record at a time whatever the batch size; wire batching there belongs to the
-client, such as Kafka's `linger.ms` and `batch.size`. SQS `BATCH` groups at most ten records per
-request, and database emitters split every flush into statements of at most the
+client, such as Kafka's `linger.ms` and `batch.size`. SQS `SEND BATCH` sends at most ten records,
+within 1 MiB, in each `SendMessageBatch` request, and database emitters split every flush into
+statements of at most the
 [batching clause's](emitters.md#batching) `MAX MESSAGES` records. On such routes a larger
 `MAX BATCH SIZE` or a longer interval buys only fewer flush
 cycles, at the cost of latency, memory, and coarser failure and retry granularity: prefer the
@@ -570,7 +623,7 @@ General expression rules:
 - generated routes allow bare reads from immutable generated state until the same-named output is
   initialized; `message` and `input` are unavailable
 - `branch.field` must be explicit and is unavailable in successful emitter expressions
-- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; each source
+- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; each ingestor
   entity declares its typed, optional `metadata.<field>` set, such as Kafka's `metadata.topic`,
   `metadata.partition`, and `metadata.offset` or Syslog's `metadata.peer_addr`, and a route may read
   only a declared field
@@ -657,14 +710,14 @@ SET error_reference = error.reference,
     attempted_total = partial_output.total
 ```
 
-An ingestor additionally declares its node-level general policy after the source configuration:
+An ingestor additionally declares its node-level general policy after the ingestor configuration:
 
 ```plexus,ignore
 ON GENERAL ERROR IGNORE | LOG
 ```
 
 An ingestor's general policy also reports the decode rejection that replaces every payload its
-codec refuses. Either form consumes the payload rather than having its source present it again:
+codec refuses. Either form consumes the payload rather than having its ingestor present it again:
 `LOG` reports the rejection and `IGNORE` does not. See
 [When The Codec Refuses A Payload](ingestors.md#when-the-codec-refuses-a-payload).
 
@@ -917,12 +970,14 @@ General notes:
   clock for the session alone and are not persisted either; see
   [Domain Clock Attachment](sessions.md#domain-clock-attachment)
 - session subscription names are unique within a connected session; one session may subscribe to relays from multiple domains, and `DELETE SUBSCRIPTION` uses the name rather than repeating subscription parameters
-- every `RELAY` is scheduled with one owner; only that owner instantiates its buffer, concrete
-  branch presence, fan-out, subscriptions, and metrics
-- relay `CAPACITY` bounds the single owner buffer cluster-wide; each producer node and remote
-  consumer node adds one fixed in-flight dispatch slot, independent of branch count
+- every `RELAY` is scheduled with one owner, or with one owner per partition when its branch
+  declares `PARTITIONS <n>` of more than one; only an owner instantiates its buffer, concrete
+  branch presence, fan-out, subscriptions, and metrics for the keys it owns
+- relay `CAPACITY` bounds the owner buffer cluster-wide, once per partition of a partitioned
+  relay; each producer node and remote consumer node adds one fixed in-flight dispatch slot,
+  independent of branch count
 - materialized state adds scheduler-selected state replicas to the relay rather than a separate
   runtime-node kind; ordinary relays report no replicas
 - ingestors and reingestors construct branch identities, and a relay owner applies branch TTL and
-  `MAX INSTANCES` across all producers for that relay
+  `MAX INSTANCES` across all producers for that relay, each partition owner on its own keys
 - `DESCRIBE INGESTOR` exposes runtime-facing ingestor state, including memory-backpressure state and committed Kafka `OFFSET BY DOMAIN` partition assignment

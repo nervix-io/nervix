@@ -24,8 +24,9 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, Assignment, BranchName, CodecName, CreateIngestor, CreateReingestor, ErrorPolicies,
     Expression, FlushPolicy, GeneralErrorPolicy, IngestorName, MessageErrorOperation,
-    MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, OutputBranch, ProcessorOutput,
-    ReingestorName, RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes, SchemaName,
+    MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, NodeUnitRef, OutputBranch,
+    ProcessorOutput, ReingestorName, RelayName, ResolvedBranching, RouteConstruction,
+    ScheduledNodes, SchemaName, Unit,
 };
 use nervix_primitives::sync::Arc;
 use nervix_vm::{
@@ -44,6 +45,10 @@ use crate::runtime_schema::compile_schema;
 /// Why the ingestors and reingestors of a schedule cannot be planned.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum EntrypointPlanError {
+    #[error(
+        "ingestor '{ingestor}' has an invalid execution unit declaration; recreate its schedule"
+    )]
+    InvalidUnitDeclaration { ingestor: IngestorName },
     #[error("ingestor '{ingestor}' has invalid upgrade headers")]
     InvalidWebsocketsUpgradeHeaders { ingestor: IngestorName },
     #[error("scheduled {kind:?} '{node}' is configured as another node")]
@@ -451,6 +456,7 @@ impl EntrypointRouteContext<'_> {
                 ResolvedBranching::Branched {
                     branch: relay_branch,
                     schema: branch_schema,
+                    ..
                 },
             ) if branch == relay_branch => {
                 let retention = RouteBranchRetention::of(relay, branch);
@@ -507,7 +513,7 @@ impl EntrypointRouteContext<'_> {
 /// consumers a reingestor subscribes. Plans are in memory only and are never persisted.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct EntrypointPlans {
-    ingestors: BTreeMap<IngestorName, Arc<IngestorStartPlan>>,
+    ingestors: BTreeMap<NodeUnitRef, Arc<IngestorStartPlan>>,
     reingestors: BTreeMap<ReingestorName, Arc<ReingestorPlan>>,
 }
 
@@ -538,16 +544,25 @@ impl EntrypointPlans {
                             reference: source_ref,
                         }));
                     };
+                    let first_unit = *node
+                        .units
+                        .keys()
+                        .next()
+                        .assured("every scheduled node has a unit");
                     let plan = IngestorStartPlan::decide(
                         domain,
                         node,
+                        first_unit,
                         ingestor,
                         source.config.as_ref(),
                         &routes,
                     )?;
-                    plans
-                        .ingestors
-                        .insert(ingestor.name.clone(), Arc::new(plan));
+                    for unit in node.units.keys() {
+                        plans.ingestors.insert(
+                            NodeUnitRef::new(node.identity(), *unit),
+                            Arc::new(plan.for_unit(*unit, node)),
+                        );
+                    }
                 }
                 Model::Reingestor(reingestor) => {
                     if node.identifier != ModelName::from(&reingestor.name) {
@@ -567,8 +582,15 @@ impl EntrypointPlans {
         Ok(plans)
     }
 
-    pub(crate) fn ingestor(&self, name: &IngestorName) -> Option<&Arc<IngestorStartPlan>> {
-        self.ingestors.get(name)
+    pub(crate) fn ingestor(
+        &self,
+        name: &IngestorName,
+        unit: Unit,
+    ) -> Option<&Arc<IngestorStartPlan>> {
+        self.ingestors.get(&NodeUnitRef::new(
+            NodeRef::new(ModelKind::Ingestor, name),
+            unit,
+        ))
     }
 
     pub(crate) fn ingestors(&self) -> impl Iterator<Item = &Arc<IngestorStartPlan>> {
@@ -676,7 +698,7 @@ mod tests {
 
         assert_eq!(plans.routes().count(), 4);
         let unbranched = plans
-            .ingestor(&named("unbranched_source"))
+            .ingestor(&named("unbranched_source"), Unit::FIRST_INSTANCE)
             .assured("the unbranched ingestor is planned");
         let route = only_route(&unbranched.ingestor.routes);
         assert_eq!(route.relay, named("events"));
@@ -688,7 +710,7 @@ mod tests {
         );
 
         let branching = plans
-            .ingestor(&named("branching_source"))
+            .ingestor(&named("branching_source"), Unit::FIRST_INSTANCE)
             .assured("the branching ingestor is planned");
         let route = only_route(&branching.ingestor.routes);
         assert!(matches!(
@@ -747,7 +769,7 @@ mod tests {
         let plans = planned_entrypoints(models).assured("the fixture schedule plans");
         let route = only_route(
             &plans
-                .ingestor(&named("source"))
+                .ingestor(&named("source"), Unit::FIRST_INSTANCE)
                 .assured("the ingestor is planned")
                 .ingestor
                 .routes,
@@ -776,7 +798,7 @@ mod tests {
         let plans = planned_entrypoints(models).assured("the fixture schedule plans");
         let route = only_route(
             &plans
-                .ingestor(&named("source"))
+                .ingestor(&named("source"), Unit::FIRST_INSTANCE)
                 .assured("the ingestor is planned")
                 .ingestor
                 .routes,

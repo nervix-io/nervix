@@ -278,7 +278,7 @@ Feature: Syslog listener and collector declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (host STRING, message STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (host string, message string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       """
@@ -328,7 +328,7 @@ Feature: Syslog listener and collector declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (host STRING, message STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (host string, message string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       """
@@ -360,7 +360,7 @@ Feature: Syslog listener and collector declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (host STRING, message STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (host string, message string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       """
@@ -389,7 +389,7 @@ Feature: Syslog listener and collector declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (host STRING, message STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (host string, message string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       """
@@ -433,13 +433,13 @@ Feature: Syslog listener and collector declarations
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
       );
       CREATE SCHEMA outcome ( size I64 OPTIONAL, error_message STRING OPTIONAL );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA syslog_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY outcomes SCHEMA outcome UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -497,13 +497,13 @@ Feature: Syslog listener and collector declarations
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
       );
       CREATE SCHEMA outcome ( message STRING OPTIONAL, error_message STRING OPTIONAL );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA syslog_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY outcomes SCHEMA outcome UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec

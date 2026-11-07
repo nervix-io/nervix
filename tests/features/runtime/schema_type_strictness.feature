@@ -6,13 +6,13 @@ Feature: Schema type strictness
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( tenant STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA tenant_branch ( tenant U32 );
       CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'strict_types' MODE NO ACK
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'strict_types' START AT LATEST MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -30,26 +30,26 @@ Feature: Schema type strictness
 
   Scenario Outline: JSON codecs require explicit RFC3339 encoding for string datetime wire fields
     Given a <cluster_size> node nervix cluster is started
-    When these Plexus commands fail with "json field 'created_at' type mismatch"
+    When these Plexus commands fail with "json field 'created_at' needs ENCODE created_at AS RFC3339 for its DATETIME value"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA orders ( created_at DATETIME );
       CREATE WIRE JSON SCHEMA orders_wire MODE STRICT ( created_at string );
-      CREATE CODEC orders_codec FROM WIRE JSON SCHEMA orders_wire TO SCHEMA orders;
+      CREATE WIRE JSON CODEC orders_codec FROM WIRE SCHEMA orders_wire TO SCHEMA orders;
       """
     When these Plexus commands are executed
       """
       CREATE WIRE JSON SCHEMA orders_wire_encoded MODE STRICT ( created_at string );
-      CREATE CODEC orders_codec_encoded
-        FROM WIRE JSON SCHEMA orders_wire_encoded
+      CREATE WIRE JSON CODEC orders_codec_encoded
+        FROM WIRE SCHEMA orders_wire_encoded
         TO SCHEMA orders
         ENCODE created_at AS RFC3339;
       """
     When these Plexus commands fail with "json field 'created_at' type mismatch"
       """
       CREATE WIRE JSON SCHEMA orders_wire_invalid MODE STRICT ( created_at number );
-      CREATE CODEC orders_codec_invalid
-        FROM WIRE JSON SCHEMA orders_wire_invalid
+      CREATE WIRE JSON CODEC orders_codec_invalid
+        FROM WIRE SCHEMA orders_wire_invalid
         TO SCHEMA orders
         ENCODE created_at AS RFC3339;
       """

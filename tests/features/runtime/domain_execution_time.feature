@@ -24,17 +24,16 @@ Feature: Domain execution time
       CREATE WIRE JSON SCHEMA source_event_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC source_event_codec
-        FROM WIRE JSON SCHEMA source_event_wire
+      CREATE WIRE JSON CODEC source_event_codec
+        FROM WIRE SCHEMA source_event_wire
         TO SCHEMA source_event;
       CREATE RELAY ingested_events SCHEMA ingested_event UNBRANCHED;
       CREATE RELAY processed_events SCHEMA processed_event UNBRANCHED;
       CREATE VHOST edge execution-time-{{test_id}}.example.com;
-      CREATE ENDPOINT source_event_endpoint
+      CREATE HTTP ENDPOINT source_event_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_events
+        PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_events
         FROM source_event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TIMESTAMP NOW
@@ -109,18 +108,17 @@ Feature: Domain execution time
         sequence integer,
         boundary string
       );
-      CREATE CODEC clock_probe_codec
-        FROM WIRE JSON SCHEMA clock_probe_wire
+      CREATE WIRE JSON CODEC clock_probe_codec
+        FROM WIRE SCHEMA clock_probe_wire
         TO SCHEMA clock_probe
         ENCODE boundary AS RFC3339;
       CREATE RELAY clock_probes SCHEMA clock_probe UNBRANCHED;
       CREATE RELAY accepted_clock_probes SCHEMA clock_probe UNBRANCHED;
       CREATE VHOST edge roto-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT clock_probe_endpoint
+      CREATE HTTP ENDPOINT clock_probe_endpoint
         ON edge
-        PATH '/probe'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR clock_probe_source
+        PATH '/probe';
+      CREATE HTTP ENDPOINT INGESTOR clock_probe_ingestor
         FROM clock_probe_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_probe_codec
         TIMESTAMP NOW
@@ -185,18 +183,17 @@ Feature: Domain execution time
         numerator integer,
         denominator integer
       );
-      CREATE CODEC calculation_codec
-        FROM WIRE JSON SCHEMA calculation_wire
+      CREATE WIRE JSON CODEC calculation_codec
+        FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE RELAY calculations SCHEMA calculation UNBRANCHED;
       CREATE RELAY calculation_results SCHEMA calculation_result UNBRANCHED;
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge execution-error-time-{{test_id}}.example.com;
-      CREATE ENDPOINT calculation_endpoint
+      CREATE HTTP ENDPOINT calculation_endpoint
         ON edge
-        PATH '/calculations'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR calculation_source
+        PATH '/calculations';
+      CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TIMESTAMP NOW
@@ -272,18 +269,17 @@ Feature: Domain execution time
       CREATE WIRE JSON SCHEMA trigger_event_wire MODE STRICT (
         id integer
       );
-      CREATE CODEC trigger_event_codec
-        FROM WIRE JSON SCHEMA trigger_event_wire
+      CREATE WIRE JSON CODEC trigger_event_codec
+        FROM WIRE SCHEMA trigger_event_wire
         TO SCHEMA trigger_event;
       CREATE RELAY trigger_events SCHEMA trigger_event UNBRANCHED;
       CREATE RELAY generated_events SCHEMA generated_event UNBRANCHED;
       CREATE RELAY generated_summaries SCHEMA generated_summary UNBRANCHED;
       CREATE VHOST edge wasm-execution-time-{{test_id}}.example.com;
-      CREATE ENDPOINT trigger_endpoint
+      CREATE HTTP ENDPOINT trigger_endpoint
         ON edge
-        PATH '/trigger'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR trigger_source
+        PATH '/trigger';
+      CREATE HTTP ENDPOINT INGESTOR trigger_ingestor
         FROM trigger_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING trigger_event_codec
         TIMESTAMP NOW

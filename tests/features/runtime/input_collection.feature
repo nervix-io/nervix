@@ -17,19 +17,18 @@ Feature: Runtime node input collection
         tenant string,
         sequence integer
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY incoming SCHEMA notification BRANCHED BY by_tenant;
       CREATE RELAY collected SCHEMA notification BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT input_collection_ingress
+      CREATE HTTP ENDPOINT input_collection_ingress
       ON edge
-      PATH '/input-collection'
-      TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR input_collection_source
+      PATH '/input-collection';
+      CREATE HTTP ENDPOINT INGESTOR input_collection_ingestor
       FROM input_collection_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming
@@ -75,7 +74,7 @@ Feature: Runtime node input collection
       {"sequence":1,"tenant":"beta"}
       {"sequence":2,"tenant":"beta"}
       """
-    And within "5s" node "node-1" eventually reports describe ingestor "input_collection_source" as "batches_total sent relay=incoming physical_node=node-1 total=4"
+    And within "5s" node "node-1" eventually reports describe ingestor "input_collection_ingestor" as "batches_total sent relay=incoming physical_node=node-1 total=4"
     And node "{{junction_owner}}" observability metric "nervix_batches_total" with labels eventually equals 2
       """
       target_kind="JUNCTION"
@@ -104,17 +103,16 @@ Feature: Runtime node input collection
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY incoming SCHEMA notification UNBRANCHED;
       CREATE RELAY collected SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT input_collection_ingress
+      CREATE HTTP ENDPOINT input_collection_ingress
       ON edge
-      PATH '/input-collection'
-      TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR input_collection_source
+      PATH '/input-collection';
+      CREATE HTTP ENDPOINT INGESTOR input_collection_ingestor
       FROM input_collection_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming

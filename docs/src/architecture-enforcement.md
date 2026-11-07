@@ -7,7 +7,7 @@ never evidence of its owner or effect.
 
 `just ratchet` runs both owners. `just validate` and `just validate-ci` require the same gate;
 formatting is applied by the former and checked by the latter. The compiler emits ordinary
-`nervix::` diagnostics. The five structural counts compare with `debt-baseline.json`; a count
+`nervix::` diagnostics. The six structural counts compare with `debt-baseline.json`; a count
 may decrease and cannot increase. `just ratchet --update` records a decrease only after the
 complete gate passes. No numeric allowance controls a semantic rule.
 
@@ -19,11 +19,11 @@ complete gate passes. No numeric allowance controls a semantic rule.
 | Rule catalog and reports | `tools/nervix-lint/report` | The finite API recognition the driver applies (`report/src/rules.rs`), side-report validation and summaries, and the stable source parser behind the structural counts. |
 | Fixtures | `tools/nervix-lint/fixtures`, `tools/nervix-lint/fixture-macros` | The allowed and rejected compiler cases, authored-macro cases and paired doctests that qualify each rule. |
 | Declared matrix | `tools/nervix-lint/configurations.toml` | The configurations the gate analyzes and the memory admission of their compilations. |
-| Runner | `scripts/typed_ratchet.py` (`just typed-ratchet`) | Runs Cargo with the driver once per configuration, computes the report identity, reuses complete evidence and refuses missing, partial, stale or foreign reports. |
-| Workspace wrapper | `scripts/typed_lint_wrapper.py`, `scripts/analysis_admission.py` | Runs the driver as a child beneath the compiler wrapper the host configures, records every compilation and admits it against host memory. |
-| Gate | `scripts/ratchet.py` (`just ratchet`) | Requires the complete diagnostic gate and compares the five structural counts with `debt-baseline.json`. |
-| Complexity analyzer | `scripts/cargo_crap.py` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
-| Audit | `scripts/lint_audit.py` (`just lint-audit`) | Attributes review candidates to the history that produced them. |
+| Runner | `tools/nervix-lint/ratchet`, `nervix-ratchet analyze` (`just typed-ratchet`) | Runs bounded concurrent Cargo children from one thread, computes the report identity, reuses complete evidence and refuses missing, partial, stale or foreign reports. Aggregation calls the report crate in-process. |
+| Workspace wrapper | `nervix-ratchet wrap` | Runs the driver as a child beneath the compiler wrapper the host configures, records every compilation and admits it against host memory through the shared advisory-lock queue. |
+| Gate | `nervix-ratchet gate` (`just ratchet`) | Requires the complete diagnostic gate, reads the product's dependency graph with `cargo tree` and compares the six structural counts with `debt-baseline.json`. |
+| Complexity analyzer | `nervix-ratchet crap` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
+| Audit | `tools/nervix-lint/ratchet/src/audit` (`nervix-ratchet audit`, `just lint-audit`) | Consumes one in-process matrix report and attributes review candidates to the history that produced them. |
 
 Product source owns the policy: the [source contracts](#source-contracts) and the reason-bearing
 expectations at the operations they cover. The tooling owns recognition and evidence, and nothing it
@@ -31,9 +31,16 @@ generates is read back as policy. `just validate-typed-errors` is a separate sou
 count: it rejects `Result<_, String>` in product code outright, and
 [Errors And Diagnostics](errors-and-diagnostics.md) owns it.
 
+Connector declaration checks are separate from the Rust source and compiler rules.
+`just validate-connector-matrix` compares generated manual regions with the vocabulary's compiled
+entity and client declarations; `just validate-connector-capabilities` checks each declared runtime
+capability against a named public scenario. Both run in `just validate`, and neither changes the
+six structural counts or treats documentation prose as product policy. [Entity
+declarations](connector-contract.md#entity-declarations) owns their inputs and limits.
+
 ## Rule Contracts
 
-The sixteen rule families below have one implementation each. The family name remains useful
+The eighteen rule families below have one implementation each. The family name remains useful
 for describing its purpose; a compiler family can emit more than one diagnostic where a missing
 contract and a violated contract require different corrections.
 
@@ -43,6 +50,7 @@ contract and a violated contract require different corrections.
 | `data_plane_lock_acquisitions` | Resolve synchronization APIs and the execution contract of their callers. [Concurrency](data-plane-concurrency.md#source-contracts) owns contexts, effects and bounds. | A task-local `HashMap::entry`; a registry acquisition with a lifecycle contract. | A recurring callback reaching a DashMap shard or a lifecycle-only helper. | Compiler `sync_acquisition`, `lifecycle_call`, `unknown_effect`; resolved receiver, helper, callback, trait, foreign item, macro and expectation fixtures. |
 | `bare_error_signatures` | A Nervix failure contract carries its complete contextual report. [Errors](errors-and-diagnostics.md) owns outcome, library and foreign-interface classifications. | `Result<T, Report<DomainError>>`; an exact reason-bearing outcome contract. | An owned failure in an alias, inferred future or stream without its report. | Compiler `bare_error_signature`; associated-output, alias, inference, metadata and report-carrier fixtures. |
 | `discarded_results` | Preserve a failure or classify recovery at its consuming operation; a replacement retains an informative cause. | A propagated failure, contextualized cause or the recovery owner's explicit `Discarded` operation. | A failed outcome discarded through a binding, projection or `drop`, or replaced with a fresh error that loses its cause. | Compiler `discarded_outcome` and `replaced_error`; complete and partial-discard, replacement, outcome, alias, macro and metadata fixtures. |
+| `partial_report_fields` | A report recorded as a tracing field renders its whole context chain. [Errors](errors-and-diagnostics.md#rendering) owns the rendering contract. | `error = %format_args!("{error:#}")`; a debug field; `%error` over an error that is not a report. | `%error`, `%self.error` or a written-out `display` field over a report, directly or through a borrow, box or shared owner. | Compiler `partial_report_field`; assigned, shorthand, owner-field, explicit and renamed `display`, alias, authored-macro, unrelated same-named type and function, and exact-expectation fixtures. |
 | `bare_unwrap_and_expect` | A canonical Option/Result panic needs a construction or checked guarantee, expressed through meticulous. | `verified` after checking the condition; an unrelated object's method named `expect`. | Canonical `unwrap` or `expect`, including aliases and UFCS. | Compiler `bare_panic`; canonical/custom methods, dereference and call-form fixtures. |
 | `model_matches_in_data_plane` | Configuration Models stay inside their owning boundary; data plane and connector engines consume plans. | A vocabulary Model or a typed connector plan. | A forbidden Model in a body, normalized interface or nested aggregate. | Compiler `model_in_data_plane`; source `layer`, `value` and `input` contracts, cross-crate and projection fixtures. |
 | `parser_imports_outside_edges` | Language dependencies belong to the language and its declared edges. | The session adapter consuming public parsing; a runtime consuming Models. | A language reference outside its authorized layer, including aliases. | Compiler `parser_dependency` plus disjoint inactive import/manifest provenance; qualified names, reexports, foreign items and dependency fixtures. |
@@ -54,6 +62,7 @@ contract and a violated contract require different corrections.
 | `as_casts` | Count actual Rust cast expressions, not words in imports, attributes or qualified paths. | `use Value as Alias`; `r#as`; `<Type as Trait>::item`; ordinary literals. | An expression using `as`, including a const expression nested in a qualified type. | Stable source parser; inactive cfg, raw identifiers, nested syntax, macro fragments and bounded source properties. Clippy independently denies conversions in its broader build scope. |
 | `testing_feature_struct_fields` | A product struct has one field shape rather than a shape selected by `testing`. | A test-only item, an API gate or a conditional documentation attribute. | A named or tuple struct field whose presence depends on `testing`, including a conditional `cfg` attribute. | Stable source parser; field ownership, tuple, inactive, compound-predicate and `cfg_attr` controls. Enum fields are outside this specific struct rule. |
 | `files_over_3000_lines` | Keep product and in-crate test files within a source-size bound. | At most 3,000 lines, counting a final line without a newline. | An eligible file with more than 3,000 lines. | Source discovery and physical line count; exact boundary and newly authored source tests. |
+| `non_aws_lc_crypto` | Nervix-authored cryptography comes from the AWS-LC boundary, and no change brings other cryptography into the product graph. [Cryptography](cryptography.md#the-count) owns what counts. | AWS-LC through the boundary; a classified non-security hash; a non-cryptographic checksum. | An authored use of a counted crate, `OsRng`, `getrandom` or a direct provider install, and a product dependency edge onto a crate implementing cryptography outside AWS-LC. A product graph linking a second AWS-LC module is refused outright rather than counted. | Stable source parser; import, rename, glob, `self`/`super`, inactive, macro, boundary and look-alike controls and the registered bounded `typed-non-aws-lc-crypto` property; the product graph through `cargo tree` for both release targets, with recorded-tree, malformed-graph, added-dependency and second-AWS-LC-module gate tests. |
 | `functions_over_complexity_30` | Keep each function's decisions within a cyclomatic complexity of 30. At full coverage a function's CRAP score equals its complexity, so a function above 30 exceeds a CRAP threshold of 30 at any coverage. [Function complexity](#function-complexity) owns the analyzer and its limits. | A function the pinned analyzer scores at most 30; an existing function above 30 that grows, which keeps the count. | A function newly scored above 30, including one in an inactive configuration or an in-crate test file. | Pinned cargo-crap analysis over source discovery; exact 30/31 boundary, inactive configuration, macro, trait and nesting limits, eligibility, and missing, failing, other-version, skipped-source, empty, configured, undiscovered and unreadable-file fixtures. |
 
 The Option/Result adapter catalog covers `and_then`, `filter`, `map`, `map_err`, `map_or`,
@@ -106,7 +115,7 @@ must be present, current and complete. Authored macro expansion and captured cal
 provenance; generated build-directory code and external definitions are explicit exclusions.
 The compiler does not infer the APIs of code that no declared configuration compiles.
 
-Cargo runs the driver for each workspace target through `scripts/typed_lint_wrapper.py`, below the
+Cargo runs the driver for each workspace target through `nervix-ratchet wrap`, below the
 compiler wrapper the host configures. That compiler wrapper reports a compiler ended by a signal with
 the exit status of a compile error, so the driver runs as the workspace wrapper's child instead of
 replacing it. It inherits the wrapper's descriptors, Cargo's jobserver among them, and ends when the
@@ -119,19 +128,25 @@ failed with compiler errors, or exited without a compiler error, which means the
 failed, for example while publishing its report. A Cargo failure with no failed compilation happened
 outside them, in Cargo, a build script or the compiler wrapper. Records of an earlier run are
 discarded before Cargo starts. The kernel's out-of-memory killer ends a compilation with a signal and
-no message, which the gate reports as such instead of as a missing report.
+no message, which the gate reports as such instead of as a missing report. Cargo's workspace-wrapper
+setting accepts an executable path: when Cargo supplies a compiler path as the first argument, the
+binary enters the same `wrap` owner. Signal forwarding and child-exit observation use OS signal
+events, with no additional thread. The driver inherits the preceding signal mask and receives
+`SIGKILL` if its wrapper dies on Linux.
 
 ### Report Identity And Reuse
 
 A run's identity is a digest of everything that can change a finding: the analysis mode, the
-worktree root, the pinned compiler's `rustc -vV`, the driver and report validator binaries, the
-workspace wrapper script, every tracked or new unignored `.rs`, `.toml`, `.lock`, `.fbs`, `.proto`,
-`.json` and `.py` file, the Cargo configuration, and the compiler environment (`RUSTFLAGS` and
+worktree root, the pinned compiler's `rustc -vV`, the driver and runner binaries, every tracked or
+new unignored `.rs`, `.toml`, `.lock`, `.fbs`, `.proto` and `.json` file, the Cargo configuration,
+and the compiler environment (`RUSTFLAGS` and
 `CARGO_ENCODED_RUSTFLAGS`, `RUSTC`, `RUSTC_WRAPPER`, `KACHE_KEY_SALT` and Cargo's build, target and
 profile variables). Every side report carries that identity and states whether it is complete. A
 partial report, a report of another identity, and so of another worktree or source state, or a
 declared target without its report fails the configuration; a configuration with zero sites still
-needs every report.
+needs every report. Authored macro-invocation provenance is computed from Rust tokens and source
+byte offsets by `nervix-lint-report::origin`, preserving nested qualified invocations and Unicode
+source positions before aggregation.
 
 Each configuration builds in a directory of its own and records its completion under
 `target/typed-ratchet/evidence/<identity>/<configuration>/`. A later run reuses that completion only
@@ -145,18 +160,20 @@ throughout, and missing analysis never reads as zero findings.
 
 ## Pinned Toolchain
 
-Product code builds with the stable toolchain `rust-toolchain.toml` declares. The analysis driver
-links rustc's internal crates, so the isolated `tools/nervix-lint` workspace builds and runs on one
-pinned nightly, `nightly-2026-09-17`, which its own `rust-toolchain.toml` declares with `rustc-dev`,
+Product code and the `nervix-ratchet` orchestration binary build with the stable toolchain
+`rust-toolchain.toml` declares. The analysis driver links rustc's internal crates and builds on one
+pinned nightly, `nightly-2026-09-17`, which the isolated tooling workspace declares with `rustc-dev`,
 `rust-src`, `rustfmt` and `llvm-tools`. `just toolchains-install` installs both toolchains. The
 driver refuses any other analysis compiler: it locates the pinned compiler through rustup and checks
 the commit that `rustc -vV` reports. Bolero's sanitizer campaigns use the same nightly, which the
 `[tool]` table of `tests/bolero-targets.toml` declares. Native coverage of the typed-ratchet
-qualification uses that toolchain's own LLVM tools, so profiles and exporters match the compiler
-that produced them.
+qualification builds both the runner and driver with that toolchain's own LLVM tools, so profiles
+and exporters match the compiler that produced them. `scripts/native_coverage.py exec` records the
+runner's and driver's profiles within the existing producer; ordinary builds retain the stable
+runner and pinned analysis compiler.
 
 Upgrading the pinned nightly is one change that moves every declaration together: the tooling
-`rust-toolchain.toml`, the driver's compiler check, `scripts/typed_ratchet.py`, the justfile recipes
+`rust-toolchain.toml`, the driver's compiler check, the runner's `configuration::TOOLCHAIN`, the justfile recipes
 that name the toolchain, `scripts/native_coverage.py`, the Bolero inventory and the sanitizer
 workflow's toolchain step, and the chapters and `AGENTS.md` that name it. It adapts the driver to
 rustc's changed internal APIs while every compiler fixture keeps its allowed and rejected result; a
@@ -221,17 +238,15 @@ proof that the literal is fixed. No filename or per-site allowance substitutes f
 The baseline is introduced at the measured repository count and may only decrease. The area
 owners classify the counted values while preserving their existing defaults. The settings
 compiler-rule cutover removes this detector and its numeric baseline entry in the same change.
-`scripts/tests/test_ratchet.py` pins eligibility and the gate; compiler fixtures qualify the
+`tools/nervix-lint/ratchet` tests pin eligibility and the gate; compiler fixtures qualify the
 constant contract; the registered `typed-hidden-tunables` property checks complete source/site
 representations and every generated location in ordinary and sanitizer execution.
 
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. It peaks at about 12.3 GiB in the ordinary configuration and between
-about 11.7 and 15.5 GiB across the ten declared configurations that compile it, highest in the
-testing configuration and the six Deloxide ones, while no other analysis compilation reaches 2 GiB.
-Its 16 GiB reservation therefore leaves about half a GiB above the largest measured peak. Every
+library's dwarfs every other. Its diagnostic analysis reaches about 18.1 GiB, while other analyses
+stay below the 4 GiB threshold. Its 19 GiB reservation rounds up to cover the measured peak. Every
 configuration builds in a directory of its own, and up to four configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
 whatever order they end in, and once one analysis fails no configuration starts another.
@@ -287,10 +302,17 @@ own scheduler, and tests, scenario clusters and other work on the host are admit
 decision sees the memory they use, not the memory they will use. The queue belongs to one user on
 one host, so separate users, containers and machines have queues of their own.
 
+The Rust queue uses the existing lease directory, lease fields, exclusive advisory locks and
+decision semantics, so every worktree of this user shares one admission protocol. Its decision
+owner takes typed leases and memory-domain observations, independently of filesystem access or
+real time. Declared-order evidence, the configuration concurrency limit, responsive-waiter rule,
+wait limit, unavailable-queue outcome and compilation measurements are qualified through focused
+unit and process tests in `tools/nervix-lint/ratchet`.
+
 ## Function Complexity
 
 `functions_over_complexity_30` counts the functions whose cyclomatic complexity exceeds 30, as one
-pinned analyzer measures it: cargo-crap at the version `scripts/cargo_crap.py` declares, the same
+pinned analyzer measures it: cargo-crap at the version `nervix-ratchet crap` declares, the same
 build the advisory CRAP report of `just check-coverage` runs. `just install-cargo-crap` builds that
 version with `cargo install --locked` into `target/tools/cargo-crap-<version>/`, through the
 compiler wrapper the host configures, and keeps a build that is already there. `just ratchet`,
@@ -364,7 +386,12 @@ Use `just test-ratchet-units`, `just test-typed-ratchet-reports`,
 `just typed-ratchet --inventory --show` displays a calibration without claiming the diagnostic
 gate passed. `just ratchet` requires the gate. Cache qualification remains
 `just qualify-typed-ratchet-cache`; changed source, annotations, rules, dependencies and
-configuration invalidate evidence.
+configuration invalidate evidence. The recipe invokes `nervix-ratchet qualify-cache`, which checks
+the complete evidence and cache behavior in two isolated worktrees. The second worktree receives
+the compiler driver and the ratchet runner at the same build paths. Both inputs are required; a
+failed copy keeps its typed I/O cause and input path beneath the qualification context.
+Compiler-fixture preparation runs before the Rust assertions read its outputs; tests do not start
+a compiler or Cargo.
 
 The registered `typed-source-syntax` Bolero property uses bounded current Rust syntax, complete
 source input/site equality and deliberate cast/field counts. Its ordinary corpus/randomized test
@@ -378,8 +405,17 @@ The sanitizer compiler adapter preserves the source parser's span contract as de
 The [concurrency](data-plane-concurrency.md), [error](errors-and-diagnostics.md) and
 [state](typed-states.md) chapters retain those operational owners.
 
-CI runs the complete gate for every pull request: the `checks` job runs `just validate-ci 4`, which
-runs the source and lint checks four recipes at a time and `just ratchet` after them, through kache.
+CI runs the complete gate for every pull request: the `checks` job's two shards run
+`just validate-ci 4 1/2` and `just validate-ci 4 2/2` on runners of their own, four recipes at a
+time through kache. The second lints the Shuttle and Loom modes and the compiler tooling and runs
+`just ratchet` after its lints, and the first runs every other source and lint check.
+`ValidationEntrypointTests` in `scripts/tests/test_validation_entrypoint.py`, part of `just test-ratchet-units`,
+hold the job to that split. Through just's own evaluation of the job's shard matrix, exactly one
+shard names the gate itself and runs `nervix-ratchet gate`, with no argument, on the
+checked-out revision once its lints have finished, and the Validate step that runs it is neither
+skipped nor allowed to fail. Together the shards run every check `just validate` runs, with
+formatting checked instead of applied, so a shard that dropped the gate, a lane or a validation
+fails them.
 The tooling's own qualification is selected by labels in the `extra-tests` job. A pull request
 labeled `extra-compiler` runs `just coverage-native-extras test-typed-ratchet`, which runs
 `just test-typed-ratchet` with its ordinary part under native coverage and its product doctests and
@@ -428,6 +464,13 @@ candidate carries its owning body, that body's execution contract (declared, or 
 reachability from a recurring caller), its spans and macro origins, and the configurations that
 compiled it.
 
+The command calls the matrix runner once and refuses an incomplete report before reading history
+or publishing an audit. Without inventory flags it uses the complete gate; `--inventory` or any
+`--configuration` selects warning levels. Git provenance is parsed into typed records and cached:
+blame metadata is shared by the lines that use it, and attribution borrows cached hunks and line
+histories. Independent blame and line-history reads use at most eight scoped workers and eight Git
+children, with no dispatch lock held while waiting for a child. Every worker joins before return.
+
 | Kind | Resolved pattern | Controls that are not candidates |
 | --- | --- | --- |
 | `repeated_lookup` | Keyed operations (`get`, `get_mut`, `contains_key`, `insert`, `remove`, `entry`, indexing and their IndexMap forms) of a standard, hashbrown, IndexMap, DashMap or JSON map collection, on one receiver place with one key value, where a later operation can run after an earlier one. `guarded` marks a later operation in a branch the earlier result selected. | Exclusive branches, a receiver or key assigned between the operations, different keys or collections, and another type with map-like method names. |
@@ -445,9 +488,10 @@ candidate's kind could have worked around, it records whether that commit introd
 count, whether its hunk, the rest of the candidate's file or the commit's other files removed the
 counter's governed spelling (such as `.entry(` for the lock counter, counted only in the files that
 counter read at the time), and whether the code predates the count. The report keeps the hunk's
-removed and added lines around the candidate's line. When the completing commit only carried the
-pattern forward, the earlier commits of the same lines are read for that evidence and the one found
-is recorded as the origin. `--pull-requests` also reads, through `gh`, the commits a squash merge
+removed and added lines around the candidate's line. When several candidate lines share the
+completing commit, the first line anchors the hunk and its excerpt. When the completing commit only
+carried the pattern forward, the earlier commits of the same lines are read for that evidence and
+the one found is recorded as the origin. `--pull-requests` also reads, through `gh`, the commits a squash merge
 folded away, finding its pull request by the number the subject names or, for a subject without one,
 by the merged commit, and records a commit that removed the spelling while writing one of the
 candidate's own lines. A read that ends with a server error or a dropped connection is attempted up
@@ -465,8 +509,15 @@ when it predates every plausible count; and `uncommitted` for lines not yet comm
 is evidence for review, never a classification: chronology alone proves nothing.
 
 Candidate identities hash the kind, file, owner, primary source and pattern facts without byte
-offsets, so an unrelated edit keeps them, and a repeat within one owner takes an ordinal.
-`audit.json` and `audit.md` land in `target/lint-audit/<source identity>/`. They are generated
+offsets, so an unrelated edit keeps them, and a repeat within one owner takes an ordinal. Identity
+preimages use sorted JSON keys, ASCII escaping (including DEL and UTF-16 surrogate pairs), and a
+space after separators. Report JSON uses the same escaping and ordering with compact separators.
+`audit.json` and `audit.md` land in `target/lint-audit/<first 16 of source identity>/`, or
+`--output-dir`. JSON is atomically replaced after a complete audit; Markdown and the per-kind
+total, recurring and suspected summary describe that same report. An analysis, history, GitHub or
+output failure exits nonzero. Captured Git and GitHub diagnostics remain causes beneath the audit's
+typed operation context, so the CLI renders their complete text, including every exhausted read.
+The outputs are generated
 evidence: review dispositions, inventories and measurements belong on the owning task, and nothing
 reads them back as policy.
 

@@ -117,10 +117,10 @@ peer_status_during_pause() {
     printf '%s\n' "${status}" >"${output}.exit-code"
 }
 
-# Requires sink progress on the surviving owners after a failover-length pause relocated them, while
+# Requires emitter progress on the surviving owners after a failover-length pause relocated them, while
 # the target stays paused. When the paused node ran the ingestor, its consumer remains a member of
 # the source group, and the group coordinator gives the partition to the relocated ingestor's
-# consumer only when that member's session expires. The sink's window then opens at this handoff
+# consumer only when that member's session expires. The emitter's window then opens at this handoff
 # rather than at the relocation. Sets pause_group_handoff_ms, pause_output_during and
 # pause_delivery_ms for the round's result.
 pause_delivery_during_pause() {
@@ -158,14 +158,14 @@ pause_delivery_during_pause() {
     fi
     local output_before_progress
     output_before_progress="$(topic_end_offset chaos_output)"
-    if ! wait_for 'sink traffic progressed with target paused' 20 \
+    if ! wait_for 'emitter traffic progressed with target paused' 20 \
         pause_topic_progressed chaos_output "${output_before_progress}"; then
-        pause_fail product 'sink did not progress on surviving nodes during pause'
+        pause_fail product 'emitter did not progress on surviving nodes during pause'
         return 1
     fi
     pause_output_during="${pause_observed_offset}"
     if ! pause_target_is "${container_id}" true; then
-        pause_fail controller 'sink progress was sampled after the pause window'
+        pause_fail controller 'emitter progress was sampled after the pause window'
         return 1
     fi
     pause_delivery_ms="$(( $(epoch_ms) - requested_ms ))"
@@ -179,6 +179,9 @@ pause_one_node() {
     mkdir -p "${round_dir}/before" "${round_dir}/immediately-before" "${round_dir}/recovered"
     phase "${duration} pause of observed ${role} (${ordinal}/4)"
     failure_category=product
+    capture_cluster_parameters "${round_dir}/cluster-parameters" "${node_names[@]}" \
+        || pause_fail product 'the nodes did not publish one installed cluster policy before the pause'
+    local parameter_evidence="${round_dir}/cluster-parameters.json"
     wait_for 'cluster settled before pause role selection' 90 \
         select_pause_target "${role}" "${round_dir}/before"
     local selected_host="${target_host}"
@@ -212,7 +215,7 @@ pause_one_node() {
     container_id="$(owned_service_container "${selected_host}")" || return 1
     inspect_target "${container_id}" "${round_dir}/selected.json"
     "${script_dir}/verify-pause-evidence.sh" before "${run_id}" "${project_name}" \
-        "${selected_host}" "${image_id}" "${round_dir}/selected.json" "${round_dir}/selected.json"
+        "${selected_host}" "${image_id}" "${round_dir}/selected.json" "${round_dir}/selected.json" "${parameter_evidence}"
     container_name="$(jq -r '.[0].Name | ltrimstr("/")' "${round_dir}/selected.json")"
     run_bounded 20 docker run --rm \
         --label "io.nervix.chaos.run=${run_id}" \
@@ -232,7 +235,7 @@ pause_one_node() {
         "${round_dir}/immediately-before"
     inspect_target "${container_id}" "${round_dir}/before.json"
     "${script_dir}/verify-pause-evidence.sh" before "${run_id}" "${project_name}" \
-        "${selected_host}" "${image_id}" "${round_dir}/selected.json" "${round_dir}/before.json"
+        "${selected_host}" "${image_id}" "${round_dir}/selected.json" "${round_dir}/before.json" "${parameter_evidence}"
     [[ "$(owned_service_container "${selected_host}")" == "${container_id}" ]] \
         || pause_fail injection 'selected container changed before pause'
     local node_container_ids=()
@@ -275,7 +278,7 @@ pause_one_node() {
         || pause_fail injection 'Pumba never paused the selected node'
     inspect_target "${container_id}" "${round_dir}/paused.json"
     "${script_dir}/verify-pause-evidence.sh" paused "${run_id}" "${project_name}" \
-        "${selected_host}" "${image_id}" "${round_dir}/before.json" "${round_dir}/paused.json"
+        "${selected_host}" "${image_id}" "${round_dir}/before.json" "${round_dir}/paused.json" "${parameter_evidence}"
     local observer_id
     observer_id="$(owned_service_container observer)" || return 1
     local source_during=null output_during=null
@@ -353,7 +356,7 @@ pause_one_node() {
     fi
     "${script_dir}/verify-pause-evidence.sh" resumed "${run_id}" "${project_name}" \
         "${selected_host}" "${image_id}" "${round_dir}/before.json" \
-        "${round_dir}/resumed.json" "${round_dir}/pause-events.ndjson" \
+        "${round_dir}/resumed.json" "${parameter_evidence}" "${round_dir}/pause-events.ndjson" \
         "${min_ms}" "${max_ms}" "${round_dir}/duration.json" \
         || pause_fail injection 'actual Docker pause interval missed the declared fault window'
     pause_target_id=""
@@ -421,7 +424,7 @@ pause_one_node() {
         --arg during_effect "${during_effect}" \
         '{before:$before[0],during:($during[0]+{observed_effect:$during_effect}),after:$after[0],acknowledged_effects_present:true}' \
         >"${round_dir}/control-results.json"
-    wait_for 'sink output advanced after resume' 90 \
+    wait_for 'emitter output advanced after resume' 90 \
         topic_progressed chaos_output "${output_at_resume}"
     docker_event_window "${fault_since_ns}" "${round_dir}/all-node-events.ndjson" --role node \
         || pause_fail controller 'the live Docker event recording does not cover the pause through recovery'
@@ -433,7 +436,7 @@ pause_one_node() {
         || pause_fail product 'a non-target node changed process incarnation'
     inspect_target "${container_id}" "${round_dir}/final.json"
     "${script_dir}/verify-pause-evidence.sh" before "${run_id}" "${project_name}" \
-        "${selected_host}" "${image_id}" "${round_dir}/before.json" "${round_dir}/final.json"
+        "${selected_host}" "${image_id}" "${round_dir}/before.json" "${round_dir}/final.json" "${parameter_evidence}"
     for host in "${node_hosts[@]}"; do
         capture_metrics "${host}"
         cp "${artifact_dir}/public/metrics-${host}.txt" "${round_dir}/metrics-${host}.txt"
@@ -477,7 +480,7 @@ run_pause_resume() {
     compose up --detach --no-deps load observer
     wait_for 'independent load, observer and broker' 30 check_support_containers
     wait_for 'source traffic started' 30 topic_progressed chaos_input 0
-    wait_for 'sink traffic started' 60 topic_progressed chaos_output 0
+    wait_for 'emitter traffic started' 60 topic_progressed chaos_output 0
     wait_for 'initial cross-node traffic metrics' 60 initial_remote_path_ready
     local host
     for host in "${node_hosts[@]}"; do

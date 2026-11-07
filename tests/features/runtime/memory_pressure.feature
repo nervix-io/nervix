@@ -17,18 +17,17 @@ Feature: Memory pressure
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_memory_pressure_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_memory_pressure_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT memory_pressure_ingress
+        CREATE HTTP ENDPOINT memory_pressure_ingress
         ON edge
-        PATH '/memory-pressure'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR memory_pressure_source
+        PATH '/memory-pressure';
+      CREATE HTTP ENDPOINT INGESTOR memory_pressure_ingestor
         FROM memory_pressure_ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 3s DECODE USING notification_codec
         TO notifications
@@ -40,15 +39,15 @@ Feature: Memory pressure
         ON GENERAL ERROR LOG;
         START;
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "status: quiesced"
-    And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "quiesce: REJECT RETRY AFTER 3s"
-    And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "quiesce state: memory pressure"
-    And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "memory-backpressure: active"
+    Then within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_ingestor" as "status: quiesced"
+    And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_ingestor" as "quiesce: REJECT RETRY AFTER 3s"
+    And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_ingestor" as "quiesce state: memory pressure"
+    And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_ingestor" as "memory-backpressure: active"
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/memory-pressure" and fails
       """
       {"user_id":1}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "nervix_ingestor_quiesce_rejected_total"
+    Then within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_ingestor" as "nervix_ingestor_quiesce_rejected_total"
 
     Examples:
       | cluster_size |

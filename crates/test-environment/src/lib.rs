@@ -57,7 +57,9 @@ pub mod collector_output;
 pub mod dns_authority;
 mod http_readiness;
 mod postgres_clients;
+mod pulsar_auth;
 mod reaper;
+pub mod restartable_rabbitmq;
 
 use collector_output::{CollectorFollower, CollectorOutput};
 use http_readiness::HttpReadiness;
@@ -85,6 +87,9 @@ const DEPENDENCY_CONFIGURATION_FILES: &[&[u8]] = &[
     include_bytes!("../../../docker/mock-server/Dockerfile"),
     include_bytes!("../../../docker/mock-server/app.py"),
     include_bytes!("../../../docker/nats/nats-tls.conf"),
+    include_bytes!("../../../docker/nats/nats-token.conf"),
+    include_bytes!("../../../docker/nats/nats-nkey.conf"),
+    include_bytes!("../../../docker/nats/nats-jwt.conf"),
     OTEL_COLLECTOR_CONFIG,
     include_bytes!("../../../docker/prometheus/prometheus.yml"),
     include_bytes!("../../../docker/prometheus/web.yml"),
@@ -160,6 +165,19 @@ pub const KAFKA_DOCKER_NETWORK: &str = "kafka_docker_network";
 pub const PULSAR_ADDR: &str = "pulsar_addr";
 pub const PULSAR_TLS_ADDR: &str = "pulsar_tls_addr";
 pub const PULSAR_ADMIN_ADDR: &str = "pulsar_admin_addr";
+/// The TLS port of the Pulsar broker, dialled through a loopback address its certificate does not
+/// name.
+pub const PULSAR_TLS_UNNAMED_ADDR: &str = "pulsar_tls_unnamed_addr";
+/// The plaintext port of the broker that authenticates its clients, which refuses a client without
+/// [`PULSAR_AUTH_TOKEN`].
+pub const PULSAR_AUTH_ADDR: &str = "pulsar_auth_addr";
+/// The TLS port of the broker that authenticates its clients, which refuses a client that presents
+/// no certificate of the scenario certificate authority.
+pub const PULSAR_AUTH_TLS_ADDR: &str = "pulsar_auth_tls_addr";
+/// A token the broker at [`PULSAR_AUTH_ADDR`] accepts.
+pub const PULSAR_AUTH_TOKEN: &str = "pulsar_auth_token";
+/// A well-formed token signed by a key the broker at [`PULSAR_AUTH_ADDR`] does not hold.
+pub const PULSAR_AUTH_FORGED_TOKEN: &str = "pulsar_auth_forged_token";
 pub const RABBITMQ_ADDR: &str = "rabbitmq_addr";
 pub const RABBITMQ_MANAGEMENT_ADDR: &str = "rabbitmq_management_addr";
 pub const RABBITMQ_TLS_ADDR: &str = "rabbitmq_tls_addr";
@@ -167,6 +185,9 @@ pub const REDIS_ADDR: &str = "redis_addr";
 pub const REDIS_TLS_ADDR: &str = "redis_tls_addr";
 pub const MQTT_ADDR: &str = "mqtt_addr";
 pub const MQTT_TLS_ADDR: &str = "mqtt_tls_addr";
+/// Listeners that cap subscription grants below the ordinary broker's QoS 2 maximum.
+pub const MQTT_QOS0_ADDR: &str = "mqtt_qos0_addr";
+pub const MQTT_QOS1_ADDR: &str = "mqtt_qos1_addr";
 /// A listener of the same MQTT broker that holds a client to a keep-alive of
 /// [`MQTT_SHORT_KEEPALIVE`]: it announces that keep-alive in every CONNACK, checks it every second,
 /// and lets a subscriber hold as many unacknowledged publishes as its own Receive Maximum asks
@@ -175,8 +196,30 @@ pub const MQTT_SHORT_KEEPALIVE_ADDR: &str = "mqtt_short_keepalive_addr";
 /// The keep-alive the listener at [`MQTT_SHORT_KEEPALIVE_ADDR`] holds its clients to. The broker
 /// closes a connection that sends nothing for one and a half of it.
 pub const MQTT_SHORT_KEEPALIVE: Duration = Duration::from_secs(10);
+/// A listener of the same MQTT broker that authenticates every client: it accepts only the user
+/// named by [`MQTT_AUTH_USERNAME`] with the password named by [`MQTT_AUTH_PASSWORD`], and refuses a
+/// client that writes no credentials or other ones. Every other listener admits clients without
+/// credentials, and the broker routes publishes across all of them.
+pub const MQTT_AUTH_ADDR: &str = "mqtt_auth_addr";
+/// The username the listener at [`MQTT_AUTH_ADDR`] accepts.
+pub const MQTT_AUTH_USERNAME: &str = "mqtt_auth_username";
+/// The password the listener at [`MQTT_AUTH_ADDR`] accepts with [`MQTT_AUTH_USERNAME`].
+pub const MQTT_AUTH_PASSWORD: &str = "mqtt_auth_password";
+/// The broker's HTTP management API, which reports each connected client's identity, username and
+/// negotiated keep-alive. A request authenticates with [`MQTT_API_KEY`] and [`MQTT_API_SECRET`].
+pub const MQTT_API_ADDR: &str = "mqtt_api_addr";
+/// The key of the management API credential the broker is started with.
+pub const MQTT_API_KEY: &str = "nervix-scenarios";
+/// The secret of the management API credential the broker is started with.
+pub const MQTT_API_SECRET: &str = "nervix-scenarios-api-secret";
+/// The values behind [`MQTT_AUTH_USERNAME`] and [`MQTT_AUTH_PASSWORD`].
+const MQTT_AUTH_USERNAME_VALUE: &str = "nervix-mqtt-user";
+const MQTT_AUTH_PASSWORD_VALUE: &str = "nervix-mqtt-password";
 pub const NATS_ADDR: &str = "nats_addr";
 pub const NATS_TLS_ADDR: &str = "nats_tls_addr";
+pub const NATS_TOKEN_ADDR: &str = "nats_token_addr";
+pub const NATS_NKEY_ADDR: &str = "nats_nkey_addr";
+pub const NATS_CREDENTIALS_ADDR: &str = "nats_credentials_addr";
 pub const SQS_ENDPOINT: &str = "sqs_endpoint";
 pub const SQS_TLS_ENDPOINT: &str = "sqs_tls_endpoint";
 pub const CLICKHOUSE_ADDR: &str = "clickhouse_addr";
@@ -287,6 +330,8 @@ pub enum ContainerReadiness {
     Http {
         port: ContainerPort,
         path: &'static str,
+        /// The token a dependency that authenticates its HTTP API takes for this request.
+        bearer_token: Option<&'static str>,
     },
     Running,
 }
@@ -527,6 +572,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                 ContainerReadiness::Http {
                     port: 8080.tcp(),
                     path: namespace_path,
+                    bearer_token: None,
                 },
                 "Pulsar public/default namespace",
                 || {
@@ -564,6 +610,10 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints.insert(
             PULSAR_TLS_ADDR,
             format!("pulsar+ssl://127.0.0.1:{tls_port}"),
+        );
+        self.endpoints.insert(
+            PULSAR_TLS_UNNAMED_ADDR,
+            format!("pulsar+ssl://127.0.0.2:{tls_port}"),
         );
         self.endpoints
             .insert(PULSAR_ADMIN_ADDR, format!("http://127.0.0.1:{admin_port}"));
@@ -660,13 +710,63 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let tls = self.ensure_tls()?.clone();
         let short_keepalive = MQTT_SHORT_KEEPALIVE.as_secs().to_string();
+        let users = format!(
+            "user_id,password,is_superuser\n{MQTT_AUTH_USERNAME_VALUE},{MQTT_AUTH_PASSWORD_VALUE},\
+             false\n"
+        );
+        let api_keys = format!("{MQTT_API_KEY}:{MQTT_API_SECRET}\n");
         let container = self
             .start_container("mqtt", 1883.tcp(), "MQTT", || {
-                GenericImage::new("emqx/emqx", "5.8.4")
+                // Capped zones must report their grant in SUBACK (EMQX #14931).
+                GenericImage::new("emqx/emqx", "5.9.0")
                     .with_exposed_port(1883.tcp())
                     .with_exposed_port(1884.tcp())
+                    .with_exposed_port(1885.tcp())
+                    .with_exposed_port(1886.tcp())
+                    .with_exposed_port(1887.tcp())
                     .with_exposed_port(8883.tcp())
-                    .with_wait_for(WaitFor::message_on_either_std("EMQX 5.8.4 is running now"))
+                    .with_exposed_port(18083.tcp())
+                    .with_wait_for(WaitFor::message_on_either_std(
+                        "EMQX Enterprise 5.9.0 is running now",
+                    ))
+                    // One password authenticator holds the users of the authenticating listener.
+                    // Every other listener skips it and admits a client without credentials.
+                    .with_env_var("EMQX_AUTHENTICATION__1__MECHANISM", "password_based")
+                    .with_env_var("EMQX_AUTHENTICATION__1__BACKEND", "built_in_database")
+                    .with_env_var("EMQX_AUTHENTICATION__1__USER_ID_TYPE", "username")
+                    .with_env_var(
+                        "EMQX_AUTHENTICATION__1__PASSWORD_HASH_ALGORITHM__NAME",
+                        "plain",
+                    )
+                    .with_env_var(
+                        "EMQX_AUTHENTICATION__1__PASSWORD_HASH_ALGORITHM__SALT_POSITION",
+                        "disable",
+                    )
+                    .with_env_var("EMQX_AUTHENTICATION__1__BOOTSTRAP_TYPE", "plain")
+                    .with_env_var(
+                        "EMQX_AUTHENTICATION__1__BOOTSTRAP_FILE",
+                        "/nervix/mqtt-users.csv",
+                    )
+                    .with_copy_to("/nervix/mqtt-users.csv", users.clone().into_bytes())
+                    .with_env_var("EMQX_API_KEY__BOOTSTRAP_FILE", "/nervix/api-keys.txt")
+                    .with_copy_to("/nervix/api-keys.txt", api_keys.clone().into_bytes())
+                    .with_env_var("EMQX_LISTENERS__TCP__AUTH__BIND", "0.0.0.0:1885")
+                    .with_env_var("EMQX_LISTENERS__TCP__AUTH__ENABLE_AUTHN", "true")
+                    // Scenarios can deny one client's subscriptions without changing any other
+                    // client's access. A policy change takes effect on the next attempt.
+                    .with_env_var(
+                        "EMQX_AUTHORIZATION__SOURCES",
+                        "[{type = built_in_database, enable = true}]",
+                    )
+                    .with_env_var("EMQX_AUTHORIZATION__NO_MATCH", "allow")
+                    .with_env_var("EMQX_AUTHORIZATION__DENY_ACTION", "ignore")
+                    .with_env_var("EMQX_AUTHORIZATION__CACHE__ENABLE", "false")
+                    .with_env_var("EMQX_LISTENERS__TCP__DEFAULT__ENABLE_AUTHN", "false")
+                    .with_env_var(
+                        "EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__ENABLE_AUTHN",
+                        "false",
+                    )
+                    .with_env_var("EMQX_LISTENERS__SSL__DEFAULT__ENABLE_AUTHN", "false")
                     .with_env_var("EMQX_LISTENERS__TCP__DEFAULT__BIND", "0.0.0.0:1883")
                     // The broker announces this keep-alive in every CONNACK of the zone's listener
                     // and checks every second whether a client sent anything within one and a half
@@ -685,6 +785,14 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                         "EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__ZONE",
                         "short_keepalive",
                     )
+                    .with_env_var("EMQX_ZONES__QOS0__MQTT__MAX_QOS_ALLOWED", "0")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS0__BIND", "0.0.0.0:1886")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS0__ZONE", "qos0")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS0__ENABLE_AUTHN", "false")
+                    .with_env_var("EMQX_ZONES__QOS1__MQTT__MAX_QOS_ALLOWED", "1")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS1__BIND", "0.0.0.0:1887")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS1__ZONE", "qos1")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS1__ENABLE_AUTHN", "false")
                     .with_env_var("EMQX_LISTENERS__SSL__DEFAULT__BIND", "0.0.0.0:8883")
                     .with_env_var(
                         "EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE",
@@ -717,13 +825,29 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .await?;
         let port = mapped_port(&container, 1883, "MQTT").await?;
         let short_keepalive_port = mapped_port(&container, 1884, "MQTT short keep-alive").await?;
+        let qos0_port = mapped_port(&container, 1886, "MQTT QoS 0").await?;
+        let qos1_port = mapped_port(&container, 1887, "MQTT QoS 1").await?;
+        let auth_port = mapped_port(&container, 1885, "MQTT authenticating").await?;
         let tls_port = mapped_port(&container, 8883, "MQTT TLS").await?;
+        let api_port = mapped_port(&container, 18083, "MQTT management API").await?;
+        self.endpoints
+            .insert(MQTT_QOS0_ADDR, format!("mqtt://127.0.0.1:{qos0_port}"));
+        self.endpoints
+            .insert(MQTT_QOS1_ADDR, format!("mqtt://127.0.0.1:{qos1_port}"));
         self.endpoints
             .insert(MQTT_ADDR, format!("mqtt://127.0.0.1:{port}"));
         self.endpoints.insert(
             MQTT_SHORT_KEEPALIVE_ADDR,
             format!("mqtt://127.0.0.1:{short_keepalive_port}"),
         );
+        self.endpoints
+            .insert(MQTT_AUTH_ADDR, format!("mqtt://127.0.0.1:{auth_port}"));
+        self.endpoints
+            .insert(MQTT_AUTH_USERNAME, MQTT_AUTH_USERNAME_VALUE.to_string());
+        self.endpoints
+            .insert(MQTT_AUTH_PASSWORD, MQTT_AUTH_PASSWORD_VALUE.to_string());
+        self.endpoints
+            .insert(MQTT_API_ADDR, format!("http://127.0.0.1:{api_port}"));
         self.endpoints
             .insert(MQTT_TLS_ADDR, format!("mqtts://127.0.0.1:{tls_port}"));
         self.containers.push(RunningContainer::Generic(container));
@@ -1036,6 +1160,56 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         Ok(())
     }
 
+    /// Independent servers enforce each public NATS authentication method.
+    pub async fn start_nats_auth(&mut self) -> io::Result<()> {
+        if !self.mark_starting("nats-auth").await? {
+            return Ok(());
+        }
+        struct AuthenticationServer {
+            role: &'static str,
+            endpoint: &'static str,
+            config: &'static [u8],
+        }
+        for AuthenticationServer {
+            role,
+            endpoint,
+            config,
+        } in [
+            AuthenticationServer {
+                role: "nats-token",
+                endpoint: NATS_TOKEN_ADDR,
+                config: include_bytes!("../../../docker/nats/nats-token.conf"),
+            },
+            AuthenticationServer {
+                role: "nats-nkey",
+                endpoint: NATS_NKEY_ADDR,
+                config: include_bytes!("../../../docker/nats/nats-nkey.conf"),
+            },
+            AuthenticationServer {
+                role: "nats-credentials",
+                endpoint: NATS_CREDENTIALS_ADDR,
+                config: include_bytes!("../../../docker/nats/nats-jwt.conf"),
+            },
+        ] {
+            nervix_primitives::task::consume_budget().await;
+            let container = self
+                .start_container(role, 4222.tcp(), "authenticated NATS", || {
+                    GenericImage::new("nats", "2.11-alpine")
+                        .with_wait_for(WaitFor::message_on_either_std("Server is ready"))
+                        .with_exposed_port(4222.tcp())
+                        .with_copy_to("/etc/nats/auth.conf", config.to_vec())
+                        .with_cmd(["-c", "/etc/nats/auth.conf"])
+                        .with_startup_timeout(STARTUP_TIMEOUT)
+                })
+                .await?;
+            let port = mapped_port(&container, 4222, "authenticated NATS").await?;
+            self.endpoints
+                .insert(endpoint, format!("nats://127.0.0.1:{port}"));
+            self.containers.push(RunningContainer::Generic(container));
+        }
+        Ok(())
+    }
+
     pub async fn start_nats_tls(&mut self) -> io::Result<()> {
         if !self.mark_starting("nats-tls").await? {
             return Ok(());
@@ -1198,7 +1372,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let tls = self.ensure_tls()?.clone();
         let workspace_root = workspace_root();
-        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "prometheus-vectors")
+        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "prometheus-answers")
             .with_dockerfile(workspace_root.join("docker/mock-server/Dockerfile"))
             .with_file(
                 workspace_root.join("docker/mock-server/app.py"),
@@ -2444,12 +2618,16 @@ async fn wait_for_container<I: Image>(
         ContainerReadiness::MappedTcp(port) => {
             wait_for_container_tcp(container, port, dependency).await
         }
-        ContainerReadiness::Http { port, path } => {
+        ContainerReadiness::Http {
+            port,
+            path,
+            bearer_token,
+        } => {
             let host_port = container
                 .get_host_port_ipv4(port)
                 .await
                 .map_err(testcontainers_error(dependency))?;
-            HttpReadiness::new(host_port, path)
+            HttpReadiness::new(host_port, path, bearer_token)
                 .wait(REUSABLE_READY_TIMEOUT)
                 .await
                 .map_err(|error| {

@@ -8,7 +8,7 @@ It executes the typed revision of a committed schedule. [Execution Plans](./exec
 describes the decisions, local binding, and publication that prepare its tasks.
 
 [Connector Crates And The Connector Contract](./connector-contract.md) defines how the host
-admits external source messages and publishes through external emitters, including their ACK and
+admits messages from external systems and publishes through external emitters, including their ACK and
 commit boundaries. This chapter follows the Arrow batches those boundaries hand to the graph.
 
 It is responsible for:
@@ -53,24 +53,33 @@ The [Data-Plane Concurrency](./data-plane-concurrency.md) chapter defines how th
 shared lock acquisition, publishes reconfigurable state, owns per-row mutation, and retains only
 the ordering fences required by delivery and ownership contracts.
 
-Every relay has one scheduled owner. Producers on other cluster nodes use one fixed dispatch slot
-per relay and serialize each batch once for the owner. The owner alone maintains the bounded relay
-buffer, concrete branch presence, metrics, subscriptions, and fan-out. It sends at most one
+Every relay has one scheduled owner, and a relay whose branch declares several partitions has one
+owner per partition, each placed on its own; see [Relay Partitions](./relay.md#relay-partitions).
+Producers on other cluster nodes use one fixed dispatch slot per relay, and per partition of a
+partitioned relay, and serialize each batch once for the owner of its key. An owner alone maintains
+the bounded relay buffer, concrete branch presence, metrics, subscriptions, and fan-out for the keys
+it owns. It sends at most one
 serialized copy to each remote consuming cluster node, where all runtime consumers and any local
 subscription share that delivery. Only a relay's optional materialized records have
 scheduler-selected state replicas; the relay's hot-path runtime is never replicated.
 
-Nervix is not a durable event log for every in-flight row. If hot-path message or ACK state is lost, sources and ingestors react according to their delivery mode, offsets, and retry policy.
+Nervix is not a durable event log for every in-flight row. If hot-path message or ACK state is lost, external systems and ingestors react according to their delivery mode, offsets, and retry policy.
 
 Branch grouping is native runtime isolation based on explicit `CREATE BRANCH` declarations. A
-branch declares the branch-key schema shape with `SCHEMA <schema>`, TTL, and optional eviction
-policy. The branch name is part of its identity: differently named branches remain incompatible
+branch declares the branch-key schema shape with `SCHEMA <schema>`, TTL, its partition count, and
+optional eviction policy. The branch name is part of its identity: differently named branches remain incompatible
 even when they reference the same schema. Ingestor routes construct keys with `BRANCHED BY
 <branch> SET ...`; reingestor routes preserve the input key, construct another named branch, or
 become unbranched. Relays and branch-preserving processors use that exact named branch or declare
 `UNBRANCHED`. Relay presence, processor buffers, deduplicator state, window state, and materialized
 entries remain scoped to one concrete branch; batches for those branches share the declared
-relay's owner buffer.
+relay's owner buffer, or the buffer of the owner of their partition.
+
+A branched processor or generator has one supervisor per partition index, placed independently.
+Each supervisor owns its branch registry, buffers, state and lifecycle metrics; prepared programs
+remain shared by the logical node. A processor receives only its input partition, while common
+consumers retain one queue across partitions. Materialized dependency reads resolve the requested
+key's unit owner, and generators enumerate only their own unit's materialized rows.
 
 Structured Model expressions are compiled into typed VM programs. The leader validates them when a
 statement is applied, so invalid scopes, construction, types, nullability, sensitivity, or branch
@@ -84,32 +93,32 @@ row and batch errors, kernels, every function family, and branch-local window ag
 ## ACK Composition
 
 Relay fan-out gives each attached runtime consumer a descendant of the incoming ACK state.
-Detached consumers receive the batch without an upstream ACK dependency. The source ACK succeeds
-only when all attached descendants succeed. Any attached failure fails the shared source attempt,
+Detached consumers receive the batch without an upstream ACK dependency. The ingestor ACK succeeds
+only when all attached descendants succeed. Any attached failure fails the shared ingestor attempt,
 even when another descendant has already completed an external side effect.
 
 The relay owner holds a dispatch permit while it selects and fans out to attached consumers. If a
 schedule swap has already closed that gate before a buffered batch begins fan-out, the owner fails
-the batch's ACKs and lets the source retry under the new schedule. This prevents a sibling attached
-consumer on the old node from completing the source ACK while a moving consumer is absent from the
+the batch's ACKs and lets the ingestor retry under the new schedule. This prevents a sibling attached
+consumer on the old node from completing the ingestor ACK while a moving consumer is absent from the
 owner's routes.
 
 A batch that a relay owner routes to another node for its attached consumers carries record
 acknowledgements for them. If no attached consumer of the relay runs on that node when the batch
 reaches its runtime, because the consumer moved away after the owner routed the batch, the batch
-fails those acknowledgements instead of completing them, and the source redelivers the record along
+fails those acknowledgements instead of completing them, and the ingestor redelivers the record along
 the current routes. See
 [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver).
 
 A node that sent a record's acknowledgement to another node waits for it only while that node keeps
 reporting it. When the other node reports nothing about it for fifteen seconds after admitting the
 batch, because its outcome was lost on the way back or its process ended, the acknowledgement fails
-and the source redelivers the record. An acknowledgement lost between two nodes on a record's path
-therefore fails the source attempt instead of keeping it waiting. See
+and the ingestor redelivers the record. An acknowledgement lost between two nodes on a record's path
+therefore fails the ingestor attempt instead of keeping it waiting. See
 [Record Acknowledgements The Receiver Stops Reporting](interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
 
 ACK guards, tokens, and maps remain in memory. They do not record a transactional per-emitter commit
-ledger. After source redelivery, every attached path processes the record again. This is why an
+ledger. After ingestor redelivery, every attached path processes the record again. This is why an
 already successful non-idempotent emitter can receive a duplicate after a sibling path fails. See
 [ACK Semantics And Effective Delivery](emitters.md#ack-semantics-and-effective-delivery) for the
 emitter consequences and mitigations.

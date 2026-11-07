@@ -21,7 +21,7 @@
 )]
 
 use error_stack::Report;
-use nervix_connector::{RustlsClientConfigProvider, install_rustls_crypto_provider, read_tls_file};
+use nervix_connector::{RustlsClientConfigProvider, read_tls_file};
 use nervix_models::{ClientConfigEntry, SyslogListenerTls};
 use nervix_primitives::sync::StdArc;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
@@ -60,7 +60,7 @@ pub(crate) fn tls_client_config(
 pub(crate) fn tls_server_config(
     tls: &SyslogListenerTls,
 ) -> error_stack::Result<StdArc<ServerConfig>, SyslogConfigError> {
-    install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let cert_file = &tls.cert_file;
     let key_file = &tls.key_file;
     let cert_pem = {

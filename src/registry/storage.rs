@@ -23,15 +23,16 @@ use std::{path::Path, str::FromStr};
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt};
-use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot};
 use meticulous::OptionExt;
 #[cfg(test)]
 use nervix_models::{AlterRelay, DropModel};
 use nervix_models::{
-    ClusterSchedule, CreateAvroWireSchema, CreateDeduplicator, CreateEmitter, CreateGenerator,
-    CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, DomainName, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    PlacementPolicy, RequestedResourceVersion, TransactionModelTransition, UniquelyKindedModel,
+    ClusterSchedule, CreateAvroWireSchema, CreateBranch, CreateCodec, CreateDeduplicator,
+    CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction, CreatePlacement,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainName,
+    EmitterPayloadPresentation, Model, ModelIndex, ModelKind, ModelName, NodeRef, PlacementPolicy,
+    RequestedResourceVersion, TransactionModelTransition, UniquelyKindedModel,
 };
 use nervix_primitives::sync::{
     Arc,
@@ -39,7 +40,6 @@ use nervix_primitives::sync::{
 };
 use nervix_recovery::Discarded;
 use serde::{Deserialize, Serialize};
-use sorted_vec::SortedSet;
 use tracing::{info, warn};
 
 use crate::registry::{
@@ -76,6 +76,7 @@ impl StoredModelRecord {
 }
 
 pub(crate) struct Registry {
+    parameters: nervix_primitives::publication::ArcSwap<nervix_models::ClusterParameterValues>,
     storage: ModelStorage,
     state: RwLock<Arc<RegistryState>>,
     commit_lock: Mutex<()>,
@@ -85,23 +86,15 @@ pub(crate) struct Registry {
 /// left to run, and for a planned batch that changes no Model.
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeChanges {
-    pub(crate) domain: DomainName,
     pub(crate) graph: Option<ActiveGraph>,
 }
 
-impl RuntimeChanges {
-    pub(crate) fn execution_revision(
-        &self,
-    ) -> error_stack::Result<Option<Arc<super::ExecutionRevision>>, super::ExecutionRevisionError>
-    {
-        match &self.graph {
-            Some(graph) => super::ExecutionRevision::from_graph(&self.domain, graph).map(Some),
-            None => Ok(None),
-        }
-    }
-}
-
 impl Registry {
+    pub(crate) fn install_cluster_parameters(&self, values: nervix_models::ClusterParameterValues) {
+        self.parameters
+            .store(nervix_primitives::sync::StdArc::new(values));
+    }
+
     #[cfg(test)]
     pub(in crate::registry) fn open(path: impl AsRef<Path>) -> Result<Self, Report<RegistryError>> {
         let path = path.as_ref();
@@ -150,11 +143,11 @@ impl Registry {
                     warn!(
                         path = %path.display(),
                         result = "err",
-                        error = %err,
+                        error = %format_args!("{err:#}"),
                         "persistent state load failed"
                     );
                 } else {
-                    warn!(result = "err", error = %err, "persistent state load failed");
+                    warn!(result = "err", error = %format_args!("{err:#}"), "persistent state load failed");
                 }
                 return Err(err);
             }
@@ -177,6 +170,9 @@ impl Registry {
         log_registry_state("persistent state load result", &state);
 
         Ok(Self {
+            parameters: nervix_primitives::publication::ArcSwap::from_pointee(
+                nervix_models::ClusterParameterValues::default(),
+            ),
             storage,
             state: RwLock::new(Arc::new(state)),
             commit_lock: Mutex::new(()),
@@ -231,22 +227,6 @@ impl Registry {
         mutations: Vec<RegistryMutation>,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
         self.apply_mutations(domain, mutations, "mixed mutation batch")
-    }
-
-    pub(crate) fn startup_runtime_changes(
-        &self,
-    ) -> Result<Vec<RuntimeChanges>, Report<RegistryError>> {
-        let state = self.state.read();
-        let domains = SortedSet::from_unsorted(state.domains.keys().cloned().collect()).into_vec();
-        let mut startup_changes = Vec::new();
-        for domain in domains {
-            let domain_state = &state.domains[&domain];
-            startup_changes.push(RuntimeChanges {
-                domain: domain.clone(),
-                graph: Some(domain_state.graph.clone()),
-            });
-        }
-        Ok(startup_changes)
     }
 
     pub(crate) fn synchronize_cluster_schedule(
@@ -342,12 +322,37 @@ impl Registry {
         self.commit_planned(planned)
     }
 
+    #[cfg(test)]
     pub(crate) fn plan_mutations(
         &self,
         domain: &DomainName,
         mutations: &[RegistryMutation],
     ) -> Result<PlannedMutations, Report<RegistryError>> {
         self.plan_mutations_named(domain, mutations, "mixed mutation batch")
+    }
+
+    /// Plans one direct model batch from its caller's captured Models and parameters.
+    ///
+    /// The snapshot owns both inputs, so runtime policy installation and registry storage cannot
+    /// select a different model set or policy between validation and schedule publication.
+    pub(crate) fn plan_snapshot_mutations_with_parameters(
+        domain: &DomainName,
+        base_models: ModelIndex,
+        parameters: &nervix_models::ClusterParameterValues,
+        mutations: &[RegistryMutation],
+    ) -> Result<PlannedMutations, Report<RegistryError>> {
+        Ok(Self::plan_mutations_against(
+            domain,
+            mutations,
+            "mixed mutation batch",
+            parameters,
+            false,
+            base_models,
+        )?
+        .planned
+        .verified(
+            "this call disallows an incomplete candidate, and only that path returns no plan",
+        ))
     }
 
     /// Plans one transaction model run against the exact Models captured by its caller.
@@ -358,6 +363,7 @@ impl Registry {
     pub(crate) fn preflight_transaction_mutations_against(
         domain: &DomainName,
         base_models: ModelIndex,
+        parameters: &nervix_models::ClusterParameterValues,
         mutations: &[RegistryMutation],
         allow_incomplete_candidate: bool,
     ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
@@ -365,11 +371,13 @@ impl Registry {
             domain,
             mutations,
             "ordered transaction planning",
+            parameters,
             allow_incomplete_candidate,
             base_models,
         )
     }
 
+    #[cfg(test)]
     fn plan_mutations_named(
         &self,
         domain: &DomainName,
@@ -389,6 +397,7 @@ impl Registry {
             ))
     }
 
+    #[cfg(test)]
     fn plan_mutations_named_with_incomplete_candidate(
         &self,
         domain: &DomainName,
@@ -407,6 +416,7 @@ impl Registry {
             domain,
             mutations,
             operation_name,
+            &self.parameters.load(),
             allow_incomplete_candidate,
             current_models,
         )
@@ -416,6 +426,7 @@ impl Registry {
         domain: &DomainName,
         mutations: &[RegistryMutation],
         operation_name: &str,
+        parameters: &nervix_models::ClusterParameterValues,
         allow_incomplete_candidate: bool,
         current_models: ModelIndex,
     ) -> Result<TransactionMutationPreflight, Report<RegistryError>> {
@@ -557,6 +568,26 @@ impl Registry {
                     };
                     relay.apply_alter(alter).map_err(|rejection| {
                         RegistryError::invalid_model(domain, alter.relay.as_str(), rejection)
+                    })?;
+                }
+                RegistryMutation::AlterBranch(alter) => {
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.branch.as_str(),
+                        kind = ModelKind::Branch.as_str(),
+                        "staging branch alter from batch"
+                    );
+
+                    let Some(branch) =
+                        candidate.configured_mut::<CreateBranch>(alter.branch.clone())
+                    else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.branch.as_str().to_string(),
+                        }));
+                    };
+                    branch.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.branch.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterJunction(alter) => {
@@ -778,6 +809,7 @@ impl Registry {
             .cloned()
             .collect::<HashSet<_>>();
 
+        super::validate_model_parameters(domain, candidate.models(), parameters)?;
         let domain_state = match DomainState::build(domain, &candidate) {
             Ok(state) => state,
             // A caller that allows an incomplete candidate is queuing a step of a transaction that
@@ -797,7 +829,7 @@ impl Registry {
                     batch_size,
                     operation = operation_name,
                     result = "err",
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     "failed to apply mutation batch\n{}",
                     current_state.graph.describe()
                 );
@@ -826,10 +858,7 @@ impl Registry {
         } else {
             Some(domain_state.graph.clone())
         };
-        let runtime_changes = RuntimeChanges {
-            domain: domain.clone(),
-            graph,
-        };
+        let runtime_changes = RuntimeChanges { graph };
 
         let candidate_models = domain_state.models.clone();
         Ok(TransactionMutationPreflight {
@@ -926,10 +955,7 @@ impl Registry {
         } else {
             Some(domain_state.graph.clone())
         };
-        let runtime_changes = RuntimeChanges {
-            domain: domain.clone(),
-            graph,
-        };
+        let runtime_changes = RuntimeChanges { graph };
         Ok(PlannedMutations {
             domain: domain.clone(),
             batch_size: operation_count,
@@ -1053,10 +1079,7 @@ impl Registry {
         } else {
             Some(base_state.graph.clone())
         };
-        let runtime_changes = RuntimeChanges {
-            domain: planned.domain.clone(),
-            graph,
-        };
+        let runtime_changes = RuntimeChanges { graph };
         let current = self.state.read();
         let mut domains = current.domains.clone();
         if base_state.graph.node_count() == 0 {
@@ -1178,6 +1201,44 @@ impl Registry {
         }
     }
 
+    /// Reads an emitter and its effective payload from one short-lived storage snapshot.
+    /// Both reads retain storage/decode failures, without cloning the domain's model index.
+    pub(crate) fn emitter_configuration(
+        &self,
+        domain: &DomainName,
+        identifier: impl Into<ModelName>,
+    ) -> Result<Option<(CreateEmitter, EmitterPayloadPresentation)>, Report<RegistryError>> {
+        let identifier = identifier.into();
+        let snapshot = self.storage.db.snapshot();
+        let Some(emitter) = self
+            .storage
+            .get_at::<CreateEmitter>(&snapshot, domain, &identifier)
+            .change_context(RegistryError::LoadStoredModels)?
+        else {
+            return Ok(None);
+        };
+        let codec = match emitter.body.codec() {
+            Some(name) => Some(
+                self.storage
+                    .get_at::<CreateCodec>(&snapshot, domain, &ModelName::from(name))
+                    .change_context(RegistryError::LoadStoredModels)?
+                    .ok_or_else(|| {
+                        Report::new(RegistryError::MissingReference {
+                            domain: domain.as_str().to_owned(),
+                            identifier: identifier.as_str().to_owned(),
+                            expected_kind: ModelKind::Codec.as_str(),
+                            reference: name.as_str().to_owned(),
+                        })
+                    })?,
+            ),
+            None => None,
+        };
+        let payload = emitter
+            .payload_presentation(|_| codec.as_ref())
+            .assured("the snapshot read resolved the codec the emitter names");
+        Ok(Some((emitter, payload)))
+    }
+
     pub(crate) fn placement_plan(
         &self,
         domain: &DomainName,
@@ -1222,6 +1283,7 @@ impl Registry {
         domain: &DomainName,
         models: &ModelIndex,
     ) -> Result<DomainState, Report<RegistryError>> {
+        super::validate_model_parameters(domain, models.models(), &self.parameters.load())?;
         DomainState::build(domain, models)
     }
 }
@@ -1251,6 +1313,33 @@ struct ModelStorage {
 }
 
 impl ModelStorage {
+    /// Typed reads sharing one MVCC view, for inspection that resolves another Model.
+    fn get_at<M: UniquelyKindedModel>(
+        &self,
+        snapshot: &Snapshot,
+        domain: &DomainName,
+        identifier: &ModelName,
+    ) -> Result<Option<M>, Report<RegistryError>> {
+        let key = encode_key(domain, M::KIND, identifier)?;
+        let Some(raw) = snapshot
+            .get(&self.index, key)
+            .change_context(RegistryError::ReadValue)?
+        else {
+            return Ok(None);
+        };
+        let model = deserialize_value(raw.as_ref())?;
+        let stored_kind = model.kind();
+        let model = M::from_model(model).ok_or_else(|| {
+            Report::new(RegistryError::StoredModelKindMismatch {
+                domain: domain.as_str().to_owned(),
+                identifier: identifier.as_str().to_owned(),
+                expected_kind: M::KIND.as_str(),
+                stored_kind: stored_kind.as_str(),
+            })
+        })?;
+        Ok(Some(model))
+    }
+
     fn from_database(db: Database) -> Result<Self, Report<RegistryError>> {
         let index = db
             .keyspace("models", KeyspaceCreateOptions::default)
@@ -1515,7 +1604,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX REDIS SUB";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX KIND KEYS";
 
 #[cfg(test)]
 #[cfg_attr(
@@ -1599,6 +1688,78 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn emitter_configuration_keeps_persisted_codec_read_and_kind_errors() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).assured("the fixture opens an empty registry");
+        let domain = named::<DomainName>("inspection");
+        let identifier = named::<ModelName>("emit");
+        registry
+            .apply_batch(&domain, full_graph_batch())
+            .assured("the complete emitter graph validates");
+        let (emitter, payload) = registry
+            .emitter_configuration(&domain, &identifier)
+            .assured("the stored emitter and codec decode")
+            .assured("the fixture graph contains emit");
+        assert!(emitter.batch.is_none());
+        assert_eq!(payload.to_string(), "JSON record");
+        assert!(
+            registry
+                .emitter_configuration(&domain, named::<ModelName>("missing"))
+                .assured("an absent name is an ordinary lookup")
+                .is_none()
+        );
+
+        let key = encode_key(&domain, ModelKind::Codec, named::<ModelName>("event_codec"))
+            .assured("the fixture codec key encodes");
+        registry
+            .storage
+            .index
+            .insert(key.clone(), b"invalid archive")
+            .assured("the fixture corrupts only its own stored codec");
+        let error = registry
+            .emitter_configuration(&domain, &identifier)
+            .expect_err("inspection must report the persisted codec decoding failure");
+        assert!(error.frames().any(|frame| matches!(
+            frame.downcast_ref::<RegistryError>(),
+            Some(RegistryError::InvalidModelArchive)
+        )));
+
+        let misplaced =
+            serialize_value(&schema("event_schema")).assured("the current schema Model archives");
+        registry
+            .storage
+            .index
+            .insert(key.clone(), misplaced)
+            .assured("the fixture writes a current Model beneath the wrong key kind");
+        let error = registry
+            .emitter_configuration(&domain, &identifier)
+            .expect_err("inspection must report the codec key's stored kind mismatch");
+        assert!(error.frames().any(|frame| matches!(
+            frame.downcast_ref::<RegistryError>(),
+            Some(RegistryError::StoredModelKindMismatch {
+                expected_kind,
+                ..
+            }) if *expected_kind == ModelKind::Codec.as_str()
+        )));
+
+        registry
+            .storage
+            .index
+            .remove(key)
+            .assured("the fixture removes only the emitter's stored codec");
+        let error = registry
+            .emitter_configuration(&domain, &identifier)
+            .expect_err("inspection must preserve a missing codec reference as a typed failure");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::MissingReference { expected_kind, reference, .. }
+                if *expected_kind == ModelKind::Codec.as_str() && reference == "event_codec"
+        ));
+        drop(registry);
+        fs::remove_dir_all(path).assured("the fixture registry path is disposable");
     }
 
     #[test]
@@ -2282,39 +2443,6 @@ mod tests {
                 .expect("read should succeed")
                 .is_none()
         );
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn startup_runtime_changes_include_graph_only_domains() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    schema("event_schema"),
-                    wire_schema("event_wire"),
-                    codec("event_codec", "event_schema"),
-                    client_model("broker_out"),
-                    relay("notifications", "event_schema"),
-                    emitter("emit", "notifications", "event_codec", "broker_out"),
-                ],
-            )
-            .expect("graph-only batch should succeed");
-
-        let startup_changes = registry
-            .startup_runtime_changes()
-            .expect("startup runtime changes should load");
-        let change = startup_changes
-            .iter()
-            .find(|change| change.domain == domain)
-            .expect("domain runtime changes should exist");
-
-        assert!(change.graph.is_some(), "graph snapshot must be included");
 
         let _ = fs::remove_dir_all(path);
     }

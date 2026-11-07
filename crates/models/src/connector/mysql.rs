@@ -39,6 +39,10 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     ClientConfigSchema::new(
         &[
             K::required("addr", V::DriverAddress),
+            K::defaulted("pool_acquire_timeout_ms", V::Milliseconds, "30000"),
+            K::defaulted("pool_idle_timeout_ms", V::NonnegativeMilliseconds, "0"),
+            K::defaulted("pool_maintenance_interval_ms", V::Milliseconds, "1000"),
+            K::optional("pool_max_lifetime_ms", V::WholeSecondsMilliseconds),
             K::TIMEOUT,
             K::TLS_CA,
             K::TLS_CERT,
@@ -139,16 +143,30 @@ const MYSQL_BOUNDS: DeclaredBounds = DeclaredBounds {
             overflow: BufferOverflow::Backpressure,
         },
     }],
-    waits: &[DeclaredWait {
-        wait: "pool checkout (including connection and handshake), initial validation, and each \
-               insert",
-        bound: WaitBound::Key {
-            key: DeadlineKey::Timeout,
-            omitted: OmittedDeadline::Unbounded,
+    waits: &[
+        DeclaredWait {
+            wait: "pool checkout, including connection and authentication; timeout_ms also \
+                   applies when shorter",
+            bound: WaitBound::Key {
+                key: DeadlineKey::PoolAcquireTimeout,
+                omitted: OmittedDeadline::Derived(
+                    "the client's declared pool_acquire_timeout_ms default",
+                ),
+            },
         },
-    }],
+        DeclaredWait {
+            wait: "initial validation and each insert; also bounds each pool checkout when shorter",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+    ],
     driver_limits: &[
-        "Without timeout_ms, pool checkout, connection validation and inserts have no deadline.",
+        "Without timeout_ms, initial validation after checkout and inserts have no operation \
+         deadline.",
+        "Maximum connection age is checked on reuse, return and the driver's idle scan; active \
+         inserts are not interrupted.",
         "TLS identity keys use the driver's RSA PKCS#1 private-key format.",
         "A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row \
          limit.",
@@ -160,6 +178,7 @@ impl EmitterDeclaration for MySqlTableEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::MySql),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::Parameters,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: MySqlTablePublishingMode::KINDS,
@@ -210,15 +229,71 @@ impl EmitterEntityBody for MySqlTableEmitter {
     }
 }
 
+/// One change an `ALTER MYSQL TABLE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum MySqlTableEmitterChange {
+    /// `SET TABLE '<table>'`.
+    Table(MySqlTableName),
+    /// `SET ON CONFLICT … DO NOTHING|UPDATE`, or `DROP ON CONFLICT` where the action is the
+    /// ordinary insert a statement that writes no `ON CONFLICT` makes.
+    OnConflict(MySqlConflictAction),
+    /// `SET MODE <mode>`.
+    Mode(MySqlTablePublishingMode),
+}
+
+impl crate::EmitterEntityChange for MySqlTableEmitterChange {
+    type Entity = MySqlTableEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut MySqlTableEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Table(table) => entity.table = table.clone(),
+            Self::OnConflict(action) => {
+                if *action == MySqlConflictAction::None
+                    && entity.conflict_action == MySqlConflictAction::None
+                {
+                    return Err(error_stack::Report::new(
+                        crate::AlterEmitterError::OptionNotWritten {
+                            entity: <MySqlTableEmitter as crate::EmitterEntityModel>::KIND,
+                            option: "ON CONFLICT",
+                        },
+                    ));
+                }
+                entity.conflict_action = action.clone();
+            }
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Table(table) => format!("SET TABLE {}", crate::string_literal(table.as_str())),
+            Self::OnConflict(action) => match action.conflict_clause() {
+                Some(clause) => format!("SET {clause}"),
+                None => "DROP ON CONFLICT".to_owned(),
+            },
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector MySql = "MYSQL";
     /// What a MySQL emitter writes.
     pub enum MySqlEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum MySqlTableEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum MySqlEmitterChange;
     /// The entities a MySQL emitter writes.
     pub enum MySqlEmitterEntity {
-        Table(MySqlTableEmitter, MySqlTablePublishingMode) = "TABLE";
+        Table(MySqlTableEmitter, MySqlTablePublishingMode, MySqlTableEmitterChange) = "TABLE";
     }
 }
 
@@ -275,6 +350,44 @@ fn table_path(text: &str) -> Result<(), super::external_name::ExternalNameError>
 mod tests {
     use super::*;
     use crate::{ClientConfigEntry, ClientConfigSchemaError};
+
+    #[test]
+    fn pool_keys_declare_the_effective_defaults_and_current_overrides() {
+        let config = vec![ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "mysql://127.0.0.1/nervix".to_string(),
+        }];
+        let effective = CLIENT_CONFIG.effective_entries(&config);
+        for (key, expected) in [
+            ("pool_acquire_timeout_ms", "30000"),
+            ("pool_idle_timeout_ms", "0"),
+            ("pool_maintenance_interval_ms", "1000"),
+        ] {
+            assert_eq!(
+                effective
+                    .iter()
+                    .find(|entry| entry.key == key)
+                    .map(|entry| entry.value.as_str()),
+                Some(expected)
+            );
+        }
+        let mut configured = config;
+        for (key, value) in [
+            ("pool_acquire_timeout_ms", "250"),
+            ("pool_idle_timeout_ms", "1000"),
+            ("pool_max_lifetime_ms", "1000"),
+            ("pool_maintenance_interval_ms", "100"),
+        ] {
+            configured.push(ClientConfigEntry {
+                key: key.to_string(),
+                value: value.to_string(),
+            });
+        }
+        CLIENT_CONFIG
+            .validate(&configured)
+            .expect("the MySQL pool declares these keys");
+        assert_eq!(CLIENT_CONFIG.effective_entries(&configured), configured);
+    }
 
     #[test]
     fn operation_deadlines_and_tls_identity_follow_the_shared_schema_rules() {

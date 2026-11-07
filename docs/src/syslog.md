@@ -22,14 +22,13 @@ Pairing the format and transport pieces creates a conventional syslog receiver o
 Reference the predefined wire schema directly from a codec:
 
 ```plexus
-CREATE CODEC syslog_codec
-  FROM SYSLOG
+CREATE SYSLOG CODEC syslog_codec
   TO SCHEMA syslog_event;
 ```
 
 `SYSLOG` itself is the reference to the singleton wire schema. It has no user-defined name or
 separate `CREATE`, `SHOW CREATE`, `ALTER`, or `DROP` lifecycle. A codec using it does not accept
-`WITH JAQ TRANSFORMATIONS` or `ENCODE <field> AS RFC3339` rules.
+`WITH JAQ TRANSFORMATIONS` or field `ENCODE` rules.
 
 ### Fixed field contract
 
@@ -48,7 +47,7 @@ name, type, and optionality shown here.
 | `structured_data` | `STRING OPTIONAL` | Exact RFC 5424 `STRUCTURED-DATA` text | Validated and emitted verbatim, or `-` when null or undeclared |
 | `message` | `STRING` | `MSG`, including an empty message | Required for encoding |
 
-A field outside this contract, or a field with different type or optionality, makes `CREATE CODEC`
+A field outside this contract, or a field with different type or optionality, makes `CREATE SYSLOG CODEC`
 fail and identifies the offending field and expected shape. Fields may be marked `SENSITIVE` in
 the target schema; normal sensitivity propagation and explicit external-leakage rules still apply.
 
@@ -70,8 +69,7 @@ CREATE SCHEMA syslog_event (
   message STRING
 );
 
-CREATE CODEC syslog_codec
-  FROM SYSLOG
+CREATE SYSLOG CODEC syslog_codec
   TO SCHEMA syslog_event;
 ```
 
@@ -100,6 +98,16 @@ lists the missing fields.
 
 Timestamps are rendered in UTC. Nanosecond values are truncated to RFC 5424's maximum six
 fractional digits, and trailing fractional zeroes are omitted.
+
+The codec owns the RFC 5424 writer for both a record and a batch frame. It preserves validated
+structured data verbatim, including element and parameter order and escape spelling, and writes
+directly into the caller's bounded output. An empty message keeps its separating space; a leading
+message BOM is omitted. The transport applies its framing separately.
+
+The complete frame counts toward an emitter's payload byte limit. A batch frame also counts the
+JSON escaping around each complete member message; its header carries the first member's
+timestamp. See [batch containers](schemas-and-codecs.md#batch-containers) for the shared batching
+contract.
 
 Record-specific encoding failures follow the emitter's `ON MESSAGE ERROR` policy. These include:
 
@@ -225,15 +233,26 @@ starts one after receiving that graph. In Kubernetes, a Service can therefore ta
 port on every Nervix pod. Routes, branch construction, flush policy, and error policy follow the
 normal ingestor contract.
 
-Every received message exposes its remote socket address as optional `STRING`
-`metadata.peer_addr`. For UDP this is the datagram source; for TCP and TLS it is the connection
-peer. Transport metadata does not propagate through a relay unless a route assigns it to a
-schema-backed field:
+Every received frame exposes this transport metadata:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `metadata.peer_addr` | `STRING OPTIONAL` | The UDP datagram's source address or the TCP/TLS connection's peer address, including its port. |
+| `metadata.transport` | `STRING OPTIONAL` | `udp`, `tcp` or `tls`, according to the frame's transport. |
+| `metadata.tls_peer` | `STRING OPTIONAL` | The distinguished subject name of the verified TLS client certificate, such as `CN=collector.example.com`. Null for UDP, TCP and TLS without client-certificate verification. |
+
+The TLS peer is established after a successful handshake and stays with every frame of that
+connection. A client identity configured only on the sender supplies no verified peer when the
+listener does not request client authentication. Quiesce buffering retains all three fields after
+the transport message is gone. Transport metadata does not propagate through a relay unless a route
+assigns it to a schema-backed field:
 
 ```plexus,ignore
 TO received_syslog
   INHERIT ALL
-  SET peer_addr = metadata.peer_addr
+  SET peer_addr = metadata.peer_addr,
+      transport = metadata.transport,
+      tls_peer = metadata.tls_peer
   UNBRANCHED
   FLUSH IMMEDIATE
   ON MESSAGE ERROR LOG

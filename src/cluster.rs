@@ -45,9 +45,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_dns::DnsLookupError;
 use nervix_interconnect::{
-    ApplicationRevisionResponse, BootstrapExpectation, InterconnectRequest, PeerTarget, PoolClass,
-    RequestContext, RequestError, RequestSubquota, Transport as InterconnectTransport,
-    TransportError,
+    BootstrapExpectation, InterconnectRequest, PeerTarget, PoolClass, RequestContext, RequestError,
+    RequestSubquota, Transport as InterconnectTransport, TransportError,
 };
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodePrerequisites,
@@ -69,8 +68,14 @@ use tracing::{debug, info, warn};
 use crate::runtime::AdvertisedSubscriptionInterest;
 use crate::runtime::SubscriptionInterestIndex;
 
+mod membership;
+mod parameters;
+mod peer_health_watcher;
 mod prerequisites;
 mod settings;
+use membership::LiveMembers;
+pub(crate) use membership::MembershipChange;
+use peer_health_watcher::PeerHealthStateWatcher;
 pub use prerequisites::{ClockSkew, PrerequisitesView, register_clock_probe_handler};
 pub use settings::{
     ClockSkewTolerance, GossipInterval, MembershipSettings, MembershipSettingsError,
@@ -85,13 +90,9 @@ const KEY_WEB_CONSOLE_ADVERTISE_ADDR: &str = "web_console_advertise_addr";
 const KEY_INTERCONNECT_LISTEN_ADDR: &str = "interconnect_listen_addr";
 const KEY_INTERCONNECT_ADVERTISE_ADDR: &str = "interconnect_advertise_addr";
 const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
+const KEY_CLUSTER_PARAMETERS: &str = "cluster_parameters";
 const KEY_TERMINATING: &str = "terminating";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
-const KEY_AUTHORITATIVE_REVISION_APPLIED: &str = "authoritative_revision_applied";
-const KEY_RUNTIME_REVISION_PREPARED: &str = "runtime_revision_prepared";
-const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
-/// The runtime revision through which every domain clock the node holds is the committed one.
-const KEY_DOMAIN_CLOCK_REVISION_INSTALLED: &str = "domain_clock_revision_installed";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
 const CLUSTER_EVENT_CAPACITY: usize = 256;
 const GOSSIP_QUEUE_CAPACITY: usize = 1024;
@@ -117,7 +118,7 @@ pub struct ClusterHandle {
     chitchat_server: Mutex<Option<ChitchatHandle>>,
     events: ClusterEvents,
     peer_health_state: watch::Sender<PeerHealthStateSnapshot>,
-    node_unavailability_timeout: Duration,
+    node_unavailability_timeout: nervix_primitives::publication::ArcSwap<Duration>,
     membership_task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -163,12 +164,7 @@ impl SubscriptionInterestPublication {
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
         let index = subscription_interests_from_live_nodes(nodes);
         self.index.store(StdArc::new(index));
-        let mut runs = BTreeMap::new();
-        for node in nodes.keys() {
-            if let Some(identity) = cluster_node_identity(node) {
-                runs.insert(identity.node_id().clone(), identity.incarnation());
-            }
-        }
+        let runs = membership::live_incarnations(nodes);
         self.live_runs.store(StdArc::new(runs));
         self.changed.send_replace(());
     }
@@ -201,17 +197,17 @@ impl SubscriptionInterestPublication {
     }
 }
 
-/// The gossip event bus, and the one way a membership or peer-connectivity change reaches a
-/// session attached to this node.
+/// The gossip event bus, and the one way a change of this node's live set reaches a session
+/// attached to it.
 ///
-/// Offering goes through [`Self::offer`] rather than through the sender directly. Each caller
-/// records the change in its own `info` line first, with the node and address as fields, and that
-/// line is the record: it is written whether or not anyone is attached. Subscribers here are live
-/// sessions only, so a node serving none is the ordinary case rather than a failure, and an
-/// undelivered offer costs the operator nothing.
+/// Offering goes through [`Self::offer`] rather than through the sender directly. The membership
+/// task records each change in its own `info` line first, with the node and its incarnation as
+/// fields, and that line is the record: it is written whether or not anyone is attached.
+/// Subscribers here are live sessions only, so a node serving none is the ordinary case rather than
+/// a failure, and an undelivered offer costs the operator nothing.
 #[derive(Clone)]
 struct ClusterEvents {
-    sender: broadcast::Sender<String>,
+    sender: broadcast::Sender<MembershipChange>,
 }
 
 impl ClusterEvents {
@@ -220,14 +216,14 @@ impl ClusterEvents {
         Self { sender }
     }
 
-    /// Offer an already-recorded change in this node's view of the cluster to attached sessions.
-    fn offer(&self, message: String) {
+    /// Offer an already-recorded change of this node's live set to attached sessions.
+    fn offer(&self, change: MembershipChange) {
         self.sender
-            .send(message)
-            .discarded("the caller logged this change before offering it to attached sessions");
+            .send(change)
+            .discarded("the membership task logged this change before offering it to sessions");
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<String> {
+    fn subscribe(&self) -> broadcast::Receiver<MembershipChange> {
         self.sender.subscribe()
     }
 }
@@ -741,72 +737,18 @@ impl RetainedPeerHealth {
     }
 }
 
-struct PeerHealthStateWatcher {
-    state: watch::Receiver<PeerHealthStateSnapshot>,
-    observation_freshness: Duration,
-    /// The scheduling revision the caller last read the cluster state under: the one current when
-    /// the watcher subscribed, and then the one each wait returned for. A caller subscribes before
-    /// it reads, so a change it has not read yet always differs from this.
-    observed: u64,
-}
-
-impl PeerHealthStateWatcher {
-    fn new(
-        mut state: watch::Receiver<PeerHealthStateSnapshot>,
-        observation_freshness: Duration,
-    ) -> Self {
-        let observed = state.borrow_and_update().scheduling_revision();
-        Self {
-            state,
-            observation_freshness,
-            observed,
-        }
-    }
-
-    /// Waits until the scheduling revision differs from the one the caller last read under, or
-    /// until a peer's health next takes effect. A change made after the caller read, even one made
-    /// before this wait was prepared, ends the wait.
-    async fn wait_for_change_or_next_transition(&mut self) {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let current = self.state.borrow_and_update().scheduling_revision();
-            if current != self.observed {
-                self.observed = current;
-                return;
-            }
-            let next_transition = self
-                .state
-                .borrow()
-                .next_effective_transition(Instant::now(), self.observation_freshness);
-            nervix_primitives::select! {
-                changed = self.state.changed() => {
-                    changed.assured(
-                        "the cluster handle retains its peer-health state sender for its lifetime",
-                    );
-                }
-                _ = async {
-                    match next_transition {
-                        Some(deadline) => nervix_primitives::time::sleep_until(deadline).await,
-                        None => std::future::pending::<()>().await,
-                    }
-                } => return,
-            }
-        }
-    }
-}
-
 /// Retained inputs whose changes can alter the node's effective cluster view.
 ///
 /// Application-health failure becomes effective after an elapsed monotonic deadline without a
 /// retained-input change. The watcher owns that deadline so consumers can re-evaluate cluster state
 /// without sampling it on an interval.
-pub(crate) struct ClusterStateWatcher {
+pub(crate) struct ClusterStateWatcher<'a> {
     live_node_states:
         nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>>,
-    peer_health_state: PeerHealthStateWatcher,
+    peer_health_state: PeerHealthStateWatcher<'a>,
 }
 
-impl ClusterStateWatcher {
+impl ClusterStateWatcher<'_> {
     pub(crate) fn wait_for_change_or_next_unavailability(
         &mut self,
     ) -> impl std::future::Future<Output = ()> + '_ {
@@ -1018,7 +960,7 @@ impl InterconnectGossipTransport {
         if let Err(error) = registration {
             debug!(
                 peer = %context.peer_node_id(),
-                error = %error,
+                error = %format_args!("{error:#}"),
                 "refused a gossip exchange from a peer that could not be registered"
             );
             return Err(GossipExchangeRefusal::PeerRegistration);
@@ -1386,7 +1328,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
                 }
             }
             Err(error) if has_recovered_peers => {
-                warn!(%seed, %error, "could not resolve the configured bootstrap host for gossip");
+                warn!(%seed, error = %format_args!("{error:#}"), "could not resolve the configured bootstrap host for gossip");
             }
             Err(error) => return Err(io::Error::other(error.into_error())),
         }
@@ -1459,15 +1401,22 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let prerequisites_publisher = prerequisites.clone();
     let event_tx = events.clone();
     let route_transport = transport.clone();
+    let mut members = LiveMembers::of_local_run(&ClusterNodeIdentity::new(
+        node_id.clone(),
+        ClusterNodeIncarnation::new(generation_id),
+    ));
     let membership_task = nervix_primitives::task::spawn(async move {
         while let Some(nodes) = live_nodes.next().await {
             nervix_primitives::task::consume_budget().await;
             subscription_interest_publisher.publish(&nodes);
             prerequisites_publisher.publish(&nodes);
             route_transport.refresh_routes(&nodes);
-            let report = membership_report(&nodes);
-            info!(members = ?report, "cluster membership updated");
-            event_tx.offer(format!("cluster membership updated: {}", report.join(", ")));
+            // Chitchat wakes this task for every change of a member's published keys; only a
+            // change of who is live is a membership event.
+            for change in members.observe(&nodes) {
+                change.record();
+                event_tx.offer(change);
+            }
         }
     });
 
@@ -1480,7 +1429,9 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         chitchat_server: Mutex::new(Some(chitchat)),
         events,
         peer_health_state: watch::channel(PeerHealthStateSnapshot::default()).0,
-        node_unavailability_timeout: settings.membership.node_unavailability_timeout(),
+        node_unavailability_timeout: nervix_primitives::publication::ArcSwap::from_pointee(
+            settings.membership.node_unavailability_timeout(),
+        ),
         membership_task: Mutex::new(Some(membership_task)),
     })
 }
@@ -1511,7 +1462,7 @@ impl ClusterHandle {
         result
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<String> {
+    pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<MembershipChange> {
         self.events.subscribe()
     }
 
@@ -1550,7 +1501,7 @@ impl ClusterHandle {
         watcher
     }
 
-    pub(crate) async fn subscribe_state_changes(&self) -> ClusterStateWatcher {
+    pub(crate) async fn subscribe_state_changes(&self) -> ClusterStateWatcher<'_> {
         ClusterStateWatcher {
             live_node_states: self.subscribe_live_node_states().await,
             peer_health_state: self.subscribe_peer_health_state(),
@@ -1673,110 +1624,6 @@ impl ClusterHandle {
         chitchat.self_node_state().get(KEY_TERMINATING).is_some()
     }
 
-    pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
-        self.set_local_revision(KEY_RUNTIME_REVISION_READY, revision)
-            .await;
-    }
-
-    pub async fn set_local_authoritative_revision(&self, revision: u64) {
-        self.set_local_revision(KEY_AUTHORITATIVE_REVISION_APPLIED, revision)
-            .await;
-    }
-
-    pub async fn nodes_at_authoritative_revision(
-        &self,
-        revision: u64,
-    ) -> BTreeSet<ClusterNodeIdentity> {
-        self.nodes_at_revision(KEY_AUTHORITATIVE_REVISION_APPLIED, revision)
-            .await
-    }
-
-    pub async fn set_local_runtime_revision_prepared(&self, revision: u64) {
-        self.set_local_revision(KEY_RUNTIME_REVISION_PREPARED, revision)
-            .await;
-    }
-
-    async fn set_local_revision(&self, key: &str, revision: u64) {
-        let chitchat_handle = self.chitchat.clone();
-        let mut chitchat = chitchat_handle.lock().await;
-        advance_revision(chitchat.self_node_state(), key, revision);
-    }
-
-    pub async fn local_application_revision(&self) -> ApplicationRevisionResponse {
-        let chitchat_handle = self.chitchat.clone();
-        let chitchat = chitchat_handle.lock().await;
-        let self_id = chitchat.self_chitchat_id();
-        let identity = cluster_node_identity(self_id)
-            .assured("the local Chitchat identity contains the validated server node name");
-        let state = chitchat
-            .node_state(self_id)
-            .assured("Chitchat retains its own node state for the server lifetime");
-        ApplicationRevisionResponse {
-            identity,
-            authoritative: revision_or_zero(state, KEY_AUTHORITATIVE_REVISION_APPLIED),
-            runtime_prepared: revision_or_zero(state, KEY_RUNTIME_REVISION_PREPARED),
-            runtime_ready: revision_or_zero(state, KEY_RUNTIME_REVISION_READY),
-        }
-    }
-
-    pub async fn nodes_prepared_for_runtime_revision(
-        &self,
-        revision: u64,
-    ) -> BTreeSet<ClusterNodeIdentity> {
-        self.nodes_at_revision(KEY_RUNTIME_REVISION_PREPARED, revision)
-            .await
-    }
-
-    pub async fn nodes_ready_for_runtime_revision(
-        &self,
-        revision: u64,
-    ) -> BTreeSet<ClusterNodeIdentity> {
-        self.nodes_at_revision(KEY_RUNTIME_REVISION_READY, revision)
-            .await
-    }
-
-    /// Advertises that every domain clock this node holds, authority fence included, is the
-    /// committed one of runtime `revision`.
-    pub async fn set_local_domain_clock_revision_installed(&self, revision: u64) {
-        self.set_local_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
-            .await;
-    }
-
-    /// The incarnations whose domain clocks match runtime `revision` or a later one.
-    pub async fn nodes_with_domain_clocks_installed(
-        &self,
-        revision: u64,
-    ) -> BTreeSet<ClusterNodeIdentity> {
-        self.nodes_at_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
-            .await
-    }
-
-    async fn nodes_at_revision(&self, key: &str, revision: u64) -> BTreeSet<ClusterNodeIdentity> {
-        let chitchat_handle = self.chitchat.clone();
-        let chitchat = chitchat_handle.lock().await;
-        let self_id = chitchat.self_chitchat_id().clone();
-        let mut ready = BTreeSet::new();
-
-        if let Some(state) = chitchat.node_state(&self_id)
-            && revision_is_at_least(state, key, revision)
-            && let Some(identity) = cluster_node_identity(&self_id)
-        {
-            ready.insert(identity);
-        }
-        for node_id in chitchat.live_nodes() {
-            if *node_id == self_id {
-                continue;
-            }
-            if let Some(state) = chitchat.node_state(node_id)
-                && revision_is_at_least(state, key, revision)
-                && let Some(identity) = cluster_node_identity(node_id)
-            {
-                ready.insert(identity);
-            }
-        }
-        ready
-    }
-
     /// Makes this node's advertised interest in `relay` match `interested`, which is read while
     /// the node's gossip state is locked.
     ///
@@ -1875,7 +1722,7 @@ impl ClusterHandle {
             targets = snapshot.replace_endpoints(
                 endpoints.clone(),
                 now,
-                self.node_unavailability_timeout,
+                self.node_unavailability_timeout(),
             );
             snapshot.revision() != previous_revision
         });
@@ -1896,7 +1743,8 @@ impl ClusterHandle {
         }
         let mut disposition = PeerHealthResultDisposition::Superseded;
         self.peer_health_state.send_if_modified(|snapshot| {
-            disposition = snapshot.record_result(result.clone(), self.node_unavailability_timeout);
+            disposition =
+                snapshot.record_result(result.clone(), self.node_unavailability_timeout());
             matches!(disposition, PeerHealthResultDisposition::Published { .. })
         });
         disposition
@@ -1907,7 +1755,7 @@ impl ClusterHandle {
         let mut effective = None;
         self.peer_health_state.send_if_modified(|snapshot| {
             let previous_revision = snapshot.revision();
-            effective = Some(snapshot.effective_snapshot(now, self.node_unavailability_timeout));
+            effective = Some(snapshot.effective_snapshot(now, self.node_unavailability_timeout()));
             snapshot.revision() != previous_revision
         });
         effective.assured("the peer-health watch update closure always publishes its snapshot")
@@ -1962,15 +1810,11 @@ impl ClusterHandle {
             .collect()
     }
 
-    fn subscribe_peer_health_state(&self) -> PeerHealthStateWatcher {
+    fn subscribe_peer_health_state(&self) -> PeerHealthStateWatcher<'_> {
         PeerHealthStateWatcher::new(
             self.peer_health_state.subscribe(),
-            self.node_unavailability_timeout,
+            &self.node_unavailability_timeout,
         )
-    }
-
-    pub(crate) fn node_unavailability_timeout(&self) -> Duration {
-        self.node_unavailability_timeout
     }
 }
 
@@ -1985,32 +1829,6 @@ fn subscription_interest_from_key(key: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((domain, relay))
-}
-
-fn revision_is_at_least(state: &NodeState, key: &str, revision: u64) -> bool {
-    let Some(value) = state.get(key) else {
-        return false;
-    };
-    let Ok(ready_revision) = value.parse::<u64>() else {
-        return false;
-    };
-    ready_revision >= revision
-}
-
-fn revision_or_zero(state: &NodeState, key: &str) -> u64 {
-    let Some(value) = state.get(key) else {
-        return 0;
-    };
-    value
-        .parse::<u64>()
-        .assured("application revision values are written from a u64")
-}
-
-fn advance_revision(state: &mut NodeState, key: &str, revision: u64) {
-    if revision_is_at_least(state, key, revision) {
-        return;
-    }
-    state.set(key, revision.to_string());
 }
 
 fn cluster_node_identity(node_id: &ChitchatId) -> Option<ClusterNodeIdentity> {
@@ -2069,16 +1887,6 @@ fn render_node_state_lines(node_id: &ChitchatId, state: &NodeState) -> Vec<Strin
     ]
 }
 
-fn membership_report(nodes: &BTreeMap<ChitchatId, NodeState>) -> Vec<String> {
-    nodes
-        .iter()
-        .map(|(id, state)| {
-            let grpc_addr = state.get(KEY_GRPC_ADVERTISE_ADDR).unwrap_or("<unknown>");
-            format!("{}@{}", id.node_id, grpc_addr)
-        })
-        .collect()
-}
-
 /// The peer `state` describes, or `None` when this build does not accept its node identity.
 ///
 /// Gossip converges field by field, so each advertised endpoint is reported only once the peer has
@@ -2086,7 +1894,11 @@ fn membership_report(nodes: &BTreeMap<ChitchatId, NodeState>) -> Vec<String> {
 /// reads it again.
 fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode> {
     let identity = cluster_node_identity(node_id)?;
+    let parameters: Option<nervix_models::ClusterParameterPublication> = state
+        .get(KEY_CLUSTER_PARAMETERS)
+        .and_then(|text| serde_json::from_str(text).ok());
     Some(GossipNode {
+        parameters,
         node_id: identity.node_id().clone(),
         incarnation: identity.incarnation(),
         terminating: state.get(KEY_TERMINATING).is_some(),

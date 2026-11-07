@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Kafka client Model, the topic source and emitter Models with their offset and
-//!   delivery modes, the topic and consumer group names a source reads with the rules Kafka holds
-//!   them to, and what each entity declares.
+//! - **Owns.** The Kafka client Model, the topic ingestor and emitter Models with their offset and
+//!   delivery modes, a consumer group's start position and its alteration, the topic and consumer
+//!   group names an ingestor reads with the rules Kafka holds them to, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality, and the
 //!   one name a client accepts for each librdkafka property.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The Kafka driver, or how a topic is consumed or
 //!   produced to.
 
@@ -18,6 +18,7 @@
 
 use std::{num::NonZeroU64, time::Duration};
 
+use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +36,7 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
-    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestStartPosition, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
     IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
     OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
@@ -50,7 +51,6 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     };
     ClientConfigSchema::new(
         &[
-            K::optional("auto.offset.reset", V::String).driver(),
             K::required("bootstrap.servers", V::String).driver(),
             K::optional("client.id", V::String).driver(),
             K::optional("delivery.timeout.ms", V::UnsignedInteger).driver(),
@@ -89,12 +89,17 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
         &[ClientConfigNamespace::All],
         &[
             "allow.auto.create.topics",
+            "auto.offset.reset",
             "delivery.report.only.error",
             "enable.auto.commit",
             "enable.partition.eof",
             "group.id",
         ],
     )
+    .with_statement_keys(&[crate::ClientConfigStatementKey {
+        key: "auto.offset.reset",
+        clause: "START AT on the consumer group of the KAFKA TOPIC ingestor",
+    }])
     .with_driver_aliases(LIBRDKAFKA_ALIASES, Some(LIBRDKAFKA_TOPIC_PREFIX))
 };
 
@@ -184,6 +189,13 @@ external_names! {
         example "readers";
 }
 
+impl KafkaTopicName {
+    /// Transfers the validated spelling into a fixed string allocation.
+    pub fn into_boxed_str(self) -> Box<str> {
+        self.0.into_boxed_str()
+    }
+}
+
 fn kafka_topic_rule(text: &str) -> Result<(), ExternalNameError> {
     require_length(text, KAFKA_TOPIC_MAX)?;
     let refused = text
@@ -212,7 +224,7 @@ pub struct KafkaTopicIngestor {
     pub client: ClientName,
     pub topic: KafkaTopicName,
     pub offset_mode: KafkaOffsetMode,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: KafkaIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -282,9 +294,11 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     ],
     driver_limits: &[
-        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor \
+         supplies group.id, auto.offset.reset and enable.auto.commit, and disables \
+         enable.partition.eof and allow.auto.create.topics.",
         "Connector control execution has two workers per node by default. A commit still \
-         unanswered after its caller's 30 s deadline retains its worker and the source's one \
+         unanswered after its caller's 30 s deadline retains its worker and the ingestor's one \
          in-flight commit until the native call ends. Native subscribe, assign and unsubscribe \
          have no cancellable deadline; their caller waits socket.timeout.ms at most.",
         "A consumer whose last handle is gone is destroyed by one connector control job, which \
@@ -297,6 +311,13 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 /// What the connector of a KAFKA TOPIC emitter holds and how long it waits.
 const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
+        DeclaredBuffer {
+            holds: "PARTITION FROM BRANCH native topic metadata response",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver("receive.message.max.bytes 100000000"),
+                overflow: BufferOverflow::FailPublish,
+            },
+        },
         DeclaredBuffer {
             holds: "records the producer queues under ACK",
             bound: BufferBound::Bounded {
@@ -325,6 +346,10 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
     waits: &[
         DeclaredWait {
+            wait: "PARTITION FROM BRANCH topic metadata, including connector executor admission",
+            bound: WaitBound::Driver("socket.timeout.ms, 60 s; maximum 300 s"),
+        },
+        DeclaredWait {
             wait: "a produce request",
             bound: WaitBound::Driver("request.timeout.ms, 30 s"),
         },
@@ -343,7 +368,8 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     ],
     driver_limits: &[
-        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets \
+         delivery.timeout.ms from ACK TIMEOUT.",
         "message.max.bytes 1000000",
         "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through \
          ON MESSAGE ERROR.",
@@ -367,6 +393,7 @@ const KAFKA_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclar
 
 impl IngestorDeclaration for KafkaTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: KAFKA_TOPIC_METADATA,
@@ -388,6 +415,8 @@ impl IngestorDeclaration for KafkaTopicIngestor {
             OptionDeclaration {
                 keywords: "OFFSET BY",
                 presence: OptionPresence::Required,
+                // A consumer group's name comes before its start position, as each example writes
+                // the option in full.
                 form: OptionForm::Choice(&[
                     OptionChoice {
                         name: "DOMAIN",
@@ -395,9 +424,14 @@ impl IngestorDeclaration for KafkaTopicIngestor {
                         example: "OFFSET BY DOMAIN",
                     },
                     OptionChoice {
-                        name: "CONSUMER GROUP",
+                        name: "CONSUMER GROUP START AT EARLIEST",
                         value: Some(OptionValue::Name(KafkaConsumerGroupName::DECLARATION)),
-                        example: "OFFSET BY CONSUMER GROUP 'readers'",
+                        example: "OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST",
+                    },
+                    OptionChoice {
+                        name: "CONSUMER GROUP START AT LATEST",
+                        value: Some(OptionValue::Name(KafkaConsumerGroupName::DECLARATION)),
+                        example: "OFFSET BY CONSUMER GROUP 'readers' START AT LATEST",
                     },
                 ]),
             },
@@ -408,8 +442,16 @@ impl IngestorDeclaration for KafkaTopicIngestor {
 }
 
 impl IngestorEntityBody for KafkaTopicIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -429,8 +471,78 @@ impl IngestorEntityBody for KafkaTopicIngestor {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum KafkaOffsetMode {
-    ConsumerGroup(KafkaConsumerGroupName),
+    /// `CONSUMER GROUP '<group>' START AT EARLIEST|LATEST`: the group's offsets on the broker own
+    /// the positions, and a partition without a usable committed offset starts at `start_at`.
+    ConsumerGroup {
+        group: KafkaConsumerGroupName,
+        start_at: IngestStartPosition,
+    },
+    /// `DOMAIN`: the domain's offset records own the positions, and the domain's start point
+    /// places every partition, so this mode has no start position of its own.
     Domain,
+}
+
+impl KafkaOffsetMode {
+    fn set_start_at(
+        &mut self,
+        position: IngestStartPosition,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::ConsumerGroup { start_at, .. } => *start_at = position,
+            Self::Domain => {
+                return Err(Report::new(
+                    crate::AlterIngestorError::DomainKafkaStartPosition,
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One change an `ALTER KAFKA TOPIC INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum KafkaTopicIngestorChange {
+    /// `SET TOPIC '<topic>'`.
+    Topic(KafkaTopicName),
+    /// `SET OFFSET BY DOMAIN | CONSUMER GROUP '<group>' START AT EARLIEST|LATEST`.
+    OffsetBy(KafkaOffsetMode),
+    /// `SET START AT EARLIEST|LATEST`: where a consumer group starts, its group kept.
+    StartAt(IngestStartPosition),
+    /// `SET MODE <mode>`.
+    Mode(KafkaIngestMode),
+}
+
+impl crate::IngestorEntityChange for KafkaTopicIngestorChange {
+    type Entity = KafkaTopicIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut KafkaTopicIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Topic(topic) => entity.topic = topic.clone(),
+            Self::OffsetBy(offset_mode) => entity.offset_mode = offset_mode.clone(),
+            Self::StartAt(position) => entity.offset_mode.set_start_at(*position)?,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(topic) => format!("SET TOPIC {}", crate::string_literal(topic.as_str())),
+            Self::OffsetBy(offset_mode) => {
+                format!("SET OFFSET BY {}", offset_mode.to_canonical_plexus())
+            }
+            Self::StartAt(position) => format!("SET START AT {position}"),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
 }
 
 #[derive(
@@ -478,13 +590,13 @@ impl KafkaIngestMode {
 
 connector_ingestors! {
     connector Kafka = "KAFKA";
-    /// What a Kafka source reads.
+    /// What a Kafka ingestor reads.
     pub enum KafkaIngestor;
     /// The alterations of the ingestors that read a Kafka entity.
     pub enum KafkaTopicIngestorAlteration;
-    /// The entities a Kafka source reads.
+    /// The entities a Kafka ingestor reads.
     pub enum KafkaIngestorEntity {
-        Topic(KafkaTopicIngestor) = "TOPIC", "Kafka";
+        Topic(KafkaTopicIngestor => KafkaTopicIngestorChange) = "TOPIC", "Kafka";
     }
 }
 
@@ -504,6 +616,7 @@ impl EmitterDeclaration for KafkaTopicEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Kafka),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: KafkaTopicPublishingMode::KINDS,
@@ -516,7 +629,11 @@ impl EmitterDeclaration for KafkaTopicEmitter {
         // persistence, routing or retention flag, no delayed delivery, no reply target and no
         // per-record message or deduplication identity, and its headers carry what properties
         // would.
-        envelope: &[EnvelopeClauseKind::Timestamp],
+        envelope: &[
+            EnvelopeClauseKind::Key,
+            EnvelopeClauseKind::PartitionFromBranch,
+            EnvelopeClauseKind::Timestamp,
+        ],
         properties: &[],
         bounds: KAFKA_EMITTER_BOUNDS,
     };
@@ -535,15 +652,51 @@ impl EmitterEntityBody for KafkaTopicEmitter {
     }
 }
 
+/// One change an `ALTER KAFKA TOPIC EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum KafkaTopicEmitterChange {
+    /// `SET TOPIC '<name>'`.
+    Topic(KafkaTopicName),
+    /// `SET MODE <mode>`.
+    Mode(KafkaTopicPublishingMode),
+}
+
+impl crate::EmitterEntityChange for KafkaTopicEmitterChange {
+    type Entity = KafkaTopicEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut KafkaTopicEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Topic(name) => entity.topic = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(name) => format!("SET TOPIC {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Kafka = "KAFKA";
     /// What a Kafka emitter writes.
     pub enum KafkaEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum KafkaTopicEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum KafkaEmitterChange;
     /// The entities a Kafka emitter writes.
     pub enum KafkaEmitterEntity {
-        Topic(KafkaTopicEmitter, KafkaTopicPublishingMode) = "TOPIC";
+        Topic(KafkaTopicEmitter, KafkaTopicPublishingMode, KafkaTopicEmitterChange) = "TOPIC";
     }
 }
 

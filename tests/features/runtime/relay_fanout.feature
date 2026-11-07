@@ -17,8 +17,8 @@ Feature: Relay fan-out
         seq integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 1;
@@ -30,9 +30,9 @@ Feature: Relay fan-out
         };
 
       CREATE VHOST edge http-{{test_id}}-fanout.example.com;
-      CREATE ENDPOINT relay_fanout_ingress ON edge PATH '/relay-fanout' TYPE HTTP;
+      CREATE HTTP ENDPOINT relay_fanout_ingress ON edge PATH '/relay-fanout';
 
-      CREATE HTTP ENDPOINT INGESTOR relay_fanout_source
+      CREATE HTTP ENDPOINT INGESTOR relay_fanout_ingestor
         FROM relay_fanout_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications

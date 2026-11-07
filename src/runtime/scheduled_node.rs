@@ -84,13 +84,10 @@ impl PlacedNodeState {
                 }
             }
             ModelKind::Ingestor => {
-                let plan = revision
-                    .entrypoints
-                    .ingestor(&IngestorName::from(&node.identifier))
-                    .assured(
-                        "the entrypoint plans hold every ingestor of the schedule they came from",
-                    );
-                if plan.keeps_domain_offsets() {
+                if revision.entrypoints.ingestors().any(|plan| {
+                    ModelName::from(&plan.ingestor.name) == node.identifier
+                        && plan.keeps_domain_offsets()
+                }) {
                     Some(Self::KafkaDomainOffsets)
                 } else {
                     None
@@ -106,9 +103,11 @@ impl PlacedNodeState {
 /// for the moved node without touching the rest of the domain.
 #[derive(Default)]
 pub(super) struct ScheduledNodePlacement {
-    pub(super) tasks: PlacementTasks,
-    pub(super) kafka_offset_state: Option<KafkaOffsetStateOriginator>,
-    pub(super) materialized_state: Option<MaterializedRelayStateOriginator>,
+    pub(super) tasks: BTreeMap<Unit, PlacementTasks>,
+    pub(super) kafka_offset_states: BTreeMap<Unit, KafkaOffsetStateOriginator>,
+    /// The originator of the materialized state of each unit of a materialized relay this node
+    /// owns, handed to that unit's state task.
+    pub(super) materialized_states: BTreeMap<Unit, MaterializedRelayStateOriginator>,
 }
 
 /// The background tasks a scheduled node's assignment runs on one cluster node.
@@ -124,10 +123,6 @@ pub(super) struct PlacementTasks {
 }
 
 impl PlacementTasks {
-    pub(super) fn is_empty(&self) -> bool {
-        self.replication.is_empty() && self.checkpoints.is_empty()
-    }
-
     /// Ends every task without a last write, as a reassignment that replaces the placement's
     /// runtime does.
     pub(super) async fn abort(self) {
@@ -252,7 +247,7 @@ mod tests {
                     client: named("kafka"),
                     topic: named("events"),
                     offset_mode,
-                    instances: nonzero!(1u64),
+                    instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                     mode: KafkaIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
@@ -286,7 +281,10 @@ mod tests {
                 kafka_ingestor("domain_offsets", KafkaOffsetMode::Domain),
                 kafka_ingestor(
                     "group_offsets",
-                    KafkaOffsetMode::ConsumerGroup(named::<KafkaConsumerGroupName>("group")),
+                    KafkaOffsetMode::ConsumerGroup {
+                        group: named::<KafkaConsumerGroupName>("group"),
+                        start_at: nervix_models::IngestStartPosition::Earliest,
+                    },
                 ),
             ],
         );

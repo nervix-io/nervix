@@ -796,8 +796,9 @@ impl SessionServiceImpl {
                 continue;
             }
             let name = IngestorName::from(&reference.identifier);
-            let (summary, _) =
-                self.ingestor_summary(domain, &name, node)
+            for unit in node.units.keys() {
+                let (summary, _) = self
+                    .ingestor_summary(domain, &name, node, *unit)
                     .await
                     .map_err(|error| {
                         error.change_context(BackupError::CaptureDomain {
@@ -805,26 +806,28 @@ impl SessionServiceImpl {
                             reason: "ingestor inspection failed".to_string(),
                         })
                     })?;
-            let counters = summary.quiesce_counters;
-            let buffered_records = u64::try_from(counters.buffered_records).map_err(|_| {
-                Report::new(BackupError::QuiesceCounters {
-                    domain: domain.clone(),
-                })
-            })?;
-            let buffered_bytes = u64::try_from(counters.buffered_bytes).map_err(|_| {
-                Report::new(BackupError::QuiesceCounters {
-                    domain: domain.clone(),
-                })
-            })?;
-            add_backup_counter(&mut totals.buffered_records, buffered_records, domain)?;
-            add_backup_counter(&mut totals.buffered_bytes, buffered_bytes, domain)?;
-            add_backup_counter(&mut totals.dropped_records, counters.dropped_total, domain)?;
-            add_backup_counter(
-                &mut totals.rejected_records,
-                counters.rejected_total,
-                domain,
-            )?;
+                let counters = summary.quiesce_counters;
+                let buffered_records = u64::try_from(counters.buffered_records).map_err(|_| {
+                    Report::new(BackupError::QuiesceCounters {
+                        domain: domain.clone(),
+                    })
+                })?;
+                let buffered_bytes = u64::try_from(counters.buffered_bytes).map_err(|_| {
+                    Report::new(BackupError::QuiesceCounters {
+                        domain: domain.clone(),
+                    })
+                })?;
+                add_backup_counter(&mut totals.buffered_records, buffered_records, domain)?;
+                add_backup_counter(&mut totals.buffered_bytes, buffered_bytes, domain)?;
+                add_backup_counter(&mut totals.dropped_records, counters.dropped_total, domain)?;
+                add_backup_counter(
+                    &mut totals.rejected_records,
+                    counters.rejected_total,
+                    domain,
+                )?;
+            }
         }
+
         Ok(totals)
     }
 
@@ -1103,7 +1106,7 @@ impl SessionServiceImpl {
             .retry_issued_at()
             .change_context(BackupError::RetryWindow)?;
         issued_at
-            .checked_add(self.inner.command_execution_policy.retry_validity())
+            .checked_add(self.command_execution_policy().retry_validity())
             .change_context(BackupError::RetryWindow)
     }
 

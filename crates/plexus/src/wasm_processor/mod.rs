@@ -1,11 +1,22 @@
+//! Plexus wasm processor statements.
+//!
+//! Layer: language.
+//! - **Owns.** The wasm processor grammar, lowering into Models and grammar-derived completion.
+//! - **Depends on.** Shared parser clauses, tokens and the vocabulary.
+//! - **Must not know.** Registry validation, execution planning or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use chumsky::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AckMode, CreateStatement, CreateWasmProcessor, GeneralErrorPolicy, ProcessorOutput,
-    ProcessorOutputs, RequestedResourceVersion, RouteConstruction, WasmProcessorLimits,
-    WasmRejectedStatePolicy,
+    CreateStatement, CreateWasmProcessor, GeneralErrorPolicy, ProcessorOutput, ProcessorOutputs,
+    RequestedResourceVersion, RouteConstruction, WasmProcessorLimits, WasmRejectedStatePolicy,
 };
 
 use crate::{
@@ -123,12 +134,12 @@ pub fn create_wasm_processor_parser<'src>() -> impl Parser<
 > + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Identifier::Wasm))
         .then_ignore(kw(Identifier::Processor))
         .then(wasm_processor_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(ack_mode().or_not())
         .then(filter_where_clause().or_not())
         .boxed()
         .then_ignore(kw(Identifier::Using))
@@ -154,7 +165,7 @@ pub fn create_wasm_processor_parser<'src>() -> impl Parser<
                             (
                                 (
                                     (
-                                        ((((if_not_exists, mode), name), from_input), filter_where),
+                                        ((((if_not_exists, name), from_input), mode), filter_where),
                                         resource,
                                     ),
                                     resource_version,
@@ -182,7 +193,7 @@ pub fn create_wasm_processor_parser<'src>() -> impl Parser<
                     limits,
                     global_error_policy,
                     rejected_state_policy,
-                    mode: mode.unwrap_or(AckMode::Attached),
+                    mode: mode.unwrap_or_default(),
                     filter_where,
                     materialized_state,
                 },
@@ -228,10 +239,24 @@ pub fn suggest_create_wasm_processor(input: &str, cursor: usize) -> Vec<String> 
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::AckMode;
     use nonzero_ext::nonzero;
 
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn input_acknowledgement_clause() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE WASM PROCESSOR tested FROM incoming",
+            "USING RESOURCE guest VERSION 1 FILE 'guest.wasm' MAX FUEL 100000 MAX MEMORY 1MiB \
+             UNBRANCHED TO outgoing SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG",
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE WASM PROCESSOR tested FROM incoming DETACHED ",
+            &["FILTER WHERE", "USING RESOURCE"],
+        );
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)
@@ -244,8 +269,9 @@ mod tests {
     #[test]
     fn parses_create_wasm_processor() {
         let input = r#"
-            CREATE DETACHED WASM PROCESSOR filter_even
+            CREATE WASM PROCESSOR filter_even
             FROM raw_orders
+            DETACHED
             USING RESOURCE wasm_filters VERSION 2 FILE 'processors/filter_even.wasm'
             MAX FUEL 1000000
             MAX MEMORY 64MiB

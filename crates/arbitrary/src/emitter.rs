@@ -111,6 +111,8 @@ impl Arbitrary<'_> {
                 continue;
             }
             match kind {
+                EnvelopeClauseKind::Key => envelope.key = Some(self.expression()),
+                EnvelopeClauseKind::PartitionFromBranch => envelope.partition_from_branch = true,
                 EnvelopeClauseKind::Persistent => envelope.persistent = true,
                 EnvelopeClauseKind::Mandatory => envelope.mandatory = true,
                 EnvelopeClauseKind::Retain => envelope.retain = true,
@@ -240,16 +242,27 @@ impl Arbitrary<'_> {
                 }))
             }
             EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
+                let mode = self.mqtt_topic_publication();
+                let qos = self.mqtt_publication_qos(&mode);
                 EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
-                    mode: self.mqtt_topic_publication(),
+                    mode,
                     client: self.name(),
                     topic: self.mqtt_publication_topic_name(),
+                    qos,
                 }))
             }
             EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => {
                 EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
                     mode: self.nats_subject_publication(),
                     client: self.name(),
+                    subject: self.nats_publication_subject_name(),
+                }))
+            }
+            EmitterEntityKind::Nats(NatsEmitterEntity::Stream) => {
+                EmitterEntity::Nats(NatsEmitter::Stream(NatsStreamEmitter {
+                    mode: self.nats_stream_publication(),
+                    client: self.name(),
+                    stream: self.nats_stream_name(),
                     subject: self.nats_publication_subject_name(),
                 }))
             }
@@ -264,10 +277,10 @@ impl Arbitrary<'_> {
                     mode: self.sqs_queue_publication(),
                     client: self.name(),
                     queue: self.sqs_queue_name(),
-                    fifo_group: match self.entropy.byte() % 3 {
-                        0 => None,
-                        1 => Some(SqsFifoGroup::FromBranch),
-                        _ => Some(SqsFifoGroup::Expression(self.expression())),
+                    fifo_group: if self.entropy.flag() {
+                        Some(self.expression())
+                    } else {
+                        None
                     },
                     send: self.entropy.pick([SqsSend::Single, SqsSend::Batch]),
                 }))
@@ -572,6 +585,17 @@ impl Arbitrary<'_> {
         }
         target
     }
+
+    /// A quality of service a statement pairs with `mode`: QoS 0 beside `NO ACK`, and QoS 1 or 2
+    /// beside `ACK`, so every pairing the declaration admits is generated and none it refuses.
+    fn mqtt_publication_qos(&mut self, mode: &MqttTopicPublishingMode) -> MqttQos {
+        match mode {
+            MqttTopicPublishingMode::NoAck { .. } => MqttQos::Qos0,
+            MqttTopicPublishingMode::Ack { .. } => {
+                self.entropy.pick([MqttQos::Qos1, MqttQos::Qos2])
+            }
+        }
+    }
 }
 
 macro_rules! publication_generators {
@@ -593,8 +617,9 @@ publication_generators! {
     rabbitmq_queue_publication(arbitrary) -> RabbitMqQueuePublishingMode = [RabbitMqQueuePublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, RabbitMqQueuePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
     rabbitmq_exchange_publication(arbitrary) -> RabbitMqExchangePublishingMode = [RabbitMqExchangePublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, RabbitMqExchangePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
     redis_pubsub_publication(arbitrary) -> RedisPubSubPublishingMode = [RedisPubSubPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
-    mqtt_topic_publication(arbitrary) -> MqttTopicPublishingMode = [MqttTopicPublishingMode::Qos0 { retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Qos1 { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Qos2 { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
-    nats_subject_publication(arbitrary) -> NatsSubjectPublishingMode = [NatsSubjectPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, NatsSubjectPublishingMode::JetStream { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    mqtt_topic_publication(arbitrary) -> MqttTopicPublishingMode = [MqttTopicPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    nats_subject_publication(arbitrary) -> NatsSubjectPublishingMode = [NatsSubjectPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
+    nats_stream_publication(arbitrary) -> NatsStreamPublishingMode = [NatsStreamPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
     zeromq_push_publication(arbitrary) -> ZeroMqPushPublishingMode = [ZeroMqPushPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
     sqs_queue_publication(arbitrary) -> SqsQueuePublishingMode = [SqsQueuePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
     sentry_event_publication(arbitrary) -> SentryEventPublishingMode = [SentryEventPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];

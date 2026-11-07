@@ -23,7 +23,7 @@ struct StoppingTask {
 
 impl Runtime {
     pub(crate) fn new() -> Self {
-        Self::with_persistence(None, DEFAULT_STATE_SNAPSHOT_INTERVAL)
+        Self::with_persistence(None, nervix_models::StateSnapshotInterval::DEFAULT)
             .verified("the None persistence path has no fallible step")
     }
 
@@ -58,7 +58,7 @@ impl Runtime {
             ..RuntimeEnvironment::transient(Executor::default())
         };
         let settings = RuntimeSettings::resolve(Some(state_snapshot_interval), None)
-            .assured("the runtime settings declare no validation");
+            .change_context(RuntimePersistenceError::InvalidRuntimeSettings)?;
         Self::with_environment(environment, settings)
     }
 
@@ -124,12 +124,11 @@ impl Runtime {
         let branch_instance_expiration_scan_interval = fault_injection
             .branch_instance_expiration_scan_interval()
             .unwrap_or(BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL);
-        let domain_drain_timeout = fault_injection
-            .domain_drain_timeout()
-            .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
-        let entity_gate_deadline = fault_injection
-            .entity_gate_deadline()
-            .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+        let domain_drain_timeout = nervix_models::DomainDrainTimeout::DEFAULT;
+        let entity_gate_deadline =
+            <nervix_models::EntityGateDeadline as nervix_models::SettingDefinition>::default_value(
+                &(),
+            );
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 dns,
@@ -211,10 +210,19 @@ impl Runtime {
                     executor.clone(),
                     SnapshotStagingLimits::default(),
                 ),
-                state_snapshot_interval,
+                construction_parameters: nervix_primitives::sync::blocking::OnceLock::new(),
+                cluster_parameters: nervix_primitives::publication::ArcSwap::from_pointee(
+                    nervix_models::ClusterParameterValues::resolve(
+                        nervix_models::ClusterParameterSeedValues {
+                            state_snapshot_interval: Some(state_snapshot_interval),
+                            domain_drain_timeout: Some(domain_drain_timeout),
+                            entity_gate_deadline: Some(entity_gate_deadline),
+                            ..Default::default()
+                        },
+                    )
+                    .assured("runtime bootstrap inputs have positive durations"),
+                ),
                 state_replication_poll_interval: DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-                domain_drain_timeout,
-                entity_gate_deadline,
                 temp_dir,
                 executor,
                 metrics: RuntimeMetrics::default(),
@@ -288,33 +296,68 @@ impl Runtime {
     }
 
     pub(crate) fn domain_drain_timeout(&self) -> Duration {
-        self.inner.domain_drain_timeout
+        self.inner
+            .fault_injection
+            .domain_drain_timeout()
+            .unwrap_or_else(|| self.cluster_parameters().domain_drain_timeout())
     }
 
     /// How long a branch task is given to stop: the configured drain timeout plus the grace it
     /// needs to finish the flush already in progress.
     pub(super) fn branch_task_stop_timeout(&self) -> Duration {
-        super::branch_task_stop_timeout(self.inner.domain_drain_timeout)
+        super::branch_task_stop_timeout(self.cluster_parameters().domain_drain_timeout())
     }
 
     /// When the emitters of a domain execution that stops now finish their emitters: the domain drain
     /// timeout from now, the same bound a stop command gives an emitter.
     pub(in crate::runtime) fn emitter_finish_deadline(&self) -> Instant {
-        self.emitter_finish_deadline_within(self.inner.domain_drain_timeout)
+        self.emitter_finish_deadline_within(self.cluster_parameters().domain_drain_timeout())
     }
 
     /// When the emitters of a domain execution that stops now finish their emitters, no later than
     /// `limit` from now.
     fn emitter_finish_deadline_within(&self, limit: Duration) -> Instant {
-        let budget = limit.min(self.inner.domain_drain_timeout);
+        let budget = limit.min(self.domain_drain_timeout());
         Instant::now().checked_add(budget).assured(
             "the domain drain timeout bounds the budget, and it is the sixty-second default or a \
              scenario's own short drain, which end within the monotonic clock's range",
         )
     }
 
+    pub(crate) fn set_construction_parameters(
+        &self,
+        record: nervix_models::ClusterParameterRecord,
+    ) {
+        self.inner
+            .construction_parameters
+            .set(record)
+            .assured("construction parameters are assigned once before runtime admission");
+    }
+
+    pub(crate) fn construction_parameters(&self) -> Option<&nervix_models::ClusterParameterRecord> {
+        self.inner.construction_parameters.get()
+    }
+
+    pub(crate) fn cluster_parameters(&self) -> nervix_models::ClusterParameterValues {
+        **self.inner.cluster_parameters.load()
+    }
+
+    pub(crate) fn install_cluster_parameters(&self, values: nervix_models::ClusterParameterValues) {
+        if let Some(store) = self.inner.resource_store.load_full() {
+            store.install_limits(crate::resource::ResourceStoreLimits {
+                max_archive_bytes: values.resource_max_archive_bytes(),
+                max_extracted_bytes: values.resource_max_extracted_bytes(),
+                max_file_count: values.resource_max_file_count(),
+            });
+        }
+        self.inner.cluster_parameters.store(StdArc::new(values));
+    }
+
     pub(crate) fn entity_gate_deadline(&self) -> Duration {
-        self.inner.entity_gate_deadline
+        self.inner
+            .fault_injection
+            .entity_gate_deadline()
+            .unwrap_or_else(|| self.cluster_parameters().entity_gate_deadline())
     }
 
     /// The fault controls a coordinator consults with control-plane identities this runtime does
@@ -446,6 +489,18 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_transaction_commit_after_progress_if_armed(node_id, domain, completed_statements)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_explicit_commit_failure_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        transaction_id: &str,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_explicit_commit_failure_if_armed(node, transaction_id)
             .await;
     }
 
@@ -755,24 +810,26 @@ impl Runtime {
             emitter_task.finish_by(emitter_finish_deadline);
         }
         execution.shutdown.send_replace(true);
-        for (relay, task) in execution.relay_owner_tasks {
+        for (owned, task) in execution.relay_owner_tasks {
             nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(self.branch_task_stop_timeout()).await {
                 warn!(
                     domain = domain.as_str(),
-                    relay = relay.as_str(),
-                    reason = %reason,
+                    relay = owned.relay.as_str(),
+                    unit = ?owned.unit,
+                    reason = %format_args!("{reason:#}"),
                     "relay owner task did not stop cleanly"
                 );
             }
         }
-        for (relay, task) in execution.relay_state_tasks {
+        for (owned, task) in execution.relay_state_tasks {
             nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE).await {
                 warn!(
                     domain = domain.as_str(),
-                    relay = relay.as_str(),
-                    reason = %reason,
+                    relay = owned.relay.as_str(),
+                    unit = ?owned.unit,
+                    reason = %format_args!("{reason:#}"),
                     "relay state task did not stop cleanly"
                 );
             }
@@ -781,7 +838,7 @@ impl Runtime {
             Self::await_shutdown_task(
                 node_task.task,
                 domain,
-                Some(&IngestorName::from(&entity.identifier)),
+                Some(&IngestorName::from(&entity.node.identifier)),
                 "scheduled node",
             )
             .await;
@@ -806,7 +863,7 @@ impl Runtime {
         let mut generators = Vec::with_capacity(execution.generator_tasks.len());
         for (entity, task) in execution.generator_tasks {
             generators.push(StoppingTask {
-                owner: IngestorName::from(&entity.identifier),
+                owner: IngestorName::from(&entity.node.identifier),
                 task,
             });
         }
@@ -831,7 +888,7 @@ impl Runtime {
                 Self::await_shutdown_task(
                     task,
                     domain,
-                    Some(&IngestorName::from(&entity.identifier)),
+                    Some(&IngestorName::from(&entity.node.identifier)),
                     "scheduled node placement",
                 )
                 .await;
@@ -859,7 +916,7 @@ impl Runtime {
             .inner
             .node_quiesce_counters
             .iter()
-            .filter(|entry| &entry.key().domain == domain)
+            .filter(|entry| &entry.key().entity.domain == domain)
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in quiesce_keys {
@@ -899,17 +956,21 @@ impl Runtime {
             .ingestors
             .iter()
             .map(|entry| entry.key().clone())
-            .filter(|key| &key.domain == domain)
+            .filter(|key| &key.entity.domain == domain)
             .collect::<Vec<_>>();
 
         for key in ingestors {
             if let Err(error) = self
-                .stop_ingestor(domain, &IngestorName::from(key.identifier()))
+                .stop_ingestor_unit(
+                    domain,
+                    &IngestorName::from(key.entity.identifier()),
+                    key.unit,
+                )
                 .await
             {
                 warn!(
                     domain = domain.as_str(),
-                    ingestor = key.identifier().as_str(),
+                    ingestor = key.entity.identifier().as_str(),
                     error = %format_args!("{error:#}"),
                     "failed to stop domain ingestor during schedule rebuild"
                 );

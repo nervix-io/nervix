@@ -14,6 +14,20 @@
 # changing the owner's ordering means revisiting its qualification.
 
 [[invariant]]
+claim = "Under the unit's exclusive transaction scope, refund restores the exact prior GCRA horizon while an observer may read; this is one-location arithmetic, with no cross-location publication claim."
+id = "rate-limit.direct.exact-refund"
+package = "nervix-rate-limit"
+test = "loom_tests::loom_a_refunded_charge_restores_the_exact_prior_horizon"
+
+[[qualification]]
+failure = "refund changed the pre-charge horizon"
+id = "rate-limit.direct.refund-clears-debt"
+invariant = "rate-limit.direct.exact-refund"
+original = "self.0.store(before, Ordering::Relaxed);"
+path = "crates/rate-limit/src/cell.rs"
+weakened = "let _ = before; self.0.store(0, Ordering::Relaxed);"
+
+[[invariant]]
 claim = "A state-assignment drain observes every write completed by an operation admitted under the superseded assignment before returning; ArcSwap internals remain opaque."
 id = "server.state-assignment.drained-publication"
 package = "nervix-server"
@@ -148,6 +162,36 @@ invariant = "runtime.relay-fanout.admission-wakeup"
 original = "let admitted = self.admitted.fetch_add(0, Ordering::AcqRel);"
 path = "src/runtime/relay_channel.rs"
 weakened = "let admitted = self.admitted.load(Ordering::Acquire);"
+
+[[invariant]]
+claim = "An audience receiver published while its parent ends is observed by that ending or observes the ending itself; every resize carries the publication through the same capacity word. ArcSwap and queue internals remain opaque."
+id = "runtime.relay-fanout.audience-ending"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_an_audience_registering_as_its_parent_ends_is_seen_or_observes_the_ending"
+
+[[qualification]]
+failure = "audience registration escaped both the parent's ending and its own ending check"
+id = "runtime.relay-fanout.audience-registration-load"
+invariant = "runtime.relay-fanout.audience-ending"
+original = "self.capacity.fetch_add(0, Ordering::AcqRel) != 0"
+path = "src/runtime/relay_channel.rs"
+weakened = "self.capacity.load(Ordering::Acquire) != 0"
+
+[[qualification]]
+failure = "audience registration escaped both the parent's ending and its own ending check"
+id = "runtime.relay-fanout.audience-resize-store"
+invariant = "runtime.relay-fanout.audience-ending"
+original = "self.fanout.capacity.swap(capacity.get(), Ordering::AcqRel);"
+path = "src/runtime/relay_channel.rs"
+weakened = "self.fanout.capacity.store(capacity.get(), Ordering::Release);"
+
+[[qualification]]
+failure = "audience registration escaped both the parent's ending and its own ending check"
+id = "runtime.relay-fanout.audience-ending-store"
+invariant = "runtime.relay-fanout.audience-ending"
+original = "self.fanout.capacity.swap(0, Ordering::AcqRel);"
+path = "src/runtime/relay_channel.rs"
+weakened = "self.fanout.capacity.store(0, Ordering::Release);"
 
 [[invariant]]
 claim = "An operation admitted under a runtime-state binding that a rebind supersedes either observes the new binding and is refused, or finishes before the rebind returns with everything it did visible to the rebinding side: the operation counts itself in before it reads the binding, the rebind publishes the binding before it reads the count, both reach the count by read-modify-write, and finishing releases what the read acquires."

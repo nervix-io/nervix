@@ -1,9 +1,10 @@
 Feature: Cross-language client conformance
   Every client runtime reads the same rows, answers and failures through the finalized session
   protocol and prints the same report, so one expected report is the oracle for every language.
-  The shared Rust binding is driven from C, C++, Python, Java and Ruby, and in process through
-  its C ABI; Go over native gRPC and TypeScript on Node.js and Bun over the binary WebSocket are
-  independent implementations generated from the schema. Every binding host also attaches to a
+  The shared Rust binding is driven through its C ABI from C, C++ and Ruby and in process,
+  from Java 21 through JNI, and from CPython through the Python package on the same host session runtime; Go over native
+  gRPC and TypeScript on Node.js and Bun over the binary WebSocket are independent implementations
+  generated from the schema. Every binding host also attaches to a
   paced domain clock that is already running, reads the clock the attach reported before it uses a
   tick, and keeps the generations a STOP and START and a restored session report apart. Every
   binding host also publishes typed Arrow batches through a client ingestor and consumes,
@@ -13,7 +14,66 @@ Feature: Cross-language client conformance
   JavaScript safe-integer boundary, an absent and a present-zero optional value, strings with
   multi-byte characters and an embedded NUL, bytes that are not UTF-8, empty strings and bytes,
   float sign and subnormal bits, the extreme DATETIME nanoseconds, a redacted sensitive field and
-  two interleaved concrete branches. Strings and bytes are reported as hex, floats as their bits.
+  two interleaved concrete branches, on both an unpartitioned relay and distinct units of a relay
+  with four partitions.
+  Strings and bytes are reported as hex, floats as their bits.
+
+  @client_upload_failure
+  Scenario Outline: A <runtime> client distinguishes an upload identity conflict from its completed retry
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE upload_bundle;
+      """
+    And node "node-1" has resource directory "upload_probe_directory" containing
+      """
+      {"payload.txt":"first archive\n"}
+      """
+    When the "<runtime>" client probe retries resource "upload_bundle" from directory "upload_probe_directory" on a follower when available
+    Then within "180s" the client probe reports
+      """
+      UPLOAD completed
+      RETRY completed
+      CONFLICT IdentityConflict
+      PASS
+      """
+
+    @client_probe_in_process
+    Examples: the shared Rust binding's C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C
+      | runtime | cluster_size |
+      | c       | 1            |
+      | c       | 3            |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++
+      | runtime | cluster_size |
+      | c++     | 1            |
+      | c++     | 3            |
+
+    @client_conformance_toolchain @client_probe_python
+    Examples: Python
+      | runtime | cluster_size |
+      | python  | 1            |
+      | python  | 3            |
+
+    @client_conformance_toolchain @client_probe_java
+    Examples: Java
+      | runtime | cluster_size |
+      | java    | 1            |
+      | java    | 3            |
+
+    @client_conformance_toolchain @client_probe_ruby
+    Examples: Ruby
+      | runtime | cluster_size |
+      | ruby    | 1            |
+      | ruby    | 3            |
 
   Scenario Outline: A <runtime> client round-trips an operation, typed rows, an error and a closure
     Given a <cluster_size> node nervix cluster is started
@@ -55,21 +115,21 @@ Feature: Cross-language client conformance
         f64v number,
         flag boolean,
         text string,
-        raw BYTES,
+        raw string,
         at string,
         maybe integer OPTIONAL,
         secret string
       );
-      CREATE CODEC typed_row_codec
-        FROM WIRE JSON SCHEMA typed_row_wire
+      CREATE WIRE JSON CODEC typed_row_codec
+        FROM WIRE SCHEMA typed_row_wire
         TO SCHEMA typed_row
-        ENCODE at AS RFC3339;
+        ENCODE at AS RFC3339, raw AS BASE64;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m <partition_clause>;
       CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant;
       CREATE VHOST edge conformance-{{test_id}}.example.com;
-      CREATE ENDPOINT typed_ingress ON edge PATH '/typed' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR typed_source
+      CREATE HTTP ENDPOINT typed_ingress ON edge PATH '/typed';
+      CREATE HTTP ENDPOINT INGESTOR typed_ingestor
         FROM typed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING typed_row_codec
         TO typed_rows
@@ -98,7 +158,7 @@ Feature: Cross-language client conformance
         ON GENERAL ERROR LOG;
       START;
       """
-    When the "<runtime>" client probe subscribes as "probe" to relay "typed_rows" on node "node-1" expecting 3 rows
+    When the "<runtime>" client probe subscribes as "probe" to relay "typed_rows" on a follower when available expecting 3 rows
     And http payload is posted to node "node-1" with host "conformance-{{test_id}}.example.com" path "/typed"
       """
       {"id":1,"tenant":"acme","u8v":255,"i8v":127,"u16v":65535,"i16v":32767,"u32v":4294967295,"i32v":2147483647,"u64v":18446744073709551615,"i64v":9223372036854775807,"f32v":3.4028235e38,"f64v":1.7976931348623157e308,"flag":true,"text":"h\u00e9llo \u4e16\u754c \ud83d\ude80","raw":"AP/+gAA=","at":"2262-04-11T23:47:16.854775807Z","secret":"s1"}
@@ -113,6 +173,7 @@ Feature: Cross-language client conformance
       """
     Then within "180s" the client probe reports
       """
+      {{client_probe_redirect_report}}
       OPERATION completed
       ERROR failed diagnostics=1 span=12..12
       FIELD id U32 required public
@@ -145,6 +206,99 @@ Feature: Cross-language client conformance
       """
 
     Examples: the C ABI in process
+      | runtime          | cluster_size | partition_clause |
+      | c-abi-in-process | 1            |                  |
+      | c-abi-in-process | 3            |                  |
+      | c-abi-in-process | 1            | PARTITIONS 4     |
+      | c-abi-in-process | 3            | PARTITIONS 4     |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C over the shared Rust binding
+      | runtime | cluster_size | partition_clause |
+      | c       | 1            |                  |
+      | c       | 3            |                  |
+      | c       | 1            | PARTITIONS 4     |
+      | c       | 3            | PARTITIONS 4     |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++ over the shared Rust binding
+      | runtime | cluster_size | partition_clause |
+      | c++     | 1            |                  |
+      | c++     | 3            |                  |
+      | c++     | 1            | PARTITIONS 4     |
+      | c++     | 3            | PARTITIONS 4     |
+
+    @client_conformance_toolchain @client_probe_python
+    Examples: CPython over the Python package
+      | runtime | cluster_size | partition_clause |
+      | python  | 1            |                  |
+      | python  | 3            |                  |
+      | python  | 1            | PARTITIONS 4     |
+      | python  | 3            | PARTITIONS 4     |
+
+    @client_conformance_toolchain @client_probe_java
+    Examples: Java 21 over the JNI library
+      | runtime | cluster_size | partition_clause |
+      | java    | 1            |                  |
+      | java    | 3            |                  |
+      | java    | 1            | PARTITIONS 4     |
+      | java    | 3            | PARTITIONS 4     |
+
+    @client_conformance_toolchain @client_probe_ruby
+    Examples: Ruby over the shared Rust binding
+      | runtime | cluster_size | partition_clause |
+      | ruby    | 1            |                  |
+      | ruby    | 3            |                  |
+      | ruby    | 1            | PARTITIONS 4     |
+      | ruby    | 3            | PARTITIONS 4     |
+
+    @client_conformance_toolchain @client_probe_go
+    Examples: an independent Go client over native gRPC
+      | runtime | cluster_size | partition_clause |
+      | go      | 1            |                  |
+      | go      | 3            |                  |
+      | go      | 1            | PARTITIONS 4     |
+      | go      | 3            | PARTITIONS 4     |
+
+    @client_conformance_toolchain @client_probe_node
+    Examples: an independent TypeScript client on Node.js over the binary WebSocket
+      | runtime | cluster_size | partition_clause |
+      | node    | 1            |                  |
+      | node    | 3            |                  |
+      | node    | 1            | PARTITIONS 4     |
+      | node    | 3            | PARTITIONS 4     |
+
+    @client_conformance_toolchain @client_probe_bun
+    Examples: the same TypeScript client on Bun
+      | runtime | cluster_size | partition_clause |
+      | bun     | 1            |                  |
+      | bun     | 3            |                  |
+      | bun     | 1            | PARTITIONS 4     |
+      | bun     | 3            | PARTITIONS 4     |
+
+  Scenario Outline: A <runtime> C binding connects through two failed HTTPS endpoints and a live seed, and distinguishes session-local repeats from durable recovery
+    Given client grpc transport is configured with mode "https"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event_row (id U32);
+      CREATE RELAY events SCHEMA event_row UNBRANCHED;
+      START;
+      """
+    When the "<runtime>" client probe connects through a seed after its first gRPC address is unavailable
+    Then within "120s" the client probe reports
+      """
+      CONNECTED seed
+      EVENT wait=deadline
+      ATTACH first=completed replay=failed
+      SUBSCRIBE first=completed replay=failed
+      DELETE first=completed replay=failed
+      CHECKS ok
+      PASS
+      """
+
+    Examples: the C ABI in process
       | runtime          | cluster_size |
       | c-abi-in-process | 1            |
       | c-abi-in-process | 3            |
@@ -161,41 +315,104 @@ Feature: Cross-language client conformance
       | c++     | 1            |
       | c++     | 3            |
 
-    @client_conformance_toolchain @client_probe_python
-    Examples: CPython over the shared Rust binding
+  Scenario Outline: A <runtime> client reads the cause, message and retry wait of a restoration refused for now
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA watched_row (value STRING);
+      CREATE RELAY watched SCHEMA watched_row UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    When the "<runtime>" client probe subscribes for restoration through the forwarded gRPC endpoint of node "{{leader}}"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" the client probe prints "INTERRUPTED"
+    When every node refuses the next subscription it is asked to open as unavailable
+    And the TCP forwarder at "127.0.0.1" restarts
+    Then within "120s" the client probe reports
+      """
+      SUBSCRIBED
+      INTERRUPTED
+      RESTORATION cause=unavailable message=the serving node could not open the subscription now wait=positive
+      CHECKS ok
+      PASS
+      """
+
+    Examples: the C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C over the shared Rust binding
       | runtime | cluster_size |
-      | python  | 1            |
-      | python  | 3            |
+      | c       | 1            |
+      | c       | 3            |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++ over the shared Rust binding
+      | runtime | cluster_size |
+      | c++     | 1            |
+      | c++     | 3            |
 
     @client_conformance_toolchain @client_probe_java
-    Examples: Java over the shared Rust binding
+    Examples: Java 21 over the JNI library
       | runtime | cluster_size |
       | java    | 1            |
       | java    | 3            |
 
-    @client_conformance_toolchain @client_probe_ruby
-    Examples: Ruby over the shared Rust binding
-      | runtime | cluster_size |
-      | ruby    | 1            |
-      | ruby    | 3            |
+  Scenario Outline: A <runtime> client reads why a subscription whose relay was dropped while it was disconnected ended
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA watched_row (value STRING);
+      CREATE RELAY watched SCHEMA watched_row UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    When the "<runtime>" client probe subscribes for restoration through the forwarded gRPC endpoint of node "{{leader}}"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" the client probe prints "INTERRUPTED"
+    When these Plexus commands are executed on the leader node
+      """
+      DROP RELAY watched;
+      """
+    And the TCP forwarder at "127.0.0.1" restarts
+    Then within "120s" the client probe reports
+      """
+      SUBSCRIBED
+      INTERRUPTED
+      ENDED reason=relay_removed
+      CHECKS ok
+      PASS
+      """
 
-    @client_conformance_toolchain @client_probe_go
-    Examples: an independent Go client over native gRPC
-      | runtime | cluster_size |
-      | go      | 1            |
-      | go      | 3            |
+    Examples: the C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
 
-    @client_conformance_toolchain @client_probe_node
-    Examples: an independent TypeScript client on Node.js over the binary WebSocket
+    @client_conformance_toolchain @client_probe_c
+    Examples: C over the shared Rust binding
       | runtime | cluster_size |
-      | node    | 1            |
-      | node    | 3            |
+      | c       | 1            |
+      | c       | 3            |
 
-    @client_conformance_toolchain @client_probe_bun
-    Examples: the same TypeScript client on Bun
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++ over the shared Rust binding
       | runtime | cluster_size |
-      | bun     | 1            |
-      | bun     | 3            |
+      | c++     | 1            |
+      | c++     | 3            |
+
+    @client_conformance_toolchain @client_probe_java
+    Examples: Java 21 over the JNI library
+      | runtime | cluster_size |
+      | java    | 1            |
+      | java    | 3            |
 
   Scenario Outline: A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart
     # Holding the clock authority's first progress proves which node owns it, and that every live
@@ -266,13 +483,13 @@ Feature: Cross-language client conformance
       | c++     | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_python
-    Examples: CPython over the shared Rust binding
+    Examples: CPython over the Python package
       | runtime | cluster_size | clock_owner | entry_node |
       | python  | 1            | node-1      | node-1     |
       | python  | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_java
-    Examples: Java over the shared Rust binding
+    Examples: Java 21 over the JNI library
       | runtime | cluster_size | clock_owner | entry_node |
       | java    | 1            | node-1      | node-1     |
       | java    | 3            | node-2      | node-1     |
@@ -496,13 +713,13 @@ Feature: Cross-language client conformance
       | c++     | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
 
     @client_conformance_toolchain @client_probe_python
-    Examples: CPython over the shared Rust binding
+    Examples: CPython over the Python package
       | runtime | cluster_size | tags_type   | grid_type        | spans_type              |
       | python  | 1            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
       | python  | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
 
     @client_conformance_toolchain @client_probe_java
-    Examples: Java over the shared Rust binding
+    Examples: Java 21 over the JNI library
       | runtime | cluster_size | tags_type   | grid_type        | spans_type              |
       | java    | 1            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
       | java    | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
@@ -513,6 +730,7 @@ Feature: Cross-language client conformance
       | ruby    | 1            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
       | ruby    | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
 
+  @client_wire_corpus
   Scenario Outline: A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote
     When the "<runtime>" client probe decodes the conformance corpus
     Then within "60s" the client probe reports the conformance corpus

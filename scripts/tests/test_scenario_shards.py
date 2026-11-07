@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -22,6 +23,11 @@ from scripts import scenario_shards as shards
 TARGETS = {"scenarios", "nervix-cli", "nervix-client-ffi", "nervix_client_ffi"}
 ONNX_LIBRARY = Path(".nervix-deps/onnxruntime/onnxruntime-linux-x64-1.30.0/lib/libonnxruntime.so.1.30.0")
 ONNX_LINK = ONNX_LIBRARY.parent / "libonnxruntime.so"
+PYTHON_WHEEL = Path("target/paced-simulation/wheels/nervix_client-0.1.0-cp312-abi3-linux_x86_64.whl")
+
+
+# What a stand-in object's debug information holds, which no stripped copy of it may.
+DEBUG_MARK = b"stand-in DWARF of a coverage build"
 
 
 def write(path: Path, content: bytes, executable: bool = False) -> None:
@@ -31,6 +37,22 @@ def write(path: Path, content: bytes, executable: bool = False) -> None:
     path.chmod(mode)
 
 
+def elf(path: Path, content: bytes) -> None:
+    """An ELF executable at `path`, as a coverage build leaves its objects: a real one, holding
+    `content` in a section of its own and debug information marked with DEBUG_MARK."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as directory:
+        held = Path(directory) / "content"
+        held.write_bytes(content)
+        debug = Path(directory) / "debug"
+        debug.write_bytes(DEBUG_MARK * 64)
+        subprocess.run(
+            ["objcopy", f"--add-section=.nervix_content={held}", f"--add-section=.debug_info={debug}", "/usr/bin/true", str(path)],
+            check=True,
+        )
+    path.chmod(0o755)
+
+
 class Checkout:
     """A git checkout holding a stand-in coverage build and the inputs its scenarios read."""
 
@@ -38,15 +60,15 @@ class Checkout:
         self.root = root
         root.mkdir(parents=True)
         debug = root / shards.COVERAGE_DEBUG
-        write(debug / "nervix-cli", b"\x7fELF cli", executable=True)
+        elf(debug / "nervix-cli", b"cli")
         (debug / "deps").mkdir(parents=True)
         os.link(debug / "nervix-cli", debug / "deps" / "nervix_cli-0f92e8a94feb2377")
         driver = debug / "build" / "playwright-rs-5e6f" / "out" / "playwright-driver" / "playwright-1.62.1-linux"
         # The scenario executable holds the driver's path from compile time.
-        executable = b"\x7fELF scenarios " + str(driver / "node").encode() + b" " + str(driver / "package/cli.js").encode()
-        write(debug / "deps" / "scenarios-4d0e03c611a711f3", executable, executable=True)
+        executable = b"scenarios " + str(driver / "node").encode() + b" " + str(driver / "package/cli.js").encode()
+        elf(debug / "deps" / "scenarios-4d0e03c611a711f3", executable)
         write(debug / "deps" / "scenarios-4d0e03c611a711f3.d", b"dependencies")
-        write(debug / "deps" / "libnervix_client_ffi.so", b"\x7fELF binding", executable=True)
+        elf(debug / "deps" / "libnervix_client_ffi.so", b"binding")
         write(debug / "deps" / "libnervix_client_ffi.rlib", b"rlib", executable=True)
         write(debug / "deps" / "libserde_derive-1a2b3c.so", b"\x7fELF macro", executable=True)
         write(debug / "nervix-cli.d", b"dependencies")
@@ -58,6 +80,7 @@ class Checkout:
         write(root / shards.ONNX_FIXTURES / "simple_score.onnx", b"model")
         write(root / ONNX_LIBRARY, b"\x7fELF onnxruntime", executable=True)
         (root / ONNX_LINK).symlink_to(ONNX_LIBRARY.name)
+        write(root / PYTHON_WHEEL, b"wheel")
         for guest in shards.WASM_GUESTS:
             write(root / guest, b"\0asm")
         write(
@@ -88,6 +111,14 @@ def fake_ldd(directory: Path, missing_for: str) -> Path:
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return directory
+
+
+def stripped(path: Path) -> bytes:
+    """What `objcopy --strip-debug` leaves of the object at `path`."""
+    with tempfile.TemporaryDirectory() as directory:
+        copy = Path(directory) / "stripped"
+        subprocess.run([*shards.STRIP, str(path), str(copy)], check=True)
+        return copy.read_bytes()
 
 
 class MatrixTests(unittest.TestCase):
@@ -172,9 +203,16 @@ class ArchiveTests(unittest.TestCase):
 
     def test_a_shard_restores_every_packed_file_into_a_checkout_of_the_build_path(self) -> None:
         build, packed = self.build()
+        objects = {path.as_posix() for path in shards.coverage_objects(build.root, shards.object_pattern(TARGETS))}
         expected = {}
         for file in packed.files:
-            expected[file.path] = (build.root / file.path).read_bytes() if not (build.root / file.path).is_symlink() else None
+            source = build.root / file.path
+            if source.is_symlink():
+                expected[file.path] = None
+            elif file.path in objects:
+                expected[file.path] = stripped(source)
+            else:
+                expected[file.path] = source.read_bytes()
         root = self.shard_checkout(build)
         restored = self.unpack(root)
         self.assertEqual(restored, packed)
@@ -199,6 +237,51 @@ class ArchiveTests(unittest.TestCase):
         self.assertNotIn("target/llvm-cov-target/debug/deps/libserde_derive-1a2b3c.so", packed_paths)
         self.assertFalse((debug / "build" / "nervix-cli-1" / "build-script-build").exists())
 
+    def test_objects_are_packed_without_their_debug_information_and_the_build_keeps_its_own(self) -> None:
+        build, packed = self.build()
+        objects = shards.coverage_objects(build.root, shards.object_pattern(TARGETS))
+        sizes = {file.path: file.size for file in packed.files}
+        root = self.shard_checkout(build)
+        self.unpack(root)
+        source = self.base / "source"
+        for path in objects:
+            restored = (root / path).read_bytes()
+            self.assertNotIn(DEBUG_MARK, restored, path)
+            self.assertIn(DEBUG_MARK, (source / path).read_bytes(), "the build's object keeps its debug information")
+            self.assertEqual(sizes[path.as_posix()], len(restored), "the manifest holds the stripped size")
+            self.assertTrue(os.access(root / path, os.X_OK), path)
+        # What the scenario executable names stays in it.
+        executable = (root / shards.COVERAGE_DEBUG / "deps" / "scenarios-4d0e03c611a711f3").read_bytes()
+        self.assertIn(b"/out/playwright-driver/playwright-1.62.1-linux/node", executable)
+        self.assertFalse((source / shards.STRIPPED).exists(), "the stripped copies are gone once packed")
+
+    def test_an_object_objcopy_cannot_read_fails_the_pack(self) -> None:
+        checkout = Checkout(self.base / "build")
+        unreadable = checkout.root / shards.COVERAGE_DEBUG / "deps" / "libnervix_client_ffi.so"
+        write(unreadable, b"\x7fELF but not an object", executable=True)
+        with self.assertRaisesRegex(shards.ShardError, r"stripping target/llvm-cov-target/debug/deps/libnervix_client_ffi\.so failed"):
+            checkout.pack(self.archive)
+        self.assertFalse((checkout.root / shards.STRIPPED).exists())
+
+    def test_the_driver_wheel_is_carried_into_a_restored_checkout(self) -> None:
+        build, manifest = self.build()
+        self.assertIn(PYTHON_WHEEL.as_posix(), [file.path for file in manifest.files])
+        root = self.shard_checkout(build)
+        self.unpack(root)
+        self.assertEqual((root / PYTHON_WHEEL).read_bytes(), b"wheel")
+
+    def test_a_build_without_the_python_driver_package_cannot_be_packed(self) -> None:
+        checkout = Checkout(self.base / "build")
+        (checkout.root / PYTHON_WHEEL).unlink()
+        with self.assertRaisesRegex(shards.ShardError, "Python.*wheel"):
+            checkout.pack(self.archive)
+
+    def test_a_build_with_two_python_driver_wheels_cannot_be_packed(self) -> None:
+        checkout = Checkout(self.base / "build")
+        write(checkout.root / PYTHON_WHEEL.with_name("nervix_client-0.2.0-cp312-abi3-linux_x86_64.whl"), b"another wheel")
+        with self.assertRaisesRegex(shards.ShardError, "Python.*wheel"):
+            checkout.pack(self.archive)
+
     def test_the_pack_holds_only_the_drivers_the_executable_names(self) -> None:
         checkout = Checkout(self.base / "build")
         debug = checkout.root / shards.COVERAGE_DEBUG
@@ -221,7 +304,7 @@ class ArchiveTests(unittest.TestCase):
     def test_an_executable_built_without_a_driver_packs_none(self) -> None:
         checkout = Checkout(self.base / "build")
         debug = checkout.root / shards.COVERAGE_DEBUG
-        write(debug / "deps" / "scenarios-4d0e03c611a711f3", b"\x7fELF scenarios", executable=True)
+        elf(debug / "deps" / "scenarios-4d0e03c611a711f3", b"scenarios")
         manifest = checkout.pack(self.archive)
         self.assertEqual([file.path for file in manifest.files if "playwright" in file.path], [])
 
@@ -318,6 +401,16 @@ class RecipeTests(unittest.TestCase):
             self.assertIn(f'/llvm-cov-target/debug/{binary}"', shard)
             self.assertIn(f'"${{suite}}/{binary}"', build)
         self.assertIn('"${suite}/nervix-plexus-format"', build)
+        package = tomllib.loads((shards.ROOT / "crates/client-python/Cargo.toml").read_text())
+        library = package["lib"].get("name", package["package"]["name"].replace("-", "_"))
+        self.assertIn(f'"${{tools}}/paced-simulation/debug/lib{library}.so"', build)
+        self.assertIn(f'"${{suite}}/lib{library}.so"', build)
+        self.assertIn('NERVIX_PACED_SIMULATION_PYTHON=', shard)
+        self.assertIn('install-paced-simulation-python', self.recipe("test-scenarios-coverage-unpack"))
+
+    def test_the_prepared_runner_installs_the_instrumented_wheel(self) -> None:
+        head = self.recipe("test-scenarios-coverage-run").splitlines()[0]
+        self.assertEqual(head, ": install-paced-simulation-python")
 
 
 class WorkflowTests(unittest.TestCase):

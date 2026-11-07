@@ -32,17 +32,16 @@ Feature: OTEL emission
         user_id integer,
         action string
       );
-      CREATE CODEC audit_event_codec
-      FROM WIRE JSON SCHEMA audit_event_wire
+      CREATE WIRE JSON CODEC audit_event_codec
+      FROM WIRE SCHEMA audit_event_wire
       TO SCHEMA audit_event
       ENCODE event_ts AS RFC3339;
       CREATE RELAY audit_events SCHEMA audit_event UNBRANCHED;
       CREATE VHOST edge otel-{{test_id}}.example.com;
-      CREATE ENDPOINT audit_ingress
+      CREATE HTTP ENDPOINT audit_ingress
       ON edge
-      PATH '/audit'
-      TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR audit_source
+      PATH '/audit';
+      CREATE HTTP ENDPOINT INGESTOR audit_ingestor
       FROM audit_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING audit_event_codec
       TIMESTAMP NOW
@@ -176,18 +175,17 @@ Feature: OTEL emission
         value integer,
         route string
       );
-      CREATE CODEC request_count_codec
-      FROM WIRE JSON SCHEMA request_count_wire
+      CREATE WIRE JSON CODEC request_count_codec
+      FROM WIRE SCHEMA request_count_wire
       TO SCHEMA request_count
       ENCODE window_start AS RFC3339,
              window_end AS RFC3339;
       CREATE RELAY request_counts SCHEMA request_count UNBRANCHED;
       CREATE VHOST edge otel-metric-{{test_id}}.example.com;
-      CREATE ENDPOINT metric_ingress
+      CREATE HTTP ENDPOINT metric_ingress
       ON edge
-      PATH '/metric'
-      TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR metric_source
+      PATH '/metric';
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor
       FROM metric_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_count_codec
       TO request_counts
@@ -304,17 +302,16 @@ Feature: OTEL emission
         bucket_counts array,
         explicit_bounds array
       );
-      CREATE CODEC latency_point_codec
-      FROM WIRE JSON SCHEMA latency_point_wire
+      CREATE WIRE JSON CODEC latency_point_codec
+      FROM WIRE SCHEMA latency_point_wire
       TO SCHEMA latency_point
       ENCODE observed_at AS RFC3339;
       CREATE RELAY latency_points SCHEMA latency_point UNBRANCHED;
       CREATE VHOST edge otel-points-{{test_id}}.example.com;
-      CREATE ENDPOINT point_ingress
+      CREATE HTTP ENDPOINT point_ingress
       ON edge
-      PATH '/points'
-      TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR point_source
+      PATH '/points';
+      CREATE HTTP ENDPOINT INGESTOR point_ingestor
       FROM point_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING latency_point_codec
       TO latency_points

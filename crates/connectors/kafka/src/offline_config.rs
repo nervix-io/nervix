@@ -47,7 +47,7 @@ pub fn validate_client_configuration(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::ConnectorKind;
@@ -168,7 +168,7 @@ mod tests {
         for (key, value) in [
             ("nervix.unknown", "value"),
             ("fetch.wait.max.ms", "not-a-number"),
-            ("auto.offset.reset", "not-an-offset"),
+            ("security.protocol", "not-a-protocol"),
         ] {
             let refusal = validate_client_configuration(&config(key, value))
                 .expect_err("librdkafka refuses this property");
@@ -179,6 +179,26 @@ mod tests {
             assert_eq!(
                 refusal.to_string(),
                 format!("invalid client config key '{key}'")
+            );
+        }
+    }
+
+    /// A Kafka client may name `ssl` or `sasl_ssl` with SCRAM or OAUTHBEARER, whose OIDC token
+    /// requests go through libcurl. librdkafka has those mechanisms only when it is built with TLS,
+    /// which the fork's `aws-lc` backend supplies from the product's one AWS-LC, and with libcurl.
+    #[test]
+    fn the_linked_librdkafka_is_built_with_tls_sasl_scram_and_oauthbearer_oidc() {
+        let native = ClientConfig::new()
+            .create_native_config()
+            .assured("librdkafka accepts a configuration that sets nothing");
+        let built = native
+            .get("builtin.features")
+            .assured("librdkafka reports the features it was built with");
+        let features: BTreeSet<&str> = built.split(',').collect();
+        for feature in ["ssl", "sasl_scram", "sasl_oauthbearer", "http", "oidc"] {
+            assert!(
+                features.contains(feature),
+                "the linked librdkafka was built without {feature}: {built}"
             );
         }
     }

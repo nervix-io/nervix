@@ -39,19 +39,20 @@
 use std::{pin::pin, time::Duration};
 
 use arch_into::ArchInto as _;
+use error_stack::Report;
 use futures_util::{Stream, StreamExt as _, stream::BoxStream};
 use meticulous::OptionExt as _;
 use nervix_execution::{Executor, Reservation};
 use nervix_interconnect::{
     ChargedItem, DuplexItems, DuplexReceiver, DuplexSendProgress, DuplexSender,
-    InterconnectDuplexRequest as _, Transport,
+    InterconnectDuplexRequest as _, RequestError, Transport,
 };
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     sync::{CancellationToken, DropGuard, mpsc},
     time::{Instant, sleep_until, timeout},
 };
-use nervix_recovery::{Discarded as _, Reported as _};
+use nervix_recovery::Discarded as _;
 use openraft::{
     error::{RPCError, Unreachable},
     network::{RPCOption, RaftNetworkV2 as _},
@@ -61,8 +62,8 @@ use thiserror::Error;
 use tracing::debug;
 
 use crate::{
-    AppendStreamOpenRecorder, LogIdOf, NetworkClient, ProtocolReceiver, TypeConfig,
-    unreachable_err, validate_protocol_origin, wire,
+    AppendStreamOpenRecorder, AppendSubmissionFault, LogIdOf, NetworkClient, ProtocolReceiver,
+    TypeConfig, unreachable_err, validate_protocol_origin, wire,
 };
 
 #[cfg(test)]
@@ -80,9 +81,8 @@ pub(crate) const MAX_OUTSTANDING_APPEND_BYTES: u64 = 16 * 1024 * 1024;
 /// How long an append stream with a batch outstanding may go without an answer while its follower
 /// also accepts none of the leader's bytes.
 const APPEND_STREAM_IDLE_BOUND: Duration = Duration::from_secs(5);
-/// The ceiling on a heartbeat's deadline. OpenRaft's soft TTL is usually far shorter, and the
-/// shorter of the two always wins.
-const HEARTBEAT_DEADLINE_CEILING: Duration = Duration::from_secs(5);
+/// The ceiling on an initial empty replication probe's soft request deadline.
+const REPLICATION_PROBE_DEADLINE_CEILING: Duration = Duration::from_secs(5);
 
 const _: () = assert!(
     MAX_OUTSTANDING_APPEND_BATCHES > 0
@@ -110,10 +110,13 @@ pub(crate) enum AppendPath {
     Replication,
 }
 
-/// The deadline for one heartbeat or leadership probe: whichever of OpenRaft's soft TTL and this
-/// crate's ceiling expires first.
-pub(crate) fn heartbeat_deadline(option: &RPCOption) -> Duration {
-    option.soft_ttl().min(HEARTBEAT_DEADLINE_CEILING)
+/// Heartbeat answers may arrive throughout the worker's lease-sized hard TTL. Initial empty
+/// replication probes retain their shorter soft TTL and five-second ceiling.
+pub(crate) fn append_request_deadline(option: &RPCOption, path: AppendPath) -> Duration {
+    match path {
+        AppendPath::Heartbeat => option.hard_ttl(),
+        AppendPath::Replication => option.soft_ttl().min(REPLICATION_PROBE_DEADLINE_CEILING),
+    }
 }
 
 /// Initial probes have no log data; commit updates following data stay on the ordered stream.
@@ -306,6 +309,8 @@ where
                 &self.executor,
                 &self.local_node_id,
                 &self.target,
+                self.append_stream_open_recorder
+                    .append_submission_fault(&self.target),
                 input,
             )
             .await?;
@@ -347,12 +352,12 @@ fn stream_failed(target: &ClusterNodeName, reason: impl std::fmt::Display) -> RP
 }
 
 /// Why one follower's submission stopped. Either way nothing more belongs on this stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum SubmissionStopped {
     /// The response reader ended this generation, so no further batch can be acknowledged.
     GenerationEnded,
-    /// The stream to the follower failed while a batch was being written.
-    StreamFailed,
+    /// Writing a batch to the follower failed, so neither it nor any later batch reached it.
+    StreamFailed(Report<RequestError>),
 }
 
 /// One batch the leader has submitted and not yet seen acknowledged.
@@ -361,13 +366,28 @@ struct OutstandingBatch {
     bytes: u64,
 }
 
+/// What the submission tells the answers, in the order it happened.
+enum Submitted {
+    /// A batch the follower now holds and owes an answer for.
+    Batch(OutstandingBatch),
+    /// Writing the next batch failed. The batches submitted before it still get their answers;
+    /// then the stream ends with this failure, because a stream that ended without one would tell
+    /// OpenRaft that every request it sent was answered.
+    Failed(Report<RequestError>),
+}
+
+#[derive(Debug, Error)]
+#[error("the append stream stopped before it submitted every batch")]
+struct AppendSubmissionFailed;
+
 /// Submits batches in OpenRaft's order, no more than the per-follower bound allows outstanding.
 struct AppendSubmission {
     sender: DuplexSender<wire::OpenAppendStream>,
-    outstanding: mpsc::Sender<OutstandingBatch>,
+    outstanding: mpsc::Sender<Submitted>,
     submitted_bytes: u64,
     batch_target_bytes: u64,
     acknowledged: mpsc::UnboundedReceiver<u64>,
+    _fault: AppendSubmissionFault,
 }
 
 impl AppendSubmission {
@@ -380,23 +400,40 @@ impl AppendSubmission {
             None => request.prev_log_id.clone(),
         };
         self.wait_for_follower_capacity().await?;
+        #[cfg(any(test, feature = "testing"))]
+        if self._fault.take(&request).await {
+            let failure = std::io::Error::other("injected append submission failure");
+            let failure = Report::new(failure).change_context(RequestError::Encode {
+                request: wire::OpenAppendStream::NAME,
+            });
+            return Err(SubmissionStopped::StreamFailed(failure));
+        }
         let record = wire::AppendEntriesRecord::from_request(request);
         let bytes = match self.sender.send(record).await {
             Ok(bytes) => bytes,
-            Err(error) => {
-                Err::<(), _>(error).reported("submit replication append batch");
-                return Err(SubmissionStopped::StreamFailed);
-            }
+            Err(error) => return Err(SubmissionStopped::StreamFailed(error)),
         };
         self.submitted_bytes = self
             .submitted_bytes
             .checked_add(bytes)
             .assured("outstanding bytes never exceed the per-follower bound plus one batch");
         let outstanding = OutstandingBatch { last_log_id, bytes };
-        match self.outstanding.send(outstanding).await {
+        match self.outstanding.send(Submitted::Batch(outstanding)).await {
             Ok(()) => Ok(()),
             Err(_) => Err(SubmissionStopped::GenerationEnded),
         }
+    }
+
+    /// Hands a failed write to the answers, after the batches submitted before it. A generation
+    /// that already ended reads no answers, so it needs no failure either.
+    async fn stop(&mut self, stopped: SubmissionStopped) {
+        let SubmissionStopped::StreamFailed(failure) = stopped else {
+            return;
+        };
+        self.outstanding
+            .send(Submitted::Failed(failure))
+            .await
+            .discarded("a generation that already ended reads no further answers");
     }
 
     /// Wait until this follower's unacknowledged bytes leave room for one more target-size batch.
@@ -483,7 +520,7 @@ impl AppendStreamIdleBound {
 struct AppendStreamGeneration {
     receiver: DuplexReceiver<wire::OpenAppendStream>,
     sender_progress: DuplexSendProgress,
-    outstanding: mpsc::Receiver<OutstandingBatch>,
+    outstanding: mpsc::Receiver<Submitted>,
     acknowledge: mpsc::UnboundedSender<u64>,
     idle_bound: AppendStreamIdleBound,
     target: ClusterNodeName,
@@ -498,7 +535,15 @@ impl AppendStreamGeneration {
         if self.finished {
             return None;
         }
-        let outstanding = self.outstanding.recv().await?;
+        // The submission's channel closes without a failure only once OpenRaft's input ended and
+        // every batch it carried was submitted, so only then does the stream end as exhausted.
+        let outstanding = match self.outstanding.recv().await? {
+            Submitted::Batch(outstanding) => outstanding,
+            Submitted::Failed(failure) => {
+                let failure = failure.change_context(AppendSubmissionFailed);
+                return self.fail(RPCError::Unreachable(unreachable_err(failure.into_error())));
+            }
+        };
         let sender_progress = &self.sender_progress;
         let answer = self
             .idle_bound
@@ -559,6 +604,7 @@ async fn open_append_stream<S>(
     executor: &Executor,
     local_node_id: &ClusterNodeName,
     target: &ClusterNodeName,
+    fault: AppendSubmissionFault,
     input: S,
 ) -> Result<
     BoxStream<'static, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>,
@@ -590,6 +636,7 @@ where
         submitted_bytes: 0,
         batch_target_bytes: append_batch_target_bytes(executor),
         acknowledged: acknowledge_rx,
+        _fault: fault,
     };
     let submission_target = target.clone();
     nervix_primitives::task::spawn(async move {
@@ -604,7 +651,19 @@ where
                 break;
             };
             if let Err(stopped) = submission.submit(request).await {
-                debug!(target = %submission_target, ?stopped, "raft append stream stopped submitting");
+                match &stopped {
+                    SubmissionStopped::GenerationEnded => {
+                        debug!(target = %submission_target, "raft append stream stopped submitting after its answers ended");
+                    }
+                    SubmissionStopped::StreamFailed(error) => {
+                        debug!(
+                            target = %submission_target,
+                            error = %format_args!("{error:#}"),
+                            "raft append stream stopped submitting"
+                        );
+                    }
+                }
+                submission.stop(stopped).await;
                 break;
             }
         }
@@ -665,7 +724,7 @@ impl ProtocolReceiver {
                     Ok(Some(decoded)) => decoded,
                     Ok(None) => return None,
                     Err(error) => {
-                        debug!(%error, "raft append stream ended");
+                        debug!(error = %format_args!("{error:#}"), "raft append stream ended");
                         return None;
                     }
                 };
@@ -676,7 +735,7 @@ impl ProtocolReceiver {
                 if let Err(error) =
                     validate_protocol_origin(&peer_node_id, record.origin_node_id(), "replication")
                 {
-                    debug!(%error, "raft append stream carried a foreign batch");
+                    debug!(error = %format_args!("{error:#}"), "raft append stream carried a foreign batch");
                     return None;
                 }
                 let request = match record.into_request() {
@@ -721,6 +780,25 @@ mod tests {
     use nervix_primitives::time::sleep;
 
     use super::*;
+
+    #[test]
+    fn heartbeat_answer_uses_the_lease_without_extending_replication_probes() {
+        let lease = RPCOption::new(Duration::from_millis(1_992));
+        assert_eq!(
+            append_request_deadline(&lease, AppendPath::Heartbeat),
+            Duration::from_millis(1_992)
+        );
+        assert_eq!(
+            append_request_deadline(&lease, AppendPath::Replication),
+            Duration::from_millis(1_494)
+        );
+
+        let long_probe = RPCOption::new(Duration::from_secs(12));
+        assert_eq!(
+            append_request_deadline(&long_probe, AppendPath::Replication),
+            REPLICATION_PROBE_DEADLINE_CEILING
+        );
+    }
 
     /// How often a follower that keeps reading accepts more of the leader's bytes.
     const ACCEPTANCE_CADENCE: Duration = Duration::from_millis(2_500);

@@ -22,16 +22,16 @@
 //! decides to attach the clock while a release is registered. A restoration attach decided before
 //! the release is sent first: the detach waits for it, and so reaches its session behind it.
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::{fmt, num::NonZeroUsize, time::Duration};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
-    DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockObserved, DomainClockTicked,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachRefusal,
+    DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked, RequestRejection,
 };
 use nervix_models::{
     DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState,
@@ -56,10 +56,11 @@ pub enum DomainClockEvent {
     /// next session, and the clock that attachment reports follows as an observation; changes in
     /// between are not reported.
     Interrupted(DomainClockInterruption),
-    /// The current session refused to attach the interrupted clock again. The attachment stays
-    /// interrupted, and the client tries again on that session later. An attach the session leaves
-    /// unanswered past the request timeout is not reported here: it ends that session, and the
-    /// next session attaches the clock again.
+    /// The current session refused to attach the interrupted clock again for now. The attachment
+    /// stays interrupted, and the client tries again on that session later. A session that no
+    /// longer has the domain ends the attachment instead, as [`Self::Ended`]. An attach the
+    /// session leaves unanswered past the request timeout is not reported here: it ends that
+    /// session, and the next session attaches the clock again.
     RestorationFailed(DomainClockRestorationFailure),
 }
 
@@ -82,12 +83,45 @@ pub struct DomainClockInterruption {
     pub domain: DomainName,
 }
 
-/// An attempt to attach an interrupted clock again that the current session refused. The client
-/// tries again after `retry_after` for as long as it follows the clock and the session stays open.
+/// Why an attempt to attach an interrupted clock again attached nothing, when a later attempt may
+/// attach it. A session that no longer has the domain ends the attachment instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainClockRestorationCause {
+    /// The session holds a transaction, which refuses every session-local request until it ends.
+    InTransaction,
+    /// The session rejected the request without serving it.
+    Rejected(RequestRejection),
+    /// The client could not send the request, or could not use its reply.
+    Failed,
+}
+
+impl From<DomainClockAttachRefusal> for DomainClockRestorationCause {
+    fn from(refusal: DomainClockAttachRefusal) -> Self {
+        match refusal {
+            DomainClockAttachRefusal::InTransaction => Self::InTransaction,
+        }
+    }
+}
+
+impl fmt::Display for DomainClockRestorationCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InTransaction => formatter.write_str("the session holds a transaction"),
+            Self::Rejected(_) => formatter.write_str("the session rejected the request"),
+            Self::Failed => formatter.write_str("the client could not complete the attempt"),
+        }
+    }
+}
+
+/// An attempt to attach an interrupted clock again that the current session refused for now. The
+/// client tries again after `retry_after` for as long as it follows the clock and the session stays
+/// open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainClockRestorationFailure {
     pub domain: DomainName,
-    /// The server's refusal, or the failure that left the attempt without a reply it could use.
+    /// Why the attempt attached nothing.
+    pub cause: DomainClockRestorationCause,
+    /// The server's message, or how the attempt failed in the client.
     pub message: String,
     /// How long the client waits before its next attempt.
     pub retry_after: Duration,
@@ -637,7 +671,7 @@ impl DomainClockAttachments {
                 followed.generation = generation.clone();
                 followed.interrupted = false;
             }
-            DomainClockAttachDisposition::Failed => return,
+            DomainClockAttachDisposition::Refused(_) => return,
         }
         drop(state);
         self.inner.changed.send_replace(());
@@ -649,6 +683,7 @@ impl DomainClockAttachments {
     pub(crate) fn restoration_failed(
         &self,
         domain: &DomainName,
+        cause: DomainClockRestorationCause,
         message: String,
         retry_after: Duration,
     ) -> bool {
@@ -662,6 +697,7 @@ impl DomainClockAttachments {
         }
         state.pending(domain).restoration_failed = Some(DomainClockRestorationFailure {
             domain: domain.clone(),
+            cause,
             message,
             retry_after,
         });
@@ -1181,7 +1217,9 @@ mod tests {
         );
         clocks.apply_attach(
             &DomainClockAttachOutcome {
-                disposition: DomainClockAttachDisposition::Failed,
+                disposition: DomainClockAttachDisposition::Refused(
+                    DomainClockAttachRefusal::InTransaction,
+                ),
                 message: String::new(),
             },
             &third,
@@ -1269,34 +1307,48 @@ mod tests {
         let first = Arc::new(());
         clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &first);
         assert!(
-            !clocks.restoration_failed(&domain("sim"), "held".to_string(), Duration::ZERO),
+            !clocks.restoration_failed(
+                &domain("sim"),
+                DomainClockRestorationCause::InTransaction,
+                "held".to_string(),
+                Duration::ZERO
+            ),
             "an attachment its exchange still holds needs no restoration"
         );
         assert!(!clocks.restoration_failed(
             &domain("unknown"),
+            DomainClockRestorationCause::InTransaction,
             "not followed".to_string(),
             Duration::ZERO
         ));
         clocks.exchange_ended(&first);
         let failure = |message: &str, seconds: u64| DomainClockRestorationFailure {
             domain: domain("sim"),
+            cause: DomainClockRestorationCause::InTransaction,
             message: message.to_string(),
             retry_after: Duration::from_secs(seconds),
         };
         assert!(clocks.restoration_failed(
             &domain("sim"),
+            DomainClockRestorationCause::InTransaction,
             "refused".to_string(),
             Duration::from_secs(1)
         ));
         assert!(clocks.restoration_failed(
             &domain("sim"),
+            DomainClockRestorationCause::InTransaction,
             "refused again".to_string(),
             Duration::from_secs(2)
         ));
         let second = Arc::new(());
         clocks.apply_attach(&attach_reply("sim", paced(2, 1.0)), &second);
         assert!(
-            !clocks.restoration_failed(&domain("sim"), "late".to_string(), Duration::ZERO),
+            !clocks.restoration_failed(
+                &domain("sim"),
+                DomainClockRestorationCause::InTransaction,
+                "late".to_string(),
+                Duration::ZERO
+            ),
             "a restored attachment reports no later failure"
         );
         let mut events = Vec::new();
@@ -1322,6 +1374,7 @@ mod tests {
         clocks.exchange_ended(&second);
         assert!(clocks.restoration_failed(
             &domain("sim"),
+            DomainClockRestorationCause::InTransaction,
             "refused".to_string(),
             Duration::from_secs(1)
         ));

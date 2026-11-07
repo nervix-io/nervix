@@ -1,23 +1,29 @@
 //! The restore driver against the in-memory browser: how it measures an archive file, streams it
 //! in chunks within the connection's room, stops when the leader answers early, follows the
-//! leader, streams again while the outcome is unknown, and reports what it could not learn.
+//! leader, streams again while the outcome is unknown, reports what it could not learn, and keeps
+//! a restore an earlier attempt may have run unknown when a later attempt ends without its outcome.
 
 use std::cell::Cell;
 
 use error_stack::Report;
 use futures_util::FutureExt as _;
+use leptos::prelude::{GetUntracked as _, Owner};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    CommandDisposition, LeaderRedirect, NodeEndpoints, RestoreDisposition, RestoreMessage,
-    RestoreReply, RestoreUploadFailure, UnknownOutcomeCause,
+    CommandDisposition, LeaderRedirect, NodeEndpoints, OutcomeOrigin, RestoreDisposition,
+    RestoreMessage, RestoreReply, RestoreUploadFailure, UnknownOutcomeCause,
     websocket::{ServerRestoreWebSocketCodec, WebSocketData},
 };
-use nervix_models::{ArchiveDigest, ClusterNodeName, RestoreArchive};
+use nervix_models::{
+    ArchiveDigest, ClusterNodeName, CommandExecutionReference, RestoreArchive, RestoreMode,
+    RestoreStepOutcome,
+};
 
-use super::{outcome, reference};
+use super::{dialog_signals, outcome, reference, restore_report};
 use crate::{
     SESSION_LIMITS,
     backup_dialog::{
+        RestoreProgress,
         browser::{
             Received,
             in_memory::{InMemoryBrowser, MemoryFile, Reply, Script},
@@ -60,10 +66,7 @@ fn upload(bytes: Vec<u8>) -> RestoreUpload<MemoryFile> {
         reference: reference(),
         statement: STATEMENT.to_string(),
         archive: archive_of(&bytes),
-        file: MemoryFile {
-            bytes,
-            unreadable: false,
-        },
+        file: MemoryFile::readable(bytes),
         base_url: Some(CONSOLE.to_string()),
         auth_token: "token".to_string(),
     }
@@ -167,10 +170,7 @@ fn an_archive_file_is_measured_and_digested_slice_by_slice() {
         .checked_add(5)
         .assured("a slice and five bytes fit usize");
     let bytes = vec![7_u8; length];
-    let file = MemoryFile {
-        bytes: bytes.clone(),
-        unreadable: false,
-    };
+    let file = MemoryFile::readable(bytes.clone());
     let reads = std::cell::RefCell::new(Vec::new());
     let progress = |done: u64, total: u64| reads.borrow_mut().push((done, total));
     let measured = measure_archive(&file, progress)
@@ -184,10 +184,7 @@ fn an_archive_file_is_measured_and_digested_slice_by_slice() {
         vec![(MEASURE_SLICE_BYTES, total), (total, total)]
     );
 
-    let empty = MemoryFile {
-        bytes: Vec::new(),
-        unreadable: false,
-    };
+    let empty = MemoryFile::readable(Vec::new());
     let refused = measure_archive(&empty, |_, _| {})
         .now_or_never()
         .assured("an empty file is refused at once");
@@ -196,10 +193,7 @@ fn an_archive_file_is_measured_and_digested_slice_by_slice() {
     };
     assert_eq!(*error.current_context(), RestoreStreamError::EmptyArchive);
 
-    let unreadable = MemoryFile {
-        bytes: vec![1, 2, 3],
-        unreadable: true,
-    };
+    let unreadable = MemoryFile::unreadable(vec![1, 2, 3]);
     let refused = measure_archive(&unreadable, |_, _| {})
         .now_or_never()
         .assured("an unreadable file is refused at once");
@@ -346,13 +340,511 @@ fn a_restore_that_cannot_learn_its_outcome_says_so() {
     assert_eq!(browser.observed().sent.len(), 1, "the start was sent");
 }
 
+/// Every restore stream context of `failure`, from the outermost to the one it began with.
+fn contexts(failure: &Report<RestoreStreamError>) -> Vec<RestoreStreamError> {
+    let mut contexts = Vec::new();
+    for frame in failure.frames() {
+        if let Some(context) = frame.downcast_ref::<RestoreStreamError>() {
+            contexts.push(context.clone());
+        }
+    }
+    contexts
+}
+
+/// Where the dialog shows the restore under the test's reference once its stream ended in
+/// `failure`.
+fn shown(failure: &Report<RestoreStreamError>) -> RestoreProgress {
+    Owner::new().with(|| {
+        let backups = dialog_signals();
+        backups.restore_failed(reference(), failure);
+        backups.restore.get_untracked()
+    })
+}
+
+/// Checks that every attempt the server received started with the same reference, statement and
+/// archive, and returns how many attempts started.
+fn attempts_of_one_restore(sent: &[Vec<u8>], bytes: &[u8]) -> usize {
+    let mut starts = 0_usize;
+    for message in received_by_server(sent) {
+        let RestoreMessage::Start(start) = message else {
+            continue;
+        };
+        assert_eq!(start.execution_reference, reference());
+        assert_eq!(start.statement, STATEMENT);
+        assert_eq!(start.archive, archive_of(bytes));
+        starts = starts
+            .checked_add(1)
+            .assured("a test restore starts far fewer than usize::MAX attempts");
+    }
+    starts
+}
+
+/// Checks that a restore whose first attempt sent the whole archive and then ended as `earlier`
+/// tells, once the next attempt cannot read the archive file, that its outcome is unknown under
+/// its own reference, with the read failure beneath.
+fn stays_unknown_when_the_next_attempt_cannot_read_the_archive(earlier: Script) {
+    let bytes = archive_bytes();
+    // The first attempt reads all three chunks; the next one cannot read its first.
+    let upload = RestoreUpload {
+        file: MemoryFile::readable_for(bytes.clone(), 3),
+        ..upload(bytes.clone())
+    };
+    let browser = InMemoryBrowser::with_scripts([earlier, answering_at_the_end(completed())]);
+    let ended = run(upload, &browser);
+    let Err(failure) = &ended.result else {
+        panic!("a restore whose next attempt cannot read its archive learns no outcome");
+    };
+    assert!(
+        failure.current_context().leaves_outcome_unknown(),
+        "an attempt that sent the whole archive may have run the restore, so a later attempt's \
+         read failure leaves its outcome unknown: {failure:#}"
+    );
+    assert_eq!(
+        contexts(failure).last(),
+        Some(&RestoreStreamError::ReadArchive),
+        "the read failure stays beneath: {failure:#}"
+    );
+    assert_eq!(attempts_of_one_restore(&browser.observed().sent, &bytes), 2);
+    let RestoreProgress::Unknown {
+        reference: unknown,
+        reason,
+    } = shown(failure)
+    else {
+        panic!("the dialog shows the restore's outcome as unknown: {failure:#}");
+    };
+    assert_eq!(unknown, reference());
+    assert!(
+        reason.contains(&RestoreStreamError::ReadArchive.to_string()),
+        "the dialog names the read failure: {reason}"
+    );
+    assert!(
+        reason.ends_with(&format!(
+            "the outcome of restore '{}' is unknown",
+            reference()
+        )),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_restore_whose_reply_was_lost_stays_unknown_when_the_next_attempt_cannot_read_the_archive() {
+    stays_unknown_when_the_next_attempt_cannot_read_the_archive(answering_at_the_end(
+        Received::Ended,
+    ));
+}
+
+#[test]
+fn a_restore_that_got_no_reply_stays_unknown_when_the_next_attempt_cannot_read_the_archive() {
+    stays_unknown_when_the_next_attempt_cannot_read_the_archive(Script::default());
+}
+
+#[test]
+fn a_restore_answered_as_unknown_stays_unknown_when_the_next_attempt_cannot_read_the_archive() {
+    stays_unknown_when_the_next_attempt_cannot_read_the_archive(answering_at_the_end(answered(
+        CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::LeadershipLost),
+    )));
+}
+
+#[test]
+fn a_restore_redirected_once_streamed_stays_unknown_when_the_next_attempt_cannot_read_the_archive()
+{
+    // A leader that loses its leadership while the restore applies answers with a redirect too.
+    stays_unknown_when_the_next_attempt_cannot_read_the_archive(answering_at_the_end(answered(
+        CommandDisposition::NotLeader(redirect_to(Some(LEADER_CONSOLE))),
+    )));
+}
+
+#[test]
+fn a_restore_whose_reply_was_lost_stays_unknown_when_the_leader_refuses_a_later_stream() {
+    // The leader refuses a stream before it looks the restore up, as when its cluster parameters
+    // are unavailable, or while it stages the archive of a restore it admitted but does not hold,
+    // so no refusal of a later stream settles an earlier one.
+    for refusal in [
+        RestoreUploadFailure::InvalidStream,
+        RestoreUploadFailure::InvalidStatement,
+        RestoreUploadFailure::SizeMismatch,
+        RestoreUploadFailure::DigestMismatch,
+        RestoreUploadFailure::QuotaExceeded,
+        RestoreUploadFailure::StagingFailed,
+    ] {
+        let refused = reply(RestoreDisposition::UploadFailed {
+            failure: refusal,
+            message: "the leader's reason".to_string(),
+        });
+        let browser = InMemoryBrowser::with_scripts([
+            answering_at_the_end(Received::Ended),
+            answering_after(1, refused),
+        ]);
+        let ended = run(upload(archive_bytes()), &browser);
+        let Err(failure) = &ended.result else {
+            panic!(
+                "a refusal of a later stream says nothing about the earlier one: {:?}",
+                ended.result
+            );
+        };
+        assert!(
+            failure.current_context().leaves_outcome_unknown(),
+            "{failure:#}"
+        );
+        let RestoreProgress::Unknown {
+            reference: unknown,
+            reason,
+        } = shown(failure)
+        else {
+            panic!("the dialog shows the restore's outcome as unknown: {failure:#}");
+        };
+        assert_eq!(unknown, reference());
+        assert!(
+            reason.contains(&format!("{refusal:?}")) && reason.contains("the leader's reason"),
+            "the dialog names the refusal: {reason}"
+        );
+    }
+}
+
+#[test]
+fn a_restore_whose_reply_was_lost_stays_unknown_when_the_leader_no_longer_holds_its_reference() {
+    // The leader answers a reference it no longer holds without the outcome of the restore an
+    // earlier attempt may have had admitted under it.
+    let expired = answering_after(1, answered(CommandDisposition::ExecutionReferenceExpired));
+    let browser = InMemoryBrowser::with_scripts([answering_at_the_end(Received::Ended), expired]);
+    let ended = run(upload(archive_bytes()), &browser);
+    let Err(failure) = &ended.result else {
+        panic!(
+            "an expired reference says nothing about the earlier attempt: {:?}",
+            ended.result
+        );
+    };
+    assert!(
+        failure.current_context().leaves_outcome_unknown(),
+        "{failure:#}"
+    );
+    let RestoreProgress::Unknown {
+        reference: unknown,
+        reason,
+    } = shown(failure)
+    else {
+        panic!("the dialog shows the restore's outcome as unknown: {failure:#}");
+    };
+    assert_eq!(unknown, reference());
+    assert!(
+        reason.contains("the server's message"),
+        "the dialog names the leader's answer: {reason}"
+    );
+}
+
+#[test]
+fn a_restore_whose_reply_was_lost_stays_unknown_when_a_later_reply_names_another_execution() {
+    let mut foreign = outcome(CommandDisposition::Completed {
+        already_existed: false,
+    });
+    foreign.execution_reference =
+        CommandExecutionReference::parse("0192d4e4-7b36-7c3e-9f00-000000000001")
+            .assured("the test's foreign reference is a valid literal");
+    let foreign = answering_after(1, reply(RestoreDisposition::Outcome(Box::new(foreign))));
+    let browser = InMemoryBrowser::with_scripts([answering_at_the_end(Received::Ended), foreign]);
+    let ended = run(upload(archive_bytes()), &browser);
+    let Err(failure) = &ended.result else {
+        panic!(
+            "another execution's outcome says nothing about this restore: {:?}",
+            ended.result
+        );
+    };
+    assert!(
+        failure.current_context().leaves_outcome_unknown(),
+        "{failure:#}"
+    );
+    assert!(
+        matches!(
+            contexts(failure).last(),
+            Some(RestoreStreamError::ReferenceMismatch { .. })
+        ),
+        "the mismatch stays beneath: {failure:#}"
+    );
+    let RestoreProgress::Unknown {
+        reference: unknown, ..
+    } = shown(failure)
+    else {
+        panic!("the dialog shows the restore's outcome as unknown: {failure:#}");
+    };
+    assert_eq!(unknown, reference());
+}
+
+#[test]
+fn an_expired_reference_ends_a_restore_no_attempt_can_have_had_admitted() {
+    let expired = answering_after(1, answered(CommandDisposition::ExecutionReferenceExpired));
+    let browser = InMemoryBrowser::with_scripts([expired]);
+    let ended = run(upload(archive_bytes()), &browser);
+    let Ok(RestoreEnd::Outcome(outcome)) = &ended.result else {
+        panic!(
+            "the answer to the only attempt is the restore's outcome: {:?}",
+            ended.result
+        );
+    };
+    assert_eq!(
+        outcome.disposition,
+        CommandDisposition::ExecutionReferenceExpired
+    );
+}
+
+#[test]
+fn a_restore_no_attempt_sent_whole_is_refused_when_a_later_attempt_cannot_read_its_archive() {
+    let bytes = archive_bytes();
+    // The connection takes the start and the first chunk, and fails the second; the next
+    // attempt cannot read its first chunk.
+    let interrupted = Script {
+        accepted: Some(2),
+        ..Script::default()
+    };
+    let browser = InMemoryBrowser::with_scripts([interrupted, answering_at_the_end(completed())]);
+    let ended = run(
+        RestoreUpload {
+            file: MemoryFile::readable_for(bytes.clone(), 2),
+            ..upload(bytes.clone())
+        },
+        &browser,
+    );
+    assert_eq!(*ended.failure(), RestoreStreamError::ReadArchive);
+    assert!(!ended.failure().leaves_outcome_unknown());
+    assert_eq!(attempts_of_one_restore(&browser.observed().sent, &bytes), 2);
+
+    // A follower answers at once, before the first chunk, and the leader's attempt cannot read
+    // the archive.
+    let redirected = answering_after(
+        1,
+        answered(CommandDisposition::NotLeader(redirect_to(Some(
+            LEADER_CONSOLE,
+        )))),
+    );
+    let browser = InMemoryBrowser::with_scripts([redirected, answering_at_the_end(completed())]);
+    let ended = run(
+        RestoreUpload {
+            file: MemoryFile::unreadable(bytes.clone()),
+            ..upload(bytes.clone())
+        },
+        &browser,
+    );
+    assert_eq!(*ended.failure(), RestoreStreamError::ReadArchive);
+    assert_eq!(attempts_of_one_restore(&browser.observed().sent, &bytes), 2);
+    let Err(failure) = &ended.result else {
+        panic!("the read failure ends the restore");
+    };
+    assert_eq!(
+        shown(failure),
+        RestoreProgress::Refused {
+            reason: RestoreStreamError::ReadArchive.to_string()
+        },
+        "no attempt could have run the restore, so nothing changed"
+    );
+}
+
+#[test]
+fn a_refusal_of_the_stream_that_sent_the_whole_archive_changed_nothing() {
+    let refused = reply(RestoreDisposition::UploadFailed {
+        failure: RestoreUploadFailure::DigestMismatch,
+        message: "the archive's digest is not the declared one".to_string(),
+    });
+    let browser = InMemoryBrowser::with_scripts([answering_at_the_end(refused)]);
+    let ended = run(upload(archive_bytes()), &browser);
+    let Ok(RestoreEnd::Refused { failure, .. }) = &ended.result else {
+        panic!(
+            "the leader refused the only stream it was sent: {:?}",
+            ended.result
+        );
+    };
+    assert_eq!(*failure, RestoreUploadFailure::DigestMismatch);
+}
+
+#[test]
+fn a_restore_whose_reply_was_lost_ends_with_the_outcome_a_later_attempt_recovers() {
+    let browser = InMemoryBrowser::with_scripts([
+        answering_at_the_end(Received::Ended),
+        answering_after(1, completed()),
+    ]);
+    let ended = run(upload(archive_bytes()), &browser);
+    let Ok(RestoreEnd::Outcome(outcome)) = &ended.result else {
+        panic!("the recovered outcome ends the restore: {:?}", ended.result);
+    };
+    assert_eq!(outcome.execution_reference, reference());
+    let observed = browser.observed();
+    assert_eq!(attempts_of_one_restore(&observed.sent, &archive_bytes()), 2);
+    assert_eq!(
+        observed.sent.len(),
+        5,
+        "the leader answered the later attempt after its start, before any chunk"
+    );
+}
+
+#[test]
+fn an_unrecorded_request_failure_cannot_settle_an_earlier_possibly_admitted_restore() {
+    for earlier_unknown in [false, true] {
+        for after_sent in [1, 4] {
+            let earlier = if earlier_unknown {
+                answering_after(
+                    1,
+                    answered(CommandDisposition::OutcomeUnknown(
+                        UnknownOutcomeCause::StillApplying,
+                    )),
+                )
+            } else {
+                answering_at_the_end(Received::Ended)
+            };
+            let mut later = outcome(CommandDisposition::Failed);
+            later.diagnostics.push(nervix_client_wire::Diagnostic {
+                message: "the attempt's structured diagnostic".to_string(),
+                span: Some(
+                    nervix_client_wire::SourceSpan::new(0, 7)
+                        .assured("RESTORE occupies the first seven bytes"),
+                ),
+            });
+            let browser = InMemoryBrowser::with_scripts([
+                earlier,
+                answering_after(
+                    after_sent,
+                    reply(RestoreDisposition::Outcome(Box::new(later.clone()))),
+                ),
+            ]);
+            let bytes = archive_bytes();
+            let ended = run(upload(bytes.clone()), &browser);
+            let Ok(RestoreEnd::Unresolved(unrecorded)) = ended.result else {
+                panic!(
+                    "an unrecorded failure cannot settle the earlier attempt \
+                     (unknown={earlier_unknown}, after_sent={after_sent}): {:?}",
+                    ended.result
+                );
+            };
+            assert_eq!(
+                unrecorded.as_ref(),
+                &later,
+                "the entire typed later answer stays beneath"
+            );
+            Owner::new().with(|| {
+                let backups = dialog_signals();
+                backups.restore_ended(
+                    RestoreEnd::Unresolved(unrecorded),
+                    STATEMENT,
+                    RestoreMode::Apply,
+                    0,
+                );
+                let RestoreProgress::Unknown {
+                    reference: unknown,
+                    reason,
+                } = backups.restore.get_untracked()
+                else {
+                    panic!("the dialog keeps the original restore unknown");
+                };
+                assert_eq!(unknown, reference());
+                assert!(reason.contains(&later.message), "{reason}");
+                let lines = super::terminal_texts(backups);
+                assert_eq!(
+                    lines.len(),
+                    2,
+                    "one uncertainty line and the original diagnostic"
+                );
+                assert!(lines[0].contains(reference().as_str()) && lines[0].contains("unknown"));
+                assert_eq!(
+                    lines[1],
+                    "- RESTORE at 0..7: the attempt's structured diagnostic"
+                );
+            });
+            assert_eq!(attempts_of_one_restore(&browser.observed().sent, &bytes), 2);
+        }
+    }
+}
+
+#[test]
+fn an_unrecorded_request_failure_keeps_its_statement_diagnostics_beneath_uncertainty() {
+    let mut later = outcome(CommandDisposition::Failed);
+    later.statements.push(nervix_client_wire::StatementOutcome {
+        disposition: nervix_client_wire::StatementDisposition::Failed,
+        message: "the statement's failure".to_string(),
+        diagnostics: vec![nervix_client_wire::Diagnostic {
+            message: "the statement's structured diagnostic".to_string(),
+            span: Some(
+                nervix_client_wire::SourceSpan::new(0, 7)
+                    .assured("RESTORE occupies the first seven bytes"),
+            ),
+        }],
+    });
+    let conclusion = crate::backup_dialog::RestoreConclusion::of(
+        RestoreEnd::Unresolved(Box::new(later)),
+        STATEMENT,
+        RestoreMode::Apply,
+        0,
+    );
+    assert!(matches!(conclusion.progress,
+        RestoreProgress::Unknown { reference: own, .. } if own == reference()));
+    let lines: Vec<_> = conclusion
+        .lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].contains(reference().as_str()) && lines[0].contains("unknown"));
+    assert_eq!(lines[1], "error: the statement's failure");
+    assert_eq!(
+        lines[2],
+        "- RESTORE at 0..7: the statement's structured diagnostic"
+    );
+}
+
+#[test]
+fn an_initial_unrecorded_request_failure_is_definitive() {
+    for after_sent in [1, 4] {
+        let failed = outcome(CommandDisposition::Failed);
+        let browser = InMemoryBrowser::with_scripts([answering_after(
+            after_sent,
+            reply(RestoreDisposition::Outcome(Box::new(failed.clone()))),
+        )]);
+        let ended = run(upload(archive_bytes()), &browser);
+        assert_eq!(
+            ended
+                .result
+                .as_ref()
+                .assured("the initial refusal is final"),
+            &RestoreEnd::Outcome(Box::new(failed))
+        );
+        assert_eq!(browser.observed().opened.len(), 1);
+        assert!(browser.observed().waits.is_empty());
+    }
+}
+
+#[test]
+fn a_recorded_or_report_bearing_failure_settles_an_earlier_possibly_admitted_restore() {
+    let mut recovered = outcome(CommandDisposition::Failed);
+    recovered.origin = OutcomeOrigin::Recovered;
+    let mut applied = outcome(CommandDisposition::Failed);
+    applied.restore = Some(Box::new(restore_report(
+        RestoreMode::Apply,
+        [
+            RestoreStepOutcome::Applied,
+            RestoreStepOutcome::Failed,
+            RestoreStepOutcome::NotAttempted,
+        ],
+    )));
+    for failed in [recovered, applied] {
+        let browser = InMemoryBrowser::with_scripts([
+            answering_at_the_end(Received::Ended),
+            answering_after(
+                1,
+                reply(RestoreDisposition::Outcome(Box::new(failed.clone()))),
+            ),
+        ]);
+        let ended = run(upload(archive_bytes()), &browser);
+        assert_eq!(
+            ended
+                .result
+                .as_ref()
+                .assured("the recorded or reported failure settles the restore"),
+            &RestoreEnd::Outcome(Box::new(failed))
+        );
+        assert_eq!(browser.observed().opened.len(), 2);
+    }
+}
+
 #[test]
 fn a_restore_ends_at_once_when_its_file_or_reply_cannot_be_read() {
     let unreadable = RestoreUpload {
-        file: MemoryFile {
-            bytes: archive_bytes(),
-            unreadable: true,
-        },
+        file: MemoryFile::unreadable(archive_bytes()),
         ..upload(archive_bytes())
     };
     let browser = InMemoryBrowser::with_scripts([answering_at_the_end(completed())]);
@@ -360,9 +852,22 @@ fn a_restore_ends_at_once_when_its_file_or_reply_cannot_be_read() {
     assert_eq!(*ended.failure(), RestoreStreamError::ReadArchive);
     assert!(!ended.failure().leaves_outcome_unknown());
 
+    // The reply the console cannot read arrived once the whole archive was sent, so the restore
+    // may have run: the stream ends at once, its outcome unknown with the reply failure beneath.
     let browser = InMemoryBrowser::with_scripts([answering_at_the_end(Received::Text)]);
     let ended = run(upload(archive_bytes()), &browser);
-    assert_eq!(*ended.failure(), RestoreStreamError::InvalidReply);
+    let Err(failure) = &ended.result else {
+        panic!("a reply the console cannot read ends the restore");
+    };
+    assert_eq!(
+        contexts(failure).last(),
+        Some(&RestoreStreamError::InvalidReply)
+    );
+    assert!(
+        failure.current_context().leaves_outcome_unknown(),
+        "{failure:#}"
+    );
+    assert_eq!(browser.observed().opened.len(), 1);
 
     let browser = InMemoryBrowser::with_scripts([answering_at_the_end(completed())]);
     let ended = run(
@@ -373,4 +878,72 @@ fn a_restore_ends_at_once_when_its_file_or_reply_cannot_be_read() {
         &browser,
     );
     assert_eq!(*ended.failure(), RestoreStreamError::NoAddress);
+}
+
+#[test]
+fn an_unreadable_restore_reply_naming_another_execution_leaves_its_own_outcome_unknown() {
+    let mut foreign = outcome(CommandDisposition::Failed);
+    foreign.execution_reference =
+        nervix_models::CommandExecutionReference::parse("0192d4e4-7b36-7c3e-9f00-000000000001")
+            .assured("a literal execution reference");
+    assert_ne!(foreign.execution_reference, reference());
+    let browser = InMemoryBrowser::with_scripts([answering_at_the_end(reply(
+        RestoreDisposition::Outcome(Box::new(foreign)),
+    ))]);
+    let ended = run(upload(archive_bytes()), &browser);
+    assert!(matches!(
+        ended.failure(),
+        RestoreStreamError::ReferenceMismatch { .. }
+    ));
+    assert_eq!(browser.observed().opened.len(), 1);
+    shows_unknown(ended);
+}
+
+#[test]
+fn an_unreadable_restore_reply_leaves_its_outcome_unknown() {
+    let browser = InMemoryBrowser::with_scripts([answering_at_the_end(Received::Text)]);
+    let ended = run(upload(archive_bytes()), &browser);
+    assert_eq!(*ended.failure(), RestoreStreamError::InvalidReply);
+    assert_eq!(browser.observed().opened.len(), 1);
+    shows_unknown(ended);
+}
+
+#[test]
+fn an_unreadable_restore_reply_answering_another_request_leaves_its_outcome_unknown() {
+    let reply = RestoreReply {
+        request_id: Some(nervix_client_wire::RequestId::new(
+            std::num::NonZeroU64::new(2).assured("the fixture's request identity is nonzero"),
+        )),
+        disposition: RestoreDisposition::Outcome(Box::new(outcome(CommandDisposition::Failed))),
+    };
+    let frame = reply
+        .encode(&SESSION_LIMITS)
+        .assured("the reply fits one frame");
+    let codec = ServerRestoreWebSocketCodec::new(SESSION_LIMITS);
+    let received = Received::Binary(Vec::from(codec.encode(frame)));
+    let browser = InMemoryBrowser::with_scripts([answering_at_the_end(received)]);
+    let ended = run(upload(archive_bytes()), &browser);
+    assert_eq!(*ended.failure(), RestoreStreamError::UnexpectedReply);
+    assert_eq!(browser.observed().opened.len(), 1);
+    shows_unknown(ended);
+}
+
+fn shows_unknown(ended: Ended) {
+    assert!(
+        ended.failure().leaves_outcome_unknown(),
+        "an unreadable reply proves nothing about this restore"
+    );
+    leptos::prelude::Owner::new().with(|| {
+        use leptos::prelude::GetUntracked as _;
+        let backups = super::dialog_signals();
+        let Err(failure) = ended.result else {
+            panic!("the reply breaks W-3");
+        };
+        backups.restore_failed(reference(), &failure);
+        assert!(matches!(
+            backups.restore.get_untracked(),
+            crate::backup_dialog::RestoreProgress::Unknown { reference: own, .. }
+                if own == reference()
+        ));
+    });
 }

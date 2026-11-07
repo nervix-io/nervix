@@ -255,7 +255,7 @@ pub(super) async fn run_processor_node_runtime(
         runtime_handle,
         domain,
     } = context;
-    let processor = template.source.clone();
+    let processor = template.owner.node.identifier.clone();
     let domain_clock = match nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "this task or concrete branch transition attaches its retained domain clock before \
@@ -274,13 +274,16 @@ pub(super) async fn run_processor_node_runtime(
     };
     let ownership_entity = DomainNodeRef::node_in(
         domain.clone(),
-        template.entity_kind,
+        template.owner.node.kind,
         ModelName::from(&processor),
     );
     let ownership_freeze = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "this task binds its exact ownership freeze publication before entering its recurring loop",
-        OwnershipHandoffFreezeWatch::new(&runtime_handle, ownership_entity.clone())
+        OwnershipHandoffFreezeWatch::for_unit(
+            &runtime_handle,
+            DomainNodeUnitRef::new(ownership_entity.clone(), template.owner.unit),
+        )
     );
     runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
     let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
@@ -293,8 +296,7 @@ pub(super) async fn run_processor_node_runtime(
     let quiesce_counters = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "task startup installs and retains the exact node quiesce counters before processing input",
-        runtime_handle
-            .node_quiesce_counters(&domain, NodeRef::new(template.entity_kind, &processor))
+        runtime_handle.unit_quiesce_counters(&domain, template.owner.clone())
     );
     let interaction_inputs = inputs
         .into_iter()
@@ -455,7 +457,7 @@ pub(super) async fn run_processor_node_runtime(
             Err(failure) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
                     &domain,
-                    template.entity_kind,
+                    template.owner.node.kind,
                     &processor,
                     &template.error_policies,
                     [&failure.acks],
@@ -475,7 +477,7 @@ pub(super) async fn run_processor_node_runtime(
                     // would start a new lifetime for a branch the restore resumes.
                     runtime_handle.handle_internal_processor_error_for_acks(
                         &domain,
-                        template.entity_kind,
+                        template.owner.node.kind,
                         &processor,
                         &template.error_policies,
                         batch.acks.iter(),
@@ -517,7 +519,7 @@ pub(super) async fn run_processor_node_runtime(
                     response
                         .send(Err(Report::new(
                             OwnershipHandoffError::BranchesUnrestored {
-                                kind: template.entity_kind,
+                                kind: template.owner.node.kind,
                                 identifier: ModelName::from(&processor),
                             },
                         )))
@@ -734,7 +736,7 @@ fn processor_reset_target_keys(
     scope: WasmStateResetScope,
     branch_key: Option<BranchKey>,
 ) -> error_stack::Result<Vec<Option<BranchKey>>, WasmStateResetRuntimeError> {
-    if template.entity_kind != ModelKind::WasmProcessor {
+    if template.owner.node.kind != ModelKind::WasmProcessor {
         return Err(Report::new(WasmStateResetRuntimeError::NotWasmProcessor {
             processor: processor.clone(),
         }));
@@ -781,7 +783,7 @@ async fn restore_processor_wasm_state_reset_branches(
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
     branches: &mut Vec<PreparedWasmStateResetBranch>,
 ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
-    let processor = ModelName::from(&template.source);
+    let processor = ModelName::from(&template.owner.node.identifier);
     for mut branch in branches.drain(..) {
         nervix_primitives::task::consume_budget().await;
         let Some(handoff) = branch.previous.take() else {
@@ -833,7 +835,7 @@ impl ProcessorWasmStateResetContext<'_> {
             published,
             reason: _,
         } = preparation;
-        let processor = ModelName::from(&template.source);
+        let processor = ModelName::from(&template.owner.node.identifier);
         if let Some(current) = prepared.as_mut() {
             if !current.matches(&request, scope) {
                 return Err(Report::new(WasmStateResetRuntimeError::RequestConflict {
@@ -947,7 +949,7 @@ async fn abort_processor_wasm_state_reset(
     request: &CommandExecutionReference,
     prepared: &mut Option<PreparedWasmStateReset>,
 ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
-    let processor = ModelName::from(&template.source);
+    let processor = ModelName::from(&template.owner.node.identifier);
     let Some(current) = prepared.as_ref() else {
         return Ok(());
     };
@@ -980,7 +982,7 @@ impl ProcessorWasmStateResetContext<'_> {
         let runtime = self.runtime;
         let domain = self.domain;
         let template = self.template;
-        let processor = ModelName::from(&template.source);
+        let processor = ModelName::from(&template.owner.node.identifier);
         if prepared.is_none() {
             self.prepare(
                 instances,
@@ -1109,6 +1111,7 @@ impl ProcessorWasmStateResetContext<'_> {
                 runtime.commit_wasm_state_reset_checkpoint(
                     domain,
                     &processor,
+                    template.owner.unit,
                     branch.key.clone(),
                     initial_state.clone(),
                 )
@@ -1177,8 +1180,8 @@ pub(super) async fn dispatch_processor_node_input(
         Err(error) => {
             runtime_handle.handle_internal_processor_error_for_acks(
                 domain,
-                template.entity_kind,
-                &template.source,
+                template.owner.node.kind,
+                &template.owner.node.identifier,
                 &template.error_policies,
                 batch.acks.iter(),
                 &error.change_context(ProcessorBranchTaskError::AcceptedInputClock {
@@ -1214,8 +1217,8 @@ pub(super) async fn dispatch_processor_node_input(
             Err(error) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
                     domain,
-                    template.entity_kind,
-                    &template.source,
+                    template.owner.node.kind,
+                    &template.owner.node.identifier,
                     &template.error_policies,
                     batch.acks.iter(),
                     &error,
@@ -1237,7 +1240,7 @@ pub(super) async fn dispatch_processor_node_input(
         );
         debug!(
             domain = domain.as_str(),
-            processor = template.source.as_str(),
+            processor = template.owner.node.identifier.as_str(),
             scope = %BranchScope::from(&key),
             "created processor branch task"
         );
@@ -1255,7 +1258,7 @@ pub(super) async fn dispatch_processor_node_input(
         // branch acknowledges nothing before its replicas hold its checkpoint. Offering the new
         // branch to them now, rather than on the next lifecycle snapshot, keeps the branch's first
         // checkpoint from waiting on that snapshot.
-        if template.entity_kind == ModelKind::WasmProcessor
+        if template.owner.node.kind == ModelKind::WasmProcessor
             && let Err(error) = nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "a new WASM branch offers the entity's lifecycle to its replicas once, when the \
@@ -1265,7 +1268,7 @@ pub(super) async fn dispatch_processor_node_input(
         {
             warn!(
                 domain = domain.as_str(),
-                processor = template.source.as_str(),
+                processor = template.owner.node.identifier.as_str(),
                 error = %format_args!("{error:#}"),
                 "failed to offer a new processor branch to its replicas"
             );
@@ -1279,8 +1282,8 @@ pub(super) async fn dispatch_processor_node_input(
     if let Err(mpsc::error::SendError(input)) = instance.state.input.send(input).await {
         runtime_handle.handle_internal_processor_error_for_acks(
             domain,
-            template.entity_kind,
-            &template.source,
+            template.owner.node.kind,
+            &template.owner.node.identifier,
             &template.error_policies,
             input.batch.acks.iter(),
             &Report::new(ProcessorBranchTaskError::Unavailable {
@@ -1305,7 +1308,7 @@ pub(super) async fn dispatch_processor_node_input(
                  branch task lifetime",
                 stop_processor_branch_task(
                     domain,
-                    &template.source,
+                    &template.owner.node.identifier,
                     &key,
                     entry,
                     ProcessorBranchStopMode::Detach,
@@ -1343,8 +1346,6 @@ pub(super) async fn spawn_processor_branch_task(
 /// every branch it installs before it starts any, so a failed attempt leaves nothing running.
 pub(super) struct PreparedProcessorBranch {
     context: ProcessorRuntimeContext,
-    entity_kind: ModelKind,
-    source: RelayName,
     branch: BranchRuntime,
     incarnation: u64,
 }
@@ -1372,7 +1373,7 @@ impl PreparedProcessorBranch {
                     routing
                         .load()
                         .processor_plans
-                        .get(&NodeRef::new(template.entity_kind, &template.source))
+                        .get(&template.owner)
                         .map(|plan| plan.template.clone())
                 })
         } else {
@@ -1387,10 +1388,10 @@ impl PreparedProcessorBranch {
                 branch: BranchScope::from(&branch_key),
             })?
             .into_inner();
-        if template.entity_kind == ModelKind::WindowProcessor
+        if template.owner.node.kind == ModelKind::WindowProcessor
             && let ProcessorBranchLifetime::Appeared = lifetime
         {
-            let processor = ModelName::from(&template.source);
+            let processor = ModelName::from(&template.owner.node.identifier);
             if let Some(node) = branch.processors.get_mut(&processor) {
                 node.reset_window_state();
             }
@@ -1402,8 +1403,6 @@ impl PreparedProcessorBranch {
         }
         Ok(Self {
             context,
-            entity_kind: template.entity_kind,
-            source: template.source.clone(),
             branch,
             incarnation,
         })
@@ -1423,12 +1422,10 @@ impl PreparedProcessorBranch {
     ) -> ProcessorBranchTask {
         let Self {
             context,
-            entity_kind,
-            source,
             mut branch,
             incarnation,
         } = self;
-        let processor = ModelName::from(&source);
+        let processor = branch.owner.node.identifier.clone();
         if let Some(node) = branch.processors.get_mut(&processor) {
             node.pending_materialized = pending_materialized;
         }
@@ -1449,7 +1446,7 @@ impl PreparedProcessorBranch {
         };
         let quiesce_counters = context
             .runtime_handle
-            .node_quiesce_counters(&context.domain, NodeRef::new(entity_kind, &processor));
+            .unit_quiesce_counters(&context.domain, branch.owner.clone());
         let task = nervix_primitives::task::spawn(run_processor_branch_task(
             context,
             ProcessorBranchRunIdentity {
@@ -1547,9 +1544,9 @@ async fn run_processor_branch_task(
     let ownership_freeze = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "this task binds its exact ownership freeze publication before entering its recurring loop",
-        OwnershipHandoffFreezeWatch::new(
+        OwnershipHandoffFreezeWatch::for_unit(
             &runtime_handle,
-            DomainNodeRef::node_in(domain.clone(), branch.entity_kind, processor.clone()),
+            DomainNodeUnitRef::new(branch.owner.node.in_domain(&domain), branch.owner.unit)
         )
     );
     let domain_clock = branch.domain_clock.clone();
@@ -1980,7 +1977,7 @@ pub(super) async fn expire_processor_branch_instances(
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
-    let processor = ModelName::from(&template.source);
+    let processor = ModelName::from(&template.owner.node.identifier);
     for (key, entry) in instances.expire(now, expiration_after) {
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
@@ -2006,7 +2003,7 @@ pub(super) async fn expire_processor_branch_instances(
             )
         )
         .await;
-        if template.entity_kind == ModelKind::WindowProcessor
+        if template.owner.node.kind == ModelKind::WindowProcessor
             && let Err(error) = nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "the concrete branch eviction withdraws its exact retained window placement",
@@ -2031,7 +2028,7 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
     max_instances: NonZeroUsize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
-    let processor = ModelName::from(&template.source);
+    let processor = ModelName::from(&template.owner.node.identifier);
     for (key, entry) in instances.evict_lru_to_capacity(max_instances) {
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
@@ -2057,7 +2054,7 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
             )
         )
         .await;
-        if template.entity_kind == ModelKind::WindowProcessor
+        if template.owner.node.kind == ModelKind::WindowProcessor
             && let Err(error) = nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "the concrete branch eviction withdraws its exact retained window placement",
@@ -2146,8 +2143,10 @@ mod tests {
     fn reset_target_template(entity_kind: ModelKind, branched: bool) -> BranchInstanceTemplate {
         BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            entity_kind,
-            source: named("counting_guest"),
+            owner: NodeUnitRef::new(
+                NodeRef::new(entity_kind, named::<ModelName>("counting_guest")),
+                Unit::SINGLE,
+            ),
             root_relay: named("counted_input_events"),
             branch: branched.then(|| named("by_tenant")),
             branch_ttl: None,
@@ -2309,8 +2308,10 @@ mod tests {
         }));
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            entity_kind: ModelKind::Deduplicator,
-            source: named("dedup_users"),
+            owner: NodeUnitRef::new(
+                NodeRef::new(ModelKind::Deduplicator, named::<ModelName>("dedup_users")),
+                Unit::SINGLE,
+            ),
             root_relay: named("orders"),
             branch: None,
             branch_ttl: None,
@@ -2607,15 +2608,18 @@ mod tests {
             0,
             Vec::new(),
             None,
-            Arc::new(BranchPresence::new()),
+            RelayBranchPresences::single(Arc::new(BranchPresence::new())),
             nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
-        let owner = runtime.spawn_relay_owner_task(
-            &domain,
-            &output,
-            services.clone(),
-            RelayRetention::default(),
-        );
+        let owner = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &output,
+                Unit::SINGLE,
+                services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let mut template = junction_branch_template(processor.as_str(), "orders");
         template
             .relays

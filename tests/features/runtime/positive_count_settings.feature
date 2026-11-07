@@ -45,15 +45,15 @@ Feature: Positive count settings
       """
       CREATE SCHEMA notification ( tenant STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       """
     And these Plexus commands fail with "instances must be greater than 0"
       """
       CREATE KAFKA TOPIC INGESTOR no_instances
-        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts' INSTANCES 0
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts' START AT LATEST INSTANCES 0
           MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
@@ -62,7 +62,7 @@ Feature: Positive count settings
     And these Plexus commands fail with "parallel max in-flight must be greater than zero"
       """
       CREATE KAFKA TOPIC INGESTOR empty_ack_window
-        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts'
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts' START AT LATEST
           MODE ACK PARALLEL MAX 0 BATCH TIMEOUT 1s ACK TIMEOUT 1s
           RETRY POLICY BACKOFF 10ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -79,7 +79,7 @@ Feature: Positive count settings
         'addr' = 'postgresql://nervix:nervix@127.0.0.1:5432/nervix?sslmode=disable'
       };
       """
-    And these Plexus commands fail with "BATCH MAX MESSAGES must be between 1 and 65536, found 0"
+    And these Plexus commands fail with "BATCH MAX MESSAGES must be between 1 and 4294967295, found 0"
       """
       CREATE POSTGRES TABLE EMITTER postgres_out FROM notifications
         TO postgres_main TABLE 'notifications'

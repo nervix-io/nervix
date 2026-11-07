@@ -35,6 +35,12 @@ async fn given_inbound_interconnect_is_paced(world: &mut ScenarioWorld, node: St
         .unwrap_or_else(|error| panic!("could not pace follower '{node}': {error}"));
 }
 
+#[when(expr = "the inbound interconnect byte pacing of node {string} is released")]
+async fn when_inbound_interconnect_pacing_is_released(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    world.cluster().release_interconnect_pacing(&node);
+}
+
 #[when(expr = "node {string} starts catching up through its paced interconnect")]
 async fn when_paced_catch_up_starts(world: &mut ScenarioWorld, node: String) {
     let follower = expand_placeholders(world, &node);

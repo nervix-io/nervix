@@ -35,6 +35,7 @@ module Probe
   EVENT_ROWS = 1
   CLOCK_KINDS = [nil, 'STATE', 'TICK', 'ENDED', 'INTERRUPTED', 'RESTORATION_FAILED'].freeze
   CLOCK_PACED = 4
+  UPLOAD_IDENTITY_CONFLICT = 6
   DISPOSITIONS = [nil, 'completed', 'failed', 'not_leader', 'transaction_detached',
                   'transaction_taken_over', 'outcome_unknown', 'execution_reference_conflict',
                   'execution_reference_expired', 'preview_stale'].freeze
@@ -61,14 +62,19 @@ module Probe
     cancel_new: function('nx_cancel_new', [], VOIDP),
     cancel_with_deadline: function('nx_cancel_with_deadline', [U64, VOIDP], VOIDP),
     cancel_trigger: function('nx_cancel_trigger', [VOIDP], Fiddle::TYPE_VOID),
+    connect_options_new: function('nx_connect_options_new', [], VOIDP),
+    connect_options_free: function('nx_connect_options_free', [VOIDP], Fiddle::TYPE_VOID),
+    connect_options_basic_auth: function('nx_connect_options_basic_auth',
+                                         [VOIDP, VOIDP, SIZE, VOIDP, SIZE], VOIDP),
     session_connect: function('nx_session_connect',
-                              [VOIDP, SIZE, VOIDP, SIZE, VOIDP, SIZE, VOIDP, SIZE, VOIDP, VOIDP], VOIDP),
+                              [VOIDP, SIZE, VOIDP, SIZE, VOIDP, VOIDP, VOIDP], VOIDP),
     session_free: function('nx_session_free', [VOIDP], Fiddle::TYPE_VOID),
     session_prepare: function('nx_session_prepare', [VOIDP, VOIDP, SIZE, VOIDP, VOIDP], VOIDP),
     execution_free: function('nx_execution_free', [VOIDP], Fiddle::TYPE_VOID),
     session_execute: function('nx_session_execute', [VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
     session_next_event: function('nx_session_next_event', [VOIDP, VOIDP, VOIDP], VOIDP),
     outcome_disposition: function('nx_outcome_disposition', [VOIDP], INT),
+    outcome_upload_failure: function('nx_outcome_upload_failure', [VOIDP, VOIDP], BOOL),
     outcome_diagnostic_count: function('nx_outcome_diagnostic_count', [VOIDP], SIZE),
     outcome_diagnostic: function('nx_outcome_diagnostic',
                                  [VOIDP, SIZE, VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
@@ -477,8 +483,15 @@ module Probe
 
     def initialize(server, domain, username, password)
       out = Probe.slot
-      Probe.check(F[:session_connect].call(server, server.bytesize, domain, domain.bytesize, username,
-                                           username.bytesize, password, password.bytesize, nil, out))
+      options = F[:connect_options_new].call
+      begin
+        Probe.check(F[:connect_options_basic_auth].call(options, username, username.bytesize,
+                                                        password, password.bytesize))
+        Probe.check(F[:session_connect].call(server, server.bytesize, domain, domain.bytesize,
+                                             options, nil, out))
+      ensure
+        F[:connect_options_free].call(options)
+      end
       @handle = Probe.read_pointer(out)
     end
 
@@ -1536,10 +1549,57 @@ module Probe
     end
   end
 
+  def self.run_upload(session)
+    query = ENV.fetch('NERVIX_PROBE_UPLOAD_QUERY')
+    slot = Probe.slot
+    check(F[:session_prepare].call(session.handle, query, query.bytesize, nil, slot))
+    execution = read_pointer(slot)
+    begin
+      ['UPLOAD completed', 'RETRY completed'].each do |line|
+        out = Probe.slot
+        check(F[:session_execute].call(session.handle, execution, nil, out))
+        outcome = read_pointer(out)
+        outcome.free = OUTCOME_FREE
+        begin
+          raise 'the upload must complete' unless F[:outcome_disposition].call(outcome) == 1
+          failure = Probe.slot(4)
+          raise 'a completed upload has no refusal' if F[:outcome_upload_failure].call(outcome, failure)
+          report(line)
+        ensure
+          outcome.call_free
+        end
+      end
+      File.binwrite(ENV.fetch('NERVIX_PROBE_UPLOAD_FILE'), "different archive\n")
+      out = Probe.slot
+      check(F[:session_execute].call(session.handle, execution, nil, out))
+      outcome = read_pointer(out)
+      outcome.free = OUTCOME_FREE
+      begin
+        failure = Probe.slot(4)
+        unless F[:outcome_disposition].call(outcome) == 2 &&
+               F[:outcome_upload_failure].call(outcome, failure) &&
+               failure[0, 4].unpack1('l') == UPLOAD_IDENTITY_CONFLICT
+          raise 'the upload must report its typed identity conflict'
+        end
+        report('CONFLICT IdentityConflict')
+      ensure
+        outcome.call_free
+      end
+    ensure
+      F[:execution_free].call(execution)
+    end
+  end
+
   def self.main
     domain = ENV.fetch('NERVIX_PROBE_DOMAIN')
     session = Session.new(ENV.fetch('NERVIX_PROBE_GRPC_URI'), domain,
                           ENV.fetch('NERVIX_PROBE_USERNAME'), ENV.fetch('NERVIX_PROBE_PASSWORD'))
+    if ARGV == ['upload']
+      run_upload(session)
+      session.close
+      report('PASS')
+      return
+    end
     return run_clock(session, domain) if ARGV == ['clock']
 
     if ARGV == ['io']

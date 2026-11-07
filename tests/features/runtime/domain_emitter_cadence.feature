@@ -19,16 +19,15 @@ Feature: Domain-paced emitter cadence
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge emitter-cadence-{{test_id}}.example.com;
-      CREATE ENDPOINT emitter_cadence_endpoint
+      CREATE HTTP ENDPOINT emitter_cadence_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR emitter_cadence_source
+        PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR emitter_cadence_ingestor
         FROM emitter_cadence_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
@@ -40,8 +39,7 @@ Feature: Domain-paced emitter cadence
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC EMITTER kafka_cadence FROM notifications TO kafka_main TOPIC 'emitter_cadence_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
         INHERIT ALL
@@ -99,16 +97,15 @@ Feature: Domain-paced emitter cadence
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge emitter-hold-{{test_id}}.example.com;
-      CREATE ENDPOINT emitter_hold_endpoint
+      CREATE HTTP ENDPOINT emitter_hold_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR emitter_hold_source
+        PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR emitter_hold_ingestor
         FROM emitter_hold_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
@@ -120,8 +117,7 @@ Feature: Domain-paced emitter cadence
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC EMITTER kafka_hold FROM notifications TO kafka_main TOPIC 'emitter_hold_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
@@ -137,7 +133,7 @@ Feature: Domain-paced emitter cadence
     Then the observed broker does not receive a payload within "2s"
     When these Plexus commands are executed
       """
-      ALTER HTTP ENDPOINT INGESTOR emitter_hold_source SET QUIESCE BUFFER MAX SIZE 2MiB;
+      ALTER HTTP ENDPOINT INGESTOR emitter_hold_ingestor SET QUIESCE BUFFER MAX SIZE 2MiB;
       """
     Then within "10s" the observed broker receives payloads
       """
@@ -169,16 +165,15 @@ Feature: Domain-paced emitter cadence
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge emitter-immediate-{{test_id}}.example.com;
-      CREATE ENDPOINT emitter_immediate_endpoint
+      CREATE HTTP ENDPOINT emitter_immediate_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR emitter_immediate_source
+        PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR emitter_immediate_ingestor
         FROM emitter_immediate_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
@@ -190,8 +185,7 @@ Feature: Domain-paced emitter cadence
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC EMITTER kafka_immediate FROM notifications TO kafka_main TOPIC 'emitter_immediate_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
@@ -238,16 +232,15 @@ Feature: Domain-paced emitter cadence
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-cadence-{{test_id}}.example.com;
-      CREATE ENDPOINT iceberg_cadence_endpoint
+      CREATE HTTP ENDPOINT iceberg_cadence_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR iceberg_cadence_source
+        PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR iceberg_cadence_ingestor
         FROM iceberg_cadence_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
@@ -270,7 +263,7 @@ Feature: Domain-paced emitter cadence
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-      CREATE ICEBERG TABLE EMITTER iceberg_cadence FROM notifications TO s3_main TABLE 'cadence_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 40s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 40s MAX BATCH SIZE 1MiB
+      CREATE ICEBERG TABLE EMITTER iceberg_cadence FROM notifications TO s3_main TABLE 'cadence_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 40s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } <batch> FLUSH EACH 40s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 20.0;
@@ -282,16 +275,19 @@ Feature: Domain-paced emitter cadence
     # At TIME RATE 20 each 40s boundary lasts two physical seconds. The flush stages the row two
     # seconds after it arrives and its commit cadence starts there, so the row reaches the table no
     # sooner than four seconds after it was posted, and long before the 80 seconds the two
-    # boundaries would take on the physical clock.
+    # boundaries would take on the physical clock. BATCH divides the staged rows into data files
+    # and leaves both boundaries where they are.
     Then within "30s" the Iceberg table "cadence_notifications_{{test_id}}" contains a row no sooner than "4s" after it was published
       """
       {"user_id":11,"action":"paced"}
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | batch                              |
+      | 1            |                                    |
+      | 3            |                                    |
+      | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1MiB |
+      | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1MiB |
 
   @domain_emitter_cadence
   Scenario Outline: A stalled emitter keeps its upstream acknowledgement alive on the physical clock
@@ -312,17 +308,16 @@ Feature: Domain-paced emitter cadence
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'ack_keepalive_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'ack_keepalive_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications

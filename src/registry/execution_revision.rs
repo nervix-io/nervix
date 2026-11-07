@@ -10,11 +10,10 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
-use meticulous::OptionExt as _;
 use nervix_models::{
     ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule, DynamicModelUpdate, FlushPolicy,
     KafkaPartitionSchedule, ModelKind, ModelName, NodeRef, NodeUnitRef, OwnershipStateComponent,
@@ -24,15 +23,22 @@ use nervix_models::{
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
 
+#[cfg(test)]
+use super::ActiveGraph;
 use super::{
-    ActiveGraph, DomainActivationPlan, EntrypointPlans, MessageErrorRouteSpecs,
-    ResourceExecutionPlans, ScheduleDelta, entity_pause_relays_for_schedule,
+    DomainActivationPlan, EntrypointPlans, MessageErrorRouteSpecs, ResourceExecutionPlans,
+    ScheduleDelta, entity_pause_relays_for_schedule,
     processor_plan::{BranchedNodeSpecs, branched_node_specs_from_scheduled_nodes},
 };
 use crate::emitter_execution_plan::EmitterExecutionPlans;
 
 #[derive(Debug, Error)]
 pub(crate) enum ExecutionRevisionError {
+    #[error(
+        "scheduled {node:?} in domain '{domain}' has an invalid unit declaration; recreate its \
+         schedule"
+    )]
+    UnitDeclaration { domain: DomainName, node: NodeRef },
     #[error("cannot plan domain '{domain}' activation")]
     Activation { domain: DomainName },
     #[error("cannot plan domain '{domain}' resources")]
@@ -56,6 +62,7 @@ pub(crate) struct ExecutionUnit {
     pub(crate) assigned_nodes: Vec<ClusterNodeName>,
     pub(crate) ownership_transition: Option<OwnershipTransition>,
     pub(crate) wasm_state_generations: Option<WasmStateGenerations>,
+    pub(crate) wasm_state_reset: Option<nervix_models::WasmStateReset>,
 }
 
 impl ExecutionUnit {
@@ -73,6 +80,17 @@ impl ExecutionUnit {
             .iter()
             .filter(|node| Some(*node) != self.primary_node.as_ref())
             .collect()
+    }
+
+    fn is_assigned_to(&self, node: &ClusterNodeName) -> bool {
+        self.assigned_nodes.contains(node)
+    }
+
+    fn is_primary_on(&self, node: &ClusterNodeName) -> bool {
+        match &self.primary_node {
+            Some(primary) => primary == node,
+            None => self.is_assigned_to(node),
+        }
     }
 }
 
@@ -116,6 +134,7 @@ impl ExecutionNode {
                             assigned_nodes: scheduled.assigned_nodes.clone(),
                             ownership_transition: scheduled.ownership_transition.clone(),
                             wasm_state_generations: scheduled.wasm_state_generations.clone(),
+                            wasm_state_reset: scheduled.wasm_state_reset.clone(),
                         },
                     )
                 })
@@ -138,51 +157,83 @@ impl ExecutionNode {
         self.identity.clone()
     }
 
-    pub(crate) fn wasm_state_generations(&self) -> Option<&WasmStateGenerations> {
-        self.single_unit().wasm_state_generations.as_ref()
+    /// The cluster node `unit` executes on, or `None` for a node that runs on every cluster node
+    /// and for a unit this node is not revised as.
+    pub(crate) fn unit_execution_node(&self, unit: Unit) -> Option<&ClusterNodeName> {
+        if self.executes_on_every_cluster_node {
+            return None;
+        }
+        self.units.get(&unit)?.execution_node()
     }
 
-    pub(crate) fn single_unit(&self) -> &ExecutionUnit {
+    /// Whether `unit` executes on `node`.
+    pub(crate) fn unit_executes_on(&self, unit: Unit, node: &ClusterNodeName) -> bool {
+        let Some(scheduled) = self.units.get(&unit) else {
+            return false;
+        };
+        if self.executes_on_every_cluster_node {
+            scheduled.is_assigned_to(node)
+        } else {
+            scheduled.is_primary_on(node)
+        }
+    }
+
+    /// The units that execute on `node`, in unit order.
+    pub(crate) fn units_executing_on(&self, node: &ClusterNodeName) -> BTreeSet<Unit> {
         self.units
-            .get(&Unit::Single)
-            .assured("current revisions contain exactly one Single unit per node")
+            .keys()
+            .copied()
+            .filter(|unit| self.unit_executes_on(*unit, node))
+            .collect()
+    }
+
+    /// Where each unit's owner executes, for every unit a cluster node owns.
+    pub(crate) fn unit_execution_nodes(&self) -> BTreeMap<Unit, ClusterNodeName> {
+        let mut owners = BTreeMap::new();
+        for unit in self.units.keys() {
+            if let Some(owner) = self.unit_execution_node(*unit) {
+                owners.insert(*unit, owner.clone());
+            }
+        }
+        owners
     }
 
     pub(crate) fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {
         self.ownership_state_components.clone()
     }
 
+    /// Whether any unit of this node is assigned to `node`, as its primary or a replica.
     pub(crate) fn is_assigned_to(&self, node: &ClusterNodeName) -> bool {
-        self.single_unit().assigned_nodes.contains(node)
+        self.units.values().any(|unit| unit.is_assigned_to(node))
     }
 
+    /// The one unit of a node revised as a single unit, and `None` for a relay revised as several
+    /// partitions, whose units each have their own placement.
+    pub(crate) fn sole_unit(&self) -> Option<&ExecutionUnit> {
+        self.units.get(&Unit::SINGLE)
+    }
+
+    /// The one node a single-unit node is assigned to, when it is assigned to exactly one. `None`
+    /// for a node revised as several units.
     pub(crate) fn assigned_single_node(&self) -> Option<&ClusterNodeName> {
-        match self.single_unit().assigned_nodes.as_slice() {
+        match self.sole_unit()?.assigned_nodes.as_slice() {
             [node] => Some(node),
             _ => None,
         }
     }
 
+    /// The primary of a single-unit node. `None` for a node revised as several units.
     pub(crate) fn primary_node(&self) -> Option<&ClusterNodeName> {
-        self.single_unit().primary_node.as_ref()
+        self.sole_unit()?.primary_node.as_ref()
     }
 
-    pub(crate) fn replica_nodes(&self) -> Vec<&ClusterNodeName> {
-        let primary = self.primary_node();
-        self.single_unit()
-            .assigned_nodes
-            .iter()
-            .filter(|node| Some(*node) != primary)
-            .collect()
-    }
-
+    /// Whether any unit of this node is primary on `node`.
     pub(crate) fn is_primary_on(&self, node: &ClusterNodeName) -> bool {
-        match self.primary_node() {
-            Some(primary) => primary == node,
-            None => self.is_assigned_to(node),
-        }
+        self.units.values().any(|unit| unit.is_primary_on(node))
     }
 
+    /// The cluster node a single-unit node executes on. `None` for a node that runs on every
+    /// cluster node, and for a node revised as several units, which have no one execution node.
     pub(crate) fn execution_node(&self) -> Option<&ClusterNodeName> {
         if self.executes_on_every_cluster_node {
             None
@@ -191,6 +242,7 @@ impl ExecutionNode {
         }
     }
 
+    /// Whether any unit of this node executes on `node`.
     pub(crate) fn executes_on(&self, node: &ClusterNodeName) -> bool {
         if self.executes_on_every_cluster_node {
             self.is_assigned_to(node)
@@ -215,6 +267,7 @@ pub(crate) struct ExecutionRevision {
 }
 
 impl ExecutionRevision {
+    #[cfg(test)]
     pub(crate) fn from_graph(
         domain: &DomainName,
         graph: &ActiveGraph,
@@ -228,6 +281,14 @@ impl ExecutionRevision {
         schedule: &DomainSchedule,
     ) -> error_stack::Result<Arc<Self>, ExecutionRevisionError> {
         let domain = &schedule.domain;
+        for node in schedule.nodes.values() {
+            if !node.units_match_declaration() {
+                return Err(Report::new(ExecutionRevisionError::UnitDeclaration {
+                    domain: domain.clone(),
+                    node: node.identity(),
+                }));
+            }
+        }
         let activation = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
             .change_context_lazy(|| ExecutionRevisionError::Activation {
                 domain: domain.clone(),
@@ -566,7 +627,7 @@ impl ExecutionDelta {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{CreateRelay, CreateSchema, Model, RelayBranching, SchemaField};
     use nonzero_ext::nonzero;
@@ -647,32 +708,61 @@ mod tests {
             .for_each(|bytes: &[u8]| {
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
                 let relay = NodeRef::new(ModelKind::Relay, named::<ModelName>("events"));
-                let unit = Unit::Partition(u32::from(arbitrary.entropy().byte()));
+                let partition_count = u16::from(2 + arbitrary.entropy().byte() % 7);
+                let partitions = nervix_models::BranchPartitions::Direct(
+                    std::num::NonZeroU16::new(partition_count)
+                        .assured("the property declares between two and eight partitions"),
+                );
+                let unit = Unit::partition(
+                    u32::from(arbitrary.entropy().byte()) % u32::from(partition_count),
+                );
                 let owner = named::<ClusterNodeName>("node-1");
                 let destination = named::<ClusterNodeName>("node-2");
                 let mut before = schedule(nonzero!(2usize));
+                let key_schema = before
+                    .configured::<CreateSchema>(named::<ModelName>("event"))
+                    .assured("the schedule declares its key schema")
+                    .clone();
+                let Model::Branch(mut branch) =
+                    crate::registry::test_fixtures::branch("by_value", "event")
+                else {
+                    unreachable!("the branch fixture constructs a branch");
+                };
+                branch.partitions = partitions;
+                let branching =
+                    ResolvedBranching::branched(branch.name.clone(), key_schema, partitions);
+                let branch = ScheduledNode::new(
+                    Model::Branch(branch),
+                    SchemaFingerprint::from_digest([7; 32]),
+                );
+                before.nodes.insert(branch.identity(), branch);
                 let node = before
                     .nodes
                     .get_mut(&relay)
                     .assured("the fixture schedules its relay");
-                node.single_unit_mut().primary_node = Some(owner.clone());
-                node.single_unit_mut().assigned_nodes = vec![owner.clone()];
-                let mut partition = node.single_unit().clone();
+                let Model::Relay(mut config) = *node.config.clone() else {
+                    unreachable!("the scheduled relay carries a relay model");
+                };
+                config.branching = RelayBranching::branched_by(named("by_value"));
+                *node = ScheduledNode::new(Model::Relay(config), node.schema_fingerprint)
+                    .with_resolved_branching(Some(branching))
+                    .placed_on(Some(owner.clone()), vec![owner.clone()]);
+                let partition = node
+                    .units
+                    .get_mut(&unit)
+                    .assured("the selected partition belongs to its declaration");
                 partition.primary_node = Some(destination.clone());
                 partition.assigned_nodes = vec![destination.clone()];
-                node.units.insert(unit, partition);
 
                 let revision = ExecutionRevision::from_schedule(&before)
                     .assured("the unit-keyed schedule plans");
                 let planned = &revision.nodes[&relay];
-                assert_eq!(
-                    planned.units[&Unit::Single].primary_node.as_ref(),
-                    Some(&owner)
-                );
-                assert_eq!(
-                    planned.units[&unit].primary_node.as_ref(),
-                    Some(&destination)
-                );
+                assert_eq!(planned.units.len(), usize::from(partition_count));
+                for (key, placement) in &planned.units {
+                    let expected = if *key == unit { &destination } else { &owner };
+                    assert_eq!(placement.primary_node.as_ref(), Some(expected));
+                    assert_eq!(placement.assigned_nodes, vec![expected.clone()]);
+                }
                 assert_eq!(
                     revision.ownership_handoff_fingerprint,
                     ExecutionRevision::ownership_fingerprint(&before)
@@ -699,6 +789,11 @@ mod tests {
                     ScheduleDelta::EntitySwap { reassignments, .. }
                         if reassignments == vec![NodeUnitRef::new(relay.clone(), unit)]
                 ));
+                for (key, assignment) in &before.nodes[&relay].units {
+                    if *key != unit {
+                        assert_eq!(after.nodes[&relay].units[key], *assignment);
+                    }
+                }
                 assert_ne!(
                     revision.ownership_handoff_fingerprint,
                     ExecutionRevision::ownership_fingerprint(&after)
@@ -771,7 +866,7 @@ mod tests {
 
         assert!(
             matches!(ExecutionDelta::between(Some(&before), Some(&after)),
-            ExecutionDelta::EntitySwap(change) if change.reassignments == vec![NodeUnitRef::new(relay, Unit::Single)])
+            ExecutionDelta::EntitySwap(change) if change.reassignments == vec![NodeUnitRef::new(relay, Unit::SINGLE)])
         );
     }
 
@@ -823,7 +918,7 @@ mod tests {
         assert_eq!(change.forced_recovery_relays, expected);
         assert_eq!(
             change.reassignments,
-            vec![NodeUnitRef::new(relay, Unit::Single)]
+            vec![NodeUnitRef::new(relay, Unit::SINGLE)]
         );
         assert!(matches!(
             ExecutionDelta::between(Some(&after), Some(&after)),
@@ -887,7 +982,7 @@ mod tests {
         );
         assert_eq!(
             change.reassignments,
-            vec![NodeUnitRef::new(relay, Unit::Single)]
+            vec![NodeUnitRef::new(relay, Unit::SINGLE)]
         );
     }
 }

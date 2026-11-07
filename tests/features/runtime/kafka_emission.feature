@@ -14,13 +14,13 @@ Feature: Kafka emission
       """
       CREATE SCHEMA queue_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA queue_wire MODE STRICT ( sequence integer );
-      CREATE CODEC queue_codec FROM WIRE JSON SCHEMA queue_wire TO SCHEMA queue_event;
-      CREATE CODEC queue_ingest_codec FROM JSON TO SCHEMA queue_event
+      CREATE WIRE JSON CODEC queue_codec FROM WIRE SCHEMA queue_wire TO SCHEMA queue_event;
+      CREATE JAQ JSON CODEC queue_ingest_codec TO SCHEMA queue_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY queue_events SCHEMA queue_event UNBRANCHED;
       CREATE VHOST edge small-queue-{{test_id}}.example.com;
-      CREATE ENDPOINT queue_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR queue_source
+      CREATE HTTP ENDPOINT queue_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR queue_ingestor
         FROM queue_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING queue_ingest_codec
         TO queue_events INHERIT ALL UNBRANCHED
@@ -85,10 +85,10 @@ Feature: Kafka emission
         secret string,
         note string OPTIONAL,
         occurred_at string,
-        blob BYTES
+        blob string
       );
-      CREATE CODEC incoming_codec FROM WIRE JSON SCHEMA incoming_wire TO SCHEMA incoming_event
-        ENCODE occurred_at AS RFC3339;
+      CREATE WIRE JSON CODEC incoming_codec FROM WIRE SCHEMA incoming_wire TO SCHEMA incoming_event
+        ENCODE occurred_at AS RFC3339, blob AS BASE64;
       CREATE SCHEMA outgoing_event (
         clean STRING,
         escaped STRING,
@@ -101,13 +101,13 @@ Feature: Kafka emission
         escaped string,
         note string OPTIONAL,
         occurred_at string,
-        blob BYTES
+        blob string
       );
-      CREATE CODEC outgoing_codec FROM WIRE JSON SCHEMA outgoing_wire TO SCHEMA outgoing_event
-        ENCODE occurred_at AS RFC3339;
+      CREATE WIRE JSON CODEC outgoing_codec FROM WIRE SCHEMA outgoing_wire TO SCHEMA outgoing_event
+        ENCODE occurred_at AS RFC3339, blob AS BASE64;
       CREATE RELAY events SCHEMA incoming_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_codec
@@ -166,8 +166,8 @@ Feature: Kafka emission
         active boolean
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA emitted_notification (
@@ -182,8 +182,8 @@ Feature: Kafka emission
         normalized string
       );
 
-      CREATE CODEC emitted_notification_codec
-        FROM WIRE JSON SCHEMA emitted_notification_wire
+      CREATE WIRE JSON CODEC emitted_notification_codec
+        FROM WIRE SCHEMA emitted_notification_wire
         TO SCHEMA emitted_notification;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -211,8 +211,7 @@ Feature: Kafka emission
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE KAFKA TOPIC EMITTER kafka_notifications
@@ -268,8 +267,8 @@ Feature: Kafka emission
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -291,8 +290,7 @@ Feature: Kafka emission
         ON GENERAL ERROR LOG;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
@@ -341,15 +339,14 @@ Feature: Kafka emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA CLIENT unavailable_kafka_sink CONFIG {
         'bootstrap.servers' = '127.0.0.1:1',
@@ -358,7 +355,7 @@ Feature: Kafka emission
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'mode_boundary_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'mode_boundary_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'mode_boundary_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -369,7 +366,8 @@ Feature: Kafka emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_mode_boundary FROM notifications
+      CREATE KAFKA TOPIC EMITTER kafka_mode_boundary FROM notifications
+        ATTACHED
         TO unavailable_kafka_sink TOPIC 'unavailable_mode_boundary'
           MODE <publishing_mode>
           ENCODE USING notification_codec
@@ -409,17 +407,16 @@ Feature: Kafka emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
       FROM kafka_main TOPIC 'detached_confirming_in_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'detached_confirming_group_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'detached_confirming_group_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
@@ -428,8 +425,9 @@ Feature: Kafka emission
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE DETACHED KAFKA TOPIC EMITTER kafka_detached_confirming
+      CREATE KAFKA TOPIC EMITTER kafka_detached_confirming
       FROM notifications
+      DETACHED
       TO kafka_main TOPIC 'detached_confirming_out_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ENCODE USING notification_codec
@@ -479,13 +477,12 @@ Feature: Kafka emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA CLIENT kafka_sink CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
@@ -493,7 +490,7 @@ Feature: Kafka emission
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
       FROM kafka_ingress TOPIC 'stale_copy_in_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'stale_copy_group_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'stale_copy_group_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
@@ -502,8 +499,9 @@ Feature: Kafka emission
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE DETACHED KAFKA TOPIC EMITTER kafka_stale_copy
+      CREATE KAFKA TOPIC EMITTER kafka_stale_copy
       FROM notifications
+      DETACHED
       TO kafka_sink TOPIC 'stale_copy_out_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 10s MAX 10s
         ENCODE USING notification_codec
@@ -561,11 +559,11 @@ Feature: Kafka emission
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE WIRE JSON CODEC held_event_codec FROM WIRE SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-stop-{{test_id}}.example.com;
-      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR held_source
+      CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TIMESTAMP NOW
@@ -647,11 +645,11 @@ Feature: Kafka emission
       """
       CREATE SCHEMA unsent_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA unsent_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC unsent_event_codec FROM WIRE JSON SCHEMA unsent_event_wire TO SCHEMA unsent_event;
+      CREATE WIRE JSON CODEC unsent_event_codec FROM WIRE SCHEMA unsent_event_wire TO SCHEMA unsent_event;
       CREATE RELAY unsent_events SCHEMA unsent_event UNBRANCHED;
       CREATE VHOST edge unsent-stop-{{test_id}}.example.com;
-      CREATE ENDPOINT unsent_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR unsent_source
+      CREATE HTTP ENDPOINT unsent_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR unsent_ingestor
         FROM unsent_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING unsent_event_codec
         TIMESTAMP NOW
@@ -729,11 +727,11 @@ Feature: Kafka emission
       """
       CREATE SCHEMA swap_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA swap_wire MODE STRICT ( sequence integer );
-      CREATE CODEC swap_codec FROM WIRE JSON SCHEMA swap_wire TO SCHEMA swap_event;
+      CREATE WIRE JSON CODEC swap_codec FROM WIRE SCHEMA swap_wire TO SCHEMA swap_event;
       CREATE RELAY swap_events SCHEMA swap_event UNBRANCHED;
       CREATE VHOST edge swap-{{test_id}}.example.com;
-      CREATE ENDPOINT swap_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR swap_source
+      CREATE HTTP ENDPOINT swap_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR swap_ingestor
         FROM swap_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING swap_codec
         TIMESTAMP NOW
@@ -810,12 +808,12 @@ Feature: Kafka emission
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retired_event ( seq I64 );
       CREATE WIRE JSON SCHEMA retired_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC retired_event_codec
-        FROM WIRE JSON SCHEMA retired_event_wire TO SCHEMA retired_event;
+      CREATE WIRE JSON CODEC retired_event_codec
+        FROM WIRE SCHEMA retired_event_wire TO SCHEMA retired_event;
       CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
       CREATE VHOST edge retire-out-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR healthy_source
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
         FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
         TO retired_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -908,12 +906,12 @@ Feature: Kafka emission
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, event_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE event_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge timestamped-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -1007,11 +1005,11 @@ Feature: Kafka emission
       """
       CREATE SCHEMA event ( seq I64, event_at DATETIME );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, event_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE event_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge timestamp-retry-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -1069,11 +1067,11 @@ Feature: Kafka emission
       """
       CREATE SCHEMA event ( seq I64, event_at DATETIME );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, event_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE event_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge timestamp-altered-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

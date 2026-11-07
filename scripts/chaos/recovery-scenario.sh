@@ -74,7 +74,7 @@ recovery_traffic_startup() {
 }
 
 # Starts continuous producer traffic from the run's fixture and the listener observer, then waits
-# for source and sink progress and for the public cross-node path before any fault.
+# for ingestor and emitter progress and for the public cross-node path before any fault.
 recovery_traffic_start() {
     local case_dir="$1"
     phase "${scenario} traffic startup"
@@ -83,7 +83,7 @@ recovery_traffic_start() {
     compose up --detach --no-deps load observer
     wait_for 'independent load, observer and broker' 30 check_support_containers
     wait_for 'source traffic started' 30 topic_progressed chaos_input 0
-    wait_for 'sink traffic started' 60 topic_progressed chaos_output 0
+    wait_for 'emitter traffic started' 60 topic_progressed chaos_output 0
     wait_for 'initial cross-node traffic metrics' 60 initial_remote_path_ready
     local host
     local evidence=()
@@ -412,11 +412,11 @@ configuration_differences() {
         | select($expected[0][$part] != $observed[0][$part]) | $part'
 }
 
-# Prints the consensus, liveness and shutdown settings a node container runs with, read from the
-# environment of its Docker inspection, as one JSON object.
+# Prints the node-local Raft prerequisites from its Docker inspection. Cluster policy is observed
+# through the committed and running records the public cluster description publishes.
 configured_settings() {
     jq -c '.[0].Config.Env
-        | map(select(test("^NERVIX_(RAFT_|NODE_UNAVAILABILITY_TIMEOUT=|SHUTDOWN_TIMEOUT=|DRAIN_TIMEOUT=)")))
+        | map(select(startswith("NERVIX_RAFT_")))
         | map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries' "$1"
 }
 

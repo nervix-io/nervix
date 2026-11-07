@@ -44,7 +44,7 @@ shape, and restoration uses the same validated Model-to-plan boundary as ordinar
 | Engines and infrastructure | The interconnect | The typed drain-status, capture, inventory, section-fetch and state-installation operations, with their pools, subquotas, deadlines and coordination identity. |
 | Decisions | The restore planner | A pure plan from the archive description, the statement, the existing users and domains, and the steps already recorded: the user policy, the name checks, the resource versions a restore imports and the versions every model pins, the stopped domain state and the `RESUME` activation. |
 | Decisions | The transaction planner | Each restored domain's model run, planned against the domain as the restore will create it. |
-| Data plane | Owner capture | For the placements the node is the scheduled primary of: forcing branch publications and lifecycle checkpoints, the capture fence, sealing source offsets and lifecycle durably, one database snapshot, and producing each section into node staging. |
+| Data plane | Owner capture | For the placements the node is the scheduled primary of: forcing branch publications and lifecycle checkpoints, the capture fence, sealing ingestor offsets and lifecycle durably, one database snapshot, and producing each section into node staging. |
 | Data plane | Branch restore | Installing every branch a restored lifecycle names, rebuilding windows from their retained rows, and binding restored state as a branch starts. |
 | Control plane | The backup coordinator on the leader | Executing an admitted `BACKUP`: each domain's cut and the nodes it must reach, owner capture, section transfer, assembly under the staging quota, retention under the execution reference, and the report. |
 | Control plane | The restore coordinator on the leader | Staging and verifying an archive, preparing and planning it, admitting the restore, applying its steps in order, and installing state. |
@@ -86,11 +86,30 @@ tree would duplicate the whole vocabulary, and the stored representation would c
 to it. A backup renders each domain's models, parses the rendered text back, and refuses the archive
 unless it yields exactly the committed models.
 
+Wire schemas in those records use each format's current Plexus vocabulary, and codec text carries
+its explicit `RFC3339` or `BASE64` rules. Restore parses and validates that text through the current
+language and registry boundaries. A vocabulary change needs no archive-owned Model encoding or
+format change; text that cannot form a current Model fails restore preparation.
+
 Every record section opens with a twelve-byte header: the magic `NVXBKREC`, then the record kind
 and its format version as little-endian 16-bit integers. A reader checks the magic, then the kind,
 then the version for exact equality, copies the payload into an aligned buffer and validates it with
 bytecheck before it reads a value, and then validates each vocabulary value in the record's
 conversion. A changed shape therefore fails at its header instead of validating as garbage.
+
+Kafka unit checkpoints include the explicit-start generation and both committed positions and
+any canonical start positions still awaiting adoption. Those pending positions remain on
+instance zero until their recipient has persisted its slice. Backup publication fences cover
+selection, adoption and seed release. Restore retains the pending cut, so a delayed unit can
+resume it after the lifecycle advances. Count redistribution prepares the newest canonical
+generation and each actual owner's progress on every target primary and replica.
+
+The current archive uses format major `5`. Each unit-bearing record owns an eight-byte primitive
+rank with four-byte alignment. Rank zero is `Single`, ranks one through `2^32` select the full
+32-bit partition range, and subsequent ranks select instance indices from zero. Every rank is a
+valid unit, and the instance range includes every ingestor index an allocation can materialize.
+The record version fences this shape before decoding; restore then validates that the unit belongs
+to the restored schedule.
 
 ### Layout And Verification
 
@@ -105,7 +124,7 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `2`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `5`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,
@@ -142,7 +161,7 @@ A backup captures each domain at one cut, in sequence, and records which kind it
 
 | Cut | When | What it guarantees |
 | --- | --- | --- |
-| Quiesced | A running or paused domain, by default | Every input acknowledged before the cut is reflected in the archive and no admitted work remained at the cut. Inputs that were not acknowledged are redelivered by acknowledged sources after a restore, or lost for sources without acknowledgements, exactly as after a restart. The cut records when it engaged and released and what intake buffered, dropped and rejected meanwhile. |
+| Quiesced | A running or paused domain, by default | Every input acknowledged before the cut is reflected in the archive and no admitted work remained at the cut. Inputs that were not acknowledged are redelivered by acknowledged ingestors after a restore, or lost for ingestors without acknowledgements, exactly as after a restart. The cut records when it engaged and released and what intake buffered, dropped and rejected meanwhile. |
 | Stopped | A stopped domain | The domain's stored checkpoints, read from one database snapshot on each owner. The domain needs no pause. |
 | Live | `WITHOUT PAUSE`, whatever the domain's status | The latest published checkpoints, captured without pausing a running domain: what a `SIGKILL` restart would recover. State and configuration need not be from one quiesced moment. |
 | Configuration only | `WITHOUT STATE` | Models, the domain record and resources, with no state sections. |
@@ -201,7 +220,7 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    cluster's own revision budget allows.
 5. **Drain.** Every 50 milliseconds, the coordinator polls every live node and every node the
    schedule assigns the domain's work to for the admitted work it still holds: admitting ingestors
-   and generators, outstanding source acknowledgement roots, relays that admitted a batch while the
+   and generators, outstanding ingestor acknowledgement roots, relays that admitted a batch while the
    node read its view, relay and node buffers, and emitter buffers and publishes. That is the view
    the shutdown drain uses. A poll installs no runtime state: the pause had every live node apply
    the paused state before the first poll, and a node that had not yet stopped its intake would
@@ -592,6 +611,15 @@ a step recorded with a different effect. A recorded step is never applied twice:
 | Import resource versions | Each version is installed from its archive section on the leader and published under its archived number through one command per version, keyed by the restore so that a repeat finds it imported, and the restore waits until every live node installed it, exactly as an upload completes. One more command records the step. |
 | Apply models | The models are applied as one batch under the restore's lease, with full graph validation and the leader's content checks, unbounded by a transaction's statement and source-byte limits; an attempt that finds exactly these models already applied skips the batch, and any other models fail the step. State installation follows, and one command records the step together with the installed generation, which opens the installation gate, and, with `RESUME`, the activation. |
 
+At the model step, one consensus snapshot supplies the target's Models, completed resource versions
+and committed parameter record. Resource pinning and graph validation use that snapshot's values;
+binding and content preparation retain its publication inputs through their waits. Schedule
+preparation consumes those inputs, and both application preflight and replicated apply compare
+the complete parameter record and revision before publication. A limit changed since archive
+preparation can therefore refuse this model step before any of its Models become committed. The
+restore's domain lease excludes competing domain mutations; global parameter publications remain
+independent and are fenced by that captured record.
+
 A step that fails ends the restore. The steps recorded before it stay applied, and a domain the
 restore created stays stopped with what it committed; when the domain was created but did not become
 usable on every live node, the create step itself stays applied and is reported as failed.
@@ -623,7 +651,12 @@ Decoded materialized containers keep their metadata and column charges in the in
 equals the relay budget and counts separately in startup sizing, leaving relay work the capacity
 it needs to evaluate, encode and dispatch while those source columns remain admitted.
 
-Running generators keep remote source views only in their task-local read cache. They describe
+Partitioned processors restore each archived branch under its scheduled partition unit, including
+that unit's generation and ownership fence. Each unit starts its own supervisor, state writer and
+replica poller. Moving or restoring one unit retains the sibling units' tasks and state identities.
+
+Running generators enumerate only their own source partition and keep remote source views only in
+their task-local read cache. They describe
 the selected owner's complete sealed identity before each reuse and replace a changed view even
 when its revision equals or precedes the one they observed before restart or restore. Cached
 rows carry their admission charges in the separate bounded `state_read_cache` pool, whose
@@ -722,6 +755,14 @@ at most 60 KiB, which keeps every key within the database's key limit. A segment
 only of its fixed archived root, so a reader checks a header's stored size before it copies or
 decodes it, and a larger valid value is an inline checkpoint. A namespace's generation is separate
 from a WASM branch's guest-state lifetime and from a checkpoint's revision.
+
+A namespace keeps one revision-index entry for each placement, naming the revision of its selected
+checkpoint, inline or segmented, so the index a placement occupies does not grow with the number of
+checkpoints it takes. A checkpoint write replaces the header, removes the entry of the revision it
+supersedes and adds its own in one database batch under the installation barrier; a segmented
+checkpoint does so only once its chunks are durable. The selected header, never the index, decides
+which chunk set stays referenced, so maintenance reclaims a superseded chunk set whether or not an
+entry names it.
 
 Ordinary checkpoints use the same segmented form when they are large: a materialized relay, and a
 window whose retained rows exceed one 8 MiB snapshot section, seal in bounded pieces to quota-owned
@@ -831,15 +872,15 @@ new clock origin. An unpaced domain needs no mapping.
 
 Without `RESUME`, the domain stays stopped. A later `START` advances its start generation, which
 clears materialized relay state, because a materialized placement's identity mixes in the start
-generation, and continues the restored WASM state, source positions, branch lifecycle, deduplicator
+generation, and continues the restored WASM state, ingestor positions, branch lifecycle, deduplicator
 keys and windows, whose identities do not. To begin a new clock at the archived logical frontier, an
 operator leaves the domain stopped and uses `START AT` with a time rate explicitly.
 
 As the domain starts:
 
-- A Kafka source resumes from its restored next offset for every partition of its current
+- A Kafka ingestor resumes from its restored next offset for every partition of its current
   assignment, clamped to the partition's live low and high watermarks; a partition without a
-  restored offset starts as the source declares.
+  restored offset starts as the ingestor declares.
 - A materialized relay binds the rows restored under the exact schema fingerprint and archived start
   generation before a branch or generator starts, with their typed keys, watermarks, revision and
   branch generation; the restore sets the ownership fence to zero and the new assignment establishes
@@ -855,7 +896,7 @@ As the domain starts:
 
 Archived Kafka positions follow acknowledged records, and a window acknowledges a row only when it
 steps past it, so a domain that reads Kafka into a window stands its positions before the rows its
-windows retained at the cut, and the resumed source reads those rows again; a restart has the same
+windows retained at the cut, and the resumed ingestor reads those rows again; a restart has the same
 effect.
 
 ## State Placement Identities
@@ -877,7 +918,7 @@ only when its unit exists in the restored schedule and sends it to that unit's a
 Kafka offset checkpoints and their archive records also retain the exact optional generation of an
 already applied explicit start. Restore installs it beside the next offsets, so resuming an archived
 `START AT` generation does not rewind acknowledged records. An absent marker stays absent; deriving
-it from the domain's start count would incorrectly claim that an incomplete source initialization
+it from the domain's start count would incorrectly claim that an incomplete ingestor initialization
 had finished. A later explicit start uses its new generation and resets the positions normally.
 
 Branch keys are typed. Every archived key must belong to the branching its restored entity declares,
@@ -1131,7 +1172,7 @@ restored schedule remains the restore planner's contract, exercised by the publi
   lengths, digests, first differing offset and the bytes there, never the whole saves. A resumed
   restore replays the inputs whose acknowledgements its archive does not hold, so the exact
   comparison relies on every input of the source cut being acknowledged; a checkpoint of a save this
-  large can outlast the source's `ACK TIMEOUT` under load, which the branch's keepalive of the inputs
+  large can outlast the ingestor's `ACK TIMEOUT` under load, which the branch's keepalive of the inputs
   that checkpoint holds keeps from becoming a replay. See [WASM State And
   Recovery](./wasm-state.md#stages).
 - The deduplicator and window scenarios on one and three nodes re-export a stopped restore with
@@ -1180,3 +1221,12 @@ leader crash, a partitioned coordinator, an owner restart and concurrent staging
 volume](https://app.clickup.com/t/86bckvq84): three concurrent restores of 40 MiB guest saves staged
 at most about 0.3 GB on a state owner, finished in under 20 seconds each on a GitHub-hosted worker,
 and left no unpublished staging five seconds after they ended.
+
+## Capturing Instance-Owned Intake
+
+A cut enumerates each locally owned `NodeUnitRef` of an ingestor, checks its readiness/drain
+summary, and captures its exact offset and branch-lifecycle placements. A logical ingestor can
+therefore contribute checkpoints from several owners. Restore retains the global instance index
+when staging and publishing those generations; final placement does not renumber it. The current
+archive major also identifies this interpretation of canonical fixed-count and per-partition
+Models. Manifest and individual state-record versions retain their own current contracts.

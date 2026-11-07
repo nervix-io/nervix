@@ -19,8 +19,8 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE WIRE JSON SCHEMA physical_poll_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC physical_poll_codec
-        FROM WIRE JSON SCHEMA physical_poll_wire
+      CREATE WIRE JSON CODEC physical_poll_codec
+        FROM WIRE SCHEMA physical_poll_wire
         TO SCHEMA physical_poll_record;
       CREATE RELAY physical_poll_records SCHEMA physical_poll_record UNBRANCHED;
       CREATE HTTP CLIENT physical_poll_source
@@ -78,15 +78,9 @@ Feature: Physical infrastructure deadlines under domain pacing
         timestamp STRING,
         due STRING
       );
-      CREATE WIRE JSON SCHEMA physical_prometheus_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string,
-        due string
-      );
-      CREATE CODEC physical_prometheus_codec
-        FROM WIRE JSON SCHEMA physical_prometheus_wire
-        TO SCHEMA physical_prometheus_sample;
+      CREATE JAQ JSON CODEC physical_prometheus_codec
+        TO SCHEMA physical_prometheus_sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE RELAY physical_prometheus_samples
         SCHEMA physical_prometheus_sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT physical_prometheus_source
@@ -135,8 +129,8 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE WIRE JSON SCHEMA physical_timeout_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC physical_timeout_codec
-        FROM WIRE JSON SCHEMA physical_timeout_wire
+      CREATE WIRE JSON CODEC physical_timeout_codec
+        FROM WIRE SCHEMA physical_timeout_wire
         TO SCHEMA physical_timeout_record;
       CREATE RELAY physical_timeout_records SCHEMA physical_timeout_record UNBRANCHED;
       CREATE HTTP CLIENT physical_timeout_source
@@ -208,11 +202,11 @@ Feature: Physical infrastructure deadlines under domain pacing
         tenant string,
         theme string
       );
-      CREATE CODEC physical_wait_notification_codec
-        FROM WIRE JSON SCHEMA physical_wait_notification_wire
+      CREATE WIRE JSON CODEC physical_wait_notification_codec
+        FROM WIRE SCHEMA physical_wait_notification_wire
         TO SCHEMA physical_wait_notification;
-      CREATE CODEC physical_wait_preference_codec
-        FROM WIRE JSON SCHEMA physical_wait_preference_wire
+      CREATE WIRE JSON CODEC physical_wait_preference_codec
+        FROM WIRE SCHEMA physical_wait_preference_wire
         TO SCHEMA physical_wait_preference;
       CREATE SCHEMA physical_wait_tenant (
         tenant STRING
@@ -226,15 +220,13 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE RELAY physical_wait_output
         SCHEMA physical_wait_notification BRANCHED BY physical_wait_by_tenant;
       CREATE VHOST edge physical-wait-{{test_id}}.example.com;
-      CREATE ENDPOINT physical_wait_state_endpoint
+      CREATE HTTP ENDPOINT physical_wait_state_endpoint
         ON edge
-        PATH '/state'
-        TYPE HTTP;
-      CREATE ENDPOINT physical_wait_input_endpoint
+        PATH '/state';
+      CREATE HTTP ENDPOINT physical_wait_input_endpoint
         ON edge
-        PATH '/input'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR physical_wait_state_source
+        PATH '/input';
+      CREATE HTTP ENDPOINT INGESTOR physical_wait_state_ingestor
         FROM physical_wait_state_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_preference_codec
         TIMESTAMP NOW
@@ -245,7 +237,7 @@ Feature: Physical infrastructure deadlines under domain pacing
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR physical_wait_input_source
+      CREATE HTTP ENDPOINT INGESTOR physical_wait_input_ingestor
         FROM physical_wait_input_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_notification_codec
         TIMESTAMP NOW
@@ -326,17 +318,16 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE WIRE JSON SCHEMA physical_ack_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC physical_ack_codec
-        FROM WIRE JSON SCHEMA physical_ack_wire
+      CREATE WIRE JSON CODEC physical_ack_codec
+        FROM WIRE SCHEMA physical_ack_wire
         TO SCHEMA physical_ack_record;
       CREATE RELAY physical_ack_records SCHEMA physical_ack_record UNBRANCHED;
       CREATE KAFKA CLIENT physical_ack_kafka
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR physical_ack_source
-        FROM physical_ack_kafka TOPIC 'physical_ack_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'physical_ack_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+      CREATE KAFKA TOPIC INGESTOR physical_ack_ingestor
+        FROM physical_ack_kafka TOPIC 'physical_ack_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'physical_ack_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING physical_ack_codec
         TIMESTAMP NOW
         TO physical_ack_records
@@ -345,7 +336,7 @@ Feature: Physical infrastructure deadlines under domain pacing
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER physical_ack_sink
+      CREATE KAFKA TOPIC EMITTER physical_ack_emitter
         FROM physical_ack_records
         TO physical_ack_kafka TOPIC 'physical_ack_out_{{test_id}}'
         MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -356,13 +347,13 @@ Feature: Physical infrastructure deadlines under domain pacing
         ON GENERAL ERROR LOG;
       START AT '1980-01-01T00:00:00Z' TIME RATE <rate>;
       """
-    And emitter "physical_ack_sink" enters stall mode
+    And emitter "physical_ack_emitter" enters stall mode
     And Kafka message is published to topic "physical_ack_in_{{test_id}}"
       """
       {"user_id":77}
       """
     Then the observed broker does not receive a payload within "1200ms"
-    When emitter "physical_ack_sink" leaves stall mode
+    When emitter "physical_ack_emitter" leaves stall mode
     Then within "4s" the observed broker receives payloads
       """
       {"user_id":77}

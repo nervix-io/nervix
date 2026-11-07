@@ -1,7 +1,7 @@
 //! Where the Kafka ingestor starts a partition after a rejection or without an offset of its own.
 //!
 //! Outside the layer order: a harness.
-//! - **Owns.** The rejected-partition floors, how the client's reset policy is read, and
+//! - **Owns.** The rejected-partition floors, the position each offset mode gives its consumer, and
 //!   regressions through the production ingestor against librdkafka's mock cluster: a consumer
 //!   group that loses its rewound partition before the rejected record is read again, and
 //!   domain-owned offsets that resume a partition, reset it at a new start point, or start it
@@ -18,13 +18,14 @@ use nervix_connector::{
     BrokerIngestorConnector as _, IngestorBatch, IngestorBatchRequest, IngestorConnector,
     IngestorMessage as _, IngestorReadCancellation, IngestorResume,
 };
-use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, KafkaTopicName, Timestamp};
+use nervix_models::{
+    ClientConfigEntry, IngestStartPosition, KafkaPartitionSchedule, KafkaTopicName, Timestamp,
+};
 use nervix_primitives::{
     sync::{Arc, blocking::Mutex, watch},
     time::{Instant, timeout},
 };
 use rdkafka::{
-    config::ClientConfig,
     consumer::{Consumer as _, RebalanceProtocol},
     mocking::MockCluster,
     producer::DefaultProducerContext,
@@ -32,15 +33,51 @@ use rdkafka::{
 };
 
 use super::{
-    KafkaDomainOffsetHost, KafkaDomainOffsetInitialization, KafkaDomainOffsetResult,
+    DomainStart, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization, KafkaDomainOffsetResult,
     KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit, KafkaOffsetPosition,
-    KafkaOffsetReset, KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
-    KafkaTopicIngestorPlan,
+    KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
+    KafkaTopicIngestorPlan, ScheduledPartitions,
     commit_tests::{READ_DEADLINE, cluster, plan as group_plan, publish, read_positions},
     rejection::RejectionFloors,
 };
 
 const TOPIC: &str = "orders";
+
+#[nervix_primitives::test]
+async fn an_explicit_start_resolves_the_whole_topic_before_any_instance_polls() {
+    let broker = MockCluster::new(1).assured("the mock cluster has one broker");
+    broker
+        .create_topic(TOPIC, 3, 1)
+        .assured("the test topic has three partitions");
+    let domain = domain_ingestor(
+        &broker,
+        ScriptedStart::At(Timestamp::from_unix_nanos(i64::MAX / 2)),
+    )
+    .await;
+    let offsets = domain
+        .ingestor
+        .control
+        .run(&domain.ingestor.consumer, |consumer, budget| {
+            let scheduled = ScheduledPartitions {
+                topic: TOPIC,
+                partitions: &[0, 1, 2],
+                assigned: std::collections::BTreeSet::from([0]),
+            };
+            let start = DomainStart::resolve(
+                consumer,
+                &scheduled,
+                KafkaDomainOffsetStart::At(Timestamp::from_unix_nanos(i64::MAX / 2)),
+                budget,
+            )?;
+            Ok(start.offsets().clone())
+        })
+        .await
+        .assured("the broker resolves a future start to each empty partition's end");
+    assert_eq!(
+        offsets,
+        std::collections::BTreeMap::from([(0, 0), (1, 0), (2, 0)])
+    );
+}
 
 /// How long one read waits for a record before the test publishes another.
 const PUBLISH_INTERVAL: Duration = Duration::from_secs(2);
@@ -144,35 +181,37 @@ fn a_cooperative_assignment_keeps_the_floors_of_partitions_it_does_not_add() {
     assert_eq!(start_of(&later, 1), Offset::Offset(3));
 }
 
-/// An ingestor in the test group whose client starts a partition the group committed nothing for at
-/// the partition's end, as librdkafka's default reset does, and whose group session lapses six
-/// seconds after its broker stops answering.
-async fn latest_group_source(
+/// An ingestor in the test group declared `START AT LATEST`, so a partition the group committed
+/// nothing for starts at its end, and whose group session lapses six seconds after its broker stops
+/// answering.
+async fn latest_group_ingestor(
     cluster: &MockCluster<'static, DefaultProducerContext>,
 ) -> KafkaTopicIngestor {
     let mut plan = group_plan(cluster, KafkaGroupCommit::EachAcknowledgedBatch);
-    plan.config.retain(|entry| entry.key != "auto.offset.reset");
+    let KafkaTopicIngestorOffsetMode::ConsumerGroup { start_at, .. } = &mut plan.offset_mode else {
+        panic!("the test plan reads through the test group");
+    };
+    *start_at = IngestStartPosition::Latest;
     plan.config.extend([
-        entry("auto.offset.reset", "latest"),
         entry("session.timeout.ms", "6000"),
         entry("heartbeat.interval.ms", "500"),
     ]);
-    let mut source = KafkaTopicIngestor::open(&plan, 0)
+    let mut ingestor = KafkaTopicIngestor::open(&plan, 0)
         .await
         .assured("librdkafka accepts the test consumer configuration");
-    let resumed = source
+    let resumed = ingestor
         .resume()
         .await
         .assured("a consumer subscribes to a topic its broker serves");
     assert!(matches!(resumed, IngestorResume::Ready));
-    source
+    ingestor
 }
 
-/// Publishes a record at a time until `source`, which starts its partition at the partition's end,
+/// Publishes a record at a time until `ingestor`, which starts its partition at the partition's end,
 /// reads one, and returns that record's position.
 async fn read_once_assigned(
     cluster: &MockCluster<'static, DefaultProducerContext>,
-    source: &mut KafkaTopicIngestor,
+    ingestor: &mut KafkaTopicIngestor,
 ) -> Vec<KafkaOffsetPosition> {
     let deadline = Instant::now()
         .checked_add(READ_DEADLINE)
@@ -184,11 +223,16 @@ async fn read_once_assigned(
     loop {
         assert!(
             Instant::now() < deadline,
-            "the group assigned the source its partition and it read a record within its deadline"
+            "the group assigned the ingestor its partition and it read a record within its \
+             deadline"
         );
         publish(cluster).await;
         let cancellation = IngestorReadCancellation::new();
-        let read = timeout(PUBLISH_INTERVAL, source.next_batch(request, &cancellation)).await;
+        let read = timeout(
+            PUBLISH_INTERVAL,
+            ingestor.next_batch(request, &cancellation),
+        )
+        .await;
         if let Ok(Ok(IngestorBatch::Messages(messages))) = read {
             return messages
                 .iter()
@@ -199,43 +243,43 @@ async fn read_once_assigned(
 }
 
 #[nervix_primitives::test]
-async fn a_rejection_retried_after_the_source_rejoins_its_group_is_read_again() {
+async fn a_rejection_retried_after_the_ingestor_rejoins_its_group_is_read_again() {
     let cluster = cluster();
-    let mut source = latest_group_source(&cluster).await;
-    let rejected = read_once_assigned(&cluster, &mut source).await;
+    let mut ingestor = latest_group_ingestor(&cluster).await;
+    let rejected = read_once_assigned(&cluster, &mut ingestor).await;
 
     // The host suspends and resumes an ingestor whose rejection failed, then retries the rejection
     // before it reads again. Rejoining the group revokes the partition and assigns it anew, and
     // the group committed nothing to resume it from.
-    source
+    ingestor
         .suspend()
         .await
         .assured("an acknowledged group leaves without a commit to make");
-    let resumed = source
+    let resumed = ingestor
         .resume()
         .await
         .assured("a consumer subscribes to a topic its broker serves");
     assert!(matches!(resumed, IngestorResume::Ready));
-    source
+    ingestor
         .reject(&rejected)
         .await
         .assured("a rejection that cannot seek yet leaves its floor for the next assignment");
 
-    assert_eq!(read_positions(&mut source).await, rejected);
+    assert_eq!(read_positions(&mut ingestor).await, rejected);
 }
 
 #[nervix_primitives::test]
 async fn a_rejected_record_is_read_again_after_an_outage_outlasts_the_group_session() {
     let cluster = cluster();
-    let mut source = latest_group_source(&cluster).await;
-    let rejected = read_once_assigned(&cluster, &mut source).await;
+    let mut ingestor = latest_group_ingestor(&cluster).await;
+    let rejected = read_once_assigned(&cluster, &mut ingestor).await;
     cluster
         .broker_down(1)
         .assured("the mock cluster takes down a broker it has");
-    source
+    ingestor
         .reject(&rejected)
         .await
-        .assured("the source rewinds the partition it is still assigned");
+        .assured("the ingestor rewinds the partition it is still assigned");
 
     // The ingestor keeps polling through the outage, which serves the group's revocation once the
     // session lapses and loses the rewind with the partition.
@@ -247,7 +291,7 @@ async fn a_rejected_record_is_read_again_after_an_outage_outlasts_the_group_sess
         batch_timeout: None,
     };
     loop {
-        let assignment = source
+        let assignment = ingestor
             .consumer
             .assignment()
             .assured("librdkafka reports a consumer's assignment");
@@ -259,10 +303,14 @@ async fn a_rejected_record_is_read_again_after_an_outage_outlasts_the_group_sess
             "the group revoked the partition once the session lapsed"
         );
         let cancellation = IngestorReadCancellation::new();
-        let polled = timeout(PUBLISH_INTERVAL, source.next_batch(request, &cancellation)).await;
+        let polled = timeout(
+            PUBLISH_INTERVAL,
+            ingestor.next_batch(request, &cancellation),
+        )
+        .await;
         if let Ok(Ok(IngestorBatch::Messages(messages))) = polled {
             panic!(
-                "the source read {} records from a broker that is down",
+                "the ingestor read {} records from a broker that is down",
                 messages.len()
             );
         }
@@ -279,10 +327,14 @@ async fn a_rejected_record_is_read_again_after_an_outage_outlasts_the_group_sess
     let read = loop {
         assert!(
             Instant::now() < read_deadline,
-            "the source read the rejected record again within its deadline"
+            "the ingestor read the rejected record again within its deadline"
         );
         let cancellation = IngestorReadCancellation::new();
-        let polled = timeout(PUBLISH_INTERVAL, source.next_batch(request, &cancellation)).await;
+        let polled = timeout(
+            PUBLISH_INTERVAL,
+            ingestor.next_batch(request, &cancellation),
+        )
+        .await;
         if let Ok(Ok(IngestorBatch::Messages(messages))) = polled {
             break messages
                 .iter()
@@ -296,31 +348,31 @@ async fn a_rejected_record_is_read_again_after_an_outage_outlasts_the_group_sess
 #[nervix_primitives::test]
 async fn a_commit_past_the_rejected_record_lets_the_group_resume_from_its_committed_offset() {
     let cluster = cluster();
-    let mut source = latest_group_source(&cluster).await;
-    let rejected = read_once_assigned(&cluster, &mut source).await;
-    source
+    let mut ingestor = latest_group_ingestor(&cluster).await;
+    let rejected = read_once_assigned(&cluster, &mut ingestor).await;
+    ingestor
         .reject(&rejected)
         .await
-        .assured("the source rewinds the partition it is still assigned");
-    assert_eq!(read_positions(&mut source).await, rejected);
+        .assured("the ingestor rewinds the partition it is still assigned");
+    assert_eq!(read_positions(&mut ingestor).await, rejected);
 
-    source
+    ingestor
         .acknowledge(&rejected)
         .await
         .assured("the group commits the record read again");
 
-    assert!(source.consumer.context().floors().is_empty());
+    assert!(ingestor.consumer.context().floors().is_empty());
     publish(&cluster).await;
-    source
+    ingestor
         .suspend()
         .await
         .assured("an acknowledged group leaves without a commit to make");
-    let resumed = source
+    let resumed = ingestor
         .resume()
         .await
         .assured("a consumer subscribes to a topic its broker serves");
     assert!(matches!(resumed, IngestorResume::Ready));
-    let next = read_positions(&mut source).await;
+    let next = read_positions(&mut ingestor).await;
     let mut expected = Vec::new();
     for rejected in &rejected {
         let next = rejected
@@ -439,30 +491,25 @@ impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
 }
 
 /// A domain-offset ingestor, the starts it stores in its domain and the offsets it resets there.
-struct DomainSource {
-    source: KafkaTopicIngestor,
+struct DomainIngestor {
+    ingestor: KafkaTopicIngestor,
     stored: Arc<Mutex<Vec<KafkaOffsetPosition>>>,
     resets: Arc<Mutex<Vec<KafkaOffsetPosition>>>,
     /// Held so the ingestor's partition watch stays open.
     _partition_watch: watch::Sender<u64>,
 }
 
-/// A domain-offset ingestor whose domain starts it as `start` says and whose client resets a
-/// partition without an offset as `reset` says.
-async fn domain_source(
+/// A domain-offset ingestor whose domain starts it as `start` says.
+async fn domain_ingestor(
     cluster: &MockCluster<'static, DefaultProducerContext>,
-    reset: &str,
     start: ScriptedStart,
-) -> DomainSource {
+) -> DomainIngestor {
     let stored = Arc::new(Mutex::new(Vec::new()));
     let resets = Arc::new(Mutex::new(Vec::new()));
     let (partition_watch, rebalanced) = watch::channel(0);
     let plan = KafkaTopicIngestorPlan {
         executor: nervix_execution::Executor::default(),
-        config: vec![
-            entry("bootstrap.servers", &cluster.bootstrap_servers()),
-            entry("auto.offset.reset", reset),
-        ],
+        config: vec![entry("bootstrap.servers", &cluster.bootstrap_servers())],
         topic: KafkaTopicName::parse(TOPIC).assured("the test topic is a valid Kafka topic"),
         offset_mode: KafkaTopicIngestorOffsetMode::Domain {
             group_id: "orders-domain".to_string(),
@@ -474,11 +521,11 @@ async fn domain_source(
             rebalance: rebalanced,
         },
     };
-    let source = KafkaTopicIngestor::open(&plan, 0)
+    let ingestor = KafkaTopicIngestor::open(&plan, 0)
         .await
         .assured("librdkafka accepts the test consumer configuration");
-    DomainSource {
-        source,
+    DomainIngestor {
+        ingestor,
         stored,
         resets,
         _partition_watch: partition_watch,
@@ -486,57 +533,22 @@ async fn domain_source(
 }
 
 #[nervix_primitives::test]
-async fn an_unrecorded_partition_starts_at_its_end_when_the_client_resets_to_latest() {
+async fn an_unrecorded_partition_starts_at_its_earliest_record() {
     let cluster = cluster();
     publish(&cluster).await;
-    let mut domain = domain_source(
-        &cluster,
-        "latest",
-        ScriptedStart::Unrecorded { domain_time: None },
-    )
-    .await;
+    let mut domain =
+        domain_ingestor(&cluster, ScriptedStart::Unrecorded { domain_time: None }).await;
 
     let resumed = domain
-        .source
+        .ingestor
         .resume()
         .await
-        .assured("the source takes up the partition its schedule assigns it");
-
-    assert!(matches!(resumed, IngestorResume::Ready));
-    assert_eq!(*domain.stored.lock(), vec![position(0, 1)]);
-    assert!(
-        domain.resets.lock().is_empty(),
-        "a resume replaces no domain offsets"
-    );
-    publish(&cluster).await;
-    assert_eq!(
-        read_positions(&mut domain.source).await,
-        vec![position(0, 2)]
-    );
-}
-
-#[nervix_primitives::test]
-async fn an_unrecorded_partition_starts_at_its_earliest_record_when_the_client_resets_to_earliest()
-{
-    let cluster = cluster();
-    publish(&cluster).await;
-    let mut domain = domain_source(
-        &cluster,
-        "earliest",
-        ScriptedStart::Unrecorded { domain_time: None },
-    )
-    .await;
-
-    let resumed = domain
-        .source
-        .resume()
-        .await
-        .assured("the source takes up the partition its schedule assigns it");
+        .assured("the ingestor takes up the partition its schedule assigns it");
 
     assert!(matches!(resumed, IngestorResume::Ready));
     assert_eq!(*domain.stored.lock(), vec![position(0, 0)]);
     assert_eq!(
-        read_positions(&mut domain.source).await,
+        read_positions(&mut domain.ingestor).await,
         vec![position(0, 1)]
     );
 }
@@ -546,9 +558,8 @@ async fn a_paced_partition_without_a_record_after_the_domain_time_starts_where_i
     let cluster = cluster();
     publish(&cluster).await;
     let after_every_record = Timestamp::from_unix_nanos(i64::MAX / 2);
-    let mut domain = domain_source(
+    let mut domain = domain_ingestor(
         &cluster,
-        "earliest",
         ScriptedStart::Unrecorded {
             domain_time: Some(after_every_record),
         },
@@ -556,16 +567,16 @@ async fn a_paced_partition_without_a_record_after_the_domain_time_starts_where_i
     .await;
 
     let resumed = domain
-        .source
+        .ingestor
         .resume()
         .await
-        .assured("the source takes up the partition its schedule assigns it");
+        .assured("the ingestor takes up the partition its schedule assigns it");
 
     assert!(matches!(resumed, IngestorResume::Ready));
     assert_eq!(*domain.stored.lock(), vec![position(0, 1)]);
     publish(&cluster).await;
     assert_eq!(
-        read_positions(&mut domain.source).await,
+        read_positions(&mut domain.ingestor).await,
         vec![position(0, 2)]
     );
 }
@@ -575,18 +586,13 @@ async fn a_recorded_partition_resumes_from_its_domain_offset() {
     let cluster = cluster();
     publish(&cluster).await;
     publish(&cluster).await;
-    let mut domain = domain_source(
-        &cluster,
-        "latest",
-        ScriptedStart::Recorded { next_offset: 1 },
-    )
-    .await;
+    let mut domain = domain_ingestor(&cluster, ScriptedStart::Recorded { next_offset: 1 }).await;
 
     let resumed = domain
-        .source
+        .ingestor
         .resume()
         .await
-        .assured("the source takes up the partition its schedule assigns it");
+        .assured("the ingestor takes up the partition its schedule assigns it");
 
     assert!(matches!(resumed, IngestorResume::Ready));
     assert!(
@@ -598,7 +604,7 @@ async fn a_recorded_partition_resumes_from_its_domain_offset() {
         "a resume replaces no domain offsets"
     );
     assert_eq!(
-        read_positions(&mut domain.source).await,
+        read_positions(&mut domain.ingestor).await,
         vec![position(0, 2)]
     );
 }
@@ -607,23 +613,18 @@ async fn a_recorded_partition_resumes_from_its_domain_offset() {
 async fn a_domain_offset_past_what_its_partition_holds_resumes_at_the_partition_end() {
     let cluster = cluster();
     publish(&cluster).await;
-    let mut domain = domain_source(
-        &cluster,
-        "earliest",
-        ScriptedStart::Recorded { next_offset: 7 },
-    )
-    .await;
+    let mut domain = domain_ingestor(&cluster, ScriptedStart::Recorded { next_offset: 7 }).await;
 
     let resumed = domain
-        .source
+        .ingestor
         .resume()
         .await
-        .assured("the source takes up the partition its schedule assigns it");
+        .assured("the ingestor takes up the partition its schedule assigns it");
 
     assert!(matches!(resumed, IngestorResume::Ready));
     publish(&cluster).await;
     assert_eq!(
-        read_positions(&mut domain.source).await,
+        read_positions(&mut domain.ingestor).await,
         vec![position(0, 2)]
     );
 }
@@ -635,13 +636,13 @@ async fn a_new_start_point_replaces_the_domain_offset_of_every_partition() {
     // librdkafka's mock broker finds no record by timestamp, so the start point places the
     // partition at its end as it stood before the lookup.
     let start = Timestamp::from_unix_nanos(0);
-    let mut domain = domain_source(&cluster, "earliest", ScriptedStart::At(start)).await;
+    let mut domain = domain_ingestor(&cluster, ScriptedStart::At(start)).await;
 
     let resumed = domain
-        .source
+        .ingestor
         .resume()
         .await
-        .assured("the source takes up the partition its schedule assigns it");
+        .assured("the ingestor takes up the partition its schedule assigns it");
 
     assert!(matches!(resumed, IngestorResume::Ready));
     assert_eq!(*domain.resets.lock(), vec![position(0, 1)]);
@@ -651,7 +652,7 @@ async fn a_new_start_point_replaces_the_domain_offset_of_every_partition() {
     );
     publish(&cluster).await;
     assert_eq!(
-        read_positions(&mut domain.source).await,
+        read_positions(&mut domain.ingestor).await,
         vec![position(0, 2)]
     );
 }
@@ -662,9 +663,8 @@ async fn a_concurrent_explicit_start_uses_the_canonical_partition_position() {
     publish(&cluster).await;
     // Another initializer chose offset 0 before this record arrived. The mock broker's later
     // timestamp lookup finds no timestamp, so this instance resolves the partition's end, 1.
-    let mut domain = domain_source(
+    let mut domain = domain_ingestor(
         &cluster,
-        "earliest",
         ScriptedStart::ConcurrentAt {
             timestamp: Timestamp::from_unix_nanos(0),
             canonical_next_offset: 0,
@@ -672,19 +672,19 @@ async fn a_concurrent_explicit_start_uses_the_canonical_partition_position() {
     )
     .await;
     let resumed = domain
-        .source
+        .ingestor
         .resume()
         .await
-        .assured("the source takes its partition up after the generation start is accepted");
+        .assured("the ingestor takes its partition up after the generation start is accepted");
     assert!(matches!(resumed, IngestorResume::Ready));
     assert_eq!(*domain.resets.lock(), vec![position(0, 1)]);
     publish(&cluster).await;
     assert_eq!(
-        read_positions(&mut domain.source).await,
+        read_positions(&mut domain.ingestor).await,
         vec![position(0, 1)]
     );
     assert_eq!(
-        read_positions(&mut domain.source).await,
+        read_positions(&mut domain.ingestor).await,
         vec![position(0, 2)]
     );
 }
@@ -692,14 +692,13 @@ async fn a_concurrent_explicit_start_uses_the_canonical_partition_position() {
 #[nervix_primitives::test]
 async fn a_new_generation_during_start_acceptance_requires_another_resume() {
     let cluster = cluster();
-    let mut domain = domain_source(
+    let mut domain = domain_ingestor(
         &cluster,
-        "earliest",
         ScriptedStart::ChangedGenerationAt(Timestamp::from_unix_nanos(0)),
     )
     .await;
     let failure = domain
-        .source
+        .ingestor
         .resume()
         .await
         .err()
@@ -714,60 +713,42 @@ async fn a_new_generation_during_start_acceptance_requires_another_resume() {
     assert_eq!(*domain.resets.lock(), vec![position(0, 0)]);
 }
 
-#[nervix_primitives::test]
-async fn a_client_that_refuses_resets_cannot_start_an_unrecorded_partition() {
-    let cluster = cluster();
-    let mut domain = domain_source(
-        &cluster,
-        "error",
-        ScriptedStart::Unrecorded { domain_time: None },
-    )
-    .await;
+#[test]
+fn a_consumer_group_starts_where_its_statement_declares() {
+    let entries = [entry("bootstrap.servers", "127.0.0.1:9092")];
+    for (start_at, reset) in [
+        (IngestStartPosition::Earliest, "earliest"),
+        (IngestStartPosition::Latest, "latest"),
+    ] {
+        let mode = KafkaTopicIngestorOffsetMode::ConsumerGroup {
+            group_id: "readers".to_string(),
+            commit: KafkaGroupCommit::EachAcknowledgedBatch,
+            start_at,
+        };
 
-    let resumed = domain.source.resume().await;
+        let config = mode.consumer_config(&entries);
 
-    let Err(report) = resumed else {
-        panic!("a partition without an offset has no start under a refusing reset");
-    };
-    let failure = report
-        .downcast_ref::<KafkaTopicIngestorError>()
-        .assured("the resume failure names the partition it could not start");
-    assert!(
-        matches!(
-            failure,
-            KafkaTopicIngestorError::ResetRefused { topic, partition: 0 } if topic == TOPIC
-        ),
-        "unexpected Kafka source failure {failure:?}"
-    );
-    assert!(domain.stored.lock().is_empty());
+        assert_eq!(config.get("auto.offset.reset"), Some(reset));
+        assert_eq!(config.get("group.id"), Some("readers"));
+        assert_eq!(config.get("bootstrap.servers"), Some("127.0.0.1:9092"));
+    }
 }
 
 #[test]
-fn a_partition_without_an_offset_starts_where_librdkafka_resets_it() {
-    let mut config = ClientConfig::new();
-    let undeclared = KafkaOffsetReset::of(&config).assured("an undeclared policy has a default");
-    assert_eq!(undeclared, KafkaOffsetReset::Latest);
-
-    // librdkafka reads a declared policy without regard to case or leading spaces.
-    let declared = [
-        (" Earliest", KafkaOffsetReset::Earliest),
-        ("beginning", KafkaOffsetReset::Earliest),
-        ("END", KafkaOffsetReset::Latest),
-        ("error", KafkaOffsetReset::Refuse),
-    ];
-    for (value, expected) in declared {
-        config.set("auto.offset.reset", value);
-        let policy = KafkaOffsetReset::of(&config).assured("librdkafka accepts the test policies");
-        assert_eq!(policy, expected, "auto.offset.reset = {value:?}");
-    }
-
-    config.set("auto.offset.reset", "newest");
-    let refused = KafkaOffsetReset::of(&config);
-    let Err(report) = refused else {
-        panic!("librdkafka refuses a policy it does not name");
+fn a_domain_offset_consumer_past_what_a_partition_retains_moves_to_the_earliest_record() {
+    let (_partition_watch, rebalanced) = watch::channel(0);
+    let mode = KafkaTopicIngestorOffsetMode::Domain {
+        group_id: "orders-domain".to_string(),
+        offsets: KafkaDomainOffsetHost::new(ScriptedDomainOffsets {
+            start: ScriptedStart::Unrecorded { domain_time: None },
+            stored: Arc::new(Mutex::new(Vec::new())),
+            resets: Arc::new(Mutex::new(Vec::new())),
+        }),
+        rebalance: rebalanced,
     };
-    assert!(matches!(
-        report.current_context(),
-        KafkaTopicIngestorError::Initialize
-    ));
+
+    let config = mode.consumer_config(&[entry("bootstrap.servers", "127.0.0.1:9092")]);
+
+    assert_eq!(config.get("auto.offset.reset"), Some("earliest"));
+    assert_eq!(config.get("group.id"), Some("orders-domain"));
 }

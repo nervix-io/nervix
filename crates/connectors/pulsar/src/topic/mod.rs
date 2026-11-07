@@ -2,11 +2,13 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Pulsar client and producer configuration, its TLS options, topic
-//!   qualification, the shared-subscription consumers an ingestor reads through, message
-//!   properties as ingest headers, per-message acknowledgement, record and property
-//!   publication, the bounded receipts a NO ACK producer retains through finish, and the classification of a send or its receipt, including a message the
-//!   client refuses because it exceeds the maximum message size the broker announced.
+//! - **Owns.** The one client both directions connect through, producer configuration, topic
+//!   qualification, the consumers of the declared subscription type an ingestor reads through,
+//!   message properties as ingest headers, per-message acknowledgement, record and property
+//!   publication, the event time and delivery time a message carries from its record, the
+//!   bounded receipts a NO ACK producer retains through finish, and the classification of a send
+//!   or its receipt, including a message the client refuses because it exceeds the maximum
+//!   message size the broker announced.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
 //!   `pulsar`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -24,8 +26,12 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod connection;
 mod ingestor;
+mod message_times;
 
+#[cfg(test)]
+mod message_times_tests;
 #[cfg(test)]
 mod receipt_tests;
 
@@ -33,33 +39,40 @@ use std::future::Future;
 
 use arch_into::ArchInto as _;
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use connection::PulsarClientConnection;
+pub use connection::{PulsarClientError, PulsarRefusal};
 use error_stack::Report;
 use futures_util::{FutureExt, StreamExt as _, stream::FuturesUnordered};
 pub use ingestor::{
-    PulsarAckReceipts, PulsarMessageProperties, PulsarRefusal, PulsarTopicIngestor,
-    PulsarTopicIngestorError, PulsarTopicIngestorMessage, PulsarTopicIngestorPlan,
-    PulsarTopicIngestorPosition, PulsarTopicIngestorSettings, PulsarUnresolvedRequest,
+    PulsarAckReceipts, PulsarMessageProperties, PulsarTopicIngestor, PulsarTopicIngestorError,
+    PulsarTopicIngestorMessage, PulsarTopicIngestorPlan, PulsarTopicIngestorPosition,
+    PulsarTopicIngestorSettings, PulsarUnresolvedRequest,
 };
+use message_times::{PulsarMessageTimeError, PulsarMessageTimes};
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerPublishingMode, BrokerVerdict, ConfirmationWindow,
     ConfirmationWindowError, EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost,
     EmitterLifecycle, EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult,
-    EmitterWriteError, PerRecordOutcome, RecordEmitter, RejectedEmitterMember, client_config_value,
-    client_tls_paths, optional_bool_client_config_value, optional_client_config_value,
-    read_tls_file,
+    EmitterWriteError, PerRecordOutcome, RecordEmitter, RecordKey, RejectedEmitterMember,
+    optional_client_config_value,
 };
 use nervix_models::{ClientConfigEntry, ConnectorKind, PulsarTopicName, Timestamp};
 use nervix_primitives::{
+    sync::{
+        Arc, StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::unconstrained,
     time::{Instant, timeout_at},
 };
 use pulsar::{
-    ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
-    TlsOptions as PulsarTlsOptions, TokioExecutor,
+    Error as PulsarError, TokioExecutor,
     error::{ConnectionError as PulsarConnectionError, ProducerError as PulsarProducerError},
     message::proto::{CommandSendReceipt, ServerError as PulsarServerError},
-    producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
+    producer::{Message as PulsarProducerMessage, ProducerOptions, SendFuture as PulsarSendFuture},
+    routing_policy::{CustomRoutingPolicy, RoutingPolicy},
 };
 use thiserror::Error;
 
@@ -87,6 +100,13 @@ fn qualified_topic(config: &[ClientConfigEntry], topic: &PulsarTopicName) -> Str
 /// Why one message is refused for good: sending it again cannot succeed while the broker keeps its
 /// configuration.
 #[derive(Debug, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "a refused message is a semantic per-record rejection the emitter answers with"
+    )
+)]
 enum PulsarRecordError {
     /// The client refused the message before writing it, because its metadata and payload
     /// together exceed the maximum message size the broker announced for the connection.
@@ -99,6 +119,9 @@ enum PulsarRecordError {
     /// size.
     #[error("the Pulsar broker does not allow the message: {reason}")]
     NotAllowed { reason: String },
+    /// The record's envelope sets a time its message cannot carry.
+    #[error(transparent)]
+    MessageTime(#[from] PulsarMessageTimeError),
 }
 
 impl PulsarRecordError {
@@ -147,6 +170,7 @@ pub struct PulsarTopicEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub topic: PulsarTopicName,
     pub mode: BrokerPublishingMode,
+    pub partition_from_branch: bool,
 }
 
 pub struct PulsarTopicEmitter {
@@ -157,6 +181,64 @@ pub struct PulsarTopicEmitter {
 enum PulsarPublishing {
     NoAck(UnconfirmedPulsarPublication),
     Ack(AckConfirmation),
+    RoutedNoAck {
+        receipts: Box<UnconfirmedPulsarPublication>,
+        selected: Arc<AtomicU64>,
+    },
+    RoutedAck {
+        settings: AckConfirmation,
+        selected: Arc<AtomicU64>,
+    },
+}
+
+enum PulsarPublicationRef<'a> {
+    NoAck(&'a mut UnconfirmedPulsarPublication),
+    Ack(AckConfirmation),
+}
+
+/// The SDK reads the selected ordinal synchronously in send_non_blocking, before its first
+/// await, while the emitter exclusively borrows the producer. The selected atomic satisfies the
+/// SDK's Sync callback contract; it is not an inter-task publication or a synchronization signal.
+struct BranchPartitionRouting {
+    selected: Arc<AtomicU64>,
+}
+
+impl CustomRoutingPolicy for BranchPartitionRouting {
+    fn route(&self, _message: &PulsarProducerMessage, num_producers: usize) -> usize {
+        assert!(
+            num_producers > 0,
+            "the SDK installs at least one topic producer"
+        );
+        let count: u64 = num_producers.arch_into();
+        (self.selected.load(Ordering::Relaxed) % count).arch_into()
+    }
+}
+
+impl PulsarPublishing {
+    fn parts(&mut self) -> (PulsarPublicationRef<'_>, Option<&AtomicU64>) {
+        match self {
+            Self::NoAck(receipts) => (PulsarPublicationRef::NoAck(receipts), None),
+            Self::Ack(settings) => (PulsarPublicationRef::Ack(*settings), None),
+            Self::RoutedNoAck { receipts, selected } => {
+                (PulsarPublicationRef::NoAck(receipts), Some(selected))
+            }
+            Self::RoutedAck { settings, selected } => {
+                (PulsarPublicationRef::Ack(*settings), Some(selected))
+            }
+        }
+    }
+}
+
+impl BranchPartitionRouting {
+    fn select(selected: Option<&AtomicU64>, source_partition: Option<u64>) {
+        if let Some(selected) = selected {
+            selected.store(
+                source_partition
+                    .verified("an explicit partition envelope retains its source ordinal"),
+                Ordering::Relaxed,
+            );
+        }
+    }
 }
 
 impl From<BrokerPublishingMode> for PulsarPublishing {
@@ -189,17 +271,29 @@ impl UnconfirmedPulsarPublication {
         &mut self,
         producer: &mut pulsar::Producer<TokioExecutor>,
         records: Vec<EmitterRecord>,
+        selected: Option<&AtomicU64>,
     ) -> PerRecordOutcome<EmitterRecordId> {
         self.collect_ready();
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
-            self.make_room().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
-            let sent = producer
-                .send_non_blocking(PulsarTopicEmitter::message(record))
-                .await;
+            let source_partition = record.source_partition();
+            let message = match PulsarTopicEmitter::message(record) {
+                Ok(message) => message,
+                Err(rejection) => {
+                    outcome.reject(PulsarTopicEmitter::rejected(
+                        record_id,
+                        occurred_at,
+                        &rejection,
+                    ));
+                    continue;
+                }
+            };
+            self.make_room().await;
+            BranchPartitionRouting::select(selected, source_partition);
+            let sent = producer.send_non_blocking(message).await;
             match sent.map_err(PulsarSendFailure::from) {
                 Ok(receipt) => {
                     self.retain(receipt);
@@ -348,11 +442,30 @@ impl PulsarTopicEmitter {
                 })
                 .attach_printable(message));
         }
+        let selected = config
+            .partition_from_branch
+            .then(|| Arc::new(AtomicU64::new(0)));
+        let policy = match &selected {
+            Some(selected) => RoutingPolicy::Custom(StdArc::new(BranchPartitionRouting {
+                selected: Arc::clone(selected),
+            })),
+            None => RoutingPolicy::RoundRobin,
+        };
         let producer =
-            Self::producer_from_config(&config.config, &config.topic, config.mode).await?;
+            Self::producer_from_config(&config.config, &config.topic, config.mode, policy).await?;
+        let publishing = match (config.mode, selected) {
+            (mode, None) => mode.into(),
+            (BrokerPublishingMode::NoAck, Some(selected)) => PulsarPublishing::RoutedNoAck {
+                receipts: Box::default(),
+                selected,
+            },
+            (BrokerPublishingMode::Ack(settings), Some(selected)) => {
+                PulsarPublishing::RoutedAck { settings, selected }
+            }
+        };
         Ok(Self {
             producer,
-            publishing: config.mode.into(),
+            publishing,
         })
     }
 
@@ -360,121 +473,53 @@ impl PulsarTopicEmitter {
         config: &[ClientConfigEntry],
         topic: &PulsarTopicName,
         mode: BrokerPublishingMode,
+        policy: RoutingPolicy,
     ) -> EmitterStartResult<pulsar::Producer<TokioExecutor>> {
-        let pulsar = Self::client_from_config(config, mode).await?;
+        // A publish's acknowledgement timeout bounds what the driver waits for on its behalf.
+        let operation_timeout = match mode {
+            BrokerPublishingMode::NoAck => None,
+            BrokerPublishingMode::Ack(settings) => Some(settings.timeout),
+        };
+        let pulsar = PulsarClientConnection::new(config, operation_timeout)
+            .open()
+            .await
+            .map_err(Self::client_error)?;
         let topic_name = qualified_topic(config, topic);
         pulsar
             .producer()
             .with_topic(topic_name)
+            .with_options(ProducerOptions {
+                routing_policy: Some(policy),
+                ..ProducerOptions::default()
+            })
             .build()
             .await
             .map_err(Self::start_error)
     }
 
-    async fn client_from_config(
-        config: &[ClientConfigEntry],
-        mode: BrokerPublishingMode,
-    ) -> EmitterStartResult<Pulsar<TokioExecutor>> {
-        let addr = Self::config_value(config, "addr")?;
-        let (connection_retry_options, operation_retry_options) = Self::retry_options(mode);
-        let mut builder = Pulsar::builder(addr, TokioExecutor)
-            .with_connection_retry_options(connection_retry_options)
-            .with_operation_retry_options(operation_retry_options)
-            .with_outbound_channel_size(PULSAR_OUTBOUND_CAPACITY);
-        if let Some(tls_options) = Self::tls_options_from_config(config)? {
-            if let Some(certificate_chain) = tls_options.certificate_chain {
-                builder = builder.with_certificate_chain(certificate_chain);
-            }
-            builder = builder
-                .with_allow_insecure_connection(tls_options.allow_insecure_connection)
-                .with_tls_hostname_verification_enabled(
-                    tls_options.tls_hostname_verification_enabled,
-                );
-        }
-        builder.build().await.map_err(Self::start_error)
-    }
-
-    fn retry_options(
-        mode: BrokerPublishingMode,
-    ) -> (ConnectionRetryOptions, OperationRetryOptions) {
-        let mut operation = OperationRetryOptions {
-            max_retries: Some(0),
-            ..Default::default()
-        };
-        if let BrokerPublishingMode::Ack(settings) = mode {
-            operation.operation_timeout = settings.timeout;
-        }
-        (
-            ConnectionRetryOptions {
-                max_retries: 0,
-                ..Default::default()
-            },
-            operation,
-        )
-    }
-
-    fn tls_options_from_config(
-        config: &[ClientConfigEntry],
-    ) -> EmitterStartResult<Option<PulsarTlsOptions>> {
-        let tls = client_tls_paths(config);
-        if tls.cert_file.is_some() || tls.key_file.is_some() {
-            return Err(Self::config_error(
-                "Pulsar TLS currently supports only 'tls_ca_file'; client authentication via \
-                 'tls_cert_file' and 'tls_key_file' is not supported",
-            ));
-        }
-
-        let allow_insecure_connection =
-            Self::optional_bool_config_value(config, "tls_allow_insecure_connection")?;
-        let tls_hostname_verification_enabled =
-            Self::optional_bool_config_value(config, "tls_hostname_verification_enabled")?;
-
-        if tls.ca_file.is_none()
-            && allow_insecure_connection.is_none()
-            && tls_hostname_verification_enabled.is_none()
-        {
-            return Ok(None);
-        }
-
-        let mut tls_options = PulsarTlsOptions::default();
-        if let Some(ca_file) = tls.ca_file.as_ref() {
-            tls_options.certificate_chain = Some({
-                let mapping_input = read_tls_file(ca_file, "TLS CA certificate");
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(error) => Err({
-                        let message = error.current_context().to_string();
-                        error
-                            .change_context(EmitterOpenError::InvalidConfiguration {
-                                connector: PULSAR.keyword(),
-                            })
-                            .attach_printable(message)
-                    }),
-                }
-            }?);
-        }
-        if let Some(allow_insecure_connection) = allow_insecure_connection {
-            tls_options.allow_insecure_connection = allow_insecure_connection;
-        }
-        if let Some(tls_hostname_verification_enabled) = tls_hostname_verification_enabled {
-            tls_options.tls_hostname_verification_enabled = tls_hostname_verification_enabled;
-        }
-        Ok(Some(tls_options))
-    }
-
     /// Every way an ACK publish ends goes through the shared window, which settles answers
     /// already given before returning a driver, enqueue or timeout failure.
     async fn publish_confirmed(
-        &mut self,
+        producer: &mut pulsar::Producer<TokioExecutor>,
         records: Vec<EmitterRecord>,
         settings: AckConfirmation,
+        selected: Option<&AtomicU64>,
     ) -> PerRecordOutcome<EmitterRecordId> {
         let mut window = ConfirmationWindow::new(PULSAR.keyword(), settings, records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
-            let sent = self.producer.send_non_blocking(Self::message(record)).await;
+            let source_partition = record.source_partition();
+            let message = match Self::message(record) {
+                Ok(message) => message,
+                Err(rejection) => {
+                    window.reject(Self::rejected(record_id, occurred_at, &rejection));
+                    continue;
+                }
+            };
+            BranchPartitionRouting::select(selected, source_partition);
+            let sent = producer.send_non_blocking(message).await;
             let receipt = match sent.map_err(PulsarSendFailure::from) {
                 Ok(receipt) => receipt,
                 Err(PulsarSendFailure::Rejected(rejection)) => {
@@ -503,13 +548,23 @@ impl PulsarTopicEmitter {
         }
     }
 
-    fn message(record: EmitterRecord) -> PulsarProducerMessage {
-        PulsarProducerMessage {
+    /// The producer message of `record`, or why `record` cannot be one.
+    fn message(record: EmitterRecord) -> Result<PulsarProducerMessage, PulsarRecordError> {
+        let times = PulsarMessageTimes::of(&record)?;
+        let (partition_key, partition_key_b64_encoded) = match record.key() {
+            None => (None, None),
+            Some(RecordKey::String(key)) => (Some(key.clone()), None),
+            Some(RecordKey::Bytes(key)) => (Some(STANDARD.encode(key)), Some(true)),
+        };
+        Ok(PulsarProducerMessage {
             payload: record.payload,
             properties: record.headers.into_iter().collect(),
-            partition_key: record.key,
+            partition_key,
+            partition_key_b64_encoded,
+            event_time: times.event_time,
+            deliver_at_time: times.deliver_at_time,
             ..Default::default()
-        }
+        })
     }
 
     fn rejected(
@@ -520,48 +575,21 @@ impl PulsarTopicEmitter {
         RejectedEmitterMember::external(record, occurred_at, rejection.message())
     }
 
-    fn config_value(config: &[ClientConfigEntry], key: &str) -> EmitterStartResult<String> {
-        {
-            let mapping_input = client_config_value(config, key, PULSAR.keyword());
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration {
-                            connector: PULSAR.keyword(),
-                        })
-                        .attach_printable(message)
-                }),
+    /// A client that did not connect: one its configuration cannot describe is invalid, and any
+    /// other could not be initialized. An emitter shows the message its emitter attached, so the
+    /// failure's whole chain is what its status says.
+    fn client_error(error: Report<PulsarClientError>) -> Report<EmitterOpenError> {
+        let connector = PULSAR.keyword();
+        let context = match error.current_context() {
+            PulsarClientError::Configuration => {
+                EmitterOpenError::InvalidConfiguration { connector }
             }
-        }
-    }
-
-    fn optional_bool_config_value(
-        config: &[ClientConfigEntry],
-        key: &str,
-    ) -> EmitterStartResult<Option<bool>> {
-        {
-            let mapping_input = optional_bool_client_config_value(config, key);
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration {
-                            connector: PULSAR.keyword(),
-                        })
-                        .attach_printable(message)
-                }),
+            PulsarClientError::Refused { .. } | PulsarClientError::NotOpened => {
+                EmitterOpenError::Initialize { connector }
             }
-        }
-    }
-
-    fn config_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
-        Report::new(EmitterOpenError::InvalidConfiguration {
-            connector: PULSAR.keyword(),
-        })
-        .attach_printable(error.to_string())
+        };
+        let description = format!("{error:#}");
+        error.change_context(context).attach_printable(description)
     }
 
     fn start_error(error: PulsarError) -> Report<EmitterOpenError> {
@@ -602,9 +630,10 @@ impl EmitterLifecycle for PulsarTopicEmitter {
     /// Producer acceptance completes NO ACK records, while finish waits for their receipts before
     /// dropping the producer. An ACK publish already settled all answers it could observe.
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
-        match &mut self.publishing {
-            PulsarPublishing::NoAck(receipts) => receipts.finish(deadline).await,
-            PulsarPublishing::Ack(_) => Ok(EmitterFinish::NothingHeld),
+        let (publishing, _) = self.publishing.parts();
+        match publishing {
+            PulsarPublicationRef::NoAck(receipts) => receipts.finish(deadline).await,
+            PulsarPublicationRef::Ack(_) => Ok(EmitterFinish::NothingHeld),
         }
     }
 }
@@ -612,13 +641,16 @@ impl EmitterLifecycle for PulsarTopicEmitter {
 #[async_trait]
 impl RecordEmitter for PulsarTopicEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
-        let settings = match &mut self.publishing {
-            PulsarPublishing::NoAck(receipts) => {
-                return receipts.publish(&mut self.producer, records).await;
+        let (publishing, selected) = self.publishing.parts();
+        let settings = match publishing {
+            PulsarPublicationRef::NoAck(receipts) => {
+                return receipts
+                    .publish(&mut self.producer, records, selected)
+                    .await;
             }
-            PulsarPublishing::Ack(settings) => *settings,
+            PulsarPublicationRef::Ack(settings) => settings,
         };
-        self.publish_confirmed(records, settings).await
+        Self::publish_confirmed(&mut self.producer, records, settings, selected).await
     }
 }
 
@@ -632,6 +664,7 @@ mod tests {
 
     use futures_util::SinkExt as _;
     use meticulous::ResultExt as _;
+    use nervix_connector::RecordEnvelope;
     use nervix_primitives::{
         net::{TcpListener, TcpStream},
         sync::{CancellationToken, mpsc},
@@ -642,13 +675,12 @@ mod tests {
         proto::{
             BaseCommand, CommandConnected, CommandLookupTopicResponse,
             CommandPartitionedTopicMetadataResponse, CommandPong, CommandProducerSuccess,
-            CommandSendError, CommandSendReceipt, CommandSuccess, MessageIdData,
+            CommandSendError, CommandSendReceipt, CommandSuccess, MessageIdData, MessageMetadata,
             base_command::Type as CommandType,
             command_lookup_topic_response::LookupType as TopicLookupType,
             command_partitioned_topic_metadata_response::LookupType as PartitionLookupType,
         },
     };
-    use tempfile::tempdir;
     use tokio_util::codec::Framed;
 
     use super::*;
@@ -786,6 +818,62 @@ mod tests {
         )));
     }
 
+    /// The host shows the message an emitter attached, so a client's whole failure reaches the
+    /// emitter's status while the emitter's own context stays what a caller decides from.
+    #[test]
+    fn an_emitter_describes_a_client_that_did_not_connect_by_its_whole_failure() {
+        let refused = PulsarTopicEmitter::client_error(Report::new(PulsarClientError::Refused {
+            refusal: PulsarRefusal {
+                error: Some(PulsarServerError::AuthenticationError),
+                reason: Some("Unable to authenticate".to_string()),
+            },
+        }));
+        let not_opened = PulsarTopicEmitter::client_error(
+            Report::new(PulsarError::Connection(PulsarConnectionError::Disconnected))
+                .change_context(PulsarClientError::NotOpened),
+        );
+        let configuration =
+            PulsarTopicEmitter::client_error(Report::new(PulsarClientError::Configuration));
+
+        let connector = PULSAR.keyword();
+        assert_eq!(
+            refused.current_context(),
+            &EmitterOpenError::Initialize { connector }
+        );
+        assert_eq!(
+            not_opened.current_context(),
+            &EmitterOpenError::Initialize { connector }
+        );
+        assert_eq!(
+            configuration.current_context(),
+            &EmitterOpenError::InvalidConfiguration { connector }
+        );
+        assert_eq!(
+            attached_message(&refused),
+            "the PULSAR broker refused the connection with AuthenticationError: Unable to \
+             authenticate"
+        );
+        assert_eq!(
+            attached_message(&not_opened),
+            format!(
+                "no connection to the PULSAR broker opened: {}",
+                PulsarError::Connection(PulsarConnectionError::Disconnected)
+            )
+        );
+        assert_eq!(
+            attached_message(&configuration),
+            "invalid PULSAR client configuration"
+        );
+    }
+
+    /// The printable attachment the host reads for an emitter's status.
+    fn attached_message(error: &Report<EmitterOpenError>) -> String {
+        let attached = error
+            .downcast_ref::<String>()
+            .assured("the emitter attached the client's failure as text");
+        attached.clone()
+    }
+
     /// How the fake broker answers one message, chosen by the first byte of its payload.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum BrokerAnswer {
@@ -820,12 +908,18 @@ mod tests {
         OldestLastAfter(usize),
     }
 
+    /// One message that reached the fake broker.
+    struct ReceivedMessage {
+        payload: Vec<u8>,
+        metadata: MessageMetadata,
+    }
+
     /// A Pulsar broker on loopback that serves the handshake one producer needs, announces
     /// `max_message_size`, and answers each message it receives by its payload. It reports every
-    /// payload that reaches it.
+    /// message that reaches it.
     struct FakeBroker {
         service_url: String,
-        received: mpsc::UnboundedReceiver<Vec<u8>>,
+        received: mpsc::UnboundedReceiver<ReceivedMessage>,
     }
 
     /// One message the fake broker received and has not answered yet.
@@ -872,7 +966,7 @@ mod tests {
             service_url: String,
             max_message_size: Option<i32>,
             order: AnswerOrder,
-            received: mpsc::UnboundedSender<Vec<u8>>,
+            received: mpsc::UnboundedSender<ReceivedMessage>,
         ) {
             let mut held: Vec<HeldMessage> = Vec::new();
             while let Some(Ok(frame)) = connection.next().await {
@@ -889,13 +983,17 @@ mod tests {
                 } else if let Some(request) = command.producer {
                     replies.push(Self::producer_ready(request.request_id));
                 } else if let Some(send) = command.send {
-                    let payload = frame.payload.expect("a send carries its message").data;
+                    let message = frame.payload.expect("a send carries its message");
                     held.push(HeldMessage {
                         producer_id: send.producer_id,
                         sequence_id: send.sequence_id,
-                        answer: BrokerAnswer::for_payload(&payload),
+                        answer: BrokerAnswer::for_payload(&message.data),
                     });
-                    if received.send(payload).is_err() {
+                    let received_message = ReceivedMessage {
+                        payload: message.data,
+                        metadata: message.metadata,
+                    };
+                    if received.send(received_message).is_err() {
                         // The test that reads the payloads has finished.
                         return;
                     }
@@ -1061,13 +1159,18 @@ mod tests {
             })
         }
 
-        /// The next payload to reach the broker. Messages on one connection arrive in the order
+        /// The next message to reach the broker. Messages on one connection arrive in the order
         /// they were written.
-        async fn next_payload(&mut self) -> Vec<u8> {
+        async fn next_message(&mut self) -> ReceivedMessage {
             nervix_primitives::time::timeout(Duration::from_secs(60), self.received.recv())
                 .await
                 .expect("the broker receives the next message")
                 .expect("the broker keeps listening while the test runs")
+        }
+
+        /// The next payload to reach the broker.
+        async fn next_payload(&mut self) -> Vec<u8> {
+            self.next_message().await.payload
         }
     }
 
@@ -1082,6 +1185,15 @@ mod tests {
 
     impl nervix_connector::EmitterEventReporter for SilentHost {
         fn report_error(&self, _message: String) {}
+    }
+
+    impl nervix_connector::EmitterPayloadObserver for SilentHost {
+        fn record_prepared_payload(
+            &self,
+            _measurement: nervix_connector::EmitterPayloadMeasurement,
+        ) {
+        }
+        fn record_payload_subdivisions(&self, _subdivisions: u64) {}
     }
 
     impl nervix_connector::EmitterStagingDirectory for SilentHost {
@@ -1107,6 +1219,7 @@ mod tests {
 
     async fn connector(broker: &FakeBroker, mode: BrokerPublishingMode) -> PulsarTopicEmitter {
         let config = PulsarTopicEmitterConfig {
+            partition_from_branch: false,
             config: vec![entry("addr", &broker.service_url)],
             topic: PulsarTopicName::parse("limited").expect("the test topic is a valid topic name"),
             mode,
@@ -1223,6 +1336,7 @@ mod tests {
     async fn a_timeout_past_the_clock_range_is_refused_before_the_driver_uses_it() {
         let broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
         let config = PulsarTopicEmitterConfig {
+            partition_from_branch: false,
             config: vec![entry("addr", &broker.service_url)],
             topic: PulsarTopicName::parse("limited").assured("the fixture topic is a valid name"),
             mode: BrokerPublishingMode::Ack(AckConfirmation {
@@ -1352,64 +1466,115 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_retries_are_disabled_in_favor_of_the_declared_retry_policy() {
-        let (connection, operation) =
-            PulsarTopicEmitter::retry_options(BrokerPublishingMode::NoAck);
-
-        assert_eq!(connection.max_retries, 0);
-        assert_eq!(operation.max_retries, Some(0));
-        assert!(!operation.allow_retry(0));
+    /// A record of a batch that executed at 2001-02-03T04:05:06.789Z, which writes `timestamp` and
+    /// `deliver_after`.
+    fn timed_record(
+        index: usize,
+        payload: &[u8],
+        timestamp: Timestamp,
+        deliver_after: Option<Duration>,
+    ) -> EmitterRecord {
+        let envelope = RecordEnvelope {
+            timestamp: Some(timestamp),
+            deliver_after,
+            ..RecordEnvelope::default()
+        };
+        let mut record = record(index, payload.to_vec()).with_envelope(envelope);
+        record.occurred_at = Timestamp::from_unix_nanos(981_173_106_789_000_000);
+        record
     }
 
-    #[test]
-    fn pulsar_tls_options_load_certificate_chain_and_flags() {
-        let tempdir = tempdir().expect("tempdir should be created");
-        let ca_path = tempdir.path().join("ca.pem");
-        std::fs::write(&ca_path, "test-ca").expect("ca file should be written");
+    #[nervix_primitives::test]
+    async fn a_messages_times_reach_the_broker_and_a_record_without_them_carries_none() {
+        for mode in [BrokerPublishingMode::NoAck, confirmed(1)] {
+            let mut broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+            let mut connector = connector(&broker, mode).await;
+            let timestamp = Timestamp::from_unix_nanos(1_000_000_002_000_000);
+            let deliver_after = Some(Duration::from_secs(5));
 
-        let options = PulsarTopicEmitter::tls_options_from_config(&[
-            entry("tls_ca_file", &ca_path.display().to_string()),
-            entry("tls_allow_insecure_connection", "true"),
-            entry("tls_hostname_verification_enabled", "false"),
-        ])
-        .expect("pulsar tls options should load")
-        .expect("tls options should be present");
+            let outcome = connector
+                .publish(vec![
+                    timed_record(0, b"timed", timestamp, deliver_after),
+                    record(1, b"untimed".to_vec()),
+                ])
+                .await
+                .into_parts();
 
+            assert_eq!(
+                outcome.delivered,
+                vec![EmitterRecordId::new(0), EmitterRecordId::new(1)],
+                "{mode:?}"
+            );
+            let timed = broker.next_message().await;
+            assert_eq!(timed.payload, b"timed");
+            assert_eq!(timed.metadata.event_time, Some(1_000_000_002));
+            assert_eq!(timed.metadata.deliver_at_time, Some(981_173_111_789));
+            let untimed = broker.next_message().await;
+            assert_eq!(untimed.payload, b"untimed");
+            assert_eq!(untimed.metadata.event_time, None);
+            assert_eq!(untimed.metadata.deliver_at_time, None);
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_record_whose_time_no_message_carries_is_rejected_before_it_is_written() {
+        for mode in [BrokerPublishingMode::NoAck, confirmed(1)] {
+            let mut broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+            let mut connector = connector(&broker, mode).await;
+            let before_the_epoch = Timestamp::from_unix_nanos(-1);
+
+            let outcome = connector
+                .publish(vec![
+                    timed_record(0, b"refused", before_the_epoch, None),
+                    record(1, b"written".to_vec()),
+                ])
+                .await
+                .into_parts();
+
+            assert_eq!(outcome.delivered, vec![EmitterRecordId::new(1)], "{mode:?}");
+            assert_eq!(
+                rejected_messages(&outcome.rejected),
+                vec![(
+                    EmitterRecordId::new(0),
+                    "PULSAR rejected record: message TIMESTAMP 1969-12-31T23:59:59.999999999Z \
+                     precedes 1970-01-01T00:00:00.001Z, the earliest event time a PULSAR message \
+                     carries"
+                        .to_string()
+                )],
+                "{mode:?}"
+            );
+            assert!(outcome.infrastructure_error.is_none(), "{mode:?}");
+            assert_eq!(
+                broker.next_payload().await,
+                b"written",
+                "the refused message, written first, never reaches the broker"
+            );
+        }
+    }
+
+    /// The host hands a record it retained to every attempt, so each one writes what the first
+    /// wrote, however much later it runs.
+    #[nervix_primitives::test]
+    async fn every_attempt_at_a_record_writes_the_times_of_the_first() {
+        let mut broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+        let mut connector = connector(&broker, confirmed(1)).await;
+        let timestamp = Timestamp::from_unix_nanos(1_000_000_002_000_000);
+        let deliver_after = Some(Duration::from_secs(5));
+
+        for _attempt in 0..2 {
+            let attempt = timed_record(0, b"timed", timestamp, deliver_after);
+            let outcome = connector.publish(vec![attempt]).await.into_parts();
+            assert_eq!(outcome.delivered, vec![EmitterRecordId::new(0)]);
+        }
+
+        let first = broker.next_message().await;
+        let second = broker.next_message().await;
+        assert_eq!(first.metadata.event_time, second.metadata.event_time);
         assert_eq!(
-            options
-                .certificate_chain
-                .expect("certificate chain should be present"),
-            b"test-ca".to_vec()
+            first.metadata.deliver_at_time,
+            second.metadata.deliver_at_time
         );
-        assert!(options.allow_insecure_connection);
-        assert!(!options.tls_hostname_verification_enabled);
-    }
-
-    #[test]
-    fn pulsar_tls_options_reject_client_auth_material() {
-        let error = PulsarTopicEmitter::tls_options_from_config(&[
-            entry("tls_cert_file", "/tmp/client.crt"),
-            entry("tls_key_file", "/tmp/client.key"),
-        ])
-        .expect_err("pulsar mTLS material should be rejected");
-        let error = format!("{error:?}");
-
-        assert!(error.contains("tls_cert_file"));
-        assert!(error.contains("tls_key_file"));
-    }
-
-    #[test]
-    fn pulsar_tls_options_reject_invalid_boolean_values() {
-        let error = PulsarTopicEmitter::tls_options_from_config(&[entry(
-            "tls_allow_insecure_connection",
-            "maybe",
-        )])
-        .expect_err("invalid pulsar tls boolean should be rejected");
-        let error = format!("{error:?}");
-
-        assert!(error.contains("tls_allow_insecure_connection"));
-        assert!(error.contains("maybe"));
+        assert_eq!(second.metadata.deliver_at_time, Some(981_173_111_789));
     }
 
     /// PULSAR TOPIC emitters declare last wins with exact names: a record's header writes become
@@ -1428,7 +1593,7 @@ mod tests {
         }
         let mut record = record(0, b"{}".to_vec());
         record.headers = headers;
-        let message = PulsarTopicEmitter::message(record);
+        let message = PulsarTopicEmitter::message(record).assured("the record sets no time");
         let properties: std::collections::BTreeMap<_, _> = message.properties.into_iter().collect();
         let expected = std::collections::BTreeMap::from([
             ("Tenant".to_string(), "x".to_string()),
@@ -1438,3 +1603,6 @@ mod tests {
         assert_eq!(properties, expected);
     }
 }
+
+#[cfg(test)]
+mod destination_properties;

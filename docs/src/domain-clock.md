@@ -107,8 +107,8 @@ selecting a different authority.
 5. Every node applies the resulting control-plane revision to its local domain-clock lifecycle
    before materializing executable work from that revision.
 6. The selected authority produces progress once its own node has installed the mapping and
-   authority fence. It delivers progress to each live peer after that peer advertises that it
-   installed the domain clocks of the required revision; neither waits for graph activation.
+   authority fence. It delivers progress to each live peer after that peer attaches with its
+   installed domain-clock revision; neither waits for graph activation.
 
 The mapping is therefore available before a graph task can bind its clock. A node joining later
 installs the existing mapping, logical origin, rate, generation, and authority fence. Its join time
@@ -137,6 +137,10 @@ incarnation through a gossip loss while its latest application-health observatio
 the node-unavailability interval and has not marked it unavailable. If that observation becomes
 stale, the node follows gossip's liveness verdict. Duplicate observations for one node name
 collapse to the newest incarnation.
+
+Changing the committed node-unavailability interval wakes existing authority-reconciliation and
+clock-installation waits. They reevaluate availability and their next health transition using the
+installed interval without recreating their subscription.
 
 Selection is deterministic. Candidates are ordered by node name, the domain name is hashed, and
 the hash selects one position in that ordered set. Every leader presented with the same domain and
@@ -220,17 +224,47 @@ value, so a fast clock or slow peer cannot create an unbounded queue. A node-wid
 bounds concurrent attempts independently of health, relay admission, cancellation, and terminal
 outcomes.
 
-Targets must be live and must advertise that their domain clocks match the committed runtime
-revision the producer started from, or a later one. Each node's domain clock owner follows every
-committed domain and schedule change, and it advertises a runtime revision once every domain clock
-the node holds, authority fence included, equals that revision's committed lifecycle. It advertises
-neither graph preparation nor activation, so a target whose graph installation waits still receives
-progress. A lifecycle change that only graph installation installs, such as a new generation of
-another domain, holds the advertisement until graph installation installs it. A new or reconnected
-target receives the producer's newest retained report when its advertisement reaches the required
-revision. Each request has a two-second physical deadline. Failure waits on a 200-millisecond
-physical backoff and then retries the newest report. Cancelling the authority stops an in-flight
-request and its backoff.
+Each receiver opens delivery with a typed `domain_clock_attach` request after every domain clock
+it holds, authority fence included, matches a committed runtime revision. The request names the
+receiver's full process identity, the domain, the installed revision and the authority fence it
+addressed. It uses the installed-clock phase of the node's
+[application progress](./interconnect.md#application-progress). A newer installed revision replaces
+the attachment, and an authority reassignment causes a fresh attachment to the new authority.
+
+Attachment follows clock installation, ahead of graph preparation and activation. A target whose
+graph installation waits on a departed node therefore still receives progress. A lifecycle change
+that only graph installation installs, such as a new generation of another domain, holds the
+installed-clock phase until graph installation installs it. An authority starts with no remote
+targets and accepts only authenticated live incarnations addressing its exact generation and
+authority fence, at its required installed revision or later. A late attachment cannot replace a
+newer revision of the same receiver incarnation. A replacement incarnation must meet the authority's
+minimum installed revision and inherits no progress from its predecessor. Replacing an attachment
+cancels its preceding delivery lifetime before publishing the replacement. Duplicate requests for
+the same attachment are idempotent.
+
+The producer registers the attachment version before reading availability and membership. If a
+handler accepts an attachment during those reads, the producer leaves the targets unchanged and
+uses the retained notification to refresh its snapshots. A preceding snapshot cannot discard the
+new attachment, and a handler holding an earlier availability view cannot replace a newer accepted
+receiver incarnation.
+
+An accepted duplicate overlapping that snapshot read invalidates it once, while retaining the exact
+attachment and cancellation lifetime. Further duplicates before the refresh and duplicates outside
+the read publish no notification. Preparing the read marks its version seen and its phase under one
+existing value guard; it adds no receiver allocation or lock acquisition.
+
+Delivery targets are accepted attachments intersected with effective availability. Departure stops
+their delivery tasks. An unavailable committed member can retain its attachment metadata, with no
+delivery task or pending report, so the same incarnation resumes with the newest frontier when it
+becomes available again. Metadata is bounded by current members and live joiners, with one
+incarnation per node name; a replacement incarnation must attach for itself. Removing a domain or
+changing its authority fence ends every attachment for the preceding fence.
+
+Each attachment or progress attempt has a two-second physical deadline. Failure waits on a
+200-millisecond physical backoff; attachment retries its current request and delivery retries the
+newest report. Replacement and terminal shutdown cancel the corresponding in-flight request and
+backoff. Gossip carries membership and availability observations; clock installation reaches the
+authority through attachment.
 
 A process stop request does not cancel clock authority reconciliation, progress production,
 progress delivery, or local installation. Those services remain active during application drain
@@ -239,7 +273,10 @@ logical deadlines, and so a committed ownership handoff can install the schedule
 needs. Terminal teardown cancels them only after drain support completes or explicitly reports
 abandonment. See [Shutdown And Recovery](./shutdown.md) for the phases these services span.
 
-The receiver first gets the reporting node name from the mutually authenticated interconnect. It
+The authority retains the receiver's authenticated transport process epoch with its attachment.
+Each delivery request checks the epoch of its selected connection before sending, so a retained
+worker cannot send to a replacement process under the same node name. The receiver gets the
+reporting node name from the mutually authenticated interconnect. It
 accepts progress only when the domain already exists and is not stopped, and the report matches the
 committed generation, authority revision, full authority identity, authenticated node name, and a
 nonzero tick id. A report is newer only when its tick id advances and its authority UTC observation
@@ -272,7 +309,7 @@ bound to its predecessor.
 
 Kafka domain offsets retain the generation in which an explicit start was applied. Resuming an
 instance in that generation uses its recorded positions; a partition without one uses the original
-start timestamp. A later explicit start applies under its new generation. This source-position
+start timestamp. A later explicit start applies under its new generation. This ingestor-position
 state travels with native checkpoints and backups, independently of clock authority or mapping;
 [Kafka ingestion](./ingestors.md#kafka) owns its acknowledgement and recovery contract.
 
@@ -455,6 +492,11 @@ that outlives the timeout, and the next session attaches the clock again; a call
 for the next clock event is woken and opens that session. A restoration refused as not found ends
 the attachment with reason `DomainRemoved`.
 
+Any request timeout that closes the native client's request registry wakes the exchange reader,
+including while a refused clock restoration waits before another attempt. The reader ends its
+frame routing before it reports the clock's interruption. A waiting clock reader can then restore
+on a new session without waiting for the transport or the preceding restoration delay.
+
 A detach and a restoration of the same clock never cross. The Rust client registers a detach
 before it sends it, and no restoration decides to attach the clock while a detach of it is in
 flight: a restoration that would has its attach wait until the detach has ended, and sends it only
@@ -504,6 +546,12 @@ Through `nx_session_domain_clock` a host reads the latest followed clock itself 
 the attach reply carried before it uses the first tick, and projects logical time, waits and
 admission with the Rust client's arithmetic instead of reimplementing it.
 
+The native Python package exposes that same Rust client through `Session.domain_clock` and
+`Session.next_clock_event`. Its `DomainClock.logical_time_at`, `wall_duration_until`,
+`admission_window` and `admits` use the client's clock arithmetic. The published Python paced
+driver reads the attached snapshot before submitting and pauses on `ClockEventKind.INTERRUPTED`
+until a subsequent `ClockEventKind.STATE`; it never advances pacing from a tick alone.
+
 ## Execution-Time Snapshots
 
 The clock is sampled once when a unit of domain work is accepted. The resulting execution snapshot
@@ -546,10 +594,20 @@ same guest-state lifetime replacement without changing the domain clock mapping.
 
 Generated records use the snapshot assigned to their generating operation. Buffered emitter
 batches and their retries retain the snapshot from acceptance, while external observation fields
-whose contract is actual UTC obtain that value at the shared source-host intake boundary or their
+whose contract is actual UTC obtain that value at the shared ingestor-host intake boundary or their
 connector boundary. An Iceberg emitter's `COMMIT EACH` is not measured from that retained snapshot:
 the host reads a fresh snapshot at the first cadence check after a flush stages rows and arms the
 commit's logical deadline from it, and a retry or drain forces the commit without a clock read.
+
+Emitter branch activity is measured at input acceptance in the domain's coordinate. TTL expiry is
+checked by physical maintenance against domain time, independently for each source's held
+branches. A wait for required materialized state belongs to that held work and ends when its
+branch expires. Removing a branch neither reassigns surviving records' execution snapshots nor
+creates a publish for an empty buffer. Force flush, retry and stop retain their existing clock
+ownership; branch maintenance does not turn a physical drain deadline into a logical one.
+The emitter retention owner captures the node's configured branch scan interval at startup;
+its physical wake is registered in the clock-boundary check. An unreadable clock defers that
+scan without discarding held work, and a pending stop defers expiry while its drain owns the task.
 
 An HTTP emitter's prepared method, target, headers, and optional body retain the execution
 snapshot of the admitted record through retries and an entity-pause drain. Changing the emitter
@@ -644,12 +702,14 @@ publication restores the old branch instance with its existing logical deadlines
 publication, recovery completes the fresh lifetime and never recreates the old instance or its
 timers.
 
-Recurring domain cadence is anchored to its initial logical schedule. The source host waits for
+Recurring domain cadence is anchored to its initial logical schedule. The ingestor host waits for
 each HTTP or Prometheus polling occurrence and passes its scheduled logical instant into the
 connector's poll operation; connector crates never bind or wait on a domain clock. HTTP polling and
 generator cadence begin immediately, while Prometheus polling begins after one interval. When work
-returns an HTTP response, its `metadata.polled_at` is that scheduled logical instant, while the
-host's separate observed instant records when the response reached the ingestion boundary. When work
+returns an HTTP response, its `metadata.polled_at` is that scheduled logical instant, and each sample
+of a Prometheus answer carries it as `metadata.evaluated_at`, the instant its query asked the API to
+evaluate. The host's separate observed instant records when the response reached the ingestion
+boundary. When work
 misses multiple occurrences, the cadence returns the newest due instant once and advances directly
 to the first future boundary. Consumers that need both meanings keep the scheduled due instant
 separate from the fresh execution snapshot taken when work actually runs.
@@ -707,6 +767,11 @@ not model time: under Shuttle a timeout never measures its deadline, and a check
 wins. HTTP request deadlines and `Retry-After` therefore stay physical, flush cadence keeps the
 domain clock, and no check establishes progress by waiting.
 
+An emitter's partial buffer and connector-staged acknowledged work keep their ingestor alive on a
+100-millisecond physical beat, even when another input is waiting for materialized state. New input
+does not postpone it, an active retry owns its existing beat, and no beat remains after all held work
+is released. This liveness deadline neither advances logical flush cadence nor confirms delivery.
+
 The web console's clock display is an external observer: its clock-display module reads browser UTC
 to project an attached paced mapping for the screen. That projection does not enter a node's read
 watermark, alter tick progress, or supply domain time to execution. The repository clock-boundary
@@ -732,7 +797,7 @@ This produces the following failure behavior:
 | --- | --- |
 | Leader transfer | The committed mapping and authority remain unchanged unless the effective candidate set also requires reconciliation |
 | Authority loss or restart | Consensus advances the authority revision and assigns another live voter incarnation; the mapping and lifecycle generation stay fixed. When the authority also led consensus, the survivors elect a leader first. Every node installs the new fence ahead of its graph installation |
-| Node join or reconnect | The node installs the committed generation before execution and receives the newest retained progress once it advertises its installed domain clocks |
+| Node join or reconnect | The node installs the committed generation before execution and receives the newest retained progress through its installed-clock attachment |
 | Session attach before a restarted node installs | The attach waits for the node's first installation of the committed domains, so it never reports a committed domain as missing |
 | Delayed old progress | Generation, revision, identity, and authenticated-peer checks discard it |
 | `STOP` followed by `START` | Stop revokes the authority; start increments the generation and commits a new mapping and fence |
@@ -742,7 +807,7 @@ This produces the following failure behavior:
 The authority's projection, cadence, tick-boundary and rate-conversion failures render the full
 typed report in both the runtime event and the corresponding warning. Timestamp overflow includes
 the timestamp arithmetic cause beneath the clock operation. Clock attachment and progress-apply
-events, source cadence errors and message-error flush-clock failures preserve their supplied
+events, ingestor cadence errors and message-error flush-clock failures preserve their supplied
 contexts in the same way, including the unavailable lifetime beneath a failed deadline wait.
 
 All nodes project from their local UTC observations. The shared mapping and per-node nondecrease

@@ -49,16 +49,15 @@ Feature: Large native restore metadata
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
@@ -139,19 +138,19 @@ Feature: Large native restore metadata
       """
       START;
       """
-    Then within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    Then within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       kafka observed partitions: 0
       """
-    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       kafka instance 0 partitions: 0
       """
-    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       transient error: -
       """
-    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       ready: true
       """
@@ -210,16 +209,15 @@ Feature: Large native restore metadata
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'backup_native_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
@@ -261,7 +259,7 @@ Feature: Large native restore metadata
     When the CLI restores "domain {{source_domain}} --as {{source_domain}}_stopped" from "native.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore succeeded, restoring domain "{{source_domain}}_stopped" with 1 resource versions and 11 models
     And the CLI restore reports domain "{{source_domain}}_stopped" as "STOPPED" at start version 1
-    Given the next native metadata capture of "metric_source" in domain "{{source_domain}}_stopped" is interrupted after 512 entries
+    Given the next native metadata capture of "metric_ingestor" in domain "{{source_domain}}_stopped" is interrupted after 512 entries
     When the CLI backs up "domain {{source_domain}}_stopped --timeout 60s" from node "{{leader}}" into "native-stopped.nvxb" reporting JSON
     Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
     And the CLI backup failure mentions "was interrupted"
@@ -277,7 +275,7 @@ Feature: Large native restore metadata
     Then the CLI restore succeeded, restoring domain "{{source_domain}}_resumed" with 1 resource versions and 11 models
     And the CLI restore reports domain "{{source_domain}}_resumed" as "RUNNING" at start version 1
     Given the active domain is "{{source_domain}}_resumed"
-    Then within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    Then within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       ready: true
       """

@@ -12,81 +12,120 @@
 
 use super::*;
 
-pub(super) fn mqtt_qos_level<'src>(
-    expected: &'static str,
-) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Qos)
-        .ignore_then(
-            select! { Token::NumberLiteral(raw) => raw }
-                .labelled("mqtt_qos")
-                .try_map(move |raw, span| {
-                    if raw == expected {
-                        Ok(())
-                    } else {
-                        Err(Rich::custom(
-                            span,
-                            format!("MQTT emitter QOS must be 0, 1, or 2, found {raw}"),
-                        ))
-                    }
-                }),
-        )
-        .boxed()
-}
 pub(super) fn mode<'src>()
 -> impl Parser<'src, &'src [Token], MqttTopicPublishingMode, extra::Err<ParseError<'src>>> + Clone {
-    choice((
-        mqtt_qos_level("0")
-            .ignore_then(retry_policy())
-            .map(|retry_policy| MqttTopicPublishingMode::Qos0 { retry_policy }),
-        mqtt_qos_level("1").ignore_then(acknowledged_policy()).map(
-            |AcknowledgedPolicy {
-                 window,
-                 ack_timeout,
-                 retry_policy,
-             }| MqttTopicPublishingMode::Qos1 {
-                window,
-                ack_timeout,
-                retry_policy,
-            },
-        ),
-        mqtt_qos_level("2").ignore_then(acknowledged_policy()).map(
-            |AcknowledgedPolicy {
-                 window,
-                 ack_timeout,
-                 retry_policy,
-             }| MqttTopicPublishingMode::Qos2 {
-                window,
-                ack_timeout,
-                retry_policy,
-            },
-        ),
+    broker_mode!(MqttTopicPublishingMode)
+}
+
+type MqttModeExtra<'src> = extra::Full<ParseError<'src>, (), MqttQos>;
+
+fn with_qos_context<'src, O, P>(
+    parser: P,
+) -> impl Parser<'src, &'src [Token], O, MqttModeExtra<'src>> + Clone
+where
+    P: Parser<'src, &'src [Token], O, extra::Err<ParseError<'src>>> + Clone,
+{
+    map_ctx::<_, _, _, MqttModeExtra<'src>, extra::Err<ParseError<'src>>, _>(|_| (), parser)
+}
+
+/// The requirement a statement that publishes at `qos` leaves unmet by naming a mode of `kind`.
+fn unmet_pairing(
+    kind: EmitterPublishingModeKind,
+    qos: MqttQos,
+) -> Option<UnmetPublishingRequirement> {
+    MqttTopicEmitter::CAPABILITIES.unmet_publishing(MqttTopicEmitter::KIND, kind, &|option| {
+        MqttTopicEmitter::publication_choice(qos, option)
+    })
+}
+
+/// The kind of the publishing mode `token` opens, for a word that opens one.
+fn opened_mode(token: Option<&Token>) -> Option<EmitterPublishingModeKind> {
+    let Some(Token::Word(Word::KnownWord { iden, .. })) = token else {
+        return None;
+    };
+    match iden {
+        Identifier::No => Some(EmitterPublishingModeKind::NoAck),
+        Identifier::Ack => Some(EmitterPublishingModeKind::BrokerAck),
+        _ => None,
+    }
+}
+
+/// `MODE …` after the quality of service the context holds. A supplied mode that does not pair with
+/// it is read through the shared parser and refused, naming what the statement writes. Anything
+/// else reads through the one family of modes that pairs with it, so completion offers only those
+/// and a statement that follows completion never reaches that refusal.
+fn paired_mode<'src>()
+-> impl Parser<'src, &'src [Token], MqttTopicPublishingMode, MqttModeExtra<'src>> + Clone {
+    let unacknowledged = with_qos_context(unconfirmed_mode!(MqttTopicPublishingMode));
+    let acknowledged = with_qos_context(consumer_mode!(MqttTopicPublishingMode));
+    let refused = with_qos_context(mode()).try_map_with(|mode: MqttTopicPublishingMode, extra| {
+        let qos: MqttQos = *extra.ctx();
+        match unmet_pairing(mode.publishing().kind(), qos) {
+            Some(unmet) => Err(Rich::custom(extra.span(), unmet.to_string())),
+            None => Ok(mode),
+        }
+    });
+    with_qos_context(kw(Identifier::Mode)).ignore_then(custom::<_, _, _, MqttModeExtra<'src>>(
+        move |input| {
+            let qos = *input.ctx();
+            if let Some(kind) = opened_mode(input.peek_ref())
+                && unmet_pairing(kind, qos).is_some()
+            {
+                return input.parse(refused.clone());
+            }
+            if unmet_pairing(EmitterPublishingModeKind::NoAck, qos).is_none() {
+                return input.parse(unacknowledged.clone());
+            }
+            input.parse(acknowledged.clone())
+        },
     ))
-    .boxed()
+}
+
+/// `<client> TOPIC '<topic>' QOS 0|1|2 MODE …`: every statement writes the quality of service it
+/// publishes at, and names a publishing mode only beside the choices the `MQTT TOPIC` declaration
+/// requires for it, QoS 0 for `NO ACK` and QoS 1 or 2 for `ACK`.
+fn topic_destination<'src>()
+-> impl Parser<'src, &'src [Token], MqttTopicEmitter, extra::Err<ParseError<'src>>> + Clone {
+    client_ref()
+        .then_ignore(kw(Identifier::Topic))
+        .then(external_name::<MqttTopicName>())
+        .then(mqtt_qos_clause().then_with_ctx(paired_mode()))
+        .map(|((client, topic), (qos, mode))| MqttTopicEmitter {
+            client,
+            topic,
+            qos,
+            mode,
+        })
 }
 
 pub(super) fn topic_body<'src>(
     context: EmitterContext,
 ) -> impl Parser<'src, &'src [Token], ParsedDestination<MqttTopicEmitter>, extra::Err<ParseError<'src>>>
 + Clone {
-    encoded_destination(
-        context,
-        client_ref()
-            .then_ignore(kw(Identifier::Topic))
-            .then(external_name::<MqttTopicName>())
-            .then_ignore(kw(Identifier::Mode))
-            .then(mode())
-            .map(|((client, topic), mode)| MqttTopicEmitter {
-                client,
-                topic,
-                mode,
-            }),
-    )
+    encoded_destination(context, topic_destination())
+}
+
+/// `SET TOPIC '<name>'`, `SET QOS 0|1|2` or `SET MODE <mode>`: one part of a `MQTT TOPIC` body.
+/// Whether the mode pairs with the quality of service is a question for the complete result, once
+/// every operation of the statement has applied.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], MqttTopicEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    let locator = kw(Identifier::Topic)
+        .ignore_then(external_name::<MqttTopicName>())
+        .map(MqttTopicEmitterChange::Topic);
+    let quality = mqtt_qos_clause().map(MqttTopicEmitterChange::Qos);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(MqttTopicEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((locator, quality, publishing)))
+        .boxed()
 }
 
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        EmitterEntity, Model, MqttEmitter, MqttTopicEmitter, MqttTopicPublishingMode,
+        EmitterEntity, Model, MqttEmitter, MqttQos, MqttTopicEmitter, MqttTopicPublishingMode,
     };
     use rstest::rstest;
 
@@ -96,18 +135,92 @@ mod tests {
         statement::parse_statement,
     };
 
-    const QOS_0: &str = "QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s";
+    const QOS_0: &str = "QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s";
     const QOS_1: &str =
-        "QOS 1 ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s";
-    const QOS_2: &str = "QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s";
+        "QOS 1 MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s";
+    const QOS_2: &str =
+        "QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s";
 
-    /// A complete `MQTT TOPIC` emitter statement that publishes to `topic` in `mode`.
-    fn statement(topic: &str, mode: &str) -> String {
+    #[test]
+    fn retained_publish_properties_use_the_shared_envelope_in_written_order() {
+        let source = statement("devices/orders", QOS_1).replace(
+            " INHERIT ALL",
+            " RETAIN PROPERTIES {'content_type' = 'application/json', 'message_expiry' = (600 AS \
+             U32), 'response_topic' = 'replies', 'correlation_data' = hex_decode('00ff')} INHERIT \
+             ALL",
+        );
+        let Some(Model::Emitter(emitter)) = created_model(&source) else {
+            panic!("the MQTT declaration admits its retained publication properties");
+        };
+        assert!(emitter.envelope.retain);
+        let keys: Vec<&str> = emitter
+            .envelope
+            .properties
+            .iter()
+            .map(|property| property.name.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "content_type",
+                "message_expiry",
+                "response_topic",
+                "correlation_data"
+            ]
+        );
+    }
+
+    #[test]
+    fn property_completion_is_confined_to_mqtt_publish_properties() {
+        let prefix = "CREATE MQTT TOPIC EMITTER publishing FROM events TO mqtt_main TOPIC \
+                      'devices/orders' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY \
+                      BACKOFF 250ms MAX 30s ENCODE USING event_codec RETAIN PROPERTIES {";
+        assert_offers_exactly(
+            prefix,
+            &[
+                "\"content_type\"",
+                "\"correlation_data\"",
+                "\"message_expiry\"",
+                "\"response_topic\"",
+            ],
+        );
+    }
+
+    #[rstest]
+    #[case("{'unknown' = 'value'}")]
+    #[case("{'content_type' = 'one', 'content_type' = 'two'}")]
+    fn publish_properties_refuse_unknown_and_repeated_keys(#[case] properties: &str) {
+        let source = statement("devices/orders", QOS_1).replace(
+            " INHERIT ALL",
+            &format!(" PROPERTIES {properties} INHERIT ALL"),
+        );
+        assert!(refused(&source));
+    }
+
+    /// A complete `MQTT TOPIC` emitter statement that publishes to `topic` as `publication` says:
+    /// its quality of service and its publishing mode.
+    fn statement(topic: &str, publication: &str) -> String {
         format!(
-            "CREATE MQTT TOPIC EMITTER publishing FROM events TO mqtt_main TOPIC '{topic}' MODE \
-             {mode} ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
-             GENERAL ERROR LOG;"
+            "CREATE MQTT TOPIC EMITTER publishing FROM events TO mqtt_main TOPIC '{topic}' \
+             {publication} ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR \
+             LOG ON GENERAL ERROR LOG;"
         )
+    }
+
+    /// What the grammar says of `source` and the source text each diagnostic underlines.
+    fn refusal(source: &str) -> Vec<(String, String)> {
+        let error = parse_statement(source).expect_err("the grammar refuses the statement");
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
+            panic!("expected a parse refusal, got {error:?}");
+        };
+        let mut refusals = Vec::new();
+        for diagnostic in diagnostics {
+            refusals.push((
+                diagnostic.message.clone(),
+                source[diagnostic.span.clone()].to_owned(),
+            ));
+        }
+        refusals
     }
 
     /// The emitter Model the grammar constructs from `statement`.
@@ -135,20 +248,23 @@ mod tests {
     }
 
     #[test]
-    fn each_quality_of_service_reaches_the_emitter_model_as_its_publishing_mode() {
+    fn each_quality_of_service_reaches_the_emitter_model_beside_its_publishing_mode() {
         let at_most_once = destination(&statement("devices/orders", QOS_0));
-        let MqttTopicPublishingMode::Qos0 { .. } = at_most_once.mode else {
-            panic!("MODE QOS 0 publishes at most once: {:?}", at_most_once.mode);
+        assert_eq!(at_most_once.qos, MqttQos::Qos0);
+        let MqttTopicPublishingMode::NoAck { .. } = at_most_once.mode else {
+            panic!("QOS 0 publishes in NO ACK: {:?}", at_most_once.mode);
         };
         let at_least_once = destination(&statement("devices/orders", QOS_1));
-        let MqttTopicPublishingMode::Qos1 { ack_timeout, .. } = &at_least_once.mode else {
-            panic!("MODE QOS 1 ACK waits for PUBACK: {:?}", at_least_once.mode);
+        assert_eq!(at_least_once.qos, MqttQos::Qos1);
+        let MqttTopicPublishingMode::Ack { ack_timeout, .. } = &at_least_once.mode else {
+            panic!("QOS 1 waits for PUBACK: {:?}", at_least_once.mode);
         };
         assert_eq!(ack_timeout, "5s");
         let exactly_once = destination(&statement("devices/orders", QOS_2));
-        let MqttTopicPublishingMode::Qos2 { ack_timeout, .. } = &exactly_once.mode else {
+        assert_eq!(exactly_once.qos, MqttQos::Qos2);
+        let MqttTopicPublishingMode::Ack { ack_timeout, .. } = &exactly_once.mode else {
             panic!(
-                "MODE QOS 2 ACK waits for the exactly-once handshake: {:?}",
+                "QOS 2 waits for the exactly-once handshake: {:?}",
                 exactly_once.mode
             );
         };
@@ -156,11 +272,27 @@ mod tests {
     }
 
     #[test]
-    fn topic_and_quality_of_service_complete_from_the_topic_declaration() {
+    fn topic_quality_of_service_and_mode_complete_from_the_topic_declaration() {
         let head = "CREATE MQTT TOPIC EMITTER publishing FROM events TO mqtt_main TOPIC ";
         assert_offers_exactly(head, &["mqtt_topic"]);
-        assert_offers_exactly(&format!("{head}'devices/orders' MODE "), &["QOS"]);
-        assert_offers_exactly(&format!("{head}'devices/orders' MODE QOS "), &["mqtt_qos"]);
+        assert_offers_exactly(&format!("{head}'devices/orders' "), &["QOS"]);
+        assert_offers_exactly(&format!("{head}'devices/orders' QOS "), &["mqtt_qos"]);
+        assert_offers_exactly(&format!("{head}'devices/orders' QOS 1 "), &["MODE"]);
+    }
+
+    #[rstest]
+    #[case::unanswered("0", "NO ACK")]
+    #[case::at_least_once("1", "ACK")]
+    #[case::exactly_once("2", "ACK")]
+    fn completion_offers_the_mode_the_written_quality_of_service_pairs_with(
+        #[case] qos: &str,
+        #[case] mode: &str,
+    ) {
+        let prefix = format!(
+            "CREATE MQTT TOPIC EMITTER publishing FROM events TO mqtt_main TOPIC 'devices/orders' \
+             QOS {qos} MODE "
+        );
+        assert_offers_exactly(&prefix, &[mode]);
     }
 
     #[rstest]
@@ -179,17 +311,36 @@ mod tests {
     }
 
     #[rstest]
-    #[case::qos_three("QOS 3 RETRY POLICY BACKOFF 1s MAX 30s")]
-    #[case::unacknowledged_qos_one("QOS 1 RETRY POLICY BACKOFF 1s MAX 30s")]
-    #[case::unacknowledged_qos_two("QOS 2 RETRY POLICY BACKOFF 1s MAX 30s")]
-    #[case::acknowledged_qos_zero(
-        "QOS 0 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
+    #[case::qos_one("1", "NO ACK RETRY POLICY BACKOFF 1s MAX 30s", "NO ACK", "QOS 0")]
+    #[case::qos_two("2", "NO ACK RETRY POLICY BACKOFF 1s MAX 30s", "NO ACK", "QOS 0")]
+    #[case::sequential(
+        "0",
+        "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+        "ACK",
+        "QOS 1 or 2"
     )]
-    fn the_composed_grammar_pairs_each_quality_of_service_with_its_acknowledgement(
+    #[case::parallel(
+        "0",
+        "ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+        "ACK",
+        "QOS 1 or 2"
+    )]
+    fn an_unpaired_mode_names_the_written_quality_of_service_and_underlines_the_mode(
+        #[case] qos: &str,
         #[case] mode: &str,
+        #[case] phrase: &str,
+        #[case] required: &str,
     ) {
-        let statement = statement("devices/orders", mode);
-        assert!(refused(&statement), "{statement}");
+        let source = statement("devices/orders", &format!("QOS {qos} MODE {mode}"));
+        let expected = format!(
+            "MQTT TOPIC emitters name MODE {phrase} only with {required}; the statement writes \
+             QOS {qos}"
+        );
+        let refusals = refusal(&source);
+        assert!(
+            refusals.contains(&(expected, mode.to_owned())),
+            "{refusals:?}"
+        );
     }
 
     #[test]
@@ -203,44 +354,46 @@ mod tests {
         assert!(refused(&statement(&format!("{at_bound}x"), QOS_0)));
     }
 
-    fn mode_statement(mode: &str) -> String {
-        format!(
-            "CREATE MQTT TOPIC EMITTER outgoing FROM events TO broker TOPIC 'events' MODE {mode} \
-             RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec FLUSH IMMEDIATE ON MESSAGE \
-             ERROR LOG ON GENERAL ERROR LOG;"
-        )
+    #[rstest]
+    #[case::unanswered("0", "expected NO ACK, found SOMEDAY")]
+    #[case::at_least_once("1", "expected ACK, found SOMEDAY")]
+    #[case::exactly_once("2", "expected ACK, found SOMEDAY")]
+    fn a_word_that_opens_no_mode_is_refused_where_it_stands(
+        #[case] qos: &str,
+        #[case] message: &str,
+    ) {
+        let source = statement("events", &format!("QOS {qos} MODE SOMEDAY"));
+        let refusals = refusal(&source);
+        assert!(
+            refusals.contains(&(message.to_owned(), "SOMEDAY".to_owned())),
+            "{refusals:?}"
+        );
     }
 
     #[rstest::rstest]
     #[case("3")]
     #[case("256")]
     fn qos_refusal_names_the_value_and_its_exact_source_span(#[case] qos: &str) {
-        let source = mode_statement(&format!("QOS {qos}"));
-        let error = parse_statement(&source).expect_err("the emitter accepts only QoS 0, 1 or 2");
-        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
-            panic!("expected a parse refusal, got {error:?}");
-        };
-        let expected = format!("MQTT emitter QOS must be 0, 1, or 2, found {qos}");
+        let source = statement(
+            "events",
+            &format!("QOS {qos} MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s"),
+        );
+        let expected = format!("MQTT QOS must be 0, 1 or 2, found {qos}");
+        let refusals = refusal(&source);
         assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic.message == expected && &source[diagnostic.span.clone()] == qos
-            }),
-            "{diagnostics:?}"
+            refusals.contains(&(expected, qos.to_owned())),
+            "{refusals:?}"
         );
     }
 
-    #[test]
-    fn qos_completion_and_supported_publication_modes_remain_available() {
-        let prefix =
-            "CREATE MQTT TOPIC EMITTER outgoing FROM events TO broker TOPIC 'events' MODE QOS ";
-        assert_offers_exactly(prefix, &["mqtt_qos"]);
-        for mode in [
-            "QOS 0",
-            "QOS 1 ACK SEQUENTIAL ACK TIMEOUT 1s",
-            "QOS 2 ACK PARALLEL MAX 2 ACK TIMEOUT 1s",
-        ] {
-            let source = mode_statement(mode);
-            assert!(created_model(&source).is_some(), "{source}");
-        }
+    #[rstest::rstest]
+    #[case("QOS 0 MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s")]
+    #[case("QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s")]
+    #[case("QOS 1 MODE ACK PARALLEL MAX 2 ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s")]
+    #[case("QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s")]
+    #[case("QOS 2 MODE ACK PARALLEL MAX 2 ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s")]
+    fn every_legal_pairing_parses(#[case] publication: &str) {
+        let source = statement("events", publication);
+        assert!(created_model(&source).is_some(), "{source}");
     }
 }

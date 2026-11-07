@@ -154,7 +154,7 @@ impl UnfoldedPayload {
             value,
         } in self.messages
         {
-            let decoded = decode_json_value(codec, &value, None, builder);
+            let decoded = decode_json_value(codec, &value, builder);
             if let Err(cause) = finish_decoded_row(codec, builder, decoded) {
                 builder.abandon_rows_after(rows_before);
                 return Err(CodecError::at(
@@ -250,7 +250,7 @@ impl CompiledCodec {
         trace!(
             codec = self.name.as_str(),
             input,
-            error = %error,
+            error = %format_args!("{error:#}"),
             "ON INGESTION program evaluation failed"
         );
         let cause = Report::new(CodecError::JaqIngestionEvaluation {

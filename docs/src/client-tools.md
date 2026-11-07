@@ -13,7 +13,7 @@ entirely through Plexus, whatever submits it.
 | --- | --- | --- |
 | [Command Line Client](client-tools-cli.md) | your terminal, installed separately | interactive work, scripting, shell completions, streaming a relay to stdout, node administration |
 | [Web Console](client-tools-web-console.md) | your browser, served by every node | reading a running graph, exploring an unfamiliar domain, guided subscriptions, uploading resources, taking and restoring backups |
-| [Rust Client Library](client-library.md) | your own program | embedding Nervix control and subscriptions in a Rust application |
+| [Client Libraries](client-libraries.md) | your own program | embedding Nervix control, subscriptions, domain clocks and client endpoints in a Rust or Python application |
 
 One further tool is not a client at all: [`nervix-plexus-format`](client-tools-plexus-format.md) formats
 saved `.plexus` files and checks that they are formatted. It never opens a session.

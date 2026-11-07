@@ -523,7 +523,7 @@ An accepted request is terminal for the callback that made it:
 
 - Output that callback emitted is discarded and never dispatched.
 - Every input the branch holds, including input the guest still buffers, is negatively
-  acknowledged, so a source with acknowledgements redelivers it into the new lifetime.
+  acknowledged, so an ingestor with acknowledgements redelivers it into the new lifetime.
 - No checkpoint follows, because the state that callback would save is the state the reset
   discards.
 - The instance is dropped with its pending timeouts, and the branch accepts nothing more until the
@@ -597,7 +597,7 @@ callback at a time, in this order:
    handled message errors, and inputs that `ON GLOBAL ERROR IGNORE` accepts after a failed
    callback. Output reaches downstream nodes, and can reach emitters, while its checkpoint is still on
    its way; only the acknowledgement waits. Until the checkpoint ends, Nervix reports the inputs it
-   holds back alive to their source, so a source's `ACK TIMEOUT` shorter than the checkpoint does
+   holds back alive to their ingestor, so an ingestor's `ACK TIMEOUT` shorter than the checkpoint does
    not deliver them again.
 4. It saves the guest with `nervix_dump_state`. The saved state is **captured** and stamped with the
    branch's next revision.
@@ -614,9 +614,11 @@ callback at a time, in this order:
    callback made for it has succeeded as well.
 8. Only then does the branch run its next callback.
 
-Only an `ATTACHED` processor, the default, holds its source's acknowledgements this way. A
+Declare the optional input mode after `FROM` and its optional `COLLECT FOR`, before
+`USING RESOURCE`; see [Shared Input And Branch Contracts](processors.md#shared-input-and-branch-contracts).
+Only an `ATTACHED` processor, the default, holds its ingestor's acknowledgements this way. A
 `DETACHED` processor receives its input after relay fan-out has acknowledged it upstream, so no
-source acknowledgement waits for its checkpoints, although its guest state is checkpointed the same
+ingestor acknowledgement waits for its checkpoints, although its guest state is checkpointed the same
 way.
 
 The replicas a checkpoint waits for are the ones the committed schedule assigns when it is captured,
@@ -639,7 +641,7 @@ failure is reported as a runtime error at its [stage](#failure-diagnostics), wha
 processor's `ON GLOBAL ERROR` policy, and then:
 
 - Every input the callback decided, and every input the guest still buffers, is negatively
-  acknowledged. A source with acknowledgements redelivers them.
+  acknowledged. An ingestor with acknowledgements redelivers them.
 - The committed checkpoint stays where it was.
 - The guest instance is discarded with the state nothing committed, together with its buffered
   input, pending output and timeouts. The branch never continues from that state: its next input
@@ -678,9 +680,9 @@ checkpoint on that node fails until the node restarts.
 ### Recovery, Replay And Duplicates
 
 A checkpoint is not a transaction that spans the guest, its output and external emitters. It guarantees
-exactly one thing: once a source has received a successful acknowledgement for an input, the guest
+exactly one thing: once an ingestor has received a successful acknowledgement for an input, the guest
 state that reflects the input is on the stable storage of the branch's owner and of every replica the
-checkpoint was confirmed by. What that means differs for guest state, for the source, and for emitters.
+checkpoint was confirmed by. What that means differs for guest state, for the ingestor, and for emitters.
 
 - **Guest state.** A restarted node restores each branch from the newest checkpoint on its own
   storage. After an owner is lost, [forced recovery](#state-generations) continues each branch from
@@ -688,8 +690,8 @@ checkpoint was confirmed by. What that means differs for guest state, for the so
   with replicas, a replica holds every checkpoint whose acknowledgements were released. Without
   replicas, only the owner's own storage holds a branch's checkpoints, so recovering without that
   node resets the branch.
-- **Source replay.** An input whose acknowledgement is withheld — its checkpoint failed, its node
-  stopped first, or the guest still buffers it — is redelivered by a source with acknowledgements
+- **Ingestor replay.** An input whose acknowledgement is withheld — its checkpoint failed, its node
+  stopped first, or the guest still buffers it — is redelivered by an ingestor with acknowledgements
   and lost by one without. The state the branch continues from can already reflect a redelivered
   input: a guest counts buffered input as it accepts it, a checkpoint that failed at its replicas
   stays on the owner's storage, and a replica can hold a checkpoint whose acknowledgement it sent too
@@ -701,7 +703,7 @@ checkpoint was confirmed by. What that means differs for guest state, for the so
 
 Where the checkpoint of the last callback had got to when its owner stopped decides which state the
 branch continues from. In every window the callback's output may already have been dispatched, and
-its inputs were not acknowledged, so a source with acknowledgements redelivers them:
+its inputs were not acknowledged, so an ingestor with acknowledgements redelivers them:
 
 | The owner stopped | The branch continues from | A redelivered input |
 | --- | --- | --- |
@@ -710,8 +712,8 @@ its inputs were not acknowledged, so a source with acknowledgements redelivers t
 | After it reached the owner's stable storage, before every replica confirmed it | On restart, this checkpoint; after owner loss, whichever of the two checkpoints the promoted replica holds | Is applied again to state that may already reflect it |
 | After every replica confirmed it, before the acknowledgements were released | This checkpoint, on restart and after owner loss | Is applied again to state that already reflects it |
 
-A source that keeps redelivering an input while no owner accepts it can deliver it to the recovered
-branch more than once, so the number of times a redelivered input is applied is not fixed. A source
+An ingestor that keeps redelivering an input while no owner accepts it can deliver it to the recovered
+branch more than once, so the number of times a redelivered input is applied is not fixed. An ingestor
 without acknowledgements delivers nothing again, and the input is lost in the first two windows.
 [Failure At Each Boundary](./wasm-state.md#failure-at-each-boundary) extends this account to the
 control plane's authority boundaries.

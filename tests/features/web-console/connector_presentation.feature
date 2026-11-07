@@ -80,6 +80,8 @@ Feature: Visual connector choices follow the entity declarations
       | 3            | mqtt-topic            | no-ack         | ack-sequential | ack-parallel   | 3     | .create-ingestor-mqtt-session  |
       | 1            | nats-subject          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-queue-group   |
       | 3            | nats-subject          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-queue-group   |
+      | 1            | nats-stream           | ack-sequential | ack-parallel   | ack-parallel   | 2     | .create-ingestor-consumer      |
+      | 3            | nats-stream           | ack-sequential | ack-parallel   | ack-parallel   | 2     | .create-ingestor-consumer      |
       | 1            | rabbitmq-queue        | no-ack         | ack-sequential | ack-parallel   | 3     | .create-ingestor-queue         |
       | 3            | rabbitmq-queue        | no-ack         | ack-sequential | ack-parallel   | 3     | .create-ingestor-queue         |
       | 1            | redis-pubsub          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-channel       |
@@ -90,8 +92,8 @@ Feature: Visual connector choices follow the entity declarations
       | 3            | prometheus-query      | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-max-body-size |
       | 1            | zeromq-pull           | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-source-ref    |
       | 3            | zeromq-pull           | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-source-ref    |
-      | 1            | sqs-queue             | ack-sequential | ack-sequential | ack-sequential | 1     | .create-ingestor-queue         |
-      | 3            | sqs-queue             | ack-sequential | ack-sequential | ack-sequential | 1     | .create-ingestor-queue         |
+      | 1            | sqs-queue             | ack-sequential | ack-parallel   | ack-sequential | 2     | .create-ingestor-queue         |
+      | 3            | sqs-queue             | ack-sequential | ack-parallel   | ack-sequential | 2     | .create-ingestor-queue         |
       | 1            | websockets-connection | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-source-ref    |
       | 3            | websockets-connection | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-source-ref    |
       | 1            | websockets-endpoint   | no-ack         | ack            | no-ack         | 2     | .create-ingestor-source-ref    |
@@ -132,7 +134,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (seq I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE WEBSOCKETS CLIENT reader CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       """
@@ -192,7 +194,7 @@ Feature: Visual connector choices follow the entity declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (seq I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = 'amqp://127.0.0.1:5672' };
       """

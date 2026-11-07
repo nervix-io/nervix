@@ -40,7 +40,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
     let ingestor = named::<IngestorName>("orders_in");
     install_unpaced_test_domain(&runtime, &domain);
     let handles = runtime
-        .ingest_task_handles(&domain, &ingestor)
+        .ingest_task_handles(&domain, &ingestor, nervix_models::Unit::SINGLE)
         .assured("the fixture ingestor attaches before its domain ends");
     let schema = test_schema(&[("id", ParseAsType::U64)]);
     let route = bind_ingestor_route_for_test(
@@ -64,7 +64,8 @@ async fn runtime_report_chain_admitted_client_batch_log() {
     )
     .assured("the fixture route binds its one field");
     let metrics = runtime.inner.metrics.clone();
-    let labels = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+    let labels =
+        metrics.register_ingestor_quiesce(&domain, &ingestor, nervix_models::Unit::SINGLE, None);
     let intake = ClientIntake {
         handles,
         runtime: runtime.clone(),
@@ -114,6 +115,8 @@ async fn runtime_report_chain_admitted_client_batch_log() {
                 attachment: ClientAttachmentId::from_u128(1),
                 submission: submission(1),
                 body: Bytes::copy_from_slice(body.as_ref()),
+                max_batch_rows: NonZeroU32::new(nervix_models::DEFAULT_CLIENT_BATCH_ROWS)
+                    .assured("the default row allowance is nonzero"),
                 max_batch_bytes: NonZeroU64::new(1024 * 1024)
                     .assured("the fixture grants a nonzero batch allowance"),
             }),
@@ -210,6 +213,8 @@ impl Fixture {
         self.send(EndpointCommand::Attach(AttachCommand {
             expected_fields: fields(&["unmatched"]),
             limits: limits(1, 1),
+            max_batch_rows: NonZeroU32::new(nervix_models::DEFAULT_CLIENT_BATCH_ROWS)
+                .assured("the default row allowance is nonzero"),
             max_batch_bytes: NonZeroU64::MIN,
             serving: ProducerServing::Local,
             reply,
@@ -287,6 +292,8 @@ impl Fixture {
         self.send(EndpointCommand::Attach(AttachCommand {
             expected_fields: expected,
             limits,
+            max_batch_rows: NonZeroU32::new(nervix_models::DEFAULT_CLIENT_BATCH_ROWS)
+                .assured("the default row allowance is nonzero"),
             max_batch_bytes: NonZeroU64::new(1024).assured("a literal non-zero size"),
             serving,
             reply,
@@ -841,7 +848,8 @@ fn a_batch_validated_under_a_hold_is_refused_with_its_root_resolved() {
     let metrics = RuntimeMetrics::default();
     let domain = DomainName::parse("tenant").assured("a literal domain name");
     let ingestor = IngestorName::parse("orders_in").assured("a literal ingestor name");
-    let metric_labels = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+    let metric_labels =
+        metrics.register_ingestor_quiesce(&domain, &ingestor, nervix_models::Unit::SINGLE, None);
     let control = IngestorQuiesceControl::new(IngestQuiesceMode::Suspend, metrics, metric_labels);
     let trackers = IngestorAckRootTrackers::detached();
 

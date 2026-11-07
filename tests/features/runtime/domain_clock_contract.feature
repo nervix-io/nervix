@@ -18,17 +18,16 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA http2_clock_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC http2_clock_request_codec
-        FROM WIRE JSON SCHEMA http2_clock_request_wire
+      CREATE WIRE JSON CODEC http2_clock_request_codec
+        FROM WIRE SCHEMA http2_clock_request_wire
         TO SCHEMA http2_clock_request;
       CREATE RELAY http2_clock_observations
         SCHEMA http2_clock_observation UNBRANCHED;
       CREATE VHOST edge http2-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT http2_clock_endpoint
+      CREATE HTTP ENDPOINT http2_clock_endpoint
         ON edge
-        PATH '/clock'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR http2_clock_source
+        PATH '/clock';
+      CREATE HTTP ENDPOINT INGESTOR http2_clock_ingestor
         FROM http2_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING http2_clock_request_codec
         TIMESTAMP NOW
@@ -113,17 +112,16 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA authority_clock_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC authority_clock_request_codec
-        FROM WIRE JSON SCHEMA authority_clock_request_wire
+      CREATE WIRE JSON CODEC authority_clock_request_codec
+        FROM WIRE SCHEMA authority_clock_request_wire
         TO SCHEMA authority_clock_request;
       CREATE RELAY authority_clock_observations
         SCHEMA authority_clock_observation UNBRANCHED;
       CREATE VHOST edge authority-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT authority_clock_endpoint
+      CREATE HTTP ENDPOINT authority_clock_endpoint
         ON edge
-        PATH '/clock'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR authority_clock_source
+        PATH '/clock';
+      CREATE HTTP ENDPOINT INGESTOR authority_clock_ingestor
         FROM authority_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING authority_clock_request_codec
         TIMESTAMP NOW
@@ -363,17 +361,16 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA joined_clock_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC joined_clock_request_codec
-        FROM WIRE JSON SCHEMA joined_clock_request_wire
+      CREATE WIRE JSON CODEC joined_clock_request_codec
+        FROM WIRE SCHEMA joined_clock_request_wire
         TO SCHEMA joined_clock_request;
       CREATE RELAY joined_clock_observations
         SCHEMA joined_clock_observation UNBRANCHED;
       CREATE VHOST edge joined-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT joined_clock_endpoint
+      CREATE HTTP ENDPOINT joined_clock_endpoint
         ON edge
-        PATH '/clock'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR joined_clock_source
+        PATH '/clock';
+      CREATE HTTP ENDPOINT INGESTOR joined_clock_ingestor
         FROM joined_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING joined_clock_request_codec
         TIMESTAMP NOW
@@ -414,8 +411,8 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA clock_source_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC clock_source_codec
-        FROM WIRE JSON SCHEMA clock_source_wire
+      CREATE WIRE JSON CODEC clock_source_codec
+        FROM WIRE SCHEMA clock_source_wire
         TO SCHEMA clock_source_record;
       CREATE RELAY clock_source_records SCHEMA clock_source_record UNBRANCHED;
       CREATE HTTP CLIENT clock_source
@@ -423,7 +420,7 @@ Feature: Domain clock contract regressions
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?fixture=domain-clock&delay_ms=25',
           'timeout_ms' = 5000
         };
-      CREATE HTTP REQUEST INGESTOR clock_source_reader
+      CREATE HTTP REQUEST INGESTOR clock_ingestor_reader
         FROM clock_source METHOD 'GET' EVERY 1h
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING clock_source_codec
         TIMESTAMP NOW
@@ -465,8 +462,8 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA cadence_source_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC cadence_source_codec
-        FROM WIRE JSON SCHEMA cadence_source_wire
+      CREATE WIRE JSON CODEC cadence_source_codec
+        FROM WIRE SCHEMA cadence_source_wire
         TO SCHEMA cadence_source_record;
       CREATE RELAY cadence_source_records SCHEMA cadence_source_record UNBRANCHED;
       CREATE HTTP CLIENT cadence_source
@@ -474,7 +471,7 @@ Feature: Domain clock contract regressions
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?fixture=http-cadence&delay_ms=25',
           'timeout_ms' = 5000
         };
-      CREATE HTTP REQUEST INGESTOR cadence_source_reader
+      CREATE HTTP REQUEST INGESTOR cadence_ingestor_reader
         FROM cadence_source METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING cadence_source_codec
         TIMESTAMP NOW
@@ -513,15 +510,9 @@ Feature: Domain clock contract regressions
         timestamp STRING,
         due STRING
       );
-      CREATE WIRE JSON SCHEMA cadence_sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string,
-        due string
-      );
-      CREATE CODEC cadence_sample_codec
-        FROM WIRE JSON SCHEMA cadence_sample_wire
-        TO SCHEMA cadence_sample;
+      CREATE JAQ JSON CODEC cadence_sample_codec
+        TO SCHEMA cadence_sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE SCHEMA cadence_observation (
         due STRING,
         executed_at DATETIME
@@ -571,15 +562,9 @@ Feature: Domain clock contract regressions
         timestamp STRING,
         due STRING
       );
-      CREATE WIRE JSON SCHEMA rebound_sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string,
-        due string
-      );
-      CREATE CODEC rebound_sample_codec
-        FROM WIRE JSON SCHEMA rebound_sample_wire
-        TO SCHEMA rebound_sample;
+      CREATE JAQ JSON CODEC rebound_sample_codec
+        TO SCHEMA rebound_sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE SCHEMA rebound_observation (
         due STRING,
         executed_at DATETIME
@@ -639,16 +624,15 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA clock_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC clock_request_codec
-        FROM WIRE JSON SCHEMA clock_request_wire
+      CREATE WIRE JSON CODEC clock_request_codec
+        FROM WIRE SCHEMA clock_request_wire
         TO SCHEMA clock_request;
       CREATE RELAY clock_observations SCHEMA clock_observation UNBRANCHED;
       CREATE VHOST edge clock-contract-{{test_id}}.example.com;
-      CREATE ENDPOINT clock_request_endpoint
+      CREATE HTTP ENDPOINT clock_request_endpoint
         ON edge
-        PATH '/clock'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR clock_request_source
+        PATH '/clock';
+      CREATE HTTP ENDPOINT INGESTOR clock_request_ingestor
         FROM clock_request_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_request_codec
         TIMESTAMP NOW
@@ -755,17 +739,16 @@ Feature: Domain clock contract regressions
         sequence integer,
         occurred_at string
       );
-      CREATE CODEC historical_event_codec
-        FROM WIRE JSON SCHEMA historical_event_wire
+      CREATE WIRE JSON CODEC historical_event_codec
+        FROM WIRE SCHEMA historical_event_wire
         TO SCHEMA historical_event
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY historical_events SCHEMA historical_event UNBRANCHED;
       CREATE VHOST edge historical-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT historical_event_endpoint
+      CREATE HTTP ENDPOINT historical_event_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR historical_event_source
+        PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR historical_event_ingestor
         FROM historical_event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING historical_event_codec
         TIMESTAMP AT occurred_at
@@ -819,18 +802,17 @@ Feature: Domain clock contract regressions
       CREATE WIRE JSON SCHEMA stamp_request_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC stamp_request_codec
-        FROM WIRE JSON SCHEMA stamp_request_wire
+      CREATE WIRE JSON CODEC stamp_request_codec
+        FROM WIRE SCHEMA stamp_request_wire
         TO SCHEMA stamp_request;
       CREATE RELAY stamp_requests SCHEMA stamp_request UNBRANCHED;
       CREATE RELAY stamped_requests SCHEMA stamped_request UNBRANCHED;
       CREATE RELAY stamp_errors SCHEMA stamp_error UNBRANCHED;
       CREATE VHOST edge uuid-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT stamp_endpoint
+      CREATE HTTP ENDPOINT stamp_endpoint
         ON edge
-        PATH '/stamp'
-        TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR stamp_source
+        PATH '/stamp';
+      CREATE HTTP ENDPOINT INGESTOR stamp_ingestor
         FROM stamp_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stamp_request_codec
         TIMESTAMP NOW

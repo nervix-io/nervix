@@ -13,7 +13,7 @@
 
 use strum::IntoEnumIterator as _;
 
-use super::{EnvelopeClauseForm, EnvelopeClauseKind, PropertyType};
+use super::{EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType, PropertyType};
 use crate::ParseAsType;
 
 #[test]
@@ -51,17 +51,21 @@ fn a_property_value_has_exactly_the_schema_type_its_property_type_names() {
 fn each_envelope_clause_takes_the_form_its_value_has() {
     for kind in EnvelopeClauseKind::iter() {
         let expected = match kind {
+            EnvelopeClauseKind::Key => EnvelopeClauseForm::Expression(EnvelopeValueType::Key),
+            EnvelopeClauseKind::PartitionFromBranch => EnvelopeClauseForm::Flag,
             EnvelopeClauseKind::Persistent
             | EnvelopeClauseKind::Mandatory
             | EnvelopeClauseKind::Retain => EnvelopeClauseForm::Flag,
             EnvelopeClauseKind::DeliverAfter | EnvelopeClauseKind::Delay => {
                 EnvelopeClauseForm::Duration
             }
-            EnvelopeClauseKind::Timestamp => EnvelopeClauseForm::Expression(ParseAsType::Datetime),
+            EnvelopeClauseKind::Timestamp => {
+                EnvelopeClauseForm::Expression(PropertyType::Datetime.into())
+            }
             EnvelopeClauseKind::ReplyTo
             | EnvelopeClauseKind::MessageId
             | EnvelopeClauseKind::DeduplicationId => {
-                EnvelopeClauseForm::Expression(ParseAsType::String)
+                EnvelopeClauseForm::Expression(PropertyType::String.into())
             }
         };
         assert_eq!(kind.form(), expected, "{}", kind.keywords());

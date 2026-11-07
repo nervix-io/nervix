@@ -45,6 +45,13 @@ const report = (line: string): void => {
 const hex = (bytes: Uint8Array): string =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 
+/** The leader endpoint carried by a typed redirect, absent while no leader is known. */
+class LeaderRedirect extends Error {
+  constructor(readonly consoleUri: string | null) {
+    super('the server redirected the session to its leader');
+  }
+}
+
 /** One session: a WebSocket carrying one frame per binary message. */
 class Exchange {
   private nextId = 0n;
@@ -121,7 +128,16 @@ class Exchange {
     if (!buffer.__has_identifier('NXSM')) {
       throw new Error('a server frame lacks the NXSM identifier');
     }
-    return wire.ServerMessage.getRootAsServerMessage(buffer);
+    const message = wire.ServerMessage.getRootAsServerMessage(buffer);
+    if (message.bodyType() === wire.ServerBody.SessionEnding) {
+      const ending = member(message.body(new wire.SessionEnding()) as wire.SessionEnding | null);
+      if (ending.reasonType() === wire.SessionEndReason.LeaderRedirect) {
+        const redirect = member(ending.reason(new wire.LeaderRedirect()) as wire.LeaderRedirect | null);
+        throw new LeaderRedirect(redirect.leader()?.webConsoleUri() ?? null);
+      }
+      throw new Error(`the session ended with ${wire.SessionEndReason[ending.reasonType()]}`);
+    }
+    return message;
   }
 
   /** Sends one ClientMessage and returns the reply that carries its request identity. */
@@ -135,7 +151,11 @@ class Exchange {
     wire.ClientMessage.addRequestType(builder, kind);
     wire.ClientMessage.addRequest(builder, body);
     builder.finish(wire.ClientMessage.endClientMessage(builder), 'NXCM');
-    this.socket.send(builder.asUint8Array());
+    // A closing socket may already have queued its typed ending. Read that frame to learn why it
+    // ended before the close event becomes a transport failure.
+    if (this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(builder.asUint8Array());
+    }
     for (;;) {
       const message = await this.receive();
       if (message.bodyType() !== wire.ServerBody.Reply) {
@@ -198,60 +218,65 @@ function leaderWebsocketUri(webConsoleUri: string): string {
 }
 
 class Probe {
-  commands: Exchange;
-
-  constructor(readonly home: Exchange) {
-    this.commands = home;
-  }
+  constructor(public exchange: Exchange) {}
 
   /**
    * Runs one statement, following leader redirects with the same execution reference. An outcome
    * the server could not settle is a failure of the probe, never a success.
    */
-  async command(query: string): Promise<wire.CommandOutcome> {
-    const reference = crypto.randomUUID();
+  async command(query: string, reference = crypto.randomUUID()): Promise<wire.CommandOutcome> {
+    const attempts: string[] = [];
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      const reply = await this.commands.request(wire.ClientRequest.CommandRequest, (builder) => {
-        const queryOffset = builder.createString(query);
-        const domain = builder.createString(target.domain);
-        const referenceOffset = builder.createString(reference);
-        wire.CommandRequest.startCommandRequest(builder);
-        wire.CommandRequest.addQuery(builder, queryOffset);
-        wire.CommandRequest.addDomain(builder, domain);
-        wire.CommandRequest.addExecutionReference(builder, referenceOffset);
-        return wire.CommandRequest.endCommandRequest(builder);
-      });
-      if (reply.bodyType() !== wire.ReplyBody.CommandOutcome) {
-        throw new Error(`a command was answered with ${wire.ReplyBody[reply.bodyType()]}`);
-      }
-      const outcome = member(reply.body(new wire.CommandOutcome()) as wire.CommandOutcome | null);
-      if (outcome.executionReference() !== reference) {
-        throw new Error('an outcome names another execution reference');
-      }
-      if (outcome.dispositionType() === wire.CommandDisposition.LeaderRedirect) {
-        const redirect = member(
-          outcome.disposition(new wire.LeaderRedirect()) as wire.LeaderRedirect | null,
-        );
-        const console = redirect.leader()?.webConsoleUri() ?? null;
-        if (console === null) {
-          // No leader is known yet, for example during an election.
+      attempts.push(reference);
+      try {
+        const reply = await this.exchange.request(wire.ClientRequest.CommandRequest, (builder) => {
+          const queryOffset = builder.createString(query);
+          const domain = builder.createString(target.domain);
+          const referenceOffset = builder.createString(reference);
+          wire.CommandRequest.startCommandRequest(builder);
+          wire.CommandRequest.addQuery(builder, queryOffset);
+          wire.CommandRequest.addDomain(builder, domain);
+          wire.CommandRequest.addExecutionReference(builder, referenceOffset);
+          return wire.CommandRequest.endCommandRequest(builder);
+        });
+        if (reply.bodyType() !== wire.ReplyBody.CommandOutcome) {
+          throw new Error(`a command was answered with ${wire.ReplyBody[reply.bodyType()]}`);
+        }
+        const outcome = member(reply.body(new wire.CommandOutcome()) as wire.CommandOutcome | null);
+        if (outcome.executionReference() !== reference) {
+          throw new Error('an outcome names another execution reference');
+        }
+        if (outcome.dispositionType() === wire.CommandDisposition.LeaderRedirect) {
+          const redirect = member(
+            outcome.disposition(new wire.LeaderRedirect()) as wire.LeaderRedirect | null,
+          );
+          throw new LeaderRedirect(redirect.leader()?.webConsoleUri() ?? null);
+        }
+        if (outcome.dispositionType() === wire.CommandDisposition.OutcomeUnknown) {
+          throw new Error("a command's outcome is unknown; the probe never reports it as settled");
+        }
+        if (!DISPOSITIONS.has(outcome.dispositionType())) {
+          throw new Error(`undeclared command disposition ${outcome.dispositionType()}`);
+        }
+        if (attempts.length > 1) {
+          report(`REDIRECT original=${attempts[0]} repeated=${attempts.at(-1)} outcome=${outcome.executionReference()}`);
+        }
+        return outcome;
+      } catch (error) {
+        if (!(error instanceof LeaderRedirect)) {
+          throw error;
+        }
+        let uri = target.websocketUri;
+        if (error.consoleUri === null) {
+          // A session ending has no reply; open another session after the election back-off.
           await new Promise((resolve) => setTimeout(resolve, 200));
-          continue;
+        } else {
+          uri = leaderWebsocketUri(error.consoleUri);
         }
-        const next = await Exchange.open(leaderWebsocketUri(console));
-        if (this.commands !== this.home) {
-          this.commands.close();
-        }
-        this.commands = next;
-        continue;
+        const next = await Exchange.open(uri);
+        this.exchange.close();
+        this.exchange = next;
       }
-      if (outcome.dispositionType() === wire.CommandDisposition.OutcomeUnknown) {
-        throw new Error("a command's outcome is unknown; the probe never reports it as settled");
-      }
-      if (!DISPOSITIONS.has(outcome.dispositionType())) {
-        throw new Error(`undeclared command disposition ${outcome.dispositionType()}`);
-      }
-      return outcome;
     }
     throw new Error('no leader accepted the command');
   }
@@ -423,9 +448,15 @@ function renderCells(
 }
 
 async function main(): Promise<void> {
-  const home = await Exchange.open(target.websocketUri);
-  const probe = new Probe(home);
+  const probe = new Probe(await Exchange.open(target.websocketUri));
 
+  const proof = await probe.command(
+    'CREATE SCHEMA redirect_proof (value U8);',
+    environment('NERVIX_PROBE_EXECUTION_REFERENCE'),
+  );
+  if (proof.dispositionType() !== wire.CommandDisposition.CommandCompleted) {
+    throw new Error(`the leader-only redirect proof failed: ${proof.message()}`);
+  }
   const operation = await probe.command(`SHOW CREATE RELAY ${target.relay};`);
   report(`OPERATION ${DISPOSITIONS.get(operation.dispositionType())}`);
 
@@ -441,6 +472,7 @@ async function main(): Promise<void> {
     `ERROR ${DISPOSITIONS.get(failed.dispositionType())} diagnostics=${failed.diagnosticsLength()} span=${span}`,
   );
 
+  const home = probe.exchange;
   const subscribe = (withType: boolean): Promise<wire.Reply> =>
     home.request(wire.ClientRequest.SubscribeRequest, (builder) => {
       const domain = builder.createString(target.domain);
@@ -582,9 +614,6 @@ async function main(): Promise<void> {
     default:
       throw new Error(`undeclared unsubscribe disposition ${closed.dispositionType()}`);
   }
-  if (probe.commands !== home) {
-    probe.commands.close();
-  }
   home.close();
   report('PASS');
 }
@@ -684,7 +713,17 @@ function openedSchema(reply: wire.Reply): OpenedSchema {
     throw new Error('the subscription did not open');
   }
   const opened = member(outcome.disposition(new wire.SubscriptionOpened()) as wire.SubscriptionOpened | null);
-  const schema = member(opened.schema());
+  return { opened, ...rowSchema(member(opened.schema())) };
+}
+
+interface RowSchemaLines {
+  fields: Field[];
+  keys: Field[];
+  lines: string[];
+}
+
+/** Renders a row schema: a FIELD line per field, then the branch and a KEY line per key field. */
+function rowSchema(schema: wire.RowSchema): RowSchemaLines {
   const fields: Field[] = [];
   const keys: Field[] = [];
   const lines: string[] = [];
@@ -702,7 +741,14 @@ function openedSchema(reply: wire.Reply): OpenedSchema {
       lines.push(fieldLine('KEY', field));
     }
   }
-  return { opened, fields, keys, lines };
+  return { fields, keys, lines };
+}
+
+/** Renders one diagnostic and its span, or `none` when it names no position. */
+function diagnosticLine(diagnostic: wire.Diagnostic): string {
+  const span = diagnostic.span();
+  const location = span === null ? 'none' : `${span.start()}..${span.end()}`;
+  return `DIAGNOSTIC span=${location} message=${text(bytesOf((encoding) => diagnostic.message(encoding)))}`;
 }
 
 /** Renders one command outcome, its first line after `head`. */
@@ -716,10 +762,7 @@ function commandLines(head: string, outcome: wire.CommandOutcome): string[] {
     `${head} ${name} reference=${outcome.executionReference()} origin=${wire.OutcomeOrigin[origin]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`,
   ];
   for (let index = 0; index < outcome.diagnosticsLength(); index += 1) {
-    const diagnostic = member(outcome.diagnostics(index));
-    const span = diagnostic.span();
-    const location = span === null ? 'none' : `${span.start()}..${span.end()}`;
-    lines.push(`DIAGNOSTIC span=${location} message=${text(bytesOf((encoding) => diagnostic.message(encoding)))}`);
+    lines.push(diagnosticLine(member(outcome.diagnostics(index))));
   }
   if (outcome.dispositionType() === wire.CommandDisposition.LeaderRedirect) {
     const redirect = member(outcome.disposition(new wire.LeaderRedirect()) as wire.LeaderRedirect | null);
@@ -781,6 +824,59 @@ function restoreReportLines(report: wire.RestoreReport): string[] {
     lines.push(
       `RESTORE_STEP kind=${wire.RestoreStepKind[kind]} domain=${domain ?? 'none'} outcome=${wire.RestoreStepOutcome[outcome]}`,
     );
+  }
+  return lines;
+}
+
+/** Renders one frame of a resource upload stream. */
+function uploadLines(frame: Uint8Array): string[] {
+  const message = wire.UploadMessage.getRootAsUploadMessage(frameBuffer(frame, 'NXUM'));
+  switch (message.partType()) {
+    case wire.UploadPart.UploadStart: {
+      const start = member(message.part(new wire.UploadStart()) as wire.UploadStart | null);
+      return [`UPLOAD_START request=${start.requestId()} domain=${start.domain()} resource=${start.resource()} identity=${start.uploadIdentity()} total_bytes=${start.totalBytes()}`];
+    }
+    case wire.UploadPart.UploadChunk: {
+      const chunk = member(message.part(new wire.UploadChunk()) as wire.UploadChunk | null);
+      return [`UPLOAD_CHUNK bytes=${hex(member(chunk.bytesArray()))}`];
+    }
+    default:
+      throw new Error(`undeclared upload part ${message.partType()}`);
+  }
+}
+
+/** Renders the typed outcome and all diagnostics of a resource upload. */
+function uploadReplyLines(frame: Uint8Array): string[] {
+  const reply = wire.UploadReply.getRootAsUploadReply(frameBuffer(frame, 'NXUR'));
+  const prefix = `UPLOAD_REPLY ${reply.requestId() ?? 'none'}`;
+  let line: string;
+  switch (reply.dispositionType()) {
+    case wire.UploadDisposition.ResourceInstalled: {
+      const installed = member(reply.disposition(new wire.ResourceInstalled()) as wire.ResourceInstalled | null);
+      line = `${prefix} INSTALLED identity=${installed.uploadIdentity()} version=${installed.version()} origin=${wire.OutcomeOrigin[member(installed.origin())]}`;
+      break;
+    }
+    case wire.UploadDisposition.UploadFailed: {
+      const failed = member(reply.disposition(new wire.UploadFailed()) as wire.UploadFailed | null);
+      line = `${prefix} FAILED identity=${failed.uploadIdentity() ?? 'none'} failure=${wire.UploadFailure[member(failed.failure())]} version=${failed.assignedVersion() ?? 'none'}`;
+      break;
+    }
+    case wire.UploadDisposition.LeaderRedirect: {
+      const redirect = member(reply.disposition(new wire.LeaderRedirect()) as wire.LeaderRedirect | null);
+      const leader = redirect.leader();
+      line = leader === null ? `${prefix} NOT_LEADER leader=none`
+        : `${prefix} NOT_LEADER leader=${leader.node()} grpc=${leader.grpcUri() ?? 'none'} console=${leader.webConsoleUri() ?? 'none'}`;
+      break;
+    }
+    default:
+      throw new Error(`undeclared upload disposition ${reply.dispositionType()}`);
+  }
+  const lines = [`${line} message=${text(bytesOf((encoding) => reply.message(encoding)))}`];
+  for (let index = 0; index < reply.diagnosticsLength(); index += 1) {
+    const diagnostic = member(reply.diagnostics(index));
+    const span = diagnostic.span();
+    const location = span === null ? 'none' : `${span.start()}..${span.end()}`;
+    lines.push(`DIAGNOSTIC span=${location} message=${text(bytesOf((encoding) => diagnostic.message(encoding)))}`);
   }
   return lines;
 }
@@ -1008,6 +1104,19 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
           ];
         }
         case wire.ReplyBody.SubscribeOutcome: {
+          const outcome = member(reply.body(new wire.SubscribeOutcome()) as wire.SubscribeOutcome | null);
+          if (outcome.dispositionType() === wire.SubscribeDisposition.SubscriptionRefused) {
+            const refused = member(
+              outcome.disposition(new wire.SubscriptionRefused()) as wire.SubscriptionRefused | null,
+            );
+            const lines = [
+              `REPLY ${id} SUBSCRIBE_REFUSED refusal=${wire.SubscriptionRefusal[member(refused.refusal())]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`,
+            ];
+            for (let index = 0; index < outcome.diagnosticsLength(); index += 1) {
+              lines.push(diagnosticLine(member(outcome.diagnostics(index))));
+            }
+            return lines;
+          }
           const read = openedSchema(reply);
           const handle = member(read.opened.subscription());
           return [
@@ -1068,8 +1177,14 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
               const notFound = member(outcome.disposition(new wire.DomainNotFound()) as wire.DomainNotFound | null);
               return [`REPLY ${id} DOMAIN_CLOCK_ATTACH domain_not_found domain=${notFound.domain()} message=${message}`];
             }
-            case wire.DomainClockAttachDisposition.RequestFailed:
-              return [`REPLY ${id} DOMAIN_CLOCK_ATTACH failed message=${message}`];
+            case wire.DomainClockAttachDisposition.DomainClockAttachRefused: {
+              const refused = member(
+                outcome.disposition(new wire.DomainClockAttachRefused()) as wire.DomainClockAttachRefused | null,
+              );
+              return [
+                `REPLY ${id} DOMAIN_CLOCK_ATTACH refused refusal=${wire.DomainClockAttachRefusal[member(refused.refusal())]} message=${message}`,
+              ];
+            }
             default:
               throw new Error(`undeclared attach disposition ${outcome.dispositionType()}`);
           }
@@ -1238,6 +1353,12 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
         `EVENT PRODUCER_ENDED producer=${ended.producer()} reason=${wire.ProducerEndReason[member(ended.reason())]} message=${text(bytesOf((encoding) => ended.message(encoding)))}`,
       ];
     }
+    case wire.ServerBody.ServerNotice: {
+      const notice = member(message.body(new wire.ServerNotice()) as wire.ServerNotice | null);
+      return [
+        `EVENT NOTICE level=${wire.NoticeLevel[member(notice.level())]} kind=${wire.NoticeKind[member(notice.kind())]} message=${text(bytesOf((encoding) => notice.message(encoding)))}`,
+      ];
+    }
     default:
       throw new Error(`the corpus holds no ${wire.ServerBody[message.bodyType()]} message`);
   }
@@ -1265,9 +1386,14 @@ function clientLines(frame: Uint8Array): string[] {
     }
     case wire.ClientRequest.SubscribeRequest: {
       const subscribe = member(message.request(new wire.SubscribeRequest()) as wire.SubscribeRequest | null);
-      return [
+      const lines = [
         `REQUEST ${id} SUBSCRIBE domain=${subscribe.domain()} statement=${text(bytesOf((encoding) => subscribe.statement(encoding)))} type=${wire.SubscriptionType[member(subscribe.subscriptionType())]}`,
       ];
+      const expected = subscribe.expectedSchema();
+      if (expected !== null) {
+        lines.push('EXPECTED_SCHEMA', ...rowSchema(expected).lines);
+      }
+      return lines;
     }
     case wire.ClientRequest.SuggestRequest: {
       const suggest = member(message.request(new wire.SuggestRequest()) as wire.SuggestRequest | null);
@@ -1354,7 +1480,7 @@ function clientLines(frame: Uint8Array): string[] {
 function corpus(directory: string): void {
   const files = readdirSync(directory)
     .filter((file) =>
-      ['.nxcm', '.nxsm', '.nxbq', '.nxbd', '.nxrm', '.nxrr'].some((extension) => file.endsWith(extension)),
+      ['.nxcm', '.nxsm', '.nxbq', '.nxbd', '.nxrm', '.nxrr', '.nxum', '.nxur'].some((extension) => file.endsWith(extension)),
     )
     .sort();
   const opened = new Uint8Array(readFileSync(join(directory, 'server_subscription_opened.nxsm')));
@@ -1373,6 +1499,10 @@ function corpus(directory: string): void {
       lines = restoreLines(frame);
     } else if (file.endsWith('.nxrr')) {
       lines = restoreReplyLines(frame);
+    } else if (file.endsWith('.nxum')) {
+      lines = uploadLines(frame);
+    } else if (file.endsWith('.nxur')) {
+      lines = uploadReplyLines(frame);
     } else {
       lines = serverLines(frame, schema);
     }

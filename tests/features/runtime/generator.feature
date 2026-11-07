@@ -74,8 +74,8 @@ Feature: Generator node
         amount integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA tenant_branch_schema (
@@ -97,10 +97,9 @@ Feature: Generator node
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT left_endpoint
+      CREATE HTTP ENDPOINT left_endpoint
         ON edge
-        PATH '/left'
-        TYPE HTTP;
+        PATH '/left';
 
       CREATE HTTP ENDPOINT INGESTOR left_ingestor
         FROM left_endpoint MODE NO ACK
@@ -161,15 +160,15 @@ Feature: Generator node
       CREATE SCHEMA notification (tenant STRING, amount I64);
       CREATE SCHEMA generated_notification (tenant STRING, total I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (tenant string, amount integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA tenant_branch_schema (tenant STRING);
       CREATE BRANCH tenant_branch SCHEMA tenant_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY tenant_branch
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_notifications SCHEMA generated_notification BRANCHED BY tenant_branch;
       CREATE VHOST edge generator-lru-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR notification_source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR notification_ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TIMESTAMP NOW
         TO notifications INHERIT ALL BRANCHED BY tenant_branch
           SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -244,8 +243,8 @@ Feature: Generator node
         labels array OPTIONAL
       );
 
-      CREATE CODEC generator_metric_codec
-        FROM WIRE JSON SCHEMA generator_metric_wire
+      CREATE WIRE JSON CODEC generator_metric_codec
+        FROM WIRE SCHEMA generator_metric_wire
         TO SCHEMA generator_metric;
 
       CREATE SCHEMA generator_tenant_branch_schema (
@@ -267,10 +266,9 @@ Feature: Generator node
 
       CREATE VHOST edge generator-columnar-{{test_id}}.example.com;
 
-      CREATE ENDPOINT generator_metric_endpoint
+      CREATE HTTP ENDPOINT generator_metric_endpoint
         ON edge
-        PATH '/metrics'
-        TYPE HTTP;
+        PATH '/metrics';
 
       CREATE HTTP ENDPOINT INGESTOR generator_metric_ingestor
         FROM generator_metric_endpoint MODE NO ACK
@@ -336,8 +334,8 @@ Feature: Generator node
         amount integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications
@@ -349,10 +347,9 @@ Feature: Generator node
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT http_notifications_endpoint
+      CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
@@ -412,8 +409,8 @@ Feature: Generator node
         amount integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications
@@ -425,10 +422,9 @@ Feature: Generator node
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT http_notifications_endpoint
+      CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
@@ -497,8 +493,8 @@ Feature: Generator node
         amount integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA tenant_branch_schema (
@@ -518,10 +514,9 @@ Feature: Generator node
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT http_notifications_endpoint
+      CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
@@ -599,8 +594,8 @@ Feature: Generator node
         id string,
         value integer
       );
-      CREATE CODEC generator_source_codec
-        FROM WIRE JSON SCHEMA generator_source_wire
+      CREATE WIRE JSON CODEC generator_source_codec
+        FROM WIRE SCHEMA generator_source_wire
         TO SCHEMA generator_source_value;
       CREATE RELAY generator_source_values
         SCHEMA generator_source_value
@@ -608,8 +603,8 @@ Feature: Generator node
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_values SCHEMA generated_value UNBRANCHED;
       CREATE VHOST edge generator-snapshot-{{test_id}}.example.com;
-      CREATE ENDPOINT generator_source_endpoint ON edge PATH '/values' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR generator_source
+      CREATE HTTP ENDPOINT generator_source_endpoint ON edge PATH '/values';
+      CREATE HTTP ENDPOINT INGESTOR generator_ingestor
         FROM generator_source_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_source_codec
         TIMESTAMP NOW
@@ -679,8 +674,8 @@ Feature: Generator node
         id string,
         divisor integer
       );
-      CREATE CODEC generator_error_codec
-        FROM WIRE JSON SCHEMA generator_error_wire
+      CREATE WIRE JSON CODEC generator_error_codec
+        FROM WIRE SCHEMA generator_error_wire
         TO SCHEMA generator_error_source;
       CREATE RELAY generator_error_sources
         SCHEMA generator_error_source
@@ -689,7 +684,7 @@ Feature: Generator node
       CREATE RELAY generator_error_outputs SCHEMA generator_error_output UNBRANCHED;
       CREATE RELAY generator_error_records SCHEMA generator_error_record UNBRANCHED;
       CREATE VHOST edge generator-errors-{{test_id}}.example.com;
-      CREATE ENDPOINT generator_error_endpoint ON edge PATH '/values' TYPE HTTP;
+      CREATE HTTP ENDPOINT generator_error_endpoint ON edge PATH '/values';
       CREATE HTTP ENDPOINT INGESTOR generator_error_ingestor
         FROM generator_error_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_error_codec

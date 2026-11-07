@@ -1,4 +1,4 @@
-//! Incomplete source settings for a visual ingestor.
+//! Incomplete entity settings for a visual ingestor.
 //!
 //! Layer: edges.
 //!
@@ -18,22 +18,23 @@ use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     ChoiceRequirement, ClientIngestorEntity, ClientName, DomainClockPeriod, EndpointIngestMode,
     EndpointName, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestHeader,
-    HttpRequestIngestMode, HttpRequestIngestor, IngestDeliveryKind, IngestQuiesceKind,
-    IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
-    KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode,
-    KafkaTopicIngestor, KafkaTopicName, ModelName, MqttIngestMode, MqttIngestorEntity, MqttQos,
-    MqttSession, MqttTopicFilter, MqttTopicIngestor, NatsIngestMode, NatsIngestorEntity,
-    NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName, NodeRef, PayloadSizeLimit,
-    PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestMode,
-    PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
-    PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
-    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisChannelPattern,
-    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget,
-    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName,
-    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity,
-    WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity,
-    ZeroMqPullIngestor,
+    HttpRequestHeaderValue, HttpRequestIngestMode, HttpRequestIngestor, IngestDeliveryKind,
+    IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow, IngestStartPosition,
+    IngestorEntity, IngestorEntityKind, KafkaConsumerGroupName, KafkaIngestMode,
+    KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName, ModelName,
+    MqttIngestMode, MqttIngestorEntity, MqttQos, MqttSession, MqttTopicFilter, MqttTopicIngestor,
+    NatsConsumerName, NatsIngestMode, NatsIngestorEntity, NatsQueueGroupName, NatsStreamIngestMode,
+    NatsStreamIngestor, NatsStreamName, NatsSubjectIngestor, NatsSubjectName, NodeRef,
+    PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor,
+    PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarSubscriptionType, PulsarTopicIngestor, PulsarTopicName,
+    RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName,
+    RedisChannelName, RedisChannelPattern, RedisIngestorEntity, RedisPubSubIngestMode,
+    RedisPubSubIngestor, RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
+    SqsQueueIngestor, SqsQueueName, SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestMode, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
+    WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
@@ -43,7 +44,71 @@ use super::SelectedReference;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OffsetChoice {
     Domain,
-    ConsumerGroup,
+    ConsumerGroup(IngestStartPosition),
+}
+
+impl OffsetChoice {
+    /// Every choice the `OFFSET BY` declaration offers.
+    const CHOICES: [Self; 3] = [
+        Self::Domain,
+        Self::ConsumerGroup(IngestStartPosition::Earliest),
+        Self::ConsumerGroup(IngestStartPosition::Latest),
+    ];
+
+    /// The name the declaration gives this choice.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Domain => "DOMAIN",
+            Self::ConsumerGroup(IngestStartPosition::Earliest) => {
+                "CONSUMER GROUP START AT EARLIEST"
+            }
+            Self::ConsumerGroup(IngestStartPosition::Latest) => "CONSUMER GROUP START AT LATEST",
+        }
+    }
+
+    pub(super) fn names_a_consumer_group(self) -> bool {
+        matches!(self, Self::ConsumerGroup(_))
+    }
+}
+
+/// One polled request header as a form edits it: its value is what the statement writes, either
+/// the header's value or the client key that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct RequestHeaderDraft {
+    pub(super) name: String,
+    pub(super) value: String,
+    pub(super) client_secret: bool,
+}
+
+impl From<&RequestHeaderDraft> for HttpRequestHeader {
+    fn from(draft: &RequestHeaderDraft) -> Self {
+        let value = if draft.client_secret {
+            HttpRequestHeaderValue::ClientSecret(draft.value.clone())
+        } else {
+            HttpRequestHeaderValue::Literal(draft.value.clone())
+        };
+        Self {
+            name: draft.name.clone(),
+            value,
+        }
+    }
+}
+
+impl From<&HttpRequestHeader> for RequestHeaderDraft {
+    fn from(header: &HttpRequestHeader) -> Self {
+        match &header.value {
+            HttpRequestHeaderValue::Literal(value) => Self {
+                name: header.name.clone(),
+                value: value.clone(),
+                client_secret: false,
+            },
+            HttpRequestHeaderValue::ClientSecret(key) => Self {
+                name: header.name.clone(),
+                value: key.clone(),
+                client_secret: true,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -56,11 +121,14 @@ pub(super) struct IngestorEntityDraft {
     pub(super) pattern: String,
     pub(super) subject: String,
     pub(super) queue_group: String,
+    pub(super) stream: String,
+    pub(super) consumer: String,
     pub(super) subscription: String,
     pub(super) subscription_ownership: Option<PulsarSubscriptionOwnership>,
+    pub(super) subscription_type: Option<PulsarSubscriptionType>,
     pub(super) query: String,
     pub(super) method: String,
-    pub(super) request_headers: Vec<HttpRequestHeader>,
+    pub(super) request_headers: Vec<RequestHeaderDraft>,
     pub(super) max_body_size: String,
     pub(super) upgrade_headers: Vec<WebsocketsUpgradeHeader>,
     pub(super) every: String,
@@ -168,15 +236,20 @@ impl IngestorEntityDraft {
 
     pub(super) fn chosen_option(&self, keywords: &str) -> Option<&'static str> {
         let selected = match keywords {
+            "INSTANCES" => Some(
+                if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") {
+                    "PER PARTITION"
+                } else {
+                    "<count>"
+                },
+            ),
             "SESSION" => self.mqtt_session.map(|session| session.keyword()),
             "QOS" => self.mqtt_qos.map(|qos| qos.spelling()),
             "SUBSCRIPTION" => self
                 .subscription_ownership
                 .map(|ownership| ownership.keywords()),
-            "OFFSET BY" => self.offset.map(|offset| match offset {
-                OffsetChoice::Domain => "DOMAIN",
-                OffsetChoice::ConsumerGroup => "CONSUMER GROUP",
-            }),
+            "TYPE" => self.subscription_type.map(PulsarSubscriptionType::keyword),
+            "OFFSET BY" => self.offset.map(OffsetChoice::name),
             _ => None,
         };
         selected.or_else(|| self.option_default(keywords))
@@ -184,6 +257,13 @@ impl IngestorEntityDraft {
 
     pub(super) fn choose_option(&mut self, keywords: &str, choice: &str) {
         match keywords {
+            "INSTANCES" => match choice {
+                "PER PARTITION" => self.instances = "PER PARTITION".to_owned(),
+                "<count>" if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") => {
+                    self.instances.clear()
+                }
+                _ => {}
+            },
             "SESSION" => {
                 self.mqtt_session = MqttSession::iter().find(|value| value.keyword() == choice)
             }
@@ -193,12 +273,14 @@ impl IngestorEntityDraft {
                     .into_iter()
                     .find(|value| value.keywords() == choice)
             }
+            "TYPE" => {
+                self.subscription_type =
+                    PulsarSubscriptionType::iter().find(|value| value.keyword() == choice)
+            }
             "OFFSET BY" => {
-                self.offset = match choice {
-                    "DOMAIN" => Some(OffsetChoice::Domain),
-                    "CONSUMER GROUP" => Some(OffsetChoice::ConsumerGroup),
-                    _ => None,
-                }
+                self.offset = OffsetChoice::CHOICES
+                    .into_iter()
+                    .find(|offset| offset.name() == choice)
             }
             _ => {}
         }
@@ -247,7 +329,7 @@ impl IngestorEntityDraft {
         let kind = self
             .kind
             .ok_or_else(|| Report::new(IngestorEntityDraftError::Kind))?;
-        // The form offers transport sources only; a client source names no client or endpoint.
+        // The form offers transport ingestors only; a client input names no client or endpoint.
         if let IngestorEntityKind::Client(ClientIngestorEntity::Producer) = kind {
             return Err(Report::new(IngestorEntityDraftError::ClientInput));
         }
@@ -279,7 +361,11 @@ impl IngestorEntityDraft {
             IngestorEntityKind::Http(HttpIngestorEntity::Request) => HttpRequestIngestor {
                 client: self.client()?,
                 method: self.required(&self.method, IngestorEntityDraftError::Method)?,
-                headers: self.request_headers.clone(),
+                headers: self
+                    .request_headers
+                    .iter()
+                    .map(HttpRequestHeader::from)
+                    .collect(),
                 max_body_size: self.max_body_size()?,
                 every: self.every()?,
                 mode: HttpRequestIngestMode::NoAck,
@@ -334,6 +420,16 @@ impl IngestorEntityDraft {
                 quiesce,
             }
             .into(),
+            IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => NatsStreamIngestor {
+                client: self.client()?,
+                stream: NatsStreamName::parse(&self.stream)
+                    .change_context(IngestorEntityDraftError::Stream)?,
+                consumer: NatsConsumerName::parse(&self.consumer)
+                    .change_context(IngestorEntityDraftError::Consumer)?,
+                mode: self.nats_stream_mode()?,
+                quiesce,
+            }
+            .into(),
             IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => RabbitMqQueueIngestor {
                 client: self.client()?,
                 queue: RabbitMqQueueName::parse(&self.queue)
@@ -372,10 +468,7 @@ impl IngestorEntityDraft {
                 queue: SqsQueueName::parse(&self.queue)
                     .change_context(IngestorEntityDraftError::Queue)?,
                 instances: self.instances()?,
-                mode: SqsIngestMode::AckSequential {
-                    timeout: self.ack_timeout()?,
-                    retry_policy: self.retry_policy()?,
-                },
+                mode: self.sqs_mode()?,
                 quiesce,
             }
             .into(),
@@ -460,15 +553,21 @@ impl IngestorEntityDraft {
         Ok(value.trim().to_string())
     }
 
-    fn instances(&self) -> error_stack::Result<NonZeroU64, IngestorEntityDraftError> {
+    fn instances(
+        &self,
+    ) -> error_stack::Result<nervix_models::IngestorInstances, IngestorEntityDraftError> {
         let value = if self.instances.trim().is_empty() {
             self.option_default("INSTANCES").unwrap_or("")
         } else {
             self.instances.trim()
         };
-        value
-            .parse::<NonZeroU64>()
-            .map_err(|cause| Report::new(cause).change_context(IngestorEntityDraftError::Instances))
+        if value.eq_ignore_ascii_case("PER PARTITION") {
+            return Ok(nervix_models::IngestorInstances::PerPartition);
+        }
+        let count = value.parse::<NonZeroU64>().map_err(|cause| {
+            Report::new(cause).change_context(IngestorEntityDraftError::Instances)
+        })?;
+        Ok(nervix_models::IngestorInstances::Count(count))
     }
 
     fn every(&self) -> error_stack::Result<DomainClockPeriod, IngestorEntityDraftError> {
@@ -478,8 +577,8 @@ impl IngestorEntityDraft {
             .map_err(|_| Report::new(IngestorEntityDraftError::Every))
     }
 
-    /// The subscription a Pulsar source reads through, and who the draft says owns it, which
-    /// every statement declares.
+    /// The subscription a Pulsar ingestor reads through, who the draft says owns it, and the type it
+    /// reads it as, which every statement declares.
     fn pulsar_subscription(
         &self,
     ) -> error_stack::Result<PulsarSubscription, IngestorEntityDraftError> {
@@ -488,16 +587,24 @@ impl IngestorEntityDraft {
         let Some(ownership) = self.subscription_ownership else {
             return Err(Report::new(IngestorEntityDraftError::SubscriptionOwnership));
         };
-        Ok(PulsarSubscription { name, ownership })
+        let Some(kind) = self.subscription_type else {
+            return Err(Report::new(IngestorEntityDraftError::SubscriptionType));
+        };
+        Ok(PulsarSubscription {
+            name,
+            ownership,
+            kind,
+        })
     }
 
     fn offset_mode(&self) -> error_stack::Result<KafkaOffsetMode, IngestorEntityDraftError> {
         match self.offset {
             Some(OffsetChoice::Domain) => Ok(KafkaOffsetMode::Domain),
-            Some(OffsetChoice::ConsumerGroup) => Ok(KafkaOffsetMode::ConsumerGroup(
-                KafkaConsumerGroupName::parse(&self.consumer_group)
+            Some(OffsetChoice::ConsumerGroup(start_at)) => Ok(KafkaOffsetMode::ConsumerGroup {
+                group: KafkaConsumerGroupName::parse(&self.consumer_group)
                     .change_context(IngestorEntityDraftError::ConsumerGroup)?,
-            )),
+                start_at,
+            }),
             None => Err(Report::new(IngestorEntityDraftError::Offset)),
         }
     }
@@ -602,6 +709,27 @@ impl IngestorEntityDraft {
         Ok(self.upgrade_headers.clone())
     }
 
+    fn nats_stream_mode(
+        &self,
+    ) -> error_stack::Result<NatsStreamIngestMode, IngestorEntityDraftError> {
+        match self.delivery {
+            Some(IngestDeliveryKind::AckSequential) => Ok(NatsStreamIngestMode::AckSequential {
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::AckParallel) => Ok(NatsStreamIngestMode::AckParallel {
+                max: self.ack_max()?,
+                batch_timeout: self
+                    .required(&self.batch_timeout, IngestorEntityDraftError::BatchTimeout)?,
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::NoAck | IngestDeliveryKind::AckRequest) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
+        }
+    }
+
     fn rabbitmq_mode(&self) -> error_stack::Result<RabbitMqIngestMode, IngestorEntityDraftError> {
         match self.delivery {
             Some(IngestDeliveryKind::NoAck) => Ok(RabbitMqIngestMode::NoAck),
@@ -624,6 +752,29 @@ impl IngestorEntityDraft {
                 })
             }
             Some(IngestDeliveryKind::AckRequest) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
+        }
+    }
+
+    fn sqs_mode(&self) -> error_stack::Result<SqsIngestMode, IngestorEntityDraftError> {
+        match self.delivery {
+            Some(IngestDeliveryKind::AckSequential) => Ok(SqsIngestMode::AckSequential {
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::AckParallel) => {
+                let max = SqsReceiveMax::try_from(self.ack_max()?.get())
+                    .change_context(IngestorEntityDraftError::AckMax)?;
+                Ok(SqsIngestMode::AckParallel {
+                    max,
+                    batch_timeout: self
+                        .required(&self.batch_timeout, IngestorEntityDraftError::BatchTimeout)?,
+                    timeout: self.ack_timeout()?,
+                    retry_policy: self.retry_policy()?,
+                })
+            }
+            Some(IngestDeliveryKind::NoAck | IngestDeliveryKind::AckRequest) | None => {
                 Err(Report::new(IngestorEntityDraftError::Mode))
             }
         }
@@ -719,10 +870,16 @@ pub(super) enum IngestorEntityDraftError {
     Subject,
     #[error("Enter a valid queue group")]
     QueueGroup,
+    #[error("Enter a valid stream")]
+    Stream,
+    #[error("Enter a valid consumer")]
+    Consumer,
     #[error("Enter a valid subscription")]
     Subscription,
     #[error("Choose whether the ingestor owns the subscription or an operator provisioned it")]
     SubscriptionOwnership,
+    #[error("Choose the subscription's TYPE")]
+    SubscriptionType,
     #[error("Enter a Prometheus query")]
     Query,
     #[error("Enter an HTTP request method")]
@@ -733,13 +890,13 @@ pub(super) enum IngestorEntityDraftError {
     UpgradeHeaders,
     #[error("EVERY must be a positive domain-clock duration")]
     Every,
-    #[error("INSTANCES must be a positive integer")]
+    #[error("INSTANCES must be a positive 64-bit count or PER PARTITION")]
     Instances,
     #[error("Choose Kafka offset ownership")]
     Offset,
     #[error("Enter a valid consumer group")]
     ConsumerGroup,
-    #[error("Choose a supported source delivery mode")]
+    #[error("Choose a supported ingestor delivery mode")]
     Mode,
     #[error("ACK MAX must be a positive integer")]
     AckMax,
@@ -759,7 +916,7 @@ pub(super) enum IngestorEntityDraftError {
     OptionRequirement { requirement: ChoiceRequirement },
     #[error("Choose an ON QUIESCE mode")]
     Quiesce,
-    #[error("This source cannot use the selected ON QUIESCE mode")]
+    #[error("This ingestor cannot use the selected ON QUIESCE mode")]
     UnsupportedQuiesce,
     #[error("BUFFER MAX SIZE must be positive")]
     BufferSize,
@@ -775,18 +932,22 @@ pub(super) enum IngestorEntityDraftError {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::num::NonZeroU64;
+
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, IngestDeliveryKind,
-        IngestQuiesceKind, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
-        KafkaIngestorEntity, Model, ModelKind, ModelName, MqttIngestMode, MqttIngestor,
-        MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity, NodeRef, PulsarIngestor,
-        PulsarIngestorEntity, PulsarSubscriptionOwnership, RedisIngestorEntity,
+        CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, HttpRequestHeader,
+        HttpRequestHeaderValue, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceOverflow,
+        IngestStartPosition, IngestorEntity, IngestorEntityKind, KafkaIngestor,
+        KafkaIngestorEntity, KafkaOffsetMode, Model, ModelKind, ModelName, MqttIngestMode,
+        MqttIngestor, MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity, NodeRef,
+        PulsarIngestor, PulsarIngestorEntity, PulsarSubscriptionOwnership, RedisIngestorEntity,
         RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
     };
     use nervix_plexus::statement::parse_statement;
+    use strum::IntoEnumIterator as _;
 
-    use super::{IngestorEntityDraft, IngestorEntityDraftError, OffsetChoice};
+    use super::{IngestorEntityDraft, IngestorEntityDraftError, OffsetChoice, RequestHeaderDraft};
     use crate::create_dialog::{
         SelectedReference,
         ingestor_draft::{IngestorDraft, TimestampDraft},
@@ -882,7 +1043,11 @@ mod tests {
         match source {
             IngestorEntity::Http(HttpIngestor::Request(entity)) => {
                 draft.method = entity.method.clone();
-                draft.request_headers = entity.headers.clone();
+                draft.request_headers = entity
+                    .headers
+                    .iter()
+                    .map(RequestHeaderDraft::from)
+                    .collect();
                 draft.max_body_size = entity
                     .max_body_size
                     .map(|limit| limit.to_string())
@@ -901,8 +1066,8 @@ mod tests {
                 draft.instances = entity.instances.to_string();
                 match &entity.offset_mode {
                     KafkaOffsetMode::Domain => draft.offset = Some(OffsetChoice::Domain),
-                    KafkaOffsetMode::ConsumerGroup(group) => {
-                        draft.offset = Some(OffsetChoice::ConsumerGroup);
+                    KafkaOffsetMode::ConsumerGroup { group, start_at } => {
+                        draft.offset = Some(OffsetChoice::ConsumerGroup(*start_at));
                         draft.consumer_group = group.to_string();
                     }
                 }
@@ -912,6 +1077,7 @@ mod tests {
                 draft.instances = entity.instances.to_string();
                 draft.subscription = entity.subscription.name.to_string();
                 draft.subscription_ownership = Some(entity.subscription.ownership);
+                draft.subscription_type = Some(entity.subscription.kind);
             }
             IngestorEntity::Mqtt(MqttIngestor::Topic(entity)) => {
                 draft.topic = entity.topic.to_string();
@@ -923,6 +1089,10 @@ mod tests {
                 draft.subject = entity.subject.to_string();
                 draft.queue_group = entity.queue_group.to_string();
                 draft.instances = entity.instances.to_string();
+            }
+            IngestorEntity::Nats(NatsIngestor::Stream(entity)) => {
+                draft.stream = entity.stream.to_string();
+                draft.consumer = entity.consumer.to_string();
             }
             IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(entity)) => {
                 draft.queue = entity.queue.to_string();
@@ -946,6 +1116,26 @@ mod tests {
             }
         }
         draft
+    }
+
+    #[test]
+    fn a_request_header_row_is_a_literal_until_it_reads_a_client_secret() {
+        let mut row = RequestHeaderDraft {
+            name: "authorization".to_string(),
+            value: "secret.api_token".to_string(),
+            client_secret: false,
+        };
+        assert_eq!(
+            HttpRequestHeader::from(&row).value,
+            HttpRequestHeaderValue::Literal("secret.api_token".to_string())
+        );
+        row.client_secret = true;
+        let header = HttpRequestHeader::from(&row);
+        assert_eq!(
+            header.value,
+            HttpRequestHeaderValue::ClientSecret("secret.api_token".to_string())
+        );
+        assert_eq!(RequestHeaderDraft::from(&header), row);
     }
 
     #[test]
@@ -1007,6 +1197,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_instance_draft_preserves_the_full_positive_64_bit_count() {
+        for count in [1, 65_536, u64::from(u32::MAX) + 1, u64::MAX] {
+            let mut draft = complete(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic));
+            draft.instances = count.to_string();
+            assert_eq!(
+                draft
+                    .instances()
+                    .assured("the complete positive count is accepted"),
+                nervix_models::IngestorInstances::Count(
+                    NonZeroU64::new(count).assured("each boundary is positive")
+                )
+            );
+            let entity = draft
+                .build()
+                .assured("the complete form preserves the count");
+            assert_eq!(filled_from(&entity).instances, count.to_string());
+        }
+    }
+
     fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {
         let mut draft = IngestorEntityDraft::default();
         draft.choose_kind(kind);
@@ -1020,8 +1230,11 @@ mod tests {
         draft.channel = "events".into();
         draft.subject = "events".into();
         draft.queue_group = "workers".into();
+        draft.stream = "events".into();
+        draft.consumer = "workers".into();
         draft.subscription = "workers".into();
         draft.subscription_ownership = Some(PulsarSubscriptionOwnership::Provisioned);
+        draft.subscription_type = Some(nervix_models::PulsarSubscriptionType::Shared);
         draft.query = "up".into();
         draft.method = "GET".into();
         draft.every = "1s".into();
@@ -1210,6 +1423,81 @@ mod tests {
             };
             assert_eq!(source.subscription.ownership, ownership);
             assert_eq!(source.subscription.name.as_str(), "workers");
+        }
+    }
+
+    #[test]
+    fn a_pulsar_source_builds_only_once_its_subscription_type_is_chosen() {
+        let mut draft = complete(IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic));
+        draft.subscription_type = None;
+        let error = draft
+            .build()
+            .expect_err("a Pulsar source declares its subscription's type");
+        assert_eq!(
+            error.current_context(),
+            &super::IngestorEntityDraftError::SubscriptionType
+        );
+        for kind in nervix_models::PulsarSubscriptionType::iter() {
+            draft.choose_option("TYPE", kind.keyword());
+            assert_eq!(draft.chosen_option("TYPE"), Some(kind.keyword()));
+            let IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) =
+                draft.build().assured("a complete Pulsar draft builds")
+            else {
+                panic!("a Pulsar draft builds a Pulsar topic source");
+            };
+            assert_eq!(source.subscription.kind, kind);
+        }
+    }
+
+    #[test]
+    fn a_kafka_draft_builds_each_offset_choice_the_declaration_offers() {
+        let kind = IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic);
+        let mut draft = complete(kind);
+        draft.consumer_group = "readers".into();
+        let capabilities = kind.capabilities();
+        let offsets = capabilities
+            .options
+            .iter()
+            .find(|option| option.keywords == "OFFSET BY")
+            .assured("a Kafka topic ingestor declares OFFSET BY");
+        let nervix_models::OptionForm::Choice(choices) = offsets.form else {
+            panic!("OFFSET BY is a choice");
+        };
+
+        for choice in choices {
+            draft.choose_option("OFFSET BY", choice.name);
+            assert_eq!(draft.chosen_option("OFFSET BY"), Some(choice.name));
+            draft
+                .build()
+                .assured("a complete Kafka draft builds with every declared choice");
+        }
+    }
+
+    #[test]
+    fn a_kafka_draft_keeps_the_start_position_of_its_consumer_group() {
+        let mut draft = complete(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic));
+        draft.consumer_group = "readers".into();
+
+        for (choice, position) in [
+            (
+                "CONSUMER GROUP START AT EARLIEST",
+                IngestStartPosition::Earliest,
+            ),
+            (
+                "CONSUMER GROUP START AT LATEST",
+                IngestStartPosition::Latest,
+            ),
+        ] {
+            draft.choose_option("OFFSET BY", choice);
+            let source = draft.build().assured("a complete Kafka draft builds");
+            let IngestorEntity::Kafka(KafkaIngestor::Topic(source)) = source else {
+                panic!("a Kafka draft builds a Kafka topic source");
+            };
+            let KafkaOffsetMode::ConsumerGroup { group, start_at } = source.offset_mode else {
+                panic!("the draft names a consumer group");
+            };
+            assert_eq!(group.as_str(), "readers");
+            assert_eq!(start_at, position);
         }
     }
 

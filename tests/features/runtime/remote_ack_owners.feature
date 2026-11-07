@@ -17,25 +17,25 @@ Feature: Attached record outcomes across independent branch deliveries
       CREATE WIRE JSON SCHEMA ack_owner_wire MODE STRICT (
         event_id string, branch_name string, sequence integer
       );
-      CREATE CODEC ack_owner_codec FROM WIRE JSON SCHEMA ack_owner_wire TO SCHEMA ack_owner_event;
+      CREATE WIRE JSON CODEC ack_owner_codec FROM WIRE SCHEMA ack_owner_wire TO SCHEMA ack_owner_event;
       CREATE SCHEMA ack_owner_key ( branch_name STRING );
       CREATE BRANCH ack_owner_branch SCHEMA ack_owner_key TTL 5m;
       CREATE RELAY ack_owner_records SCHEMA ack_owner_event BRANCHED BY ack_owner_branch;
       CREATE KAFKA CLIENT ack_owner_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR ack_owner_source
+      CREATE KAFKA TOPIC INGESTOR ack_owner_ingestor
         FROM ack_owner_kafka TOPIC 'ack_owners_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'ack_owners_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'ack_owners_group_{{test_id}}' START AT EARLIEST
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING ack_owner_codec
         TO ack_owner_records INHERIT ALL
           BRANCHED BY ack_owner_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER ack_owner_sink
+      CREATE KAFKA TOPIC EMITTER ack_owner_emitter
         FROM ack_owner_records
+        ATTACHED
         TO ack_owner_kafka TOPIC 'ack_owners_out_{{test_id}}'
           MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING ack_owner_codec

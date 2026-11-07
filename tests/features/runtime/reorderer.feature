@@ -13,8 +13,7 @@ Feature: Reorderer
         sequence I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -23,10 +22,9 @@ Feature: Reorderer
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY filtered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -102,8 +100,7 @@ Feature: Reorderer
         priority I32,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -111,10 +108,9 @@ Feature: Reorderer
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -228,8 +224,8 @@ Feature: Reorderer
         payload string,
         note string OPTIONAL
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_reorder_default SCHEMA tenant_branch TTL 5m;
@@ -239,10 +235,9 @@ Feature: Reorderer
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_reorder_default;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_reorder_default;
         CREATE VHOST edge http-reorder-default-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/reorder-default'
-        TYPE HTTP;
+        PATH '/reorder-default';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

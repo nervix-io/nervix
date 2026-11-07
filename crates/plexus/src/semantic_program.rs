@@ -120,7 +120,7 @@ fn field_reference<'src>()
 -> impl Parser<'src, &'src [Token], FieldReference, extra::Err<ParseError<'src>>> + Clone {
     let scoped = raw_identifier()
         .then_ignore(tok(Token::Dot))
-        .then(qualified_name_word())
+        .then(qualified_name_word().labelled("ref:expression_field"))
         .then(
             tok(Token::Dot)
                 .ignore_then(qualified_name(FieldName::parse))
@@ -534,13 +534,14 @@ fn expression<'src>()
             ));
             let udf_call = kw(Identifier::Udf)
                 .then_ignore(tok(Token::DoubleColon))
-                .then(qualified_name(UdfName::parse))
+                .then(qualified_name(UdfName::parse).labelled("ref:expression_udf"))
                 .then(arguments.clone())
                 .map(|(((), function), arguments)| Expression::UdfCall {
                     function,
                     arguments,
                 });
             let function_call = name(BuiltinFunctionName::parse)
+                .labelled("ref:expression_function")
                 .then(arguments.clone())
                 .map(|(function, arguments)| Expression::Call {
                     function,
@@ -698,7 +699,16 @@ fn assignment_target<'src>()
                 Ok(AssignmentTarget { scope, field })
             }
         });
-    choice((plain, quoted))
+    choice((plain, quoted)).labelled("ref:expression_target")
+}
+
+/// One `<target> = <expression>` assignment.
+fn assignment<'src>()
+-> impl Parser<'src, &'src [Token], Assignment, extra::Err<ParseError<'src>>> + Clone {
+    assignment_target()
+        .then_ignore(tok(Token::Eq))
+        .then(expression())
+        .map(|(target, value)| Assignment { target, value })
 }
 
 /// The `<target> = <expression>` assignments that `SET` and a materialized-state `DEFAULT` write,
@@ -709,10 +719,7 @@ fn assignments<'src, S>(
 where
     S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
 {
-    assignment_target()
-        .then_ignore(tok(Token::Eq))
-        .then(expression())
-        .map(|(target, value)| Assignment { target, value })
+    assignment()
         .separated_by(separator)
         .at_least(1)
         .collect::<Vec<_>>()
@@ -869,14 +876,11 @@ impl RoutePart {
     }
 }
 
-/// The calls `INVOKE` makes, read after the keyword, each after the `separator` before it.
-fn invocations<'src, S>(
-    separator: S,
-) -> impl Parser<'src, &'src [Token], Vec<Invocation>, extra::Err<ParseError<'src>>> + Clone
-where
-    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
-{
+/// One call `INVOKE` makes: a builtin function and its arguments.
+fn invocation<'src>()
+-> impl Parser<'src, &'src [Token], Invocation, extra::Err<ParseError<'src>>> + Clone {
     name(BuiltinFunctionName::parse)
+        .labelled("ref:expression_invocation")
         .then(
             expression()
                 .separated_by(tok(Token::Comma))
@@ -888,6 +892,16 @@ where
             function,
             arguments,
         })
+}
+
+/// The calls `INVOKE` makes, read after the keyword, each after the `separator` before it.
+fn invocations<'src, S>(
+    separator: S,
+) -> impl Parser<'src, &'src [Token], Vec<Invocation>, extra::Err<ParseError<'src>>> + Clone
+where
+    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    invocation()
         .separated_by(separator)
         .at_least(1)
         .collect::<Vec<_>>()
@@ -1050,6 +1064,39 @@ where
     S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     read_prefix(route_construction_after(first, separator), tokens)
+}
+
+/// Reads what an inheritance inherits at the front of `tokens`, which begin just after its
+/// `INHERIT`. A listed field goes on past a comma only where `separator` accepts it.
+pub(crate) fn read_inheritance_prefix<'src, S>(
+    tokens: &'src [Token],
+    separator: S,
+) -> Result<Prefix<Inheritance>, Vec<ParseError<'src>>>
+where
+    S: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    read_prefix(inheritance(separator), tokens)
+}
+
+/// Reads one `<target> = <expression>` assignment at the front of `tokens`.
+pub(crate) fn read_assignment_prefix(
+    tokens: &[Token],
+) -> Result<Prefix<Assignment>, Vec<ParseError<'_>>> {
+    read_prefix(assignment(), tokens)
+}
+
+/// Reads the field one assignment writes at the front of `tokens`, as `SET` spells it.
+pub(crate) fn read_assignment_target_prefix(
+    tokens: &[Token],
+) -> Result<Prefix<AssignmentTarget>, Vec<ParseError<'_>>> {
+    read_prefix(assignment_target(), tokens)
+}
+
+/// Reads one call `INVOKE` makes at the front of `tokens`.
+pub(crate) fn read_invocation_prefix(
+    tokens: &[Token],
+) -> Result<Prefix<Invocation>, Vec<ParseError<'_>>> {
+    read_prefix(invocation(), tokens)
 }
 
 /// Reads the assignments of a materialized-state `DEFAULT` at the front of `tokens`.
@@ -1321,6 +1368,23 @@ mod tests {
             );
         }
         assert!(parse_expression("input.inbound IN (input.from_unix)").is_ok());
+    }
+
+    /// AMQP names a message's kind `type`, and a RabbitMQ delivery exposes it and its timestamp as
+    /// `metadata.type` and `metadata.timestamp`: the word after the `metadata.` scope names the
+    /// field even where a statement spells a keyword with it, such as `TYPE` or `TIMESTAMP AT`.
+    #[test]
+    fn a_metadata_field_may_be_named_by_a_keyword_after_its_scope() {
+        for name in ["type", "timestamp", "priority", "exchange", "expiration"] {
+            assert_eq!(
+                parsed(&format!("metadata.{name}")),
+                Expression::Field(FieldReference::scoped(
+                    FieldScope::Metadata,
+                    FieldName::try_from(name).expect("test field names are valid"),
+                )),
+                "metadata.{name} names a metadata field"
+            );
+        }
     }
 
     fn cast(expression: Expression, target: ParseAsType) -> Expression {

@@ -197,7 +197,7 @@ raft.membership:
 
 [schedule]
 - domain=chaos_baseline kind=codec name=chaos_json owner=- replicas=-
-- domain=chaos_baseline kind=ingestor name=chaos_ingestor owner=node-1 replicas=-
+- domain=chaos_baseline kind=ingestor name=chaos_ingestor unit=instance:0 owner=node-1 replicas=-
 - domain=chaos_baseline kind=relay name=chaos_records owner=node-3 replicas=- transition_from=node-2 state_recovery=complete
 - domain=chaos_baseline kind=emitter name=chaos_emitter owner=node-3 replicas=-
 
@@ -231,9 +231,9 @@ jq '.resources.chaos_restart_before = "absent" | .models["schema-chaos_record"] 
     || fail 'lost configuration was not reported by part'
 
 jq -n '[{Config:{Env:["PATH=/usr/bin","NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
-    "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=10s","NERVIX_NODE_ID=node-1","NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD=64"]}}]' \
+    "NERVIX_NODE_ID=node-1","NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD=64"]}}]' \
     >"${tmp_dir}/inspection.json"
-[[ "$(configured_settings "${tmp_dir}/inspection.json")" == '{"NERVIX_RAFT_HEARTBEAT_INTERVAL":"250ms","NERVIX_NODE_UNAVAILABILITY_TIMEOUT":"10s","NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD":"64"}' ]] \
+[[ "$(configured_settings "${tmp_dir}/inspection.json")" == '{"NERVIX_RAFT_HEARTBEAT_INTERVAL":"250ms","NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD":"64"}' ]] \
     || fail "configured settings were read incorrectly: $(configured_settings "${tmp_dir}/inspection.json")"
 
 # Snapshot catch-up: the survivors purged past the follower, which then holds a covering snapshot,

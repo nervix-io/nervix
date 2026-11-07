@@ -15,7 +15,7 @@ from scripts import connector_matrix as matrix
 def declarations():
     return {
         "ingest": [{
-            "entity": "KAFKA TOPIC", "connector": "KAFKA", "reference": "KAFKA client",
+            "entity": "KAFKA TOPIC", "connector": "KAFKA", "reference": "KAFKA client", "instancing": "per_partition",
             "locator": "TOPIC 'orders' (kafka_topic)", "options": [],
             "modes": ["NO ACK", "ACK SEQUENTIAL ACK TIMEOUT 5s"],
             "quiesce": ["SUSPEND"], "metadata": ["metadata.offset: I64 OPTIONAL"],
@@ -55,7 +55,8 @@ def declarations():
                                "owner": "driver; best effort", "confidential": True, "file": "none",
                                "readers": "every"}],
                      "namespaces": ["all driver property names"], "reserved": ["group.id"],
-                     "aliases": [], "stripped_prefix": None, "constraints": []}],
+                     "statement_keys": [], "secret_keys": None, "aliases": [],
+                     "stripped_prefix": None, "constraints": []}],
     }
 
 
@@ -104,6 +105,15 @@ class ConnectorMatrixTests(unittest.TestCase):
             self.assertIn(value, text)
         surface["clients"][0]["stripped_prefix"]["properties"] = []
         self.assertIn("whose names begin with it: none.", matrix.render_matrix(surface, reasons()))
+
+    def test_a_reserved_key_a_statement_sets_names_its_clause(self):
+        surface = declarations()
+        self.assertNotIn("is set by a statement", matrix.render_matrix(surface, reasons()))
+        surface["clients"][0]["statement_keys"] = [
+            {"key": "group.id", "clause": "OFFSET BY CONSUMER GROUP on the ingestor"},
+        ]
+        self.assertIn("`group.id` is set by a statement: write OFFSET BY CONSUMER GROUP on the ingestor.",
+                      matrix.render_matrix(surface, reasons()))
 
     def test_keys_one_side_reads_name_the_entities_of_that_side(self):
         surface = declarations()

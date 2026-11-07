@@ -11,7 +11,7 @@
 )]
 
 use std::{
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::Range,
     str::FromStr,
 };
@@ -26,24 +26,26 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchName,
-    BranchSelection, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CorrelatorName,
-    DeduplicatorName, DomainClockPeriod, DomainName, EmitterName, EndpointName, Expression,
-    ExternalName, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerName,
-    IngestorName, InputCollectPolicy, InspectionFormat, JunctionName, LookupName,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError,
-    OutputBranch, PayloadSizeLimit, PlacementName, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, ReingestorName, RelayName, ReordererName,
-    RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction, SchemaName,
-    SignalingProtocolName, SubscriptionName, TransactionOperationNumber, UdfName, UserName,
-    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    BranchSelection, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
+    ConstructionAlteration, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName,
+    EmitterName, EndpointName, Expression, ExternalName, FieldName, FlushPolicy,
+    GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName, InputCollectPolicy,
+    InspectionFormat, JunctionName, LookupName, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, ModelName, MqttQos, NameError, OutputBranch,
+    PayloadSizeLimit, PlacementName, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
+    ResourceName, RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName,
+    SubscriptionName, TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
 use crate::{
     lexer::{Identifier, SpannedToken, Token, Word, lex},
     semantic_program::{
-        Prefix, RouteClause, read_assignments_prefix, read_expression_list_prefix,
-        read_expression_prefix, read_route_construction_prefix,
+        Prefix, RouteClause, read_assignment_prefix, read_assignment_target_prefix,
+        read_assignments_prefix, read_expression_list_prefix, read_expression_prefix,
+        read_inheritance_prefix, read_invocation_prefix, read_route_construction_prefix,
     },
 };
 
@@ -313,12 +315,28 @@ pub fn sequential_ack_window<'src>()
 /// The positive bound in `PARALLEL MAX <n>`, shared by ingestor and emitter modes.
 pub fn parallel_ack_window<'src>()
 -> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+    parallel_ack_window_of(parallel_max_count())
+}
+
+/// The `n` of `PARALLEL MAX <n>`: any positive count.
+pub fn parallel_max_count<'src>()
+-> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+    nonzero_u64_value(
+        "max_in_flight",
+        "parallel max in-flight must be greater than zero",
+    )
+}
+
+/// `PARALLEL MAX <n>` whose `n` `count` reads. An entity whose transport bounds the window more
+/// narrowly than any positive count reads `n` with that bound, so a larger `n` is refused where it
+/// is written: past the point where every other mode's alternative fails, so the refusal names the
+/// bound rather than another mode.
+pub fn parallel_ack_window_of<'src, T: 'src>(
+    count: impl Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Parallel)
         .ignore_then(kw(Identifier::Max))
-        .ignore_then(nonzero_u64_value(
-            "max_in_flight",
-            "parallel max in-flight must be greater than zero",
-        ))
+        .ignore_then(count)
         .boxed()
 }
 
@@ -329,6 +347,24 @@ pub fn ack_window<'src>()
         parallel_ack_window().map(|max| AckWindow::Parallel { max }),
     ))
     .boxed()
+}
+
+/// `QOS 0 | QOS 1 | QOS 2`, which an MQTT statement of either side writes.
+pub fn mqtt_qos_clause<'src>()
+-> impl Parser<'src, &'src [Token], MqttQos, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Qos).ignore_then(
+        select! { Token::NumberLiteral(raw) => raw }
+            .labelled("mqtt_qos")
+            .try_map(|raw, span| match raw.as_str() {
+                "0" => Ok(MqttQos::Qos0),
+                "1" => Ok(MqttQos::Qos1),
+                "2" => Ok(MqttQos::Qos2),
+                _ => Err(Rich::custom(
+                    span,
+                    format!("MQTT QOS must be 0, 1 or 2, found {raw}"),
+                )),
+            }),
+    )
 }
 
 pub fn ack_timeout<'src>()
@@ -465,6 +501,45 @@ pub fn nonzero_u32_value<'src>(
     u32_value(label)
         .try_map(move |value, span| {
             NonZeroU32::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
+        })
+        .boxed()
+}
+
+/// An integer written where the count is bounded by the 16-bit range its Model uses.
+///
+/// The bound belongs to the value, so a count outside it is rejected where it is written rather
+/// than narrowed later: the message names the range instead of leaving a truncated number behind.
+pub fn u16_value<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], u16, extra::Err<ParseError<'src>>> + Clone {
+    // Each alternative carries the label for the same reason `u64_value` does: chumsky only
+    // rewrites an alternative error whose position matches the start of the labelled parser.
+    choice((
+        select! { Token::NumberLiteral(v) => v }.labelled(label),
+        word_raw().labelled(label),
+    ))
+    .try_map(|raw, span| {
+        integer_literal::<u16>(&raw).map_err(|_| {
+            Rich::custom(
+                span,
+                format!("invalid integer '{raw}'; expected 0 through {}", u16::MAX),
+            )
+        })
+    })
+    .boxed()
+}
+
+/// A 16-bit count written where zero has no meaning, parsed straight into `NonZeroU16`.
+///
+/// The label goes on the integer itself, not on the checked parser: labelling the check would
+/// rewrite `zero_reason` into a bare expectation and lose the explanation.
+pub fn nonzero_u16_value<'src>(
+    label: &'static str,
+    zero_reason: &'static str,
+) -> impl Parser<'src, &'src [Token], NonZeroU16, extra::Err<ParseError<'src>>> + Clone {
+    u16_value(label)
+        .try_map(move |value, span| {
+            NonZeroU16::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
         })
         .boxed()
 }
@@ -1024,20 +1099,25 @@ pub fn duration_lit<'src>()
     // setting consumes it validates it; checking it here would take over validation the runtime has
     // to do anyway, since models also arrive from persisted state. Only keywords are ruled out,
     // because a keyword is never a value.
+    let span = select! { Token::NumberLiteral(value) => value }.then(word_raw());
+    let spans = span
+        .clone()
+        .map(|(number, unit)| format!("{number}{unit}"))
+        .foldl(span.repeated(), |mut raw, (number, unit)| {
+            raw.push(' ');
+            raw.push_str(&number);
+            raw.push_str(&unit);
+            raw
+        });
+
     choice((
-        select! { Token::NumberLiteral(value) => value }
-            .then(word_raw())
-            .map(|(number, unit)| format!("{number}{unit}"))
-            .try_map(|raw, span| {
-                let mapping_input = nervix_models::parse_duration_text(&raw).map(|_| raw.clone());
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(report) => Err(Rich::custom(
-                        span,
-                        format!("invalid duration '{raw}': {}", report.current_context()),
-                    )),
-                }
-            }),
+        spans.try_map(|raw, span| match nervix_models::parse_duration_text(&raw) {
+            Ok(_) => Ok(raw),
+            Err(report) => Err(Rich::custom(
+                span,
+                format!("invalid duration '{raw}': {report:#}"),
+            )),
+        }),
         unknown_word(),
     ))
     .labelled("duration_literal")
@@ -1416,7 +1496,23 @@ where
 pub fn general_error_policy<'src>()
 -> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::On)
-        .ignore_then(kw(Identifier::General))
+        .ignore_then(general_error_clause())
+        .boxed()
+}
+
+/// `SET GENERAL ERROR IGNORE|LOG`, which an `ALTER` writes in place of the policy its node
+/// declared.
+pub fn set_general_error_policy<'src>()
+-> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Set)
+        .ignore_then(general_error_clause())
+        .boxed()
+}
+
+/// `GENERAL ERROR IGNORE|LOG`, as a statement declares the policy and an `ALTER` replaces it.
+fn general_error_clause<'src>()
+-> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::General)
         .then_ignore(kw(Identifier::Error))
         .ignore_then(choice((
             kw(Identifier::Ignore).to(GeneralErrorPolicy::Ignore),
@@ -1525,6 +1621,72 @@ pub fn alter_route_construction<'src>()
     )
 }
 
+/// Which in-place changes a construction can take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructionChanges {
+    /// Every part: its inheritance, assignments, filter and invocations.
+    Every,
+    /// Its filter alone, for an emitter whose entity writes its own values.
+    FilterOnly,
+}
+
+/// One in-place change to a construction inside an `ALTER`: `SET INHERIT …`, `DROP INHERIT`,
+/// `ADD SET <target> = <expression>`, `DROP SET <target>`, `ADD INVOKE <call>`,
+/// `DROP INVOKE <n>`, `SET WHERE <expression>` or `DROP WHERE`, of those `changes` admits.
+pub fn construction_alteration<'src>(
+    changes: ConstructionChanges,
+) -> Boxed<'src, 'src, &'src [Token], ConstructionAlteration, extra::Err<ParseError<'src>>> {
+    let set_where = kw(Identifier::Set)
+        .ignore_then(where_expression())
+        .map(|where_clause| ConstructionAlteration::SetWhere { where_clause })
+        .boxed();
+    let drop_where = kw_phrase2(Identifier::Drop, Identifier::Where)
+        .to(ConstructionAlteration::DropWhere)
+        .boxed();
+    if changes == ConstructionChanges::FilterOnly {
+        return choice((set_where, drop_where)).boxed();
+    }
+    let set_inherit = kw_phrase2(Identifier::Set, Identifier::Inherit)
+        .ignore_then(embedded(RouteClause::Inherit.body_label(), |tokens| {
+            read_inheritance_prefix(tokens, alter_list_separator())
+        }))
+        .map(|inheritance| ConstructionAlteration::SetInherit { inheritance });
+    let drop_inherit =
+        kw_phrase2(Identifier::Drop, Identifier::Inherit).to(ConstructionAlteration::DropInherit);
+    let add_set = kw_phrase2(Identifier::Add, Identifier::Set)
+        .ignore_then(embedded(
+            RouteClause::Set.body_label(),
+            read_assignment_prefix,
+        ))
+        .map(|assignment| ConstructionAlteration::AddSet { assignment });
+    let drop_set = kw_phrase2(Identifier::Drop, Identifier::Set)
+        .ignore_then(embedded("assignment_target", read_assignment_target_prefix))
+        .map(|target| ConstructionAlteration::DropSet { target });
+    let add_invoke = kw_phrase2(Identifier::Add, Identifier::Invoke)
+        .ignore_then(embedded(
+            RouteClause::Invoke.body_label(),
+            read_invocation_prefix,
+        ))
+        .map(|invocation| ConstructionAlteration::AddInvoke { invocation });
+    let drop_invoke = kw_phrase2(Identifier::Drop, Identifier::Invoke)
+        .ignore_then(nonzero_u64_value(
+            "invocation_number",
+            "DROP INVOKE counts invocations from 1",
+        ))
+        .map(|position| ConstructionAlteration::DropInvoke { position });
+    choice((
+        set_inherit.boxed(),
+        drop_inherit.boxed(),
+        add_set.boxed(),
+        drop_set.boxed(),
+        add_invoke.boxed(),
+        drop_invoke.boxed(),
+        set_where,
+        drop_where,
+    ))
+    .boxed()
+}
+
 fn explicit_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
     route_construction_clause(RouteClause::Set, tok(Token::Comma))
@@ -1572,10 +1734,10 @@ fn expression_term_word<'src>()
 /// rendered back to text or lexed again, and a standalone entry point reads the same text with the
 /// same grammar.
 ///
-/// Completion sees none of the part's grammar. Where the part cannot begin, the rejection expects
-/// `label`, which completion offers. Any other rejection keeps the reader's message, located at
-/// the statement's tokens where the reader failed, and expects nothing, so an unfinished
-/// expression offers nothing and a finished one offers the clauses that may follow it.
+/// Where the part cannot begin, the rejection expects `label`. Further inside it, semantic
+/// expression expectations retain the reader's expected and found tokens at their statement
+/// positions. Completion uses those semantic expectations, and a finished part offers the
+/// surrounding statement's continuations.
 pub fn embedded<'src, O, R>(
     label: &'static str,
     read: R,
@@ -1638,7 +1800,26 @@ fn embedded_rejection<'src>(
             span,
         );
     }
-    Rich::custom(span, format_parse_error(&error))
+    let mut rejection = Rich::custom(span, format_parse_error(&error));
+    for pattern in error.expected() {
+        if is_expression_reference(pattern) {
+            <ParseError<'src> as LabelError<
+                'src,
+                &'src [Token],
+                RichPattern<'src, Token>,
+            >>::in_context(&mut rejection, pattern.clone(), span);
+        }
+    }
+    rejection
+}
+
+/// Semantic positions inside the expression grammar. Its other expected tokens remain available
+/// to diagnostics; completion resolves only these references when an expression is unfinished.
+fn is_expression_reference(pattern: &RichPattern<'_, Token>) -> bool {
+    match pattern {
+        RichPattern::Label(label) => label.starts_with("ref:expression_"),
+        _ => false,
+    }
 }
 
 /// An expression embedded in a statement, whose body completion names `label`.
@@ -2014,11 +2195,9 @@ pub fn into_parse_error(
 /// Split completion input at the cursor into the source the grammar should parse and the partial
 /// word the user is part-way through typing.
 ///
-/// The partial word is removed before parsing rather than left in place. A half-typed word is not a
-/// token the grammar can make sense of, and inside a free-form expression region it is swallowed
-/// into the region and read by the expression grammar, which fails with a custom error that
-/// carries no expectations — so completion falls silent the moment the user starts typing. The
-/// prefix comes back separately and only filters the result.
+/// The partial word is removed before parsing so the grammar sees the completed tokens before
+/// the cursor. The prefix comes back separately to filter literal offers and the concrete names
+/// the server expands from semantic expectations.
 pub fn completion_context(input: &str, cursor: usize) -> (String, String) {
     let safe_cursor = cursor.min(input.len());
     let head = &input[..safe_cursor];
@@ -2049,17 +2228,32 @@ pub fn suggestions_from_errors(mut errors: Vec<ParseError<'_>>, prefix: &str) ->
     };
     let best_span = best.span().into_range();
 
-    let candidates = SortedSet::from_unsorted(
-        errors
-            .iter()
-            .rev()
-            .take_while(|error| error.span().into_range() == best_span)
-            .flat_map(|error| error.expected())
-            .map(expected_to_suggestion)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>(),
-    )
-    .into_vec();
+    let mut patterns = Vec::new();
+    for error in errors.iter().rev() {
+        if error.span().into_range() != best_span {
+            break;
+        }
+        patterns.extend(error.expected());
+        for (pattern, span) in error.contexts() {
+            if span == error.span() && is_expression_reference(pattern) {
+                patterns.push(pattern);
+            }
+        }
+    }
+    let expression = patterns
+        .iter()
+        .any(|pattern| is_expression_reference(pattern));
+    let mut candidates = Vec::new();
+    for pattern in patterns {
+        if expression && !is_expression_reference(pattern) {
+            continue;
+        }
+        let suggestion = expected_to_suggestion(pattern);
+        if !suggestion.is_empty() {
+            candidates.push(suggestion);
+        }
+    }
+    let candidates = SortedSet::from_unsorted(candidates).into_vec();
 
     filter_by_prefix(candidates, prefix)
 }
@@ -2077,9 +2271,13 @@ pub fn filter_by_prefix(suggestions: Vec<String>, prefix: &str) -> Vec<String> {
         .into_iter()
         .filter(|suggestion| {
             suggestion.starts_with("ref:")
+                || suggestion.ends_with("_expression")
                 || matches!(
                     suggestion.as_str(),
-                    "resource_version" | "completed_resource_version" | "set_assignments"
+                    "resource_version"
+                        | "completed_resource_version"
+                        | "set_assignments"
+                        | "invocations"
                 )
                 || suggestion.to_ascii_lowercase().starts_with(&prefix)
         })
@@ -2120,15 +2318,20 @@ fn format_parse_error(err: &ParseError<'_>) -> String {
     match err.reason() {
         RichReason::Custom(msg) => msg.clone(),
         RichReason::ExpectedFound { expected, found } => {
-            let expected = expected
-                .iter()
-                .map(format_expected_pattern)
-                .collect::<Vec<_>>();
+            let mut named = Vec::with_capacity(expected.len());
+            for pattern in expected {
+                // A contextual gate that is closed expects `something else`, which adds nothing
+                // beside what the open alternatives name.
+                if let RichPattern::SomethingElse = pattern {
+                    continue;
+                }
+                named.push(format_expected_pattern(pattern));
+            }
 
-            let expected_text = if expected.is_empty() {
+            let expected_text = if named.is_empty() {
                 "something else".to_string()
             } else {
-                expected.join(" | ")
+                named.join(" | ")
             };
 
             let found_text = match found.as_deref() {
@@ -2155,7 +2358,14 @@ fn expected_to_suggestion(pattern: &RichPattern<'_, Token>) -> String {
 
 fn format_expected_pattern(pattern: &RichPattern<'_, Token>) -> String {
     match pattern {
-        RichPattern::Label(label) => label.to_string(),
+        RichPattern::Label(label) => match label.as_ref() {
+            "ref:expression_function" | "ref:expression_invocation" => "function_name".to_string(),
+            "ref:expression_field"
+            | "ref:expression_target"
+            | "ref:ingestor_timestamp_metadata" => "field_name".to_string(),
+            "ref:expression_udf" => "udf_name".to_string(),
+            _ => label.to_string(),
+        },
         RichPattern::Identifier(identifier) => identifier.to_string(),
         RichPattern::Token(token) => format_found_token(token),
         RichPattern::Any => "any token".to_string(),
@@ -2220,16 +2430,36 @@ mod tests {
         error::{RichPattern, RichReason},
         prelude::*,
     };
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::NamePosition;
     use strum::IntoEnumIterator as _;
 
     use super::{
-        ALTER_OPERATION_HEADS, LexedInput, ParseError, current_word_prefix, filter_where_clause,
-        format_parse_error, into_parse_error, kw, lex_input, schema_ref, suggestions_from_errors,
-        token_span_to_source_span,
+        ALTER_OPERATION_HEADS, LexedInput, ParseError, current_word_prefix, duration_lit,
+        filter_where_clause, format_parse_error, into_parse_error, kw, lex_input, schema_ref,
+        suggestions_from_errors, token_span_to_source_span,
     };
     use crate::lexer::{Identifier, Token, Word};
+
+    #[test]
+    fn multi_span_duration_keeps_the_following_keyword() {
+        let LexedInput { tokens, .. } =
+            lex_input("1 min 30s MAX").assured("the input is lexical Plexus");
+        let parsed = duration_lit()
+            .then_ignore(kw(Identifier::Max))
+            .then_ignore(end())
+            .parse(tokens.as_slice())
+            .into_result()
+            .assured("MAX belongs to the following clause");
+        assert_eq!(parsed, "1min 30s");
+    }
+
+    #[test]
+    fn duration_does_not_consume_a_count_and_its_messages_keyword() {
+        let LexedInput { tokens, .. } =
+            lex_input("100 MESSAGES").assured("the input is lexical Plexus");
+        assert!(duration_lit().parse(tokens.as_slice()).has_errors());
+    }
 
     #[test]
     fn canonical_plexus_quotes_a_keyword_exactly_where_the_grammar_reads_it_as_one() {
@@ -2576,7 +2806,15 @@ mod tests {
         for (input, expected) in [
             (
                 "CREATE JUNCTION j FROM r WHERE input.a BETWEEN 1 AND 2 ",
-                vec![",", "BRANCHED BY", "COLLECT FOR", "FILTER", "UNBRANCHED"],
+                vec![
+                    ",",
+                    "ATTACHED",
+                    "BRANCHED BY",
+                    "COLLECT FOR",
+                    "DETACHED",
+                    "FILTER",
+                    "UNBRANCHED",
+                ],
             ),
             (
                 "CREATE JUNCTION j FROM r FILTER WHERE input.a IS DISTINCT FROM 1 ",
@@ -2604,17 +2842,30 @@ mod tests {
     }
 
     #[test]
-    fn completion_inside_an_unfinished_embedded_expression_offers_nothing() {
+    fn completion_at_a_non_operand_position_keeps_expression_syntax_internal() {
         for input in [
             "CREATE SUBSCRIPTION s TO r WHERE input.a IS ",
-            "CREATE SUBSCRIPTION s TO r WHERE CASE WHEN input.a THEN ",
-            "CREATE JUNCTION j FROM r UNBRANCHED TO o SET x = ",
             "CREATE JUNCTION j FROM r FILTER WHERE input.a NOT ",
         ] {
             assert_eq!(
                 crate::client_statement::suggest_client_statement(input, input.len()),
                 Vec::<String>::new(),
                 "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_operands_keep_the_expression_grammars_function_expectation() {
+        for input in [
+            "CREATE SUBSCRIPTION s TO r WHERE CASE WHEN input.a THEN ",
+            "CREATE JUNCTION j FROM r UNBRANCHED TO o SET x = ",
+            "CREATE JUNCTION j FROM r FILTER WHERE coalesce(",
+        ] {
+            let suggestions = crate::client_statement::suggest_client_statement(input, input.len());
+            assert!(
+                suggestions.contains(&"ref:expression_function".to_string()),
+                "{input}: {suggestions:?}"
             );
         }
     }

@@ -3,7 +3,8 @@
 //! Test harness outside the product layer order.
 //! - **Owns.** Assertions that a reply larger than a frame arrives whole as transfer parts, that a
 //!   reply larger than the transfer limit is refused whole, that a cancellation of a request that
-//!   is not in flight says so, that registration refuses a duplicate or excess request rather
+//!   is not in flight says so, that the node's client traffic series count what each of those
+//!   sessions served, that registration refuses a duplicate or excess request rather
 //!   than queueing it while a submitted batch stays outside the in-flight limit, that a subscription statement the parser rejects is refused with the
 //!   stage and the diagnostic located in that statement, and that a domain clock attachment
 //!   delivers its changes between its replies and ends when its domain leaves the node. An attach
@@ -19,14 +20,16 @@ use std::{
 
 use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto as _;
 use nervix_client_wire::{
     AttachDomainClockRequest, CancelRequest, ClientFrame, ClientMessage, ClientRequest,
     CommandDisposition as WireCommandDisposition, CommandRequest, DetachDomainClockRequest,
-    DomainClockAttachDisposition, DomainClockAttachmentEndReason, DomainClockDetachDisposition,
-    EmitterOpenRefusal, LeaderRedirect as WireLeaderRedirect, OpenEmitterDisposition,
-    OpenEmitterRequest, OpenIngestorDisposition, OpenIngestorRequest, ReplyBody, RequestId,
-    RequestRejection, ServerEvent, ServerFrame, ServerMessage, SessionLimitSettings, SessionLimits,
-    SubscribeDisposition, SubscribeRequest, SubscriptionType, TransferAssembly, VerifiedFrame,
+    DomainClockAttachDisposition, DomainClockAttachRefusal, DomainClockAttachmentEndReason,
+    DomainClockDetachDisposition, EmitterOpenRefusal, LeaderRedirect as WireLeaderRedirect,
+    OpenEmitterDisposition, OpenEmitterRequest, OpenIngestorDisposition, OpenIngestorRequest,
+    ReplyBody, RequestId, RequestRejection, RowSchema, ServerEvent, ServerFrame, ServerMessage,
+    SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscribeRequest,
+    SubscriptionRefusal, SubscriptionType, TransferAssembly, VerifiedFrame,
 };
 use nervix_models::{
     ClientConsumerLimits, ClientProducerLimits, ClientProducerRefusal, DomainClockObservation,
@@ -179,6 +182,24 @@ impl SessionUnderTest {
     }
 }
 
+/// The value the node's metrics export for exactly `series`, a family name with its labels in
+/// exposition order.
+fn exported(service: &SessionServiceImpl, series: &str) -> f64 {
+    let text = service.inner.runtime.metrics().prometheus_text();
+    for line in text.lines() {
+        let Some(value) = line.strip_prefix(series) else {
+            continue;
+        };
+        let Some(value) = value.strip_prefix(' ') else {
+            continue;
+        };
+        return value
+            .parse()
+            .assured("the Prometheus text format prints a sample's value as a number");
+    }
+    panic!("the node exports no {series}:\n{text}");
+}
+
 /// A transaction with two queued schemas, then a JSON description of it as request 4.
 fn describe_two_operation_transaction(session: &SessionUnderTest) {
     session.command(1, "BEGIN;", None);
@@ -288,6 +309,15 @@ async fn a_reply_larger_than_a_frame_arrives_whole_in_transfer_parts() {
         panic!("DESCRIBE TRANSACTION is answered with a command outcome, found {body:?}");
     };
     assert!(frames > 1, "a reply above one frame travels in parts");
+    let parts: f64 = frames.approx_into();
+    assert_eq!(
+        exported(
+            &service,
+            "nervix_session_transfer_parts_total{transport=\"grpc\"}"
+        ),
+        parts,
+        "every part of the reply is counted"
+    );
     let inspection = outcome
         .inspection
         .verified("a description carries its typed inspection");
@@ -320,6 +350,22 @@ async fn a_reply_larger_than_the_transfer_limit_is_refused_whole() {
     };
     assert_eq!(frames, 1);
     assert_eq!(rejected.rejection, RequestRejection::ReplyTooLarge);
+    assert_eq!(
+        exported(
+            &service,
+            "nervix_session_rejections_total{rejection=\"reply_too_large\",transport=\"grpc\"}"
+        ),
+        1.0,
+        "the rejection that replaced the reply is counted"
+    );
+    assert_eq!(
+        exported(
+            &service,
+            "nervix_session_transfer_parts_total{transport=\"grpc\"}"
+        ),
+        0.0,
+        "a refused reply sends no transfer part"
+    );
 
     session.close().await;
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
@@ -350,8 +396,35 @@ async fn cancelling_a_request_that_is_not_in_flight_says_so() {
     };
     assert_eq!(outcome.target, request_id(1));
     assert_eq!(outcome.state, nervix_client_wire::CancelState::NotInFlight);
+    for (series, value) in [
+        ("nervix_sessions{transport=\"grpc\"}", 1.0),
+        ("nervix_sessions_opened_total{transport=\"grpc\"}", 1.0),
+        (
+            "nervix_session_requests_total{request=\"command\",transport=\"grpc\"}",
+            1.0,
+        ),
+        (
+            "nervix_session_requests_total{request=\"cancel\",transport=\"grpc\"}",
+            1.0,
+        ),
+        (
+            "nervix_session_cancellations_total{stage=\"before_admission\",transport=\"grpc\"}",
+            0.0,
+        ),
+        (
+            "nervix_session_cancellations_total{stage=\"after_admission\",transport=\"grpc\"}",
+            0.0,
+        ),
+    ] {
+        assert_eq!(exported(&service, series), value, "{series}");
+    }
 
     session.close().await;
+    assert_eq!(
+        exported(&service, "nervix_sessions{transport=\"grpc\"}"),
+        0.0,
+        "a session leaves the open sessions once it ends"
+    );
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 
@@ -531,6 +604,7 @@ async fn a_subscription_statement_the_parser_rejects_is_refused_at_its_rejected_
             domain: named::<DomainName>("default"),
             statement: statement.to_string(),
             subscription_type: SubscriptionType::Row,
+            expected_schema: None,
         }),
     });
     let (body, _) = session.reply(request_id(1)).await;
@@ -538,7 +612,10 @@ async fn a_subscription_statement_the_parser_rejects_is_refused_at_its_rejected_
     let ReplyBody::Subscribe(outcome) = body else {
         panic!("a subscribe request is answered with its outcome, found {body:?}");
     };
-    assert!(matches!(outcome.disposition, SubscribeDisposition::Failed));
+    assert_eq!(
+        outcome.disposition,
+        SubscribeDisposition::Refused(SubscriptionRefusal::InvalidStatement)
+    );
     assert_eq!(outcome.message, "parse error");
     let [diagnostic] = outcome.diagnostics.as_slice() else {
         panic!(
@@ -867,7 +944,10 @@ async fn a_session_holding_a_transaction_refuses_domain_clock_requests() {
     let ReplyBody::DomainClockAttach(outcome) = body else {
         panic!("an attach request is answered with its outcome, found {body:?}");
     };
-    assert_eq!(outcome.disposition, DomainClockAttachDisposition::Failed);
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Refused(DomainClockAttachRefusal::InTransaction)
+    );
     assert_eq!(outcome.message, super::SESSION_LOCAL_IN_TRANSACTION);
     session.detach_clock(3, "clocked");
     let (body, _) = session.reply(request_id(3)).await;
@@ -911,6 +991,187 @@ async fn a_domain_clock_statement_sent_as_a_command_is_refused_in_favour_of_its_
         outcome.message,
         "DETACH DOMAIN CLOCK is a session-local command; send a detach domain clock request"
     );
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+impl SessionUnderTest {
+    /// Asks the session to open the one `CREATE SUBSCRIPTION` in `statement` in `domain`, expecting
+    /// `expected_schema` when the request restores a subscription, and returns its outcome.
+    async fn subscribe(
+        &mut self,
+        id: u64,
+        domain: &str,
+        statement: &str,
+        expected_schema: Option<RowSchema>,
+    ) -> SubscribeOutcome {
+        self.send(&ClientMessage {
+            request_id: request_id(id),
+            request: ClientRequest::Subscribe(SubscribeRequest {
+                domain: named(domain),
+                statement: statement.to_string(),
+                subscription_type: SubscriptionType::Row,
+                expected_schema,
+            }),
+        });
+        let (body, _) = self.reply(request_id(id)).await;
+        let ReplyBody::Subscribe(outcome) = body else {
+            panic!("a subscribe request is answered with its outcome, found {body:?}");
+        };
+        outcome
+    }
+
+    /// Executes the one statement `query` outside a transaction and requires it to complete.
+    async fn completed(&mut self, id: u64, query: &str) {
+        self.command(id, query, None);
+        let (body, _) = self.reply(request_id(id)).await;
+        let ReplyBody::Command(outcome) = body else {
+            panic!("a command is answered with its outcome, found {body:?}");
+        };
+        assert!(
+            matches!(
+                outcome.disposition,
+                WireCommandDisposition::Completed { .. }
+            ),
+            "`{query}` completes: {outcome:?}"
+        );
+    }
+}
+
+/// Proves the node caught up with the committed state, as its startup does before it admits
+/// runtime work.
+async fn admit(service: &SessionServiceImpl) {
+    let admitted = service
+        .inner
+        .runtime_admission
+        .runtime_state(&service.inner.consensus, &CancellationToken::new())
+        .await;
+    assert!(
+        admitted.is_some(),
+        "a test node catches up with its own state"
+    );
+}
+
+/// The refusal a node that has not proved it caught up answers in place of a terminal refusal.
+fn catching_up(outcome: &SubscribeOutcome) -> bool {
+    outcome.disposition == SubscribeDisposition::Refused(SubscriptionRefusal::Unavailable)
+        && outcome.message == "the serving node is catching up with committed domain state"
+}
+
+#[nervix_primitives::test]
+async fn a_subscription_is_refused_by_what_the_committed_state_lacks_once_its_node_caught_up() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+    let statement = "CREATE SUBSCRIPTION watch TO events;";
+
+    let missing_domain = session.subscribe(1, "absent", statement, None).await;
+    assert!(
+        catching_up(&missing_domain),
+        "a node that has not caught up cannot tell a missing domain from one it has not applied: \
+         {missing_domain:?}"
+    );
+    let missing_relay = session.subscribe(2, "default", statement, None).await;
+    assert!(
+        catching_up(&missing_relay),
+        "a node that has not caught up cannot tell a missing relay from one it has not applied: \
+         {missing_relay:?}"
+    );
+
+    admit(&service).await;
+    let missing_domain = session.subscribe(3, "absent", statement, None).await;
+    assert_eq!(
+        missing_domain.disposition,
+        SubscribeDisposition::Refused(SubscriptionRefusal::DomainNotFound)
+    );
+    assert_eq!(missing_domain.message, "domain 'absent' does not exist");
+    let missing_relay = session.subscribe(4, "default", statement, None).await;
+    assert_eq!(
+        missing_relay.disposition,
+        SubscribeDisposition::Refused(SubscriptionRefusal::RelayNotFound)
+    );
+    assert_eq!(
+        missing_relay.message,
+        "stream 'events' does not exist in domain 'default'"
+    );
+    let [diagnostic] = missing_relay.diagnostics.as_slice() else {
+        panic!(
+            "a missing relay is refused with one diagnostic, found {:?}",
+            missing_relay.diagnostics
+        );
+    };
+    assert_eq!(diagnostic.message, "stream 'events' not found");
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[nervix_primitives::test]
+async fn a_restoration_expecting_another_schema_than_its_relay_announces_is_refused_as_changed() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+    session
+        .completed(1, "CREATE SCHEMA event_record ( value STRING );")
+        .await;
+    session
+        .completed(2, "CREATE RELAY events SCHEMA event_record UNBRANCHED;")
+        .await;
+    let earlier = RowSchema {
+        fields: vec![SchemaField {
+            name: named("value"),
+            ty: ParseAsType::I64,
+            optional: false,
+            sensitive: false,
+        }],
+        branch: None,
+    };
+    let statement = "CREATE SUBSCRIPTION watch TO events;";
+
+    let changed = session
+        .subscribe(3, "default", statement, Some(earlier))
+        .await;
+    assert_eq!(
+        changed.disposition,
+        SubscribeDisposition::Refused(SubscriptionRefusal::RelayChanged)
+    );
+    assert_eq!(
+        changed.message,
+        "relay 'events' in domain 'default' was redefined, so it no longer announces the schema \
+         session subscription 'watch' expects; subscribe again to receive its rows under the \
+         current schema"
+    );
+
+    let filtered = session
+        .subscribe(
+            4,
+            "default",
+            "CREATE SUBSCRIPTION watch TO events WHERE missing_field = 'x';",
+            None,
+        )
+        .await;
+    assert_eq!(
+        filtered.disposition,
+        SubscribeDisposition::Refused(SubscriptionRefusal::InvalidFilter),
+        "{filtered:?}"
+    );
+
+    session.command(5, "BEGIN;", None);
+    let (begun, _) = session.reply(request_id(5)).await;
+    assert!(matches!(begun, ReplyBody::Command(_)));
+    let in_transaction = session.subscribe(6, "default", statement, None).await;
+    assert_eq!(
+        in_transaction.disposition,
+        SubscribeDisposition::Refused(SubscriptionRefusal::InTransaction)
+    );
+    assert_eq!(in_transaction.message, super::SESSION_LOCAL_IN_TRANSACTION);
 
     session.close().await;
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");

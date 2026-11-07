@@ -17,20 +17,20 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
-    AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, CommandExecutionReference,
-    ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact,
-    DomainName, DomainSchedule, DomainState as ControlDomainState, DomainStatus,
-    DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution,
-    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
-    ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
-    ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason, OperationImpactReport,
-    OwnershipMoveImpact, PauseRequirement, PlacementPolicy, PlannedExecutionStepImpact,
-    QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
-    ResetWasmState, ResetWasmStateSelectionError, ResourceBindingImpact, ResourceCatalogAction,
-    ResourceCatalogImpact, ResourceName, ResourceUploads, ResourceVersionResolutionError,
-    StateResetImpact, Statement, TransactionCommitPlanStep, TransactionCommitStepKind,
-    TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition,
+    AttributedGateBoundary, AttributedImpactNode, BranchName, CanonicalImpactSet,
+    CommandExecutionReference, ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction,
+    DomainLifecycleImpact, DomainName, DomainSchedule, DomainState as ControlDomainState,
+    DomainStatus, DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact,
+    ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage,
+    ImpactPlanningBasis, ImpactReportCompleteness, ImpactReportError, ImpactTopology,
+    ImpactTopologyEdge, ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlacementPolicy,
+    PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason,
+    RequestedResourceVersion, ResetWasmState, ResetWasmStateSelectionError, ResourceBindingImpact,
+    ResourceCatalogAction, ResourceCatalogImpact, ResourceName, ResourceUploads,
+    ResourceVersionResolutionError, StateResetImpact, Statement, TransactionCommitPlanStep,
+    TransactionCommitStepKind, TransactionImpactReport, TransactionOperation,
+    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
 };
 use thiserror::Error;
 
@@ -49,6 +49,7 @@ use rebind::plan_resource_rebind;
 /// Every mutable control-plane input one planning pass may inspect.
 #[derive(Debug, Clone)]
 pub(crate) struct TransactionPlanningSnapshot {
+    pub(crate) parameters: nervix_models::ClusterParameterValues,
     pub(crate) domain: ControlDomainState,
     pub(crate) models: ModelIndex,
     pub(crate) resources: BTreeSet<ResourceName>,
@@ -174,6 +175,8 @@ impl PlannedTransaction {
 
 #[derive(Debug, Error)]
 pub(crate) enum TransactionPlanningError {
+    #[error("cluster parameters have not been seeded")]
+    ClusterParametersUnseeded,
     #[error("domain '{domain}' does not exist")]
     DomainNotFound { domain: DomainName },
     #[error("domain '{domain}' is paused by a model alteration")]
@@ -184,6 +187,15 @@ pub(crate) enum TransactionPlanningError {
     DomainAlreadyRunning { domain: DomainName },
     #[error("domain '{domain}' is already stopped")]
     DomainAlreadyStopped { domain: DomainName },
+    #[error(
+        "branch '{branch}' changes its partition count only while its domain is stopped: STOP \
+         domain '{domain}', run ALTER BRANCH, then START it"
+    )]
+    BranchPartitionsRequireStoppedDomain {
+        operation: TransactionOperationNumber,
+        domain: DomainName,
+        branch: BranchName,
+    },
     #[error(
         "domain '{domain}' restore state installation is incomplete for execution '{execution}'"
     )]
@@ -280,9 +292,11 @@ impl TransactionPlanningError {
             | Self::ResourceVersion { operation, .. }
             | Self::ModelPreflight { operation, .. }
             | Self::ExternalModelValidation { operation }
-            | Self::UdfPreparation { operation } => Some(*operation),
+            | Self::UdfPreparation { operation }
+            | Self::BranchPartitionsRequireStoppedDomain { operation, .. } => Some(*operation),
             Self::ResetIdentityMissing { operation } => Some(*operation),
-            Self::DomainNotFound { .. }
+            Self::ClusterParametersUnseeded
+            | Self::DomainNotFound { .. }
             | Self::DomainPaused { .. }
             | Self::ConcurrentDomainAlter { .. }
             | Self::DomainAlreadyRunning { .. }
@@ -326,6 +340,7 @@ struct ModelRunPlan {
 }
 
 struct ModelRunPlanningInput<'a> {
+    parameters: &'a nervix_models::ClusterParameterValues,
     domain: &'a DomainName,
     domain_state: &'a ControlDomainState,
     resources: &'a BTreeSet<ResourceName>,
@@ -504,6 +519,7 @@ impl Registry {
             &ImpactAttribution,
         ) -> TransactionScheduleDecision,
     {
+        let parameters = snapshot.parameters;
         let domain = snapshot.domain.id.clone();
         let mut domain_state = snapshot.domain;
         let mut models = snapshot.models;
@@ -538,6 +554,7 @@ impl Registry {
                     .get(operation_offset..end)
                     .verified("the model run bounds were found in this statement slice");
                 let input = ModelRunPlanningInput {
+                    parameters: &parameters,
                     domain: &domain,
                     domain_state: &domain_state,
                     resources: &resources,
@@ -830,6 +847,7 @@ impl Registry {
         ) -> TransactionScheduleDecision,
     {
         let ModelRunPlanningInput {
+            parameters,
             domain,
             domain_state,
             resources,
@@ -894,6 +912,7 @@ impl Registry {
                 continue;
             }
 
+            ensure_branch_partitions_change_is_stopped(domain_state, statement, number)?;
             let operation = model_operation(domain, statement, number)?;
             let is_if_not_exists_noop = match statement {
                 Statement::Create(create) if create.if_not_exists => {
@@ -953,6 +972,7 @@ impl Registry {
         let preflight = Self::preflight_transaction_mutations_against(
             domain,
             base_models.clone(),
+            parameters,
             &mutations,
             allow_incomplete,
         )
@@ -1139,6 +1159,32 @@ fn ensure_domain_not_paused(
         }));
     }
     Ok(())
+}
+
+/// A branch's partition count decides which unit of every relay it branches owns each key, and a
+/// running domain has no mechanism to move keys between units, so `ALTER BRANCH … SET PARTITIONS`
+/// is accepted only while the branch's domain is stopped. Its next `START` schedules the new units.
+fn ensure_branch_partitions_change_is_stopped(
+    domain: &ControlDomainState,
+    statement: &Statement,
+    operation: TransactionOperationNumber,
+) -> Result<(), Report<TransactionPlanningError>> {
+    let Statement::AlterBranch(alter) = statement else {
+        return Ok(());
+    };
+    if !alter.sets_partitions() {
+        return Ok(());
+    }
+    match domain.status {
+        DomainStatus::Stopped => Ok(()),
+        DomainStatus::Running | DomainStatus::Paused => Err(Report::new(
+            TransactionPlanningError::BranchPartitionsRequireStoppedDomain {
+                operation,
+                domain: domain.id.clone(),
+                branch: alter.branch.clone(),
+            },
+        )),
+    }
 }
 
 fn model_operation(
@@ -1392,7 +1438,7 @@ fn complete_model_impact(input: ModelImpactInput<'_>) -> CompletedModelImpact {
     let moved_entities = ownership_moves
         .as_slice()
         .iter()
-        .map(|moved| moved.node.node.clone())
+        .map(|moved| nervix_models::NodeUnitRef::new(moved.node.node.clone(), moved.unit))
         .collect::<Vec<_>>();
     let ownership_gate =
         EntityGatePlan::for_ownership_handoff(current_schedule, next_schedule, moved_entities);
@@ -1479,7 +1525,7 @@ fn complete_placement_impact(
     let moved_entities = ownership_moves
         .as_slice()
         .iter()
-        .map(|moved| moved.node.node.clone());
+        .map(|moved| nervix_models::NodeUnitRef::new(moved.node.node.clone(), moved.unit));
     let ownership_gate =
         EntityGatePlan::for_ownership_handoff(current_schedule, next_schedule, moved_entities);
     let mut pause_nodes =
@@ -1856,7 +1902,7 @@ fn add_ownership_pause_nodes(
     by_entity: &mut BTreeMap<NodeRef, BTreeSet<TransactionOperationNumber>>,
 ) {
     let attribution = merged_ownership_attribution(ownership_moves, fallback_attribution);
-    for entity in gate.affected_entities() {
+    for entity in &gate.affected_entities() {
         let moved = ownership_moves
             .as_slice()
             .iter()
@@ -1891,7 +1937,7 @@ fn add_model_gate_pause_nodes(
     let Some(schedule) = current else {
         return;
     };
-    for entity in gate.affected_entities() {
+    for entity in &gate.affected_entities() {
         let operations = by_entity
             .get(entity)
             .cloned()
@@ -1927,7 +1973,7 @@ fn attributed_gate_boundaries(
         (model_gate, [current, desired]),
         (ownership_gate, [current, None]),
     ] {
-        for entity in gate.affected_entities() {
+        for entity in &gate.affected_entities() {
             let operations = entity_operations
                 .get(entity)
                 .cloned()

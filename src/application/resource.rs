@@ -15,6 +15,8 @@
     )
 )]
 
+mod upload_executions;
+
 use std::{collections::BTreeMap, path::Path};
 
 use ahash::HashMap;
@@ -27,8 +29,10 @@ use nervix_models::{
     ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUpload,
     ResourceUploadKey, ResourceUploadState, UploadResource,
 };
-use nervix_primitives::sync::{Mutex as AsyncMutex, OwnedMutexGuard, StdArc};
+use nervix_primitives::sync::{Mutex as AsyncMutex, StdArc};
 use thiserror::Error;
+use upload_executions::ResourceUploadExecution;
+pub(in crate::application) use upload_executions::ResourceUploadExecutions;
 
 use super::{
     command_result::{CommandOrigin, CommandResult},
@@ -562,13 +566,9 @@ impl SessionServiceImpl {
                 if !matches!(upload.state, ResourceUploadState::Applying { .. }) {
                     continue;
                 }
-                let execution = self
-                    .inner
-                    .resource_upload_executions
-                    .entry(upload.key.clone())
-                    .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
-                    .clone();
-                let Ok(execution_guard) = execution.try_lock_owned() else {
+                let Some(execution_guard) =
+                    self.inner.resource_upload_executions.try_lock(&upload.key)
+                else {
                     continue;
                 };
                 let service = self.clone();
@@ -588,7 +588,7 @@ impl SessionServiceImpl {
     async fn recover_resource_upload(
         &self,
         upload: ResourceUpload,
-        _execution_guard: OwnedMutexGuard<()>,
+        _execution_guard: ResourceUploadExecution,
     ) {
         #[cfg(feature = "testing")]
         self.inner
@@ -632,7 +632,6 @@ impl SessionServiceImpl {
                         "failed to record completion of resource upload '{}': {error}",
                         upload.key.identity
                     ));
-                    return;
                 }
             }
             Err(reason) => {
@@ -646,11 +645,9 @@ impl SessionServiceImpl {
                         "failed to record failure of resource upload '{}': {error}",
                         upload.key.identity
                     ));
-                    return;
                 }
             }
         }
-        self.inner.resource_upload_executions.remove(&upload.key);
     }
 
     /// Publishes the copy of `upload`'s archive that this node installed before the task
@@ -911,13 +908,7 @@ impl SessionServiceImpl {
         archive_path: &Path,
         root_checksum: String,
     ) -> Result<ResourceInstallation, Report<ResourceUploadError>> {
-        let execution = self
-            .inner
-            .resource_upload_executions
-            .entry(key.clone())
-            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
-            .clone();
-        let _execution_guard = execution.lock().await;
+        let _execution_guard = self.inner.resource_upload_executions.lock(&key).await;
         let identifier = ModelName::from(&key.identifier);
         let created_at = current_timestamp();
         if let Some(existing) = self.inner.consensus.current_resources().await.upload(&key)
@@ -929,6 +920,21 @@ impl SessionServiceImpl {
                 expected_checksum: existing.state.root_checksum().to_string(),
                 received_checksum: root_checksum,
             }));
+        }
+        #[cfg(feature = "testing")]
+        if self
+            .inner
+            .runtime
+            .fault_injection()
+            .refuses_resource_upload_start(self.inner.consensus.local_node_id())
+        {
+            return Err(
+                Report::new(self.inner.consensus.lapsed_lease_refusal()).change_context(
+                    ResourceUploadError::BeginUpload {
+                        identifier: identifier.clone(),
+                    },
+                ),
+            );
         }
         let upload = self
             .inner
@@ -1181,13 +1187,7 @@ impl SessionServiceImpl {
             archive_path,
             offset,
         } = import;
-        let execution = self
-            .inner
-            .resource_upload_executions
-            .entry(key.clone())
-            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
-            .clone();
-        let _execution_guard = execution.lock().await;
+        let _execution_guard = self.inner.resource_upload_executions.lock(&key).await;
         let id = resource.id.clone();
         let recorded = self.inner.consensus.current_resources().await;
         match recorded.upload(&key).map(|upload| upload.state.clone()) {
@@ -1377,6 +1377,7 @@ mod tests {
         ResourceVersionStatus, Timestamp, UserName,
     };
     use nervix_plexus::client_statement::local_path_fragment;
+    use nervix_recovery::Reported as _;
     use sorted_vec::SortedVec;
 
     #[cfg(feature = "testing")]
@@ -1678,7 +1679,7 @@ mod tests {
         for input in [
             "DESCRIBE RESOURCE proto VERSION ",
             "CREATE VHOST edge api.example.com WITH TLS proto VERSION ",
-            "CREATE CODEC c FROM PROTOBUF USING RESOURCE proto VERSION 1",
+            "CREATE PROTOBUF CODEC c USING RESOURCE proto VERSION 1",
             "CREATE INFERENCER i FROM features USING RESOURCE proto VERSION ",
             "REBIND RESOURCE proto TO VERSION ",
             "REBIND\nRESOURCE\tproto\nTO\tVERSION ",
@@ -1792,13 +1793,7 @@ mod tests {
             .begin_resource_upload(key.clone(), "expected-root".to_string())
             .await
             .assured("the test upload is admitted by the single-node leader");
-        let execution = service
-            .inner
-            .resource_upload_executions
-            .entry(key.clone())
-            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
-            .clone();
-        let execution_guard = execution.lock_owned().await;
+        let execution_guard = service.inner.resource_upload_executions.lock(&key).await;
 
         service
             .recover_resource_upload(upload, execution_guard)
@@ -1853,13 +1848,7 @@ mod tests {
             )
             .await
             .assured("the durable resource version and local replica are published");
-        let execution = service
-            .inner
-            .resource_upload_executions
-            .entry(key.clone())
-            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
-            .clone();
-        let execution_guard = execution.lock_owned().await;
+        let execution_guard = service.inner.resource_upload_executions.lock(&key).await;
 
         service
             .recover_resource_upload(upload, execution_guard)
@@ -1907,14 +1896,8 @@ mod tests {
     async fn recovery_execution(
         service: &SessionServiceImpl,
         key: &ResourceUploadKey,
-    ) -> OwnedMutexGuard<()> {
-        let execution = service
-            .inner
-            .resource_upload_executions
-            .entry(key.clone())
-            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
-            .clone();
-        execution.lock_owned().await
+    ) -> ResourceUploadExecution {
+        service.inner.resource_upload_executions.lock(key).await
     }
 
     #[nervix_primitives::test]
@@ -2095,9 +2078,27 @@ mod tests {
         );
         assert_eq!(resources.version(&id), None, "nothing is published");
         assert!(
-            service.inner.resource_upload_executions.contains_key(&key),
-            "the next reconciliation takes the upload up again"
+            !service.inner.resource_upload_executions.contains_key(&key),
+            "a deferred recovery releases its local execution entry"
         );
+
+        assert_eq!(retained.version, 1);
+        drop(resources);
+        let execution_guard = recovery_execution(&service, &key).await;
+        assert!(service.inner.resource_upload_executions.contains_key(&key));
+        drop(execution_guard);
+        assert!(!service.inner.resource_upload_executions.contains_key(&key));
+
+        let resources = service.inner.consensus.current_resources().await;
+        let retained = resources
+            .upload(&key)
+            .assured("local execution retirement leaves the durable upload retained");
+        assert!(
+            matches!(retained.state, ResourceUploadState::Applying { .. }),
+            "a fresh local execution does not complete the upload on a stopped consensus store: \
+             {retained:?}"
+        );
+        assert_eq!(retained.version, 1);
 
         drop(service);
         drop(registry);
@@ -2333,6 +2334,63 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn completed_resource_upload_and_recovered_outcome_release_their_execution_entries() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain = DomainName::parse("default").assured("the test domain is valid");
+        let identifier = "completed_archive";
+        declare_resource(&service, &domain, identifier).await;
+        let key = resource_upload_key(&domain, identifier, "completed-upload");
+        let id = ResourceId::new(key.domain.clone(), key.identifier.clone(), 1);
+        let installed = install_leader_copy(&service, &id, &path.join("upload-source")).await;
+        let archive = path.join("upload.tar");
+        std::fs::copy(service.inner.resource_store.archive_path(&id), &archive)
+            .assured("the test keeps its source outside the destination installation");
+
+        let first = service
+            .install_uploaded_resource_archive(
+                key.clone(),
+                &archive,
+                installed.root_checksum.clone(),
+            )
+            .await
+            .assured("the single-node upload installs a valid archive");
+        assert_eq!(first.version, 1);
+        assert!(matches!(first.origin, CommandOrigin::Executed));
+        assert!(!service.inner.resource_upload_executions.contains_key(&key));
+
+        let repeated = service
+            .install_uploaded_resource_archive(key.clone(), &archive, installed.root_checksum)
+            .await
+            .assured("the completed upload reports its retained outcome");
+        assert_eq!(repeated.version, 1);
+        assert!(matches!(repeated.origin, CommandOrigin::Recovered));
+        assert!(!service.inner.resource_upload_executions.contains_key(&key));
+
+        let conflict = service
+            .install_uploaded_resource_archive(
+                key.clone(),
+                &archive,
+                "another-archive-digest".to_string(),
+            )
+            .await;
+        let Err(conflict) = conflict else {
+            panic!("the identity keeps its original archive");
+        };
+        assert!(matches!(
+            conflict.current_context(),
+            ResourceUploadError::DigestConflict { version: 1, .. }
+        ));
+        assert!(!service.inner.resource_upload_executions.contains_key(&key));
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).reported("remove the completed upload test fixture");
+    }
+
+    #[nervix_primitives::test]
     async fn invalid_resource_archive_failure_is_retained_across_retry() {
         let TestService {
             service,
@@ -2361,9 +2419,17 @@ mod tests {
             first_error.current_context(),
             ResourceUploadError::Terminal { version: 1, .. }
         ));
+        assert!(
+            !service.inner.resource_upload_executions.contains_key(&key),
+            "an ended installation releases its execution entry"
+        );
 
         let retried = service
-            .install_uploaded_resource_archive(key, &missing_archive, "invalid-root".to_string())
+            .install_uploaded_resource_archive(
+                key.clone(),
+                &missing_archive,
+                "invalid-root".to_string(),
+            )
             .await;
         let retried_error = match retried {
             Ok(_) => panic!("a retained resource upload failure must remain terminal"),
@@ -2373,6 +2439,10 @@ mod tests {
             retried_error.current_context(),
             ResourceUploadError::Terminal { version: 1, .. }
         ));
+        assert!(
+            !service.inner.resource_upload_executions.contains_key(&key),
+            "a recovered terminal outcome releases its execution entry"
+        );
 
         let _ = std::fs::remove_dir_all(&path);
     }

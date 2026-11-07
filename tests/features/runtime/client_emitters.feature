@@ -2,7 +2,7 @@ Feature: Client emitters
   Applications receive constructed Arrow batches from domain-owned emitters and explicitly
   acknowledge their processing before an attached producer completes.
 
-  @client_emitter
+  @client_emitter @emitter_payload_observations
   Scenario Outline: A client emitter keeps two source relays and two concrete branches distinct
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -15,7 +15,7 @@ Feature: Client emitters
       CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY orders SCHEMA incoming BRANCHED BY tenants;
       CREATE RELAY invoices SCHEMA incoming BRANCHED BY tenants;
-      CREATE CLIENT PRODUCER INGESTOR source_in
+      CREATE CLIENT PRODUCER INGESTOR ingestor_in
         FROM SCHEMA incoming
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
@@ -35,7 +35,7 @@ Feature: Client emitters
       """
     And client "app" is connected to the leader node
     When client "app" opens consumer "output" on emitter "app_output" expecting fields "id STRING, cents I64"
-    And client "app" opens producer "input" on ingestor "source_in" expecting fields "id STRING, amount I64, tenant STRING"
+    And client "app" opens producer "input" on ingestor "ingestor_in" expecting fields "id STRING, amount I64, tenant STRING"
     And producer "input" submits batch "two tenants" with rows
       | id  | amount | tenant |
       | o-1 | 1      | acme   |
@@ -53,6 +53,23 @@ Feature: Client emitters
     And batch "two tenants" remains pending for "200ms"
     When output batch "fourth" is acknowledged
     Then batch "two tenants" completes
+    And within "30s" DESCRIBE EMITTER "app_output" on the leader node contains
+      """
+      batch container: Arrow IPC batch
+      """
+    And within "30s" DESCRIBE EMITTER "app_output" on the leader node contains
+      """
+      payloads: 4 source_messages=4
+      """
+    And the last command output owner is saved as placeholder "metrics_owner"
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_payload_encoded_bytes_total" with labels eventually reaches at least 1
+      """
+      emitter="app_output"
+      """
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_prepared_bytes" with labels eventually equals 0
+      """
+      emitter="app_output"
+      """
 
     Examples:
       | cluster_size |
@@ -517,7 +534,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED CLIENT CONSUMER EMITTER app_output FROM orders
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        DETACHED
         TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100

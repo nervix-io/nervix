@@ -10,7 +10,7 @@ Feature: Redis Pub/Sub declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 CONFIG {
         'addr' = 'redis://127.0.0.1:1/2?protocol=resp3',
@@ -66,7 +66,7 @@ Feature: Redis Pub/Sub declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 CONFIG {
         'addr' = 'redis://127.0.0.1:1',
@@ -127,7 +127,7 @@ Feature: Redis Pub/Sub declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 CONFIG {
         'addr' = 'redis://127.0.0.1:1',
@@ -160,7 +160,7 @@ Feature: Redis Pub/Sub declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 CONFIG {
         'addr' = 'redis://127.0.0.1:1',
@@ -197,7 +197,7 @@ Feature: Redis Pub/Sub declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 CONFIG {
         'addr' = 'redis://127.0.0.1:1',
@@ -243,7 +243,7 @@ Feature: Redis Pub/Sub declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 CONFIG {
         'addr' = 'redis://127.0.0.1:1',

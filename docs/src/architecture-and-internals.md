@@ -23,6 +23,9 @@ Use it for:
 - [host name resolution: the node's asynchronous DNS resolver, its configuration, cache and bounds,
   the client-library hooks and every call site, residual driver and browser resolution, deployment
   limits, and the evidence behind them](./name-resolution.md)
+- [cryptography: the AWS-LC boundary, the algorithm policy, the register of non-security hashes,
+  the inventory of cryptography outside AWS-LC and the count that holds it
+  down](./cryptography.md)
 - [client-to-node communication: the FlatBuffers session protocol, request correlation and
   dispositions, exact recovery, redirect and reconnection, Row subscriptions, uploads, and the
   shared client binding](./client-session-protocol.md)
@@ -45,6 +48,9 @@ Use it for:
   aggregates and sketches, and adding a function](./vm-functions.md)
 - [SIMD kernels: typed buffer ownership, dispatch and build targets, exact results, caller
   catalog, qualification, and measured evidence](./simd-kernels.md)
+- [wire schema binding: each format's wire types, the binding rule and its matrix, `ENCODE` rules,
+  arrays, modes, the value models of the schemaful codecs, value fidelity, stored shapes and
+  failures](./wire-schema-binding.md)
 - runtime semantics that are easier to understand from the implementation side
 - relay/state internals
 

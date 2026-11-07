@@ -52,8 +52,7 @@ integers, so a field-for-field message needs only the identity program `'.'`:
 ```plexus
 BEGIN;
 
-CREATE CODEC order_protobuf_codec
-  FROM PROTOBUF
+CREATE PROTOBUF CODEC order_protobuf_codec
   USING RESOURCE order_proto VERSION 1
   CONFIG {'file' = 'order_event.proto', 'include' = '.'}
   MESSAGE 'quickstart.OrderEvent'
@@ -62,7 +61,7 @@ CREATE CODEC order_protobuf_codec
 
 CREATE RELAY proto_orders SCHEMA order_record UNBRANCHED;
 
-CREATE ENDPOINT proto_ingress ON edge PATH '/proto-orders' TYPE HTTP;
+CREATE HTTP ENDPOINT proto_ingress ON edge PATH '/proto-orders';
 
 CREATE HTTP ENDPOINT INGESTOR proto_order_source
   FROM proto_ingress MODE NO ACK

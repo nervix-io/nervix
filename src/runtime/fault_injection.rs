@@ -18,7 +18,7 @@ use std::{net::SocketAddr, time::Duration};
 #[cfg(not(feature = "testing"))]
 use nervix_models::{
     ClusterNodeName, DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName,
-    RelayName,
+    RelayName, Unit,
 };
 
 #[cfg(not(feature = "testing"))]
@@ -68,7 +68,7 @@ impl ConfiguredFaultInjection {
         false
     }
 
-    pub(in crate::runtime) fn source_confirmation_delay(
+    pub(in crate::runtime) fn ingestor_confirmation_delay(
         &self,
         _ingestor: &DomainNodeRef,
     ) -> Option<Duration> {
@@ -115,6 +115,15 @@ impl ConfiguredFaultInjection {
         _emitter: &EmitterName,
     ) -> Option<usize> {
         None
+    }
+
+    pub(in crate::runtime) fn received_emitter_record_outcome(
+        &self,
+        _emitter: &EmitterName,
+        _records: usize,
+        outcome: nervix_connector::PerRecordOutcome<nervix_connector::EmitterRecordId>,
+    ) -> nervix_connector::PerRecordOutcome<nervix_connector::EmitterRecordId> {
+        outcome
     }
 
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(
@@ -224,6 +233,14 @@ impl ConfiguredFaultInjection {
     }
 
     pub(in crate::runtime) async fn pause_owner_relay_fanout_if_armed(&self, _domain: &DomainName) {
+    }
+
+    pub(in crate::runtime) async fn pause_owner_relay_partition_fanout_if_armed(
+        &self,
+        _domain: &DomainName,
+        _relay: &RelayName,
+        _unit: Unit,
+    ) {
     }
 
     pub(in crate::runtime) fn mark_owner_relay_fanout_complete(&self, _domain: &DomainName) {}

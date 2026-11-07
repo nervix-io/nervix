@@ -26,20 +26,19 @@ Feature: Runtime startup admission
         sequence integer
       );
 
-      CREATE CODEC admission_event_codec
-        FROM WIRE JSON SCHEMA admission_event_wire
+      CREATE WIRE JSON CODEC admission_event_codec
+        FROM WIRE SCHEMA admission_event_wire
         TO SCHEMA admission_event;
 
       CREATE RELAY admission_input SCHEMA admission_event UNBRANCHED;
       CREATE RELAY admission_output SCHEMA admission_event UNBRANCHED;
 
       CREATE VHOST admission_edge http-admission-{{test_id}}.example.com;
-      CREATE ENDPOINT admission_ingress
+      CREATE HTTP ENDPOINT admission_ingress
         ON admission_edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
 
-      CREATE HTTP ENDPOINT INGESTOR admission_source
+      CREATE HTTP ENDPOINT INGESTOR admission_ingestor
         FROM admission_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING admission_event_codec
         TO admission_input
@@ -58,8 +57,7 @@ Feature: Runtime startup admission
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE KAFKA TOPIC EMITTER admission_emitter

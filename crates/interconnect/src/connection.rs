@@ -61,6 +61,7 @@ use nervix_primitives::{
 use strum::EnumCount as _;
 use tracing::{debug, warn};
 
+pub(crate) use self::control::PeerProcessFence;
 use self::{
     join::InboundBindingAnswer,
     published_tls::{ActiveTls, PublishedTls},
@@ -87,6 +88,7 @@ use crate::{
 };
 
 mod body;
+mod control;
 mod dial;
 mod duplex;
 mod join;
@@ -1858,50 +1860,6 @@ impl TransportState {
             self.retire_relay_record(&record, record.status());
         }
         result
-    }
-
-    pub(crate) async fn round_trip_control(
-        &self,
-        node_id: &ClusterNodeName,
-        control: ControlEnvelope,
-        subquota: RequestSubquota,
-        timeout_duration: Duration,
-    ) -> Result<wire::Decoded<ControlEnvelope>, Report<TransportError>> {
-        let class = control.pool_class();
-        let deadline = Instant::now()
-            .checked_add(timeout_duration)
-            .ok_or_else(|| TransportError::InvalidOptions {
-                reason: "request deadline exceeds the monotonic clock range".to_string(),
-            })?;
-        let lease = self.lease(node_id, class, subquota, deadline).await?;
-        let bytes = wire::encode_rkyv(
-            &self.executor,
-            class.memory_class(),
-            class.cpu_class(),
-            class.control_body_limit(&self.executor),
-            control,
-        )
-        .await?;
-        let response = lease
-            .request_raw(
-                self,
-                RawRequest {
-                    path: CONTROL_PATH,
-                    body: Some(bytes),
-                    response_class: class,
-                    response_limit: class.control_body_limit(&self.executor),
-                    timeout: deadline.saturating_duration_since(Instant::now()),
-                    headers: &[],
-                },
-            )
-            .await?;
-        wire::decode_rkyv::<ControlEnvelope>(
-            &self.executor,
-            class.memory_class(),
-            class.cpu_class(),
-            response,
-        )
-        .await
     }
 
     fn deliver_incoming(

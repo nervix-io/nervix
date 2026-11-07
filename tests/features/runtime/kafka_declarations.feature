@@ -11,7 +11,7 @@ Feature: Kafka topic declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:1' };
       """
@@ -55,13 +55,13 @@ Feature: Kafka topic declarations
       """
 
     Examples:
-      | cluster_size | topic          | offsets                               | ingest_mode                                                                           | emit_mode                                                         | batch                                 | shown                 |
-      | 1            | Orders.EU_v2-1 | OFFSET BY DOMAIN                      | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                         |                                       | write_header          |
-      | 3            | Orders.EU_v2-1 | OFFSET BY DOMAIN                      | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                         |                                       | write_header          |
-      | 1            | orders         | OFFSET BY CONSUMER GROUP 'Readers EU' | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | BATCH MAX MESSAGES 10 MAX SIZE 512KiB | BATCH MAX MESSAGES 10 |
-      | 3            | orders         | OFFSET BY CONSUMER GROUP 'Readers EU' | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | BATCH MAX MESSAGES 10 MAX SIZE 512KiB | BATCH MAX MESSAGES 10 |
-      | 1            | ..orders       | OFFSET BY CONSUMER GROUP 'readers'    | NO ACK                                                                                | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s     |                                       | write_header          |
-      | 3            | ..orders       | OFFSET BY CONSUMER GROUP 'readers'    | NO ACK                                                                                | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s     |                                       | write_header          |
+      | cluster_size | topic          | offsets                                               | ingest_mode                                                                           | emit_mode                                                         | batch                                 | shown                 |
+      | 1            | Orders.EU_v2-1 | OFFSET BY DOMAIN                                      | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                         |                                       | write_header          |
+      | 3            | Orders.EU_v2-1 | OFFSET BY DOMAIN                                      | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                         |                                       | write_header          |
+      | 1            | orders         | OFFSET BY CONSUMER GROUP 'Readers EU' START AT LATEST | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | BATCH MAX MESSAGES 10 MAX SIZE 512KiB | BATCH MAX MESSAGES 10 |
+      | 3            | orders         | OFFSET BY CONSUMER GROUP 'Readers EU' START AT LATEST | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | BATCH MAX MESSAGES 10 MAX SIZE 512KiB | BATCH MAX MESSAGES 10 |
+      | 1            | ..orders       | OFFSET BY CONSUMER GROUP 'readers' START AT LATEST    | NO ACK                                                                                | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s     |                                       | write_header          |
+      | 3            | ..orders       | OFFSET BY CONSUMER GROUP 'readers' START AT LATEST    | NO ACK                                                                                | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s     |                                       | write_header          |
 
   Scenario Outline: Kafka topic ingestors refuse offset ownership and quiesce modes the topic does not declare on <cluster_size> nodes
     Given a <cluster_size> node nervix cluster is started
@@ -70,7 +70,7 @@ Feature: Kafka topic declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:1' };
       """
@@ -89,15 +89,15 @@ Feature: Kafka topic declarations
       """
 
     Examples:
-      | cluster_size | offsets                     | quiesce                                      | expected                                           |
-      | 1            |                             | SUSPEND                                      | expected OFFSET, found MODE                        |
-      | 3            |                             | SUSPEND                                      | expected OFFSET, found MODE                        |
-      | 1            | OFFSET BY CONSUMER GROUP '' | SUSPEND                                      | invalid kafka_consumer_group '': must not be empty |
-      | 3            | OFFSET BY CONSUMER GROUP '' | SUSPEND                                      | invalid kafka_consumer_group '': must not be empty |
-      | 1            | OFFSET BY DOMAIN            | DROP                                         | expected SUSPEND, found DROP                       |
-      | 3            | OFFSET BY DOMAIN            | DROP                                         | expected SUSPEND, found DROP                       |
-      | 1            | OFFSET BY DOMAIN            | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                     |
-      | 3            | OFFSET BY DOMAIN            | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                     |
+      | cluster_size | offsets                                     | quiesce                                      | expected                                           |
+      | 1            |                                             | SUSPEND                                      | expected OFFSET, found MODE                        |
+      | 3            |                                             | SUSPEND                                      | expected OFFSET, found MODE                        |
+      | 1            | OFFSET BY CONSUMER GROUP '' START AT LATEST | SUSPEND                                      | invalid kafka_consumer_group '': must not be empty |
+      | 3            | OFFSET BY CONSUMER GROUP '' START AT LATEST | SUSPEND                                      | invalid kafka_consumer_group '': must not be empty |
+      | 1            | OFFSET BY DOMAIN                            | DROP                                         | expected SUSPEND, found DROP                       |
+      | 3            | OFFSET BY DOMAIN                            | DROP                                         | expected SUSPEND, found DROP                       |
+      | 1            | OFFSET BY DOMAIN                            | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                     |
+      | 3            | OFFSET BY DOMAIN                            | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                     |
 
   Scenario Outline: Kafka topic emitters refuse publishing modes the topic does not declare on <cluster_size> nodes
     Given a <cluster_size> node nervix cluster is started
@@ -106,7 +106,7 @@ Feature: Kafka topic declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:1' };
       """
@@ -135,14 +135,14 @@ Feature: Kafka topic declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:1' };
       """
     When these Plexus commands fail
       """
       CREATE KAFKA TOPIC INGESTOR refused_intake
-        FROM kafka_main TOPIC '<topic>' OFFSET BY CONSUMER GROUP 'readers'
+        FROM kafka_main TOPIC '<topic>' OFFSET BY CONSUMER GROUP 'readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

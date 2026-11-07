@@ -20,6 +20,13 @@ Change the address with `--web-console-listen-addr` or `NERVIX_WEB_CONSOLE_LISTE
 published ports differ by installation method: see [Docker](installation-docker.md) and
 [Kubernetes Operator](installation-kubernetes.md).
 
+To serve HTTPS, configure `--web-console-https-listen-addr`, `--web-console-tls-cert`, and
+`--web-console-tls-key`. Set `--web-console-advertise-addr` to the client-reachable HTTPS host and
+port on each node; leader redirects then advertise HTTPS and the console reconnects over `wss`.
+Without an explicit advertise address, the HTTPS listen address is used. The certificate must be
+trusted by the browser and cover that host. It is loaded at startup, so restart after rotation.
+These options configure the console independently of the native session listener's TLS options.
+
 Any node works. Opening the console on a follower is supported — the console follows the leader
 redirect, reconnects there, and reports which node it reached:
 
@@ -28,7 +35,7 @@ connected to leader 'node-2'
 ```
 
 The console reports the leader each time its session connects, so the notice appears again when
-the session reconnects: after a lost connection, after a command whose outcome is not yet known, or
+the session reconnects: after a lost connection, after a reply that breaks the session contract, or
 after a leader change. A reconnect keeps the session's place: the console connects again where the
 redirect took it, selects its domain, attaches its clock, restores its subscription tabs and
 attaches its transaction again, and then sends its pending commands under their execution
@@ -55,9 +62,28 @@ The console is one screen with three regions:
 - the **execution graph** in the upper right
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
-The top bar carries the websocket connection state, the global **Create** menu, the **Backups**
-button, the domain lifecycle button, the selected clock state, and the theme picker. The clock panel below the domain
-selector shows the selected domain's clock in detail.
+The top bar carries the websocket connection state, the node panel, the global **Create** menu, the
+**Backups** button, the domain lifecycle button, the selected clock state, and the theme picker. The
+clock panel below the domain selector shows the selected domain's clock in detail.
+
+### Following cluster events
+
+The **Events** button beside the connection state counts the cluster events the console has
+received, and opens the node panel that lists them, newest first. They are the membership and
+leadership notices of the node the console is connected to: a node that joined, left or restarted
+as a new incarnation, the node's Raft transitions, and the membership operations it proposes while
+it leads. A membership event repeated within one session is shown once with its count, for example
+`node 'node-3' left ×2`. The panel keeps the events of earlier sessions after a reconnect, up to its
+newest 256 entries; the count on the button keeps every event received.
+
+```text
+node 'node-3' joined (incarnation 1793845627114630656)
+node 'node-3' left
+raft transition: state=Follower leader=node-2 term=3 last_log_index=41 last_applied=41
+```
+
+These events never enter the REPL transcript. Runtime and control-plane failures and committed
+cluster-parameter revisions still appear there as notice lines, beside the command outcomes.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.
@@ -136,12 +162,21 @@ branches. Schema fields are added in declaration order and can be moved or remov
 field selects its exact scalar type, then may wrap it in any sequence of variable vectors and
 fixed arrays; each fixed array needs a positive length. Optional and sensitive flags are separate
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
-mode. A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
+mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; CBOR offers `integer`,
+`float`, `boolean`, `text`, `bytes`, and `array`, with native byte strings for `bytes`. AVRO offers
+the item types `boolean`, `int`, `long`, `float`, `double`, `string`, and `bytes`, and wraps the
+picked item type in one array per added layer, building `array<item>` the way an internal field
+builds vectors and fixed arrays; a layer can be removed again. Codec field encoding controls
+select `RFC3339` or `BASE64` for explicit text interchange, as described in
+[Schemas And Codecs](schemas-and-codecs.md#codecs).
+A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
 share a name. The preview and submitted command come from the completed semantic Model's
 canonical renderer, just as they do for the earlier forms.
 
 A branch form selects an internal key schema from a server-backed, searchable, paged list, then
-requires a TTL. It may set a positive maximum instance count with LRU eviction. The schema list
+requires a TTL. Its partition count starts at 1 and accepts a whole number from 1 through 65535; the
+preview omits `PARTITIONS 1` as `SHOW CREATE BRANCH` does. It may set a positive maximum instance
+count with LRU eviction. The schema list
 uses the draft's captured domain and the session's attached transaction prefix, so a schema staged
 earlier in the same transaction is selectable. Changing the captured domain keeps a previous
 selection visible but marks it invalid until it is selected again. An invalid branch key schema,
@@ -166,8 +201,9 @@ schema is an exact typed selection. Declared wire-schema choices are limited to 
 format, even when wire schemas of different formats share a name. JAQ-native and Protobuf codecs
 choose ingestion (decode), emitting (encode), or both, and may add an emitting-batch program after
 an emitting program. These are program editors: their contents remain jaq source in the current
-codec Model, including quotes and whitespace. RFC3339 field encoding rules can be added in order
-where the format supports them. The preview renders the complete codec Model as canonical Plexus.
+codec Model, including quotes and whitespace. Field encoding rules select RFC3339 or BASE64 and
+can be added in order where the format supports them. The preview renders the complete codec
+Model as canonical Plexus.
 
 The Protobuf controls select an existing resource and one of its completed versions, including
 `LATEST`, then accept an optional `.proto` file and include root, additional compiler
@@ -236,7 +272,7 @@ commands under the same session and domain.
 
 An ingestor form offers every connector and entity an ingestor reads through a transport:
 `HTTP REQUEST`, `HTTP ENDPOINT`, `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `NATS SUBJECT`,
-`RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
+`NATS STREAM`, `RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
 `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER`. Its client or endpoint is a
 typed choice limited to that pair: clients of its connector, or endpoints of the `TYPE` its head
 names. The preview writes the statement under that pair's head. The entity declaration supplies
@@ -248,15 +284,17 @@ on quiesce. Buttons whose declared option requirements are unmet stay disabled, 
 ACK or SUSPEND without `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. A required option, such as an
 MQTT topic's `SESSION` and `QOS`, starts unchosen and has no default: the draft refuses to build
 until each is chosen, and validates the declared requirements too.
-Switching sources refreshes the option controls and quiesce choices from the selected entity.
+Switching ingestors refreshes the option controls and quiesce choices from the selected entity.
 A WebSocket connection edits literal upgrade headers as
-ordered name/value rows. A RabbitMQ queue offers its declared `NO ACK`, `ACK SEQUENTIAL` and
+ordered name/value rows. An `HTTP REQUEST` edits its request headers as ordered rows too: a row
+holds a literal value, or, with **Client secret** checked, the client key it reads, and the preview
+shows `CLIENT SECRET '<key>'`. A RabbitMQ queue offers its declared `NO ACK`, `ACK SEQUENTIAL` and
 `ACK PARALLEL` modes; the parallel window, batch timeout and retry settings are retained in the
 preview and submitted command. A topic,
 queue, subject, channel, consumer group, queue group or subscription keeps its text exactly as
 typed, case and spaces included, and the form refuses a name its entity's rule refuses. A
 `PULSAR TOPIC` subscription also requires an explicit ownership choice, `OWNED BY INGESTOR START AT EARLIEST` or
-`PROVISIONED`, which the form never defaults. The decoding codec list contains only codecs that
+`PROVISIONED`, and an explicit `TYPE`, neither of which the form defaults. The decoding codec list contains only codecs that
 support decoding. Timestamp behavior must be chosen explicitly: source timestamp, `NOW`, or `AT` a
 typed field from the codec's output schema.
 
@@ -453,7 +491,28 @@ attached transaction stay as they were. See
 [Plexus Overview](plexus-overview.md) for its forms and output.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
-follows leadership. The transaction id and status are replicated. If the WebSocket closes
+follows leadership. When its outcome is not known yet, the console repeats it on the open session
+after a wait that starts at 250 milliseconds and doubles to at most five seconds. The command keeps
+its position ahead of later held commands, while session messages continue to arrive. The selected
+domain, clock and relay tabs keep their existing attachments. A redirect or an ended connection
+triggers recovery; an uncertain reply alone leaves the connection open. A reply whose outcome names
+another execution reference than its command's is a protocol violation: the console reports it with
+both references, takes nothing from that reply, neither its result nor its redirect, transaction or
+retry, and stops reading the connection. It reconnects as after a lost connection and sends the
+command again in its place under its own reference, so the leader answers with the command's own
+outcome; a Create form shows **Queued until reconnect** until then. The transaction id and
+status are replicated. A reply that cannot be decoded or reassembled also violates the session
+contract, and so does a readable reply of a kind that does not answer its request, such as a
+domain listing under a command's request identity: a request is answered only by its own outcome,
+a rejection or a cancellation. The console checks a reply's kind before it applies anything the
+reply carries, so it takes no listing, selection, subscription, clock attachment, transaction or
+redirect from a reply of another kind and never shows it as the command's failure. It reports why
+the reply broke the contract and stops reading that connection. Every command still waiting keeps
+its whole original request and its place in the issue order, including its reference, transaction
+position, preview and uncertain-outcome retry history. The next connection restores the session before repeating those commands; a visual Create
+waits for its own recovered outcome.
+
+If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
 commit remains pending through `COMMITTING` until its exact terminal result. A
@@ -465,6 +524,10 @@ then gets an explicit takeover error. A clean console session close reverts an o
 while an accepted commit continues on the leader without the browser. See
 [Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and
 [Client Session Protocol](client-session-protocol.md).
+
+Connector expression completion follows the same entity declarations as the
+[CLI](./client-tools-cli.md#completion), including filters, HTTP request expressions, `ALTER`
+constructions and typed metadata fields. Header functions are offered only in a supported scope.
 
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`
@@ -488,11 +551,18 @@ its session delivers, and says where it left something out:
   command larger than the whole history says that it cannot be recalled.
 - While the console connects or waits to reconnect, at most 64 requests of its controls wait for
   the session, carrying at most 4 MiB of statements, completion input, and search text. Once
-  connected, at most 256 requests, carrying at most 16 MiB, are held or awaiting their reply.
-  Commands, subscription changes, and inspections wait in the order they were issued while 64
-  requests, the most the server admits for one session, are in flight, and go out as earlier
-  replies arrive; a completion, choice lookup, or domain selection goes out at once and is reported
-  if the server finds the session full. A request past either bound is not sent, and the control
+  connected, controls can admit at most 256 outstanding requests carrying at most 16 MiB.
+  Connection setup also restores the retained tabs, selected domain and clock, and transaction,
+  so a full control backlog cannot prevent its own recovery.
+  Every request shares the session's 64-place request window, including completion, choice lookup,
+  domain selection, connection setup and transaction attachment. Requests wait for earlier terminal
+  replies to free a place. Waiting controls respect the issue order of ready commands, subscription
+  changes and inspections; setup and reattachment precede the commands waiting for them. A waiting
+  completion is replaced
+  by the latest input, and each choice control keeps its latest waiting lookup. Superseded requests
+  already sent still count until their terminal replies, while their text and partial replies are
+  released immediately. Waiting lookups, selections and attachments end with their connection;
+  the replacement connection issues its own. A request past either bound is not sent, and the control
   that issued it shows why where its outcome would have appeared: the REPL, a form, a tab, the
   resource dialog, or the inspector. A completion request that is not sent reports a failed lookup
   rather than an empty list.
@@ -552,7 +622,10 @@ name, or `none`.
 
 Files or a whole directory can be uploaded from the browser as a new version of that resource in
 the selected domain. The successful upload result arrives after every current live node has
-verified and installed the version. An upload moves no binding: models keep the version they pin
+verified and installed the version. A refusal by a node that could not act as the leader, such as a
+leader that could not confirm its lease, decided nothing: the dialog keeps uploading and sends the
+same files again, waiting as the console waits before reconnecting, until the upload completes or
+fails, or the dialog is closed. An upload moves no binding: models keep the version they pin
 until [`REBIND RESOURCE`](resources.md#rebinding-existing-models) moves them. Version contents and
 how nodes consume them are covered in [Resources](resources.md).
 
@@ -611,7 +684,7 @@ owner can read it.
 
 The **Restore** form restores one domain of an archive, under its archived name or a new one, or a
 whole cluster archive with its policy for users the cluster already has. It can resume the restored
-domains at their archived lifecycle, and leave out source offsets or all runtime state.
+domains at their archived lifecycle, and leave out ingestor offsets or all runtime state.
 
 Choose the archive file, set the options, and select **Dry run**. The console reads the file once to
 measure its size and BLAKE3 digest, then streams it to the leader with the statement's `DRY RUN`
@@ -633,9 +706,28 @@ message.
 
 A restore runs outside transactions, so the form refuses while the session holds one. Every attempt
 sends the same execution reference, statement, and archive: a lost connection or an unknown outcome
-streams the archive again, from its first byte, until the leader answers. If no answer arrives
-within about ten minutes, the dialog reports the restore's outcome as unknown and names its
-execution reference.
+streams the archive again, from its first byte, until the leader answers. After about ten minutes
+of retry pauses without learning the outcome, the dialog reports it as unknown and names its
+execution reference. An unreadable reply, or a reply naming another request or execution, stops
+that restore call and likewise reports **unknown** under the restore's original reference. It
+cannot establish that the restore was refused or that nothing changed; a foreign outcome is never
+shown as this restore's result.
+
+The leader may admit a restore once it holds the whole archive, so once an attempt has sent the
+whole archive without an answer the console can read, or the leader has answered that the outcome
+is not known yet, the restore may have run. If the restore then ends without its outcome, because
+the browser can no longer read the file, a reply cannot be read, the leader refuses a later
+stream, the leader no longer holds the execution reference, or a later request fails without a
+recorded outcome or restore step report, the dialog reports the outcome as
+unknown under that reference, with what stopped it, and never as a refusal: a refusal of a later
+stream says nothing about the earlier one. A file the browser cannot read before any attempt has
+sent the whole archive changes nothing, and the dialog reports the restore as refused.
+
+A valid refusal on the first attempt remains definitive. A recovered failure, or a failure with
+the restore's step report, gives the restore's result; the dialog retains the steps already applied.
+An unrecorded failure of a later request cannot replace an earlier restore's unknown result, even
+when it names the same execution reference. Keep the original reference, statement and archive
+when recovering that result.
 
 The console never renders what an archive holds beyond the summary a backup reports and the report
 a restore returns.

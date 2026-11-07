@@ -26,14 +26,14 @@ Feature: Route-local value construction
         raw string,
         note string OPTIONAL
       );
-      CREATE CODEC source_event_codec
-        FROM WIRE JSON SCHEMA source_event_wire
+      CREATE WIRE JSON CODEC source_event_codec
+        FROM WIRE SCHEMA source_event_wire
         TO SCHEMA source_event;
       CREATE RELAY source_events SCHEMA source_event UNBRANCHED;
       CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
       CREATE VHOST edge value-construction-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TO source_events
@@ -104,14 +104,14 @@ Feature: Route-local value construction
         numerator integer,
         denominator integer
       );
-      CREATE CODEC header_calculation_codec
-        FROM WIRE JSON SCHEMA header_calculation_wire
+      CREATE WIRE JSON CODEC header_calculation_codec
+        FROM WIRE SCHEMA header_calculation_wire
         TO SCHEMA header_calculation;
       CREATE RELAY header_calculation_results SCHEMA header_calculation_result UNBRANCHED;
       CREATE RELAY header_calculation_errors SCHEMA header_calculation_error UNBRANCHED;
       CREATE VHOST edge header-error-{{test_id}}.example.com;
-      CREATE ENDPOINT header_calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR header_calculation_source
+      CREATE HTTP ENDPOINT header_calculation_ingress ON edge PATH '/calculations';
+      CREATE HTTP ENDPOINT INGESTOR header_calculation_ingestor
         FROM header_calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING header_calculation_codec
         TO header_calculation_results
@@ -178,15 +178,15 @@ Feature: Route-local value construction
         denominator integer,
         secret string
       );
-      CREATE CODEC calculation_codec
-        FROM WIRE JSON SCHEMA calculation_wire
+      CREATE WIRE JSON CODEC calculation_codec
+        FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE RELAY calculations SCHEMA calculation UNBRANCHED;
       CREATE RELAY calculation_results SCHEMA calculation_result UNBRANCHED;
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge error-construction-{{test_id}}.example.com;
-      CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR calculation_source
+      CREATE HTTP ENDPOINT calculation_ingress ON edge PATH '/calculations';
+      CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations

@@ -23,6 +23,51 @@ fn entry(key: &str, value: &str) -> ClientConfigEntry {
 }
 
 #[test]
+fn an_exclusion_group_accepts_absence_or_one_key_and_refuses_every_pair() {
+    let schema = ConnectorKind::Nats
+        .client()
+        .assured("NATS declares its client")
+        .config;
+    let address = entry("addr", "nats://127.0.0.1:4222");
+    schema
+        .validate(std::slice::from_ref(&address))
+        .assured("authentication may be absent");
+    for key in ["credentials_file", "nkey_seed", "token"] {
+        schema
+            .validate(&[address.clone(), entry(key, "secret")])
+            .assured("one declared authentication method is accepted");
+    }
+    for (first, second) in [
+        ("credentials_file", "nkey_seed"),
+        ("credentials_file", "token"),
+        ("nkey_seed", "token"),
+    ] {
+        for validate in [
+            ClientConfigSchema::validate,
+            ClientConfigSchema::validate_rendered,
+        ] {
+            let report = validate(
+                schema,
+                &[
+                    address.clone(),
+                    entry(second, "second-secret"),
+                    entry(first, "first-secret"),
+                ],
+            )
+            .expect_err("the exclusion is independent of entry order and rendering stage");
+            assert_eq!(
+                report.current_context(),
+                &ClientConfigSchemaError::MutuallyExclusive { first, second }
+            );
+            assert_eq!(
+                report.to_string(),
+                format!("client config keys '{first}' and '{second}' are mutually exclusive")
+            );
+        }
+    }
+}
+
+#[test]
 fn defaulted_keys_preserve_authored_configuration_and_explicit_values() {
     let schema = ConnectorKind::ClickHouse
         .client()
@@ -82,6 +127,46 @@ fn tcp_keepalive_values_fit_the_socket_option_without_truncation() {
             .expect_err("the socket option cannot represent this interval");
         assert!(
             matches!(report.current_context(), ClientConfigSchemaError::InvalidValue { key, .. } if key == "tcp_keepalive_ms")
+        );
+    }
+}
+
+#[test]
+fn millisecond_lifetimes_keep_zero_and_whole_second_rules_distinct() {
+    let idle = ClientConfigKey::optional(
+        "pool_idle_timeout_ms",
+        ClientConfigValue::NonnegativeMilliseconds,
+    );
+    for value in ["0", "00", "1", "1250"] {
+        idle.validate(value)
+            .expect("zero and positive schedulable millisecond lifetimes are valid");
+    }
+    let maximum = ClientConfigKey::optional(
+        "pool_max_lifetime_ms",
+        ClientConfigValue::WholeSecondsMilliseconds,
+    );
+    for value in ["1000", "30000", "60000"] {
+        maximum
+            .validate(value)
+            .expect("positive whole seconds are exactly representable");
+    }
+    for value in ["+0", "-0", "1.5", "18446744073709551615"] {
+        assert!(
+            idle.validate(value).is_err(),
+            "invalid idle lifetime {value}"
+        );
+    }
+    for value in [
+        "0",
+        "999",
+        "1001",
+        "-1000",
+        "1000.0",
+        "18446744073709551615",
+    ] {
+        assert!(
+            maximum.validate(value).is_err(),
+            "invalid maximum lifetime {value}"
         );
     }
 }
@@ -440,6 +525,65 @@ fn a_refused_name_is_no_reserved_key() {
     }];
     ClientConfigSchema::new(&ALIASED_KEYS, &[], &["owned.name"])
         .with_driver_aliases(&RESERVED, None);
+}
+
+#[test]
+fn a_reserved_key_a_statement_sets_names_the_clause_that_sets_it() {
+    const STATEMENT_KEYS: [ClientConfigStatementKey; 1] = [ClientConfigStatementKey {
+        key: "owned.start",
+        clause: "START AT on the ingestor",
+    }];
+    let schema = ClientConfigSchema::new(&ALIASED_KEYS, &[], &["owned.group", "owned.start"])
+        .with_statement_keys(&STATEMENT_KEYS);
+
+    let refusal = schema
+        .validate(&[entry("owned.start", "value")])
+        .expect_err("a statement sets this key");
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::SetByStatement {
+            key: "owned.start".to_string(),
+            clause: "START AT on the ingestor",
+        }
+    );
+
+    let refusal = schema
+        .validate(&[entry("owned.group", "value")])
+        .expect_err("Nervix sets this key itself");
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::Reserved {
+            key: "owned.group".to_string()
+        }
+    );
+    assert_eq!(schema.statement_keys(), &STATEMENT_KEYS);
+}
+
+#[test]
+#[should_panic(expected = "holds_name")]
+fn a_key_a_statement_sets_is_reserved() {
+    const UNRESERVED: [ClientConfigStatementKey; 1] = [ClientConfigStatementKey {
+        key: "owned.start",
+        clause: "START AT on the ingestor",
+    }];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &[]).with_statement_keys(&UNRESERVED);
+}
+
+#[test]
+#[should_panic(expected = "name_precedes")]
+fn keys_a_statement_sets_are_sorted() {
+    const UNSORTED: [ClientConfigStatementKey; 2] = [
+        ClientConfigStatementKey {
+            key: "owned.start",
+            clause: "START AT on the ingestor",
+        },
+        ClientConfigStatementKey {
+            key: "owned.group",
+            clause: "OFFSET BY on the ingestor",
+        },
+    ];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &["owned.group", "owned.start"])
+        .with_statement_keys(&UNSORTED);
 }
 
 #[test]
@@ -891,6 +1035,99 @@ fn a_deadline_uses_the_shared_positive_millisecond_contract() {
 }
 
 #[test]
+fn a_client_accepts_the_secret_keys_an_operator_names_and_stays_strict_about_every_other_key() {
+    let client = ConnectorKind::Http
+        .client()
+        .assured("HTTP declares a client");
+    let base = [
+        entry("endpoint", "https://api.example.com"),
+        entry("timeout_ms", "5000"),
+    ];
+
+    let mut authored = base.to_vec();
+    authored.push(entry("secret.api_token", "Bearer fixture-token"));
+    authored.push(entry("secret.tenant_key", "fixture-tenant"));
+    client
+        .config
+        .validate(&authored)
+        .assured("a client names as many secret keys as it reads");
+    assert_eq!(client.config.secret_key_prefix(), Some("secret."));
+    assert_eq!(
+        client.config.ownership_label(),
+        "Nervix",
+        "no driver reads a secret key, so the family delegates nothing"
+    );
+    assert!(client.config.namespaces().is_empty());
+
+    for key in ["secret.", "secrets.api_token", "api_token", "secret"] {
+        let mut refused = base.to_vec();
+        refused.push(entry(key, "value"));
+        let refusal = client
+            .config
+            .validate(&refused)
+            .expect_err("only the prefix and a name make a secret key");
+        assert!(
+            matches!(
+                refusal.current_context(),
+                ClientConfigSchemaError::UnknownKey { key: found } if found == key
+            ),
+            "{key}: {refusal:?}"
+        );
+    }
+    let mut repeated = base.to_vec();
+    repeated.push(entry("secret.api_token", "first"));
+    repeated.push(entry("secret.api_token", "second"));
+    assert!(matches!(
+        client
+            .config
+            .validate(&repeated)
+            .expect_err("a secret key occurs once")
+            .current_context(),
+        ClientConfigSchemaError::DuplicateKey { .. }
+    ));
+    let mut uppercase = base.to_vec();
+    uppercase.push(entry("secret.API_TOKEN", "value"));
+    assert!(matches!(
+        client
+            .config
+            .validate(&uppercase)
+            .expect_err("a secret key is lowercase like every key")
+            .current_context(),
+        ClientConfigSchemaError::KeyCase { .. }
+    ));
+}
+
+#[test]
+fn inspection_masks_every_secret_key_and_a_schema_reports_which_keys_are_secret() {
+    let client = ConnectorKind::Http
+        .client()
+        .assured("HTTP declares a client");
+    let inspected = client.config.inspection_entries(&[
+        entry("timeout_ms", "5000"),
+        entry("secret.api_token", "Bearer fixture-token"),
+    ]);
+    assert_eq!(
+        inspected,
+        [
+            entry("timeout_ms", "5000"),
+            entry("secret.api_token", CLIENT_CONFIG_REDACTION),
+        ]
+    );
+
+    assert!(client.config.is_secret("secret.api_token"));
+    assert!(!client.config.is_secret("secret."));
+    assert!(!client.config.is_secret("timeout_ms"));
+    assert!(!client.config.is_secret("unknown"));
+
+    let declared = ConnectorKind::ClickHouse
+        .client()
+        .assured("ClickHouse declares a client");
+    assert_eq!(declared.config.secret_key_prefix(), None);
+    assert!(declared.config.is_secret("password"));
+    assert!(!declared.config.is_secret("secret.api_token"));
+}
+
+#[test]
 fn http_declares_one_strict_client_transport_contract() {
     let client = ConnectorKind::Http
         .client()
@@ -1070,7 +1307,23 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 }
             }
             let mut entries = Vec::new();
+            let mut selected_exclusive = None;
+            if let Some(keys) = schema.mutually_exclusive_keys()
+                && arbitrary.entropy().flag()
+            {
+                let index = arbitrary.entropy().index(
+                    NonZeroUsize::new(keys.len())
+                        .assured("a declared exclusion group names at least two keys"),
+                );
+                selected_exclusive = Some(keys[index]);
+            }
             for key in schema.keys() {
+                if let Some(keys) = schema.mutually_exclusive_keys()
+                    && keys.binary_search(&key.name).is_ok()
+                    && selected_exclusive != Some(key.name)
+                {
+                    continue;
+                }
                 if matches!(key.presence, ClientConfigPresence::Defaulted(_))
                     && arbitrary.entropy().flag()
                 {
@@ -1096,6 +1349,14 @@ fn bolero_schema_checked_client_entries_round_trip() {
                         .to_string(),
                     ClientConfigValue::Milliseconds => {
                         arbitrary.entropy().boundary_biased(1..=60_000).to_string()
+                    }
+                    ClientConfigValue::NonnegativeMilliseconds => {
+                        arbitrary.entropy().boundary_biased(0..=60_000).to_string()
+                    }
+                    ClientConfigValue::WholeSecondsMilliseconds => {
+                        Duration::from_secs(arbitrary.entropy().boundary_biased(1..=60))
+                            .as_millis()
+                            .to_string()
                     }
                     ClientConfigValue::TcpKeepaliveMilliseconds => {
                         Duration::from_secs(arbitrary.entropy().boundary_biased(1..=32_767))
@@ -1193,6 +1454,12 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 };
                 entries.push(entry(key.name, &value));
                 assert_eq!(schema.key(key.name), Some(key));
+            }
+            if let Some(prefix) = schema.secret_key_prefix() {
+                entries.push(entry(
+                    &format!("{prefix}fixture_secret"),
+                    &arbitrary.string(),
+                ));
             }
             if let Some(count) = NonZeroUsize::new(schema.namespaces().len()) {
                 let namespace = schema.namespaces()[arbitrary.entropy().index(count)];

@@ -12,18 +12,16 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -67,8 +65,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -76,11 +73,10 @@ Feature: JAQ transformation
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -124,8 +120,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -179,8 +174,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -236,8 +230,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -291,8 +284,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -344,8 +336,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -400,8 +391,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -456,18 +446,16 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE VHOST edge ws-{{test_id}}.example.com;
-        CREATE ENDPOINT ws_notifications_endpoint
+        CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS;
+        PATH '/ws';
         CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -511,8 +499,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -562,8 +549,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -613,10 +599,9 @@ Feature: JAQ transformation
         value F64,
         timestamp STRING
       );
-        CREATE CODEC sample_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC sample_codec
         TO SCHEMA sample
-        WITH JAQ TRANSFORMATIONS ON INGESTION '{source, value: (.value * 2), timestamp}';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value: (.value * 2), timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;

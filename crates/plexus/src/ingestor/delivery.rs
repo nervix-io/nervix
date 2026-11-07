@@ -1,12 +1,12 @@
 //! The clauses ingestor source bodies share: the delivery modes, the consumer count, the batch
-//! timeout of a parallel acknowledgement window, and every `ON QUIESCE` body.
+//! timeout of a parallel acknowledgement window, the start position, and every `ON QUIESCE` body.
 //!
 //! Layer: language.
 //!
 //! - **Owns.** The one spelling of each delivery mode an ingestor writes — `NO ACK`,
 //!   `ACK SEQUENTIAL …` and `ACK PARALLEL MAX n …` — and the grammar of `INSTANCES`,
-//!   `BATCH TIMEOUT` and the quiesce bodies, which each connector's grammar composes into the
-//!   subset its entity accepts.
+//!   `BATCH TIMEOUT`, `START AT` and the quiesce bodies, which each connector's grammar composes
+//!   into the subset its entity accepts.
 //! - **Depends on.** Shared Plexus grammar primitives and the delivery and quiesce vocabulary.
 //! - **Must not know.** Which connector accepts which clause; the connector modules choose.
 
@@ -17,15 +17,18 @@
 
 use std::num::NonZeroU64;
 
-use chumsky::prelude::*;
+use chumsky::{Boxed, prelude::*};
 use meticulous::ResultExt as _;
-use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, RetryPolicy};
+use nervix_models::{
+    DeclaredQuiesce, IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestStartPosition, IngestorEntityModel, IngestorInstances, RetryPolicy,
+};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ack_timeout, boxed_choice, byte_size_lit, duration_lit, kw, kw_phrase2,
-        nonzero_u64_value, parallel_ack_window, retry_policy, sequential_ack_window,
+        ParseError, ack_timeout, byte_size_lit, duration_lit, kw, kw_phrase2, nonzero_u64_value,
+        parallel_ack_window, retry_policy, sequential_ack_window,
     },
 };
 
@@ -59,8 +62,8 @@ pub(super) fn ack_sequential<'src>()
 /// What `ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY …` states: up to `max`
 /// messages wait on their acknowledgements together.
 #[derive(Debug, Clone)]
-pub(super) struct ParallelAck {
-    pub(super) max: NonZeroU64,
+pub(super) struct ParallelAck<W = NonZeroU64> {
+    pub(super) max: W,
     pub(super) batch_timeout: String,
     pub(super) timeout: String,
     pub(super) retry_policy: RetryPolicy,
@@ -68,8 +71,16 @@ pub(super) struct ParallelAck {
 
 pub(super) fn ack_parallel<'src>()
 -> impl Parser<'src, &'src [Token], ParallelAck, extra::Err<ParseError<'src>>> + Clone {
+    ack_parallel_within(parallel_ack_window())
+}
+
+/// `ACK PARALLEL …` whose `PARALLEL MAX <n>` window `window` reads, for an entity that bounds its
+/// window itself.
+pub(super) fn ack_parallel_within<'src, W: 'src>(
+    window: impl Parser<'src, &'src [Token], W, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, &'src [Token], ParallelAck<W>, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Ack)
-        .ignore_then(parallel_ack_window())
+        .ignore_then(window)
         .then(batch_timeout_parser())
         .then(ack_timeout())
         .then(retry_policy())
@@ -83,19 +94,58 @@ pub(super) fn ack_parallel<'src>()
         )
 }
 
-/// The count after `INSTANCES`.
-pub(super) fn instance_count<'src>()
--> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
-    nonzero_u64_value("instance_count", "instances must be greater than 0")
+/// The instancing body the entity declares after `INSTANCES`.
+pub(super) fn instances<'src, S: IngestorEntityModel>()
+-> impl Parser<'src, &'src [Token], IngestorInstances, extra::Err<ParseError<'src>>> + Clone {
+    let count = nonzero_u64_value("instance_count", "instances must be greater than 0")
+        .map(IngestorInstances::Count);
+    let capability = S::KIND.capabilities().instancing;
+    let grammar = match capability {
+        nervix_models::IngestorInstancingCapability::PerPartition => choice((
+            kw_phrase2(Identifier::Per, Identifier::Partition).to(IngestorInstances::PerPartition),
+            count,
+        ))
+        .boxed(),
+        nervix_models::IngestorInstancingCapability::Instances => count.boxed(),
+        nervix_models::IngestorInstancingCapability::Single => empty()
+            .try_map(|_, span| {
+                Err(Rich::custom(
+                    span,
+                    "this entity has no instance declaration",
+                ))
+            })
+            .boxed(),
+    };
+    grammar
+        .try_map(move |instances, span| {
+            if capability.permits(instances) {
+                Ok(instances)
+            } else {
+                Err(Rich::custom(
+                    span,
+                    format!("{} does not support this INSTANCES form", S::KIND),
+                ))
+            }
+        })
+        .boxed()
 }
 
 /// `INSTANCES <n>` where a source may leave it out, and one instance when it does.
-pub(super) fn optional_instances<'src>()
--> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+pub(super) fn optional_instances<'src, S: IngestorEntityModel>()
+-> impl Parser<'src, &'src [Token], IngestorInstances, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Instances)
-        .ignore_then(instance_count())
+        .ignore_then(instances::<S>())
         .or_not()
-        .map(|instances| instances.unwrap_or(NonZeroU64::MIN))
+        .map(|instances| instances.unwrap_or(IngestorInstances::ONE))
+}
+
+/// `START AT EARLIEST|LATEST`: where a source starts when its broker holds no position it can use.
+pub(super) fn start_position<'src>()
+-> impl Parser<'src, &'src [Token], IngestStartPosition, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Start, Identifier::At).ignore_then(choice((
+        kw(Identifier::Earliest).to(IngestStartPosition::Earliest),
+        kw(Identifier::Latest).to(IngestStartPosition::Latest),
+    )))
 }
 
 pub(super) fn batch_timeout_parser<'src>()
@@ -208,15 +258,22 @@ pub(super) fn endpoint_ack_quiesce_clause<'src>()
     quiesce_clause(quiesce_reject_parser())
 }
 
-/// The quiesce body `SET QUIESCE` writes. Every form parses here, and the stored source decides
-/// which of them it honors.
-pub(super) fn alter_quiesce_body<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    boxed_choice!(
-        quiesce_suspend_parser(),
-        quiesce_buffer_parser(),
-        quiesce_drop_parser(),
-        quiesce_reject_parser(),
-        endpoint_quiesce_buffer_parser(),
-    )
+/// The quiesce body `SET QUIESCE` writes for an entity that declares `declared`: each mode the
+/// entity declares and no other. Whether the rest of the body keeps a mode's requirements is
+/// checked on the complete ingestor, once every operation applied.
+pub(super) fn declared_quiesce_body<'src>(
+    declared: &'static [DeclaredQuiesce],
+) -> Boxed<'src, 'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> {
+    let mut bodies = Vec::with_capacity(declared.len());
+    for quiesce in declared {
+        let body = match quiesce.kind {
+            IngestQuiesceKind::Suspend => quiesce_suspend_parser().boxed(),
+            IngestQuiesceKind::Buffer => quiesce_buffer_parser().boxed(),
+            IngestQuiesceKind::Drop => quiesce_drop_parser().boxed(),
+            IngestQuiesceKind::Reject => quiesce_reject_parser().boxed(),
+            IngestQuiesceKind::EndpointBuffer => endpoint_quiesce_buffer_parser().boxed(),
+        };
+        bodies.push(body);
+    }
+    choice(bodies).boxed()
 }

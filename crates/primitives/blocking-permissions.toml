@@ -19,6 +19,27 @@
 # thread count, work and lifetime bound here.
 
 [[permission]]
+bound = "At most eight scoped history-read workers and eight local Git children in one read group; a finite input index is claimed once, the work lock is released before Git runs, and all workers join before the group returns."
+items = ["thread::scope"]
+owner = "The audit's bounded Git blame and line-history reads."
+path = "tools/nervix-lint/ratchet/src/audit/git.rs"
+reason = "The command-line audit is outside every node and its executor. Scoped workers preserve the existing eight-read concurrency and keep pipe reads draining while Git produces output; no worker outlives the audit read group."
+
+[[permission]]
+bound = "Three modeled contenders per Shuttle execution, each completing two synchronous keyed transactions and joined before the execution ends."
+items = ["thread::spawn"]
+owner = "The rate-limit key-store production-owner check."
+path = "crates/rate-limit/src/shuttle_tests.rs"
+reason = "The contenders run the production store inside Shuttle, not node work admitted to the executor."
+
+[[permission]]
+bound = "Three diagnostic contenders per disposable test process, each completing two synchronous keyed transactions and joined before state restoration and test completion."
+items = ["thread::spawn"]
+owner = "The rate-limit keyed-store diagnostic workload."
+path = "crates/rate-limit/src/diagnostic_tests.rs"
+reason = "These bounded external test participants exercise tracked locks on real threads after installing the diagnostic run; they execute no node jobs."
+
+[[permission]]
 bound = "Three model threads per execution: two claim one fixed pool slot and one retires it; all are joined before the bounded Shuttle execution ends."
 items = ["thread::spawn"]
 owner = "The retained transport pool-slot lifetime model."
@@ -42,7 +63,7 @@ reason = "The model contenders drive the production channel owners under Shuttle
 [[permission]]
 bound = "Two model threads per execution: one publishes three readiness transitions and one retires the exact instance. Both are joined before the bounded Shuttle execution ends."
 items = ["thread::spawn"]
-owner = "The exact source-instance readiness lifetime model."
+owner = "The exact ingestor-instance readiness lifetime model."
 path = "src/runtime/source_readiness.rs"
 reason = "Thread creation is confined to this file's Shuttle test module, where model contenders exercise the production scalar owner; product readiness publication creates no thread."
 
@@ -54,9 +75,9 @@ path = "crates/dns/src/lib.rs"
 reason = "The resolver names no executor: the Rust client and the CLI build it without one, and a node's startup preflight loads it through the same call."
 
 [[permission]]
-bound = "The flush returns by the physical deadline the host hands the sink's finish."
+bound = "The flush returns by the physical deadline the host hands the emitter's finish."
 items = ["task::spawn_blocking"]
-owner = "The Kafka sink's final producer-queue drain."
+owner = "The Kafka emitter's final producer-queue drain."
 path = "crates/connectors/kafka/src/topic/mod.rs"
 reason = "librdkafka's flush parks its calling thread until the broker answers. It waits on the network and computes nothing, so it would hold a CPU or storage worker idle for the whole drain."
 
@@ -129,6 +150,13 @@ items = ["thread::Builder", "thread::scope"]
 owner = "The benchmark load driver summary drain and Kafka watermark queries."
 path = "crates/benchmark/src/bin/nervix-benchmark-load.rs"
 reason = "The external load harness has no node executor; broker polling and metadata queries must not block its async traffic driver."
+
+[[permission]]
+bound = "The test creates one host thread with a 512 KiB stack, blocks it on one prepared command the loopback answers, and joins it before it returns."
+items = ["thread::Builder"]
+owner = "The Rust client's host-thread stack test."
+path = "crates/client-core/src/tests/host_stack.rs"
+reason = "A host blocks on a call from a thread of its own, and only a thread with a chosen stack size shows that the call fits a host's stack; the bounded executor's workers have their own."
 
 [[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
@@ -241,6 +269,20 @@ items = ["thread::spawn"]
 owner = "Retained-backup claim and sweep concurrency tests."
 path = "src/application/backup/retained.rs"
 reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Application progress Shuttle checks."
+path = "src/application/completion/progress.rs"
+reason = "Model participants exercise the progress owner concurrently outside a node executor under the selected scheduler."
+
+[[permission]]
+bound = "At most two modeled participants, an observer and replacement handler or two attachment handlers, race the calling participant's finite attachment, availability observation and stop operations and are joined in every schedule; DFS explores at most 1,000 schedules under the model runner's step and wall bounds."
+items = ["thread::spawn"]
+owner = "Domain clock attachment observation, replacement and stop Shuttle checks."
+path = "src/application/domain_clock/attachments/tests.rs"
+reason = "The observer drives the production watch and lifetime owner under Shuttle rather than running node work through the executor."
 
 [[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."

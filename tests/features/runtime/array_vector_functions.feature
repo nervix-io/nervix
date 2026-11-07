@@ -10,12 +10,12 @@ Feature: Typed array and vector expressions
       """
       CREATE SCHEMA numbers (id STRING, first I64, second I64);
       CREATE SCHEMA result (id STRING, items <items_type>, vec_items <vec_type>, empty_items <vec_type>, item_count I64);
-      CREATE CODEC numbers_codec FROM JSON TO SCHEMA numbers WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE JAQ JSON CODEC numbers_codec TO SCHEMA numbers WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY numbers SCHEMA numbers UNBRANCHED;
       CREATE RELAY results SCHEMA result UNBRANCHED;
       CREATE VHOST edge arrays-{{test_id}}.example.com;
-      CREATE ENDPOINT numbers_ingress ON edge PATH '/numbers' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR numbers_source
+      CREATE HTTP ENDPOINT numbers_ingress ON edge PATH '/numbers';
+      CREATE HTTP ENDPOINT INGESTOR numbers_ingestor
         FROM numbers_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING numbers_codec
         TO numbers
@@ -75,13 +75,13 @@ Feature: Typed array and vector expressions
         separation F64 OPTIONAL
       );
       CREATE SCHEMA vector_error (input_id STRING, error_message STRING);
-      CREATE CODEC source_codec FROM JSON TO SCHEMA source WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE JAQ JSON CODEC source_codec TO SCHEMA source WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY sources SCHEMA source UNBRANCHED;
       CREATE RELAY results SCHEMA result UNBRANCHED;
       CREATE RELAY vector_errors SCHEMA vector_error UNBRANCHED;
       CREATE VHOST edge vectors-{{test_id}}.example.com;
-      CREATE ENDPOINT source_ingress ON edge PATH '/vectors' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_node
+      CREATE HTTP ENDPOINT source_ingress ON edge PATH '/vectors';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_node
         FROM source_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
         TO sources
@@ -153,13 +153,13 @@ Feature: Typed array and vector expressions
         protected <array_two> SENSITIVE
       );
       CREATE SCHEMA unsafe_result (id STRING, exposed <array_two>);
-      CREATE CODEC source_codec FROM JSON TO SCHEMA source WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE JAQ JSON CODEC source_codec TO SCHEMA source WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY sources SCHEMA source UNBRANCHED;
       CREATE RELAY results SCHEMA result UNBRANCHED;
       CREATE RELAY unsafe_results SCHEMA unsafe_result UNBRANCHED;
       CREATE VHOST edge fixed-arrays-{{test_id}}.example.com;
-      CREATE ENDPOINT source_ingress ON edge PATH '/fixed-arrays' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_node
+      CREATE HTTP ENDPOINT source_ingress ON edge PATH '/fixed-arrays';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_node
         FROM source_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
         TO sources

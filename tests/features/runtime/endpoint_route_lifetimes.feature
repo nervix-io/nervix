@@ -11,11 +11,11 @@ Feature: Published endpoint route lifetimes
       """
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge shared-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -27,11 +27,11 @@ Feature: Published endpoint route lifetimes
       """
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge shared-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -77,11 +77,11 @@ Feature: Published endpoint route lifetimes
       """
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge lifetime-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE WEBSOCKETS;
-      CREATE WEBSOCKETS ENDPOINT INGESTOR event_source
+      CREATE WEBSOCKETS ENDPOINT ingress ON edge PATH '/events';
+      CREATE WEBSOCKETS ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -138,11 +138,11 @@ Feature: Published endpoint route lifetimes
       """
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge restart-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -156,14 +156,15 @@ Feature: Published endpoint route lifetimes
     When node "node-1" is stopped
     And node "node-2" is stopped
     And node "node-3" is stopped
-    And node "node-3" is started without waiting for it to catch up
+    And node "node-3" is started until public observation is available
     And endpoint request "uninstalled" is posted on node "node-3" host "restart-{{test_id}}.example.com" path "/events"
       """
       {"user_id":42}
       """
     Then endpoint request "uninstalled" answers HTTP 503
     When node "node-1" is started
-    Then node "node-3" eventually accepts http traffic for host "restart-{{test_id}}.example.com" path "/events"
+    Then node "node-3" eventually reports status containing "node.initialization=ready"
+    And node "node-3" eventually accepts http traffic for host "restart-{{test_id}}.example.com" path "/events"
       """
       {"user_id":43}
       """

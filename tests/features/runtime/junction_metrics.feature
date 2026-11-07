@@ -17,19 +17,18 @@ Feature: Junction metrics
         tenant string,
         sequence integer
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_junction_metrics SCHEMA tenant_branch TTL 5m;
       CREATE RELAY incoming SCHEMA notification BRANCHED BY by_junction_metrics;
       CREATE RELAY routed SCHEMA notification BRANCHED BY by_junction_metrics;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT junction_metrics_ingress
+      CREATE HTTP ENDPOINT junction_metrics_ingress
       ON edge
-      PATH '/junction-metrics'
-      TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR junction_metrics_source
+      PATH '/junction-metrics';
+      CREATE HTTP ENDPOINT INGESTOR junction_metrics_ingestor
       FROM junction_metrics_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming

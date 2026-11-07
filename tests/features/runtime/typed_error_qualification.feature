@@ -160,8 +160,9 @@ Feature: Typed error qualification through public streams
       """
     Then the last command output contains
       """
-      CREATE ATTACHED JUNCTION route_orders
+      CREATE JUNCTION route_orders
         FROM orders
+        ATTACHED
         UNBRANCHED
         TO accepted_orders
           INHERIT ALL
@@ -242,8 +243,8 @@ Feature: Typed error qualification through public streams
         denominator integer,
         secret string
       );
-      CREATE CODEC calculation_codec
-        FROM WIRE JSON SCHEMA calculation_wire
+      CREATE WIRE JSON CODEC calculation_codec
+        FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -251,8 +252,8 @@ Feature: Typed error qualification through public streams
       CREATE RELAY calculation_results SCHEMA calculation_result BRANCHED BY by_tenant;
       CREATE RELAY calculation_errors SCHEMA calculation_error BRANCHED BY by_tenant;
       CREATE VHOST edge typed-errors-{{test_id}}.example.com;
-      CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR calculation_source
+      CREATE HTTP ENDPOINT calculation_ingress ON edge PATH '/calculations';
+      CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations

@@ -302,7 +302,7 @@ impl IcebergStorageBackend {
             (Self::Gcs, "disable_config_load") => Some("gcs.disable-config-load"),
             (Self::Gcs, "disable_vm_metadata") => Some("gcs.disable-vm-metadata"),
             (Self::Gcs, "no_auth") => Some("gcs.no-auth"),
-            (Self::Gcs, "service_path") => Some("gcs.service.path"),
+            (Self::Gcs, "service_path") => Some("gcs.service.host"),
             (Self::Gcs, "token") => Some("gcs.oauth2.token"),
             (Self::AzureBlob, "account_key") => Some("adls.account-key"),
             (Self::AzureBlob, "account_name") => Some("adls.account-name"),
@@ -501,6 +501,7 @@ impl EmitterDeclaration for IcebergTableEmitter {
             ConnectorKind::AzureBlob,
         ]),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::Parquet,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: IcebergTablePublishingMode::KINDS,
@@ -574,15 +575,87 @@ impl EmitterEntityBody for IcebergTableEmitter {
     }
 }
 
+/// One change an `ALTER ICEBERG TABLE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum IcebergTableEmitterChange {
+    /// `SET TABLE '<table>'`.
+    Table(IcebergTableName),
+    /// `SET NAMESPACE '<namespace>'`.
+    Namespace(IcebergNamespace),
+    /// `SET LOCATION '<location>'`.
+    Location(String),
+    /// `SET CATALOG <client>`.
+    Catalog(IcebergCatalog),
+    /// `SET COMMIT EACH <duration> MAX SIZE <bytes>`.
+    CommitEach {
+        commit_each: String,
+        max_commit_size: PayloadSizeLimit,
+    },
+    /// `SET MODE <mode>`.
+    Mode(IcebergTablePublishingMode),
+}
+
+impl crate::EmitterEntityChange for IcebergTableEmitterChange {
+    type Entity = IcebergTableEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut IcebergTableEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Table(table) => entity.table = table.clone(),
+            Self::Namespace(namespace) => entity.namespace = namespace.clone(),
+            Self::Location(location) => entity.location = location.clone(),
+            Self::Catalog(catalog) => entity.catalog = catalog.clone(),
+            Self::CommitEach {
+                commit_each,
+                max_commit_size,
+            } => {
+                entity.commit_each = commit_each.clone();
+                entity.max_commit_size = *max_commit_size;
+            }
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Table(table) => format!("SET TABLE {}", crate::string_literal(table.as_str())),
+            Self::Namespace(namespace) => format!(
+                "SET NAMESPACE {}",
+                crate::string_literal(namespace.as_str())
+            ),
+            Self::Location(location) => format!("SET LOCATION {}", crate::string_literal(location)),
+            Self::Catalog(IcebergCatalog::Rest { client }) => {
+                format!("SET CATALOG {}", client.as_str())
+            }
+            Self::CommitEach {
+                commit_each,
+                max_commit_size,
+            } => format!(
+                "SET {}",
+                crate::canonical::commit_policy_to_plexus(commit_each, max_commit_size)
+            ),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Iceberg = "ICEBERG";
     /// What an Iceberg emitter writes.
     pub enum IcebergEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum IcebergTableEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum IcebergEmitterChange;
     /// The entities an Iceberg emitter writes.
     pub enum IcebergEmitterEntity {
-        Table(IcebergTableEmitter, IcebergTablePublishingMode) = "TABLE";
+        Table(IcebergTableEmitter, IcebergTablePublishingMode, IcebergTableEmitterChange) = "TABLE";
     }
 }
 

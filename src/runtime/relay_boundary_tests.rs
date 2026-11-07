@@ -34,63 +34,33 @@ use crate::{
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
+/// The branch presence of a relay that is not divided into partitions: its single unit's.
+fn single_presence(services: &RelayBoundaryServices) -> RelayBranchPresence {
+    services
+        .branch_presences
+        .of(Unit::SINGLE)
+        .cloned()
+        .expect("a whole relay has its single unit's presence")
+}
+
+/// Whether the ingress channel a producer of `branch` binds now, on a relay that is not divided
+/// into partitions, is cancelled from the start.
+fn single_ingress_cancelled(services: &RelayBoundaryServices, branch: &Option<BranchKey>) -> bool {
+    services
+        .ingress_slot(branch, Unit::SINGLE)
+        .cancellation()
+        .is_cancelled()
+}
+
 fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> RelayMetricsHandle {
     runtime.inner.metrics.resolve_relay_metrics(
         domain,
         relay,
+        Unit::SINGLE,
         None,
         RELAY_BUFFER_DIRECTION_CONCRETE,
         None,
     )
-}
-
-#[rstest::rstest]
-#[case(false)]
-#[case(true)]
-fn forced_routing_fence_ends_changed_channels_until_publication(#[case] move_owner: bool) {
-    let owner = named::<ClusterNodeName>("node-1");
-    let consumers = vec![RemoteRuntimeConsumer {
-        node_id: named("node-3"),
-        relay: named("events"),
-        mode: AckMode::Attached,
-    }];
-    let services = RelayBoundaryServices::new(
-        RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
-        0,
-        0,
-        consumers.clone(),
-        None,
-        Arc::new(BranchPresence::new()),
-        Arc::new(crate::runtime_ack::AckRootTracker::default()),
-    );
-    services.replace_owner_node(Some(owner.clone()));
-    let retained = services.ingress_slot(&None);
-    services.fence_routing_change(Some(&owner), &consumers);
-    assert!(!retained.cancellation().is_cancelled());
-
-    let destination = if move_owner { named("node-2") } else { owner };
-    let destinations = if move_owner { consumers } else { Vec::new() };
-    services.fence_routing_change(Some(&destination), &destinations);
-    assert!(retained.cancellation().is_cancelled());
-    assert!(services.ingress_slot(&None).cancellation().is_cancelled());
-    let appearing = string_branch_key("tenant", "beta");
-    assert!(
-        services
-            .ingress_slot(&appearing)
-            .cancellation()
-            .is_cancelled()
-    );
-
-    services.replace_owner_node(Some(destination));
-    services.replace_remote_runtime_consumers(destinations);
-    assert!(!services.ingress_slot(&None).cancellation().is_cancelled());
-    assert!(
-        !services
-            .ingress_slot(&appearing)
-            .cancellation()
-            .is_cancelled()
-    );
-    assert!(retained.cancellation().is_cancelled());
 }
 
 #[nervix_primitives::test(start_paused = true)]
@@ -113,10 +83,11 @@ async fn runtime_report_chain_detached_relay_delivery_log() {
         vec![RemoteRuntimeConsumer {
             node_id: named("node-2"),
             relay: named("orders"),
-            mode: AckMode::Detached,
+            mode: Some(AckMode::Detached),
+            unit_modes: BTreeMap::new(),
         }],
         Some(dispatcher),
-        Arc::new(BranchPresence::new()),
+        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
         nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     );
     let batch = RelayRecordBatch::single(
@@ -127,9 +98,13 @@ async fn runtime_report_chain_detached_relay_delivery_log() {
     )
     .assured("the fixture batch carries one valid I64 row");
     let mut logs = ReportLogObserver::new();
-    logs.observe(services.dispatch_remote_runtime_consumers(&domain("default"), &batch))
-        .await
-        .assured("a detached delivery reports its failure without rejecting the local batch");
+    logs.observe(services.dispatch_remote_runtime_consumers(
+        &domain("default"),
+        Unit::SINGLE,
+        &batch,
+    ))
+    .await
+    .assured("a detached delivery reports its failure without rejecting the local batch");
     assert_eq!(
         logs.next("detached remote delivery failed").fields["error"],
         "failed to cancel relay delivery 0 on node 'node-2': transport is shutting down"
@@ -141,6 +116,7 @@ async fn relay_task_stops_classify_join_failures_by_task_kind() {
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
     let state = RelayStateTask {
         shutdown: state_shutdown,
+        unit: Unit::SINGLE,
         task: nervix_primitives::task::spawn(async { panic!("state task fixture failed") }),
     };
     let state_error = state
@@ -179,6 +155,7 @@ async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
     let state = RelayStateTask {
         shutdown: state_shutdown,
+        unit: Unit::SINGLE,
         task: nervix_primitives::task::spawn(std::future::pending()),
     };
     let state_error = state
@@ -211,166 +188,27 @@ async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
     ));
 }
 
-#[test]
-fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
-    let slot = RelayOutboundSlot::new();
-    let start = Instant::now();
-    let first = slot.next_delivery_at(start);
-    let active_at = start
-        .checked_add(
-            RELAY_CHANNEL_IDLE_ROTATION
-                .checked_sub(Duration::from_nanos(1))
-                .expect("the relay idle duration is longer than one nanosecond"),
-        )
-        .expect("the fixed relay idle duration should fit the monotonic clock");
-    let second = slot.next_delivery_at(active_at);
-    let reopened = slot.next_delivery_at(
-        active_at
-            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
-            .expect("the fixed relay idle duration should fit the monotonic clock"),
-    );
-
-    assert_eq!(first.channel_incarnation, second.channel_incarnation);
-    assert_eq!(first.sequence, 0);
-    assert_eq!(second.sequence, 1);
-    assert_ne!(first.channel_incarnation, reopened.channel_incarnation);
-    assert_eq!(reopened.sequence, 0);
-}
-
-/// A receiver may forget a channel opened after this one and refuse every unseen channel at or
-/// below it, so a channel that opened and carried nothing for the idle rotation opens a fresh
-/// incarnation for its first batch.
-#[test]
-fn a_channel_left_unused_since_it_opened_reopens_before_its_first_delivery() {
-    let slot = RelayOutboundSlot::new();
-    let after_opening = Instant::now();
-    let opened_later = uuid::Uuid::now_v7().into_bytes();
-
-    let first = slot.next_delivery_at(
-        after_opening
-            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
-            .expect("the fixed relay idle duration should fit the monotonic clock"),
-    );
-
-    assert!(
-        first.channel_incarnation > opened_later,
-        "the first delivery used the incarnation the slot opened {RELAY_CHANNEL_IDLE_ROTATION:?} \
-         before it"
-    );
-    assert_eq!(first.sequence, 0);
-}
-
-#[test]
-fn a_channel_left_unused_since_it_reopened_reopens_before_its_next_delivery() {
-    let slot = RelayOutboundSlot::new();
-    let unresolved = slot.next_delivery();
-    slot.reopen_delivery_channel();
-    let after_reopening = Instant::now();
-    let reopened_later = uuid::Uuid::now_v7().into_bytes();
-
-    let next = slot.next_delivery_at(
-        after_reopening
-            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
-            .expect("the fixed relay idle duration should fit the monotonic clock"),
-    );
-
-    assert!(unresolved.channel_incarnation < reopened_later);
-    assert!(
-        next.channel_incarnation > reopened_later,
-        "the next delivery used the incarnation reopened {RELAY_CHANNEL_IDLE_ROTATION:?} before it"
-    );
-    assert_eq!(next.sequence, 0);
-}
-
-#[test]
-fn a_channel_used_within_the_idle_rotation_of_its_opening_keeps_its_incarnation() {
-    let slot = RelayOutboundSlot::new();
-    let opened_later = uuid::Uuid::now_v7().into_bytes();
-    let after_opening = Instant::now();
-
-    let first = slot.next_delivery_at(after_opening);
-
-    assert!(first.channel_incarnation < opened_later);
-    assert_eq!(first.sequence, 0);
-}
-
-/// A receiver refuses a channel at or below the greatest one it forgot, so every channel this
-/// process opens, at a slot's creation and at each reopening, sorts after every channel it opened
-/// before.
-#[test]
-fn every_channel_this_process_opens_sorts_after_the_channels_it_opened_before() {
-    let slots = [RelayOutboundSlot::new(), RelayOutboundSlot::new()];
-    let mut previous = slots[0].next_delivery().channel_incarnation;
-    let mut latest = slots[1].next_delivery().channel_incarnation;
-    assert!(latest > previous);
-    for round in 0..1_000 {
-        previous = latest;
-        let slot = &slots[round % 2];
-        slot.reopen_delivery_channel();
-        latest = slot.next_delivery().channel_incarnation;
-        assert!(
-            latest > previous,
-            "reopening {round} opened {latest:?} after {previous:?}"
-        );
-    }
-}
-
-#[test]
-fn indeterminate_delivery_reopens_with_a_fresh_channel_incarnation() {
-    let slot = RelayOutboundSlot::new();
-    let unresolved = slot.next_delivery();
-
-    slot.reopen_delivery_channel();
-
-    let retry = slot.next_delivery();
-    assert_ne!(unresolved.channel_incarnation, retry.channel_incarnation);
-    assert_eq!(retry.sequence, 0);
-}
-
-#[test]
-fn branch_eviction_cancels_and_reopens_relay_channel_generations() {
-    let services = test_relay_boundary_services();
-    let node = ClusterNodeName::parse("node-2").expect("valid node name");
-    let relay = RelayName::parse("notifications").expect("valid relay name");
-    let branch = string_branch_key("tenant", "acme");
-    let ingress = services.ingress_slot(&branch);
-    let outbound = services.outbound_slot(&node, &relay, RelayPayloadKind::Routed, &branch);
-    let first_delivery = outbound.next_delivery();
-
-    services.remove_branch_slots(&branch);
-
-    assert!(ingress.cancellation().is_cancelled());
-    assert!(outbound.cancellation().is_cancelled());
-    let reopened = services.outbound_slot(&node, &relay, RelayPayloadKind::Routed, &branch);
-    let reopened_delivery = reopened.next_delivery();
-    assert!(!reopened.cancellation().is_cancelled());
-    assert_ne!(
-        first_delivery.channel_incarnation,
-        reopened_delivery.channel_incarnation
-    );
-    assert_eq!(reopened_delivery.sequence, 0);
-}
-
 #[nervix_primitives::test]
 async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let runtime = Runtime::default();
     let domain = domain("default");
     let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
-    let _owner_receiver = services.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
+    let _owner_receiver =
+        services.activate_owner_buffer(Unit::SINGLE, relay_metrics(&runtime, &domain, &relay));
     runtime.inner.relay_boundary_fanouts.insert(
         DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
         services.fanout.clone(),
     );
     services
-        .enqueue_owner_batch(&quiesce_test_batch())
+        .enqueue_owner_batch(&quiesce_test_batch(), Unit::SINGLE)
         .await
         .expect("the relay owner buffer should admit the batch");
 
     let status = runtime.entity_drain_status(
         &domain,
         std::slice::from_ref(&relay),
-        &[],
+        &nervix_models::EntityGateTargets::Entities(Vec::new()),
         EntityGatePurpose::ModelAlteration,
     );
 
@@ -378,19 +216,97 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     assert!(!status.is_drained());
 }
 
+#[nervix_primitives::test]
+async fn partition_drains_count_their_own_transit_and_queues_while_the_domain_keeps_the_aggregate()
+{
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("orders");
+    let partitioning =
+        RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16)));
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(2usize)),
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::fresh(partitioning),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    runtime.inner.relay_boundary_fanouts.insert(
+        DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
+        services.fanout.clone(),
+    );
+    let first = Unit::partition(0);
+    let second = Unit::partition(1);
+    let (mut receiver, _buffer) =
+        services.activate_owner_buffer(second, relay_metrics(&runtime, &domain, &relay));
+    let status = |unit| {
+        runtime.entity_drain_status(
+            &domain,
+            std::slice::from_ref(&relay),
+            &nervix_models::EntityGateTargets::Units(vec![NodeUnitRef::new(
+                NodeRef::new(ModelKind::Relay, &relay),
+                unit,
+            )]),
+            EntityGatePurpose::OwnershipHandoff,
+        )
+    };
+    services
+        .enqueue_owner_batch(&quiesce_test_batch(), second)
+        .await
+        .assured("the owner buffer admits one batch");
+    assert!(status(first).is_drained());
+    assert_eq!(status(second).buffered_relay_batches, 1);
+    assert_eq!(services.fanout.outstanding_work_len(), 1);
+    assert!(matches!(receiver.try_recv(), RelayTryRecv::Batch(_)));
+    let completion = services.begin_owner_batch_completion(second);
+    assert_eq!(
+        status(second).buffered_relay_batches,
+        1,
+        "dequeue never hides a batch still being handed on"
+    );
+    drop(completion);
+    assert!(status(second).is_drained());
+    assert_eq!(services.fanout.outstanding_work_len(), 0);
+
+    let _common = services.add_local_runtime_consumer(AckMode::Detached);
+    let mut scoped = services.add_local_unit_runtime_consumer(AckMode::Detached, second);
+    services
+        .dispatch_local_runtime_consumers(
+            RuntimeConsumerDispatch::Owner,
+            second,
+            &quiesce_test_batch(),
+        )
+        .await
+        .assured("the second partition reaches its own and common consumers");
+    assert!(status(first).is_drained());
+    assert_eq!(status(second).buffered_relay_batches, 1);
+    assert!(matches!(scoped.try_recv(), RelayTryRecv::Batch(_)));
+    assert!(
+        status(second).is_drained(),
+        "a common consumer keeps its own lifecycle"
+    );
+    assert_eq!(
+        services.fanout.outstanding_work_len(),
+        1,
+        "the whole-domain drain still sees the common consumer's batch"
+    );
+}
+
 #[test]
 fn replacing_relay_owner_retires_the_retained_ingress_channel() {
     let services = test_relay_boundary_services();
-    services.replace_owner_node(Some(named("node-2")));
+    services.replace_owner_routes(RelayOwnerRoutes::single(named("node-2")));
     let branch = string_branch_key("tenant", "acme");
-    let retained = services.ingress_slot(&branch);
-    let sibling = services.ingress_slot(&string_branch_key("tenant", "beta"));
+    let retained = services.ingress_slot(&branch, Unit::SINGLE);
+    let sibling = services.ingress_slot(&string_branch_key("tenant", "beta"), Unit::SINGLE);
 
-    services.replace_owner_node(Some(named("node-3")));
+    services.replace_owner_routes(RelayOwnerRoutes::single(named("node-3")));
 
     assert!(retained.cancellation().is_cancelled());
     assert!(sibling.cancellation().is_cancelled());
-    let replacement = services.ingress_slot(&branch);
+    let replacement = services.ingress_slot(&branch, Unit::SINGLE);
     assert!(!replacement.cancellation().is_cancelled());
     assert!(!StdArc::ptr_eq(&retained, &replacement));
 }
@@ -401,8 +317,8 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     let domain = domain("default");
     let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
-    let mut owner_receiver =
-        services.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
+    let (mut owner_receiver, _owner_buffer) =
+        services.activate_owner_buffer(Unit::SINGLE, relay_metrics(&runtime, &domain, &relay));
     let (acks, completion) = AckSet::root();
     let batch = RelayRecordBatch::single(
         test_schema(&[("value", ParseAsType::I64)]),
@@ -413,7 +329,7 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     .expect("relay owner ACK test batch should build");
 
     services
-        .enqueue_owner_batch(&batch)
+        .enqueue_owner_batch(&batch, Unit::SINGLE)
         .await
         .expect("the relay owner buffer should admit the batch");
     let completion = completion.wait();
@@ -447,12 +363,15 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("customer_id", ParseAsType::String)]);
     let services = test_relay_boundary_services();
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        services.clone(),
-        RelayRetention::default(),
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     let mut subscription_rx = services.subscription_receiver();
     let mut runtime_rx = services
         .fanout
@@ -512,12 +431,15 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let services = test_relay_boundary_services();
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        services.clone(),
-        RelayRetention::default(),
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     let mut runtime_rx = services
         .fanout
         .runtime_consumer_receiver_for_mode(AckMode::Detached);
@@ -562,12 +484,15 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let services = test_relay_boundary_services();
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        services.clone(),
-        RelayRetention::default(),
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     let mut first_consumer = services
         .fanout
         .runtime_consumer_receiver_for_mode(AckMode::Attached);
@@ -636,15 +561,18 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         0,
         Vec::new(),
         None,
-        Arc::new(BranchPresence::new()),
+        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
         nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ));
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        services.clone(),
-        RelayRetention::default(),
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     let mut relay_runtime = ConcreteRelayRuntime::new(ConcreteRelayRuntimeBuild {
         runtime: runtime.clone(),
         domain: domain.clone(),
@@ -866,6 +794,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
                 kind: RelayPayloadKind::SubscriptionFanout,
                 domain: inbound_domain,
                 relay,
+                unit: Unit::SINGLE,
                 key: None,
                 batch_ipc,
                 metadata: vec![metadata],
@@ -1001,7 +930,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
     let relay_id = RelayName::parse("notifications").expect("valid identifier");
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay_id);
     let placement_presence = runtime
-        .relay_branch_presence(&domain, &relay_id)
+        .relay_branch_presence(&domain, &relay_id, Unit::SINGLE)
         .expect("the relay's state identity is published");
     let services = Arc::new(RelayBoundaryServices::new(
         RelayBoundaryFanout::direct_with_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME),
@@ -1009,7 +938,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
         0,
         Vec::new(),
         None,
-        placement_presence.clone(),
+        RelayBranchPresences::single(placement_presence.clone()),
         nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ));
     let (shutdown, _) = watch::channel(false);
@@ -1021,6 +950,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
     runtime.install_domain_execution(
         &domain,
         DomainExecution {
+            mqtt_ingestor_clients: HashMap::default(),
             revision: test_execution_revision(&domain, Vec::new()),
             start_version: 0,
             domain_clock: test_domain_clock(&domain),
@@ -1041,8 +971,8 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
             placement_tasks: HashMap::default(),
-            relay_state_tasks: HashMap::default(),
-            relay_owner_tasks: HashMap::default(),
+            relay_state_tasks: BTreeMap::default(),
+            relay_owner_tasks: BTreeMap::default(),
             tasks: Vec::new(),
         },
     );
@@ -1054,8 +984,15 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
         .expect("batch ipc should serialize");
 
     let key = u32_branch_key("user_id", 42);
-    let owner_task =
-        runtime.spawn_relay_owner_task(&domain, &relay_id, services, RelayRetention::default());
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay_id,
+            Unit::SINGLE,
+            services,
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     runtime
         .handle_remote_stream_payload_with_owner_ingress(
             RelayPayload {
@@ -1066,6 +1003,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
                 kind: RelayPayloadKind::Ingress,
                 domain: domain.clone(),
                 relay: relay_id.clone(),
+                unit: Unit::SINGLE,
                 key: BranchKey::to_remote_key(&key),
                 batch_ipc,
                 metadata: vec![
@@ -1169,6 +1107,7 @@ impl JoinedRelayOwner {
             kind: RelayPayloadKind::Ingress,
             domain: self.domain.clone(),
             relay: self.relay.clone(),
+            unit: Unit::SINGLE,
             key: BranchKey::to_remote_key(key),
             batch_ipc,
             metadata: vec![
@@ -1196,12 +1135,16 @@ async fn a_delivery_held_for_its_acknowledgement_watches_reaches_its_relay_once_
     let owner = JoinedRelayOwner::start().await;
     let key = u32_branch_key("user_id", 42);
     let delivery = owner.delivery(&key, 1).await;
-    let owner_task = owner.runtime.spawn_relay_owner_task(
-        &owner.domain,
-        &owner.relay,
-        owner.services.clone(),
-        RelayRetention::default(),
-    );
+    let owner_task = owner
+        .runtime
+        .spawn_relay_owner_task(
+            &owner.domain,
+            &owner.relay,
+            Unit::SINGLE,
+            owner.services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     let memory = owner.relay_memory();
     let room = memory
         .capacity_bytes
@@ -1354,6 +1297,7 @@ async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_cons
                 kind: RelayPayloadKind::Routed,
                 domain: domain.clone(),
                 relay: relay.clone(),
+                unit: Unit::SINGLE,
                 key: BranchKey::to_remote_key(&None),
                 batch_ipc,
                 metadata: vec![test_runtime_row([]).metadata().to_remote()],
@@ -1447,6 +1391,7 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
                     kind: RelayPayloadKind::Routed,
                     domain: domain.clone(),
                     relay: relay.clone(),
+                    unit: Unit::SINGLE,
                     key,
                     batch_ipc: batch_ipc.clone(),
                     metadata,
@@ -1534,6 +1479,7 @@ async fn a_subscription_fanout_that_does_not_decode_is_refused() {
                 kind: RelayPayloadKind::SubscriptionFanout,
                 domain: domain.clone(),
                 relay: relay.clone(),
+                unit: Unit::SINGLE,
                 key: None,
                 batch_ipc: batch_ipc.clone(),
                 metadata,
@@ -1564,7 +1510,7 @@ async fn a_routed_attached_batch_fails_its_acknowledgement_without_an_attached_c
     let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks);
 
     services
-        .inject_remote_message(&batch)
+        .inject_remote_message(Unit::SINGLE, &batch)
         .await
         .expect_err("no attached consumer of the relay runs on this node");
 
@@ -1585,7 +1531,7 @@ async fn a_routed_attached_batch_completes_when_its_attached_consumer_does() {
     let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks.clone());
 
     services
-        .inject_remote_message(&batch)
+        .inject_remote_message(Unit::SINGLE, &batch)
         .await
         .expect("the attached consumer on this node takes the routed batch");
     acks.ack_success();
@@ -1617,9 +1563,76 @@ async fn a_routed_detached_batch_needs_no_attached_consumer() {
     let services = test_relay_boundary_services();
 
     services
-        .inject_remote_message(&quiesce_test_batch())
+        .inject_remote_message(Unit::SINGLE, &quiesce_test_batch())
         .await
         .expect("a detached routed batch carries no acknowledgement to complete");
+}
+
+#[rstest::rstest]
+#[case::whole(RelayPartitioning::Whole, false)]
+#[case::partition(
+    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    false
+)]
+#[case::partition_common(
+    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    true
+)]
+#[nervix_primitives::test]
+async fn a_detached_consumer_joining_during_attached_backpressure_receives_the_batch(
+    #[case] partitioning: RelayPartitioning,
+    #[case] common: bool,
+) {
+    let fanout = match partitioning {
+        RelayPartitioning::Whole => RelayBoundaryFanout::direct_with_capacity(nonzero!(1usize)),
+        RelayPartitioning::Partitioned(_) => {
+            RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize))
+        }
+    };
+    let services = RelayBoundaryServices::new(
+        fanout,
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::fresh(partitioning),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    let key = string_branch_key("tenant", "acme");
+    let unit = partitioning
+        .unit_of(&key)
+        .expect("the key names a relay unit");
+    let batch = RelayRecordBatch::single(
+        test_schema(&[("value", ParseAsType::I64)]),
+        key,
+        test_runtime_row([("value".into(), RuntimeValue::I64(1))]),
+        AckSet::empty(),
+    )
+    .expect("the fixture batch preserves its concrete branch");
+    let mut attached = services.add_local_unit_runtime_consumer(AckMode::Attached, unit);
+    services
+        .dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, unit, &batch)
+        .await
+        .expect("the first batch fills the attached queue");
+    let pending =
+        services.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, unit, &batch);
+    tokio::pin!(pending);
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    let mut detached = if common {
+        services.add_local_runtime_consumer(AckMode::Detached)
+    } else {
+        services.add_local_unit_runtime_consumer(AckMode::Detached, unit)
+    };
+    assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+    pending
+        .await
+        .expect("the attached queue returned its capacity");
+    assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+    assert!(
+        matches!(detached.try_recv(), RelayTryRecv::Batch(_)),
+        "detached publication begins after attached admission completes"
+    );
+    assert!(matches!(detached.try_recv(), RelayTryRecv::Empty));
 }
 
 #[nervix_primitives::test]
@@ -1629,15 +1642,18 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
     install_unpaced_test_domain(&runtime, &domain);
     let relay = named("orders");
     let services = test_relay_boundary_services();
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        services.clone(),
-        RelayRetention {
-            branch_ttl: None,
-            branch_capacity: Some(nonzero!(2usize)),
-        },
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention {
+                branch_ttl: None,
+                branch_capacity: Some(nonzero!(2usize)),
+            },
+        )
+        .expect("a whole relay schedules its single unit");
     let schema = test_schema(&[]);
     let keys = [
         string_branch_key("tenant", "acme"),
@@ -1654,7 +1670,7 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
         )
         .expect("relay batch should build");
         services
-            .enqueue_owner_batch(&batch)
+            .enqueue_owner_batch(&batch, Unit::SINGLE)
             .await
             .expect("owner should admit the batch");
     }
@@ -1662,9 +1678,9 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
     timeout(Duration::from_secs(1), async {
         loop {
             nervix_primitives::task::consume_budget().await;
-            if !services.branch_presence.contains(keys[0].as_ref())
-                && services.branch_presence.contains(keys[1].as_ref())
-                && services.branch_presence.contains(keys[2].as_ref())
+            if !services.holds_branch(&keys[0])
+                && services.holds_branch(&keys[1])
+                && services.holds_branch(&keys[2])
             {
                 break;
             }
@@ -1696,15 +1712,18 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     let relay = named("orders");
     let key = string_branch_key("tenant", "acme");
     let services = test_relay_boundary_services();
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        services.clone(),
-        RelayRetention {
-            branch_ttl: Some(Duration::from_millis(20)),
-            branch_capacity: None,
-        },
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention {
+                branch_ttl: Some(Duration::from_millis(20)),
+                branch_capacity: None,
+            },
+        )
+        .expect("a whole relay schedules its single unit");
     let batch = RelayRecordBatch::single(
         test_schema(&[]),
         key.clone(),
@@ -1713,12 +1732,12 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     )
     .expect("relay batch should build");
     services
-        .enqueue_owner_batch(&batch)
+        .enqueue_owner_batch(&batch, Unit::SINGLE)
         .await
         .expect("owner should admit the batch");
 
     timeout(Duration::from_secs(1), async {
-        while !services.branch_presence.contains(key.as_ref()) {
+        while !services.holds_branch(&key) {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
@@ -1728,7 +1747,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     timeout(Duration::from_secs(1), async {
         loop {
             nervix_primitives::task::consume_budget().await;
-            if !services.branch_presence.contains(key.as_ref()) {
+            if !services.holds_branch(&key) {
                 break;
             }
             sleep(Duration::from_millis(5)).await;
@@ -1777,6 +1796,7 @@ impl BranchKeySiblingRelays {
             &self.ending,
             RelayPayloadKind::Routed,
             key,
+            Unit::SINGLE,
         )
     }
 
@@ -1789,7 +1809,7 @@ impl BranchKeySiblingRelays {
         )
         .expect("relay batch should build");
         self.ending_services
-            .enqueue_owner_batch(&batch)
+            .enqueue_owner_batch(&batch, Unit::SINGLE)
             .await
             .expect("owner should admit the batch");
     }
@@ -1815,16 +1835,19 @@ async fn relay_owner_expiry_retires_only_its_own_channels_for_the_branch_key() {
     let relays = BranchKeySiblingRelays::publish(&runtime, &domain);
     let key = string_branch_key("tenant", "acme");
     let ending_route = relays.ending_route(&key);
-    let sibling_ingress = relays.sibling_services.ingress_slot(&key);
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relays.ending,
-        relays.ending_services.clone(),
-        RelayRetention {
-            branch_ttl: Some(Duration::from_millis(20)),
-            branch_capacity: None,
-        },
-    );
+    let sibling_ingress = relays.sibling_services.ingress_slot(&key, Unit::SINGLE);
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relays.ending,
+            Unit::SINGLE,
+            relays.ending_services.clone(),
+            RelayRetention {
+                branch_ttl: Some(Duration::from_millis(20)),
+                branch_capacity: None,
+            },
+        )
+        .expect("a whole relay schedules its single unit");
     relays.enqueue_owner_batch(&key).await;
 
     timeout(
@@ -1855,16 +1878,19 @@ async fn relay_owner_lru_eviction_retires_only_its_own_channels_for_the_branch_k
     let evicted = string_branch_key("tenant", "acme");
     let admitted = string_branch_key("tenant", "globex");
     let ending_route = relays.ending_route(&evicted);
-    let sibling_ingress = relays.sibling_services.ingress_slot(&evicted);
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relays.ending,
-        relays.ending_services.clone(),
-        RelayRetention {
-            branch_ttl: None,
-            branch_capacity: Some(nonzero!(1usize)),
-        },
-    );
+    let sibling_ingress = relays.sibling_services.ingress_slot(&evicted, Unit::SINGLE);
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relays.ending,
+            Unit::SINGLE,
+            relays.ending_services.clone(),
+            RelayRetention {
+                branch_ttl: None,
+                branch_capacity: Some(nonzero!(1usize)),
+            },
+        )
+        .expect("a whole relay schedules its single unit");
     relays.enqueue_owner_batch(&evicted).await;
     relays.enqueue_owner_batch(&admitted).await;
 
@@ -1893,7 +1919,7 @@ async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
     let branch = string_branch_key("tenant", "acme");
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay);
     let presence = runtime
-        .relay_branch_presence(&domain, &relay)
+        .relay_branch_presence(&domain, &relay, Unit::SINGLE)
         .expect("the relay's state identity is published");
     let mut owner = OwnedBranches::<BranchKey, ()>::claim(presence.clone());
     owner
@@ -1910,6 +1936,7 @@ async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
         .stop_domain_execution(
             &domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
@@ -1923,8 +1950,8 @@ async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
                 placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
-                relay_owner_tasks: HashMap::default(),
+                relay_state_tasks: BTreeMap::default(),
+                relay_owner_tasks: BTreeMap::default(),
                 tasks: Vec::new(),
             },
             runtime.emitter_finish_deadline(),
@@ -1956,7 +1983,7 @@ async fn an_ended_producer_cannot_attach_to_a_recreated_relay_branch() {
     });
     producer.retire();
     services.channels.retire(&None);
-    assert!(!services.channels.bind(&None).is_retired());
+    assert!(!services.channels.bind(&None, Unit::SINGLE).is_retired());
     let (batch, completion) = presence_test_batch(None);
     assert!(producer.dispatch_boundary(&batch).await.is_err());
     assert!(matches!(completion.wait().await, AckOutcome::NoAck(_)));
@@ -1966,7 +1993,7 @@ async fn an_ended_producer_cannot_attach_to_a_recreated_relay_branch() {
 async fn fan_out_through_owner(services: &RelayBoundaryServices, key: &Option<BranchKey>) {
     let (batch, completion) = presence_test_batch(key.clone());
     services
-        .enqueue_owner_batch(&batch)
+        .enqueue_owner_batch(&batch, Unit::SINGLE)
         .await
         .expect("owner should admit the batch");
     // The owner holds a share attached to this one, so the root completes once the owner has
@@ -1987,7 +2014,7 @@ fn services_reporting_to(presence: RelayBranchPresence) -> Arc<RelayBoundaryServ
         0,
         Vec::new(),
         None,
-        presence,
+        RelayBranchPresences::single(presence),
         nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ))
 }
@@ -1999,19 +2026,22 @@ async fn an_established_relay_branch_publishes_its_presence_once_across_successi
     install_unpaced_test_domain(&runtime, &domain);
     let relay = named("orders");
     let services = test_relay_boundary_services();
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        services.clone(),
-        RelayRetention {
-            branch_ttl: Some(Duration::from_secs(300)),
-            branch_capacity: Some(nonzero!(4usize)),
-        },
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention {
+                branch_ttl: Some(Duration::from_secs(300)),
+                branch_capacity: Some(nonzero!(4usize)),
+            },
+        )
+        .expect("a whole relay schedules its single unit");
     let acme = string_branch_key("tenant", "acme");
 
     fan_out_through_owner(&services, &acme).await;
-    let published = services.branch_presence.load();
+    let published = single_presence(&services).load();
     assert!(published.contains(acme.as_ref()));
     for _ in 0..16 {
         nervix_primitives::task::consume_budget().await;
@@ -2019,14 +2049,14 @@ async fn an_established_relay_branch_publishes_its_presence_once_across_successi
     }
 
     assert!(
-        StdArc::ptr_eq(&published, &services.branch_presence.load()),
+        StdArc::ptr_eq(&published, &single_presence(&services).load()),
         "batches for an established branch must leave its published presence untouched"
     );
     owner_task
         .stop(Duration::from_secs(1))
         .await
         .expect("relay owner should stop");
-    assert!(!services.branch_presence.contains(acme.as_ref()));
+    assert!(!services.holds_branch(&acme));
 }
 
 #[nervix_primitives::test]
@@ -2039,12 +2069,15 @@ async fn a_successor_owner_starts_from_an_empty_presence_after_its_predecessor_w
     let acme = string_branch_key("tenant", "acme");
     let beta = string_branch_key("tenant", "beta");
     let predecessor_services = services_reporting_to(presence.clone());
-    let predecessor = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        predecessor_services.clone(),
-        RelayRetention::default(),
-    );
+    let predecessor = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            predecessor_services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     fan_out_through_owner(&predecessor_services, &acme).await;
     assert!(presence.contains(acme.as_ref()));
 
@@ -2055,12 +2088,15 @@ async fn a_successor_owner_starts_from_an_empty_presence_after_its_predecessor_w
         .join_after_shutdown("aborted relay owner")
         .await;
     let successor_services = services_reporting_to(presence.clone());
-    let successor = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        successor_services.clone(),
-        RelayRetention::default(),
-    );
+    let successor = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            successor_services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
 
     assert!(
         !presence.contains(acme.as_ref()),
@@ -2085,21 +2121,27 @@ async fn an_ending_predecessor_owner_cannot_clear_its_successors_presence() {
     let acme = string_branch_key("tenant", "acme");
     let beta = string_branch_key("tenant", "beta");
     let predecessor_services = services_reporting_to(presence.clone());
-    let predecessor = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        predecessor_services.clone(),
-        RelayRetention::default(),
-    );
+    let predecessor = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            predecessor_services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     fan_out_through_owner(&predecessor_services, &acme).await;
 
     let successor_services = services_reporting_to(presence.clone());
-    let successor = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        successor_services.clone(),
-        RelayRetention::default(),
-    );
+    let successor = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            successor_services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     fan_out_through_owner(&successor_services, &beta).await;
     predecessor
         .stop(Duration::from_secs(1))
@@ -2133,7 +2175,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
             },
             kind: ModelKind::Relay,
             identifier: ModelName::from(&relay.clone()),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         },
         schema.arrow_schema(),
@@ -2152,6 +2194,8 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
         &domain,
         RelayStateTaskSpec {
             relay: relay.clone(),
+            unit: Unit::SINGLE,
+            partitioning: RelayPartitioning::Whole,
             state,
             retention: RelayRetention::default(),
             receiver,
@@ -2204,8 +2248,11 @@ async fn direct_fanout_owner_buffer_uses_configured_capacity() {
             unbranched_subscription_definition(&[]),
         )
         .await;
-    let mut receiver = fanout.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
-    let owner_buffer = fanout.owner_buffer().expect("owner buffer must be active");
+    let (mut receiver, _owner_buffer) =
+        fanout.activate_owner_buffer(Unit::SINGLE, relay_metrics(&runtime, &domain, &relay));
+    let owner_buffer = fanout
+        .owner_buffer(Unit::SINGLE)
+        .expect("owner buffer must be active");
 
     owner_buffer
         .batches
@@ -2277,7 +2324,8 @@ async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
             unbranched_subscription_definition(&[]),
         )
         .await;
-    let mut receiver = fanout.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
+    let (mut receiver, _owner_buffer) =
+        fanout.activate_owner_buffer(Unit::SINGLE, relay_metrics(&runtime, &domain, &relay));
     let resized = runtime
         .relay_boundary_fanout_with_capacity(
             &domain,
@@ -2290,12 +2338,12 @@ async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
     let broadcast = match (&fanout, &resized) {
         (RelayBoundaryFanout::Direct(original), RelayBoundaryFanout::Direct(resized_fanout)) => {
             assert!(Arc::ptr_eq(original, resized_fanout));
-            assert_eq!(resized_fanout.owner_buffer_len(), Some((0, 5)));
+            assert_eq!(resized_fanout.owner_buffer_len(Unit::SINGLE), Some((0, 5)));
             assert_eq!(resized_fanout.subscriptions.receivers().capacity(), 1);
             assert_eq!(resized_fanout.attached_runtime_consumers.capacity(), 1);
             assert_eq!(resized_fanout.detached_runtime_consumers.capacity(), 1);
             resized_fanout
-                .owner_buffer()
+                .owner_buffer(Unit::SINGLE)
                 .expect("owner buffer must remain active")
         }
         _ => panic!("unbranched relay must use direct fanout"),
@@ -2507,7 +2555,8 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
     let consumers = ["one", "two", "three"].map(|relay| RemoteRuntimeConsumer {
         node_id: ClusterNodeName::parse(&format!("node-{relay}")).expect("valid name"),
         relay: named::<RelayName>(relay),
-        mode: AckMode::Attached,
+        mode: Some(AckMode::Attached),
+        unit_modes: BTreeMap::new(),
     });
     let payloads = consumers
         .iter()
@@ -2519,6 +2568,7 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
                     sequence: index.arch_into(),
                 },
                 domain: &domain,
+                unit: Unit::SINGLE,
                 consumer,
                 batch: &batch,
                 batch_ipc: body.clone(),
@@ -2706,12 +2756,15 @@ async fn the_console_lists_the_concrete_branches_the_relay_owner_holds() {
     install_unpaced_test_domain(&runtime, &domain);
     let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay,
-        services.clone(),
-        RelayRetention::default(),
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     let beta = string_branch_key("tenant", "beta");
     let acme = string_branch_key("tenant", "acme");
     fan_out_through_owner(&services, &beta).await;
@@ -2766,7 +2819,7 @@ async fn an_unscheduled_materialized_record_is_visible_only_while_its_owner_hold
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay);
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &untracked);
     let presence = runtime
-        .relay_branch_presence(&domain, &relay)
+        .relay_branch_presence(&domain, &relay, Unit::SINGLE)
         .expect("the relay's state identity is published");
     let routing = DomainRoutingSnapshot {
         relay_services: [(relay.clone(), services_reporting_to(presence.clone()))]
@@ -2832,6 +2885,7 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
         kind,
         domain: target.clone(),
         relay: relay.clone(),
+        unit: Unit::SINGLE,
         key: None,
         batch_ipc: batch_ipc.clone(),
         metadata: Vec::new(),
@@ -2893,3 +2947,6 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
         );
     }
 }
+
+#[path = "relay_boundary_channel_tests.rs"]
+mod channel_tests;

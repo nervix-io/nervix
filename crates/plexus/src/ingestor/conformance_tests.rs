@@ -17,7 +17,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_models::{
     ChoiceRequirement, CreateIngestor, DeclaredDelivery, IngestDeliveryKind, IngestQuiesceKind,
@@ -252,6 +252,36 @@ fn every_delivery_spelling() -> Vec<DeclaredDelivery> {
         }
     }
     spellings.into_values().collect()
+}
+
+/// Every combination of choices a statement of the entity can write for the options its delivery
+/// modes require, and one combination of no choices for an entity whose modes require none.
+fn every_choosing_of_delivery_options(declared: &IngestorEntityCapabilities) -> Vec<Chosen> {
+    let mut options = BTreeSet::new();
+    for delivery in declared.delivery {
+        for requirement in delivery.requires {
+            options.insert(requirement.option);
+        }
+    }
+    let mut choosings = vec![Chosen::new()];
+    for keywords in options {
+        let Some(option) = declared.option(keywords) else {
+            panic!("a requirement names the undeclared option {keywords}");
+        };
+        let OptionForm::Choice(choices) = option.form else {
+            panic!("a requirement names {keywords}, which declares no choice");
+        };
+        let mut extended = Vec::new();
+        for chosen in &choosings {
+            for choice in choices {
+                let mut choosing = chosen.clone();
+                choosing.insert(keywords, choice.name);
+                extended.push(choosing);
+            }
+        }
+        choosings = extended;
+    }
+    choosings
 }
 
 /// Every option any entity declares, written in each of its forms, by its keywords.
@@ -491,24 +521,34 @@ fn empty_names(option: &OptionDeclaration) -> Vec<String> {
 }
 
 #[test]
-fn completion_offers_exactly_the_declared_delivery_modes() {
+fn completion_offers_exactly_the_delivery_modes_the_written_choices_keep() {
     for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
-        let generated = Generated::of(kind);
-        let mut spellings = Vec::new();
-        for delivery in declared.delivery {
-            spellings.push(delivery.example);
-        }
-        assert_offers_exactly(&generated.through_mode(), &spellings);
-
-        let mut acknowledged = Vec::new();
-        for spelling in &spellings {
-            if let Some(rest) = spelling.strip_prefix("ACK ") {
-                acknowledged.push(rest);
+        for chosen in every_choosing_of_delivery_options(&declared) {
+            let mut spellings = Vec::new();
+            for delivery in declared.delivery {
+                let kept = ChoiceRequirement::all_met(delivery.requires, &|option| {
+                    chosen.get(option).copied()
+                });
+                if kept {
+                    spellings.push(delivery.example);
+                }
             }
-        }
-        if !acknowledged.is_empty() {
-            assert_offers_exactly(&format!("{}ACK ", generated.through_mode()), &acknowledged);
+            let generated = Generated {
+                chosen,
+                ..Generated::of(kind)
+            };
+            assert_offers_exactly(&generated.through_mode(), &spellings);
+
+            let mut acknowledged = Vec::new();
+            for spelling in &spellings {
+                if let Some(rest) = spelling.strip_prefix("ACK ") {
+                    acknowledged.push(rest);
+                }
+            }
+            if !acknowledged.is_empty() {
+                assert_offers_exactly(&format!("{}ACK ", generated.through_mode()), &acknowledged);
+            }
         }
     }
 }
@@ -590,3 +630,6 @@ fn completion_names_the_declared_locator_then_the_declared_options() {
         );
     }
 }
+
+#[path = "alter_conformance_tests.rs"]
+mod alter;

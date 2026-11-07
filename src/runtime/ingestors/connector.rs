@@ -41,7 +41,10 @@ use super::{
     },
     IngestorConnectorStartError, IngestorStartError,
 };
-use crate::runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryEnd};
+use crate::{
+    metrics::IngestorInteractionMetrics,
+    runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryEnd},
+};
 
 #[path = "connector_acknowledgement.rs"]
 mod acknowledgement;
@@ -58,9 +61,9 @@ use read::{ReadOutcome, read_batch};
 #[path = "connector_poll.rs"]
 mod poll;
 
-const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
+const INGESTOR_ERROR_RETRY: Duration = Duration::from_millis(100);
 
-/// How a ingestor whose delivery mode declares no retry policy reopens after a failure: the delay
+/// How an ingestor whose delivery mode declares no retry policy reopens after a failure: the delay
 /// starts here and doubles up to the ceiling.
 pub(super) const INGESTOR_RECONNECT_POLICY: ParsedRetryPolicy = ParsedRetryPolicy {
     backoff: Duration::from_millis(250),
@@ -69,11 +72,24 @@ pub(super) const INGESTOR_RECONNECT_POLICY: ParsedRetryPolicy = ParsedRetryPolic
 
 impl IngestorSpec {
     /// The identity this ingestor's running ingestor is registered under.
-    pub(in crate::runtime) fn runtime_key(&self) -> DomainNodeRef {
-        DomainNodeRef::node_in(self.domain.clone(), ModelKind::Ingestor, self.name.clone())
+    pub(in crate::runtime) fn runtime_key(&self) -> DomainNodeUnitRef {
+        DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(self.domain.clone(), ModelKind::Ingestor, self.name.clone()),
+            self.unit,
+        )
     }
 
-    /// The context every failure to initialize this ingestor's ingestor is reported under.
+    pub(in crate::runtime) fn instance_index(&self) -> u64 {
+        match self.unit.kind() {
+            nervix_models::UnitKind::Single => 0,
+            nervix_models::UnitKind::Instance(index) => index,
+            nervix_models::UnitKind::Partition(_) => {
+                unreachable!("an ingestor plan declares Single or Instance units")
+            }
+        }
+    }
+
+    /// The context every failure to initialize this ingestor's connector is reported under.
     pub(super) fn initialize_failure(&self) -> IngestorStartError {
         IngestorStartError::Initialize {
             domain: self.domain.clone(),
@@ -81,7 +97,7 @@ impl IngestorSpec {
         }
     }
 
-    /// This ingestor's ingestor failing to start because of `cause`.
+    /// This ingestor's connector failing to start because of `cause`.
     pub(super) fn connector_start_failure(
         &self,
         cause: IngestorConnectorStartError,
@@ -95,7 +111,7 @@ impl IngestorSpec {
         self.declared_input.entity_kind().capabilities().metadata
     }
 
-    /// The capabilities this ingestor's ingestor runs with, derived from the ingestor vocabulary.
+    /// The capabilities this ingestor's connector runs with, derived from the ingestor vocabulary.
     pub(super) fn ingestor_capabilities(
         &self,
         instances: NonZeroU64,
@@ -128,18 +144,17 @@ pub(super) trait IngestorInstance: Send + 'static {
     ) -> BoxFuture<'static, ()>;
 }
 
-/// A task a ingestor runs beside its instances for as long as the ingestor runs.
+/// A task an ingestor unit runs beside its connector for that unit's lifetime.
 pub(super) trait IngestorCompanion: Send + 'static {
     /// Returns the task, which ends at shutdown.
     fn start(self: Box<Self>, shutdown: watch::Receiver<bool>) -> BoxFuture<'static, ()>;
 }
 
-/// One ingestor composed from its plan: the instances its connector opened and how the host runs
-/// them.
+/// One ingestor unit composed from its plan: its opened connector and how the host runs it.
 pub(super) struct IngestorStart {
-    /// Every opened instance, in instance order.
-    pub(super) instances: Vec<Box<dyn IngestorInstance>>,
-    /// Tasks the ingestor runs beside its instances, such as the watch that tells domain-offset
+    /// The exact instance selected by this unit plan.
+    pub(super) instance: Box<dyn IngestorInstance>,
+    /// Tasks the unit runs beside its connector, such as the watch that tells domain-offset
     /// Kafka instances their topic's partitions changed.
     pub(super) companions: Vec<Box<dyn IngestorCompanion>>,
     /// Whether what the ingestor reads while quiesced passes through the quiesce control, which may
@@ -175,7 +190,7 @@ pub(super) struct BrokerIngestorStart<'a, P> {
 }
 
 impl<P> BrokerIngestorStart<'_, P> {
-    /// Parses the declared delivery mode and opens every instance to run under the broker loop.
+    /// Resolves acknowledgement policy and opens this unit's selected global instance.
     ///
     /// Nothing is registered here, so a mode that fails to parse or an instance that fails to open
     /// leaves no running ingestor behind.
@@ -205,23 +220,18 @@ impl<P> BrokerIngestorStart<'_, P> {
             capabilities: ingestor.ingestor_capabilities(instances, acknowledgement.support()),
             acknowledgement,
         };
-        let mut opened: Vec<Box<dyn IngestorInstance>> =
-            Vec::with_capacity(plan.capabilities.instances().get().arch_into());
-        for instance_index in 0..plan.capabilities.instances().get() {
-            nervix_primitives::task::consume_budget().await;
-            let source = C::open(&plan.connector, instance_index)
-                .await
-                .change_context_lazy(|| ingestor.initialize_failure())?;
-            opened.push(Box::new(BrokerIngestorInstance {
-                source,
-                policy: BrokerIngestorPolicy::new(
-                    plan.acknowledgement,
-                    plan.capabilities.position_class(),
-                ),
-            }));
-        }
+        let connector = C::open(&plan.connector, ingestor.instance_index())
+            .await
+            .change_context_lazy(|| ingestor.initialize_failure())?;
+        let instance = Box::new(BrokerIngestorInstance {
+            connector,
+            policy: BrokerIngestorPolicy::new(
+                plan.acknowledgement,
+                plan.capabilities.position_class(),
+            ),
+        });
         Ok(IngestorStart {
-            instances: opened,
+            instance,
             companions: Vec::new(),
             buffered_intake,
             flush_each_intake,
@@ -235,7 +245,7 @@ impl<P> BrokerIngestorStart<'_, P> {
 
 /// One broker ingestor instance, which the host runs under the broker loop.
 pub(super) struct BrokerIngestorInstance<C> {
-    pub(super) source: C,
+    pub(super) connector: C,
     pub(super) policy: BrokerIngestorPolicy,
 }
 
@@ -278,9 +288,9 @@ where
         host: RuntimeIngestorHost,
         shutdown: watch::Receiver<bool>,
     ) -> BoxFuture<'static, ()> {
-        let Self { source, policy } = *self;
+        let Self { connector, policy } = *self;
         Box::pin(run_ingestor_instance_with_retry(
-            source,
+            connector,
             IngestorHost::new(host),
             policy,
             shutdown,
@@ -324,19 +334,19 @@ impl<P> PacedIngestorStart<P> {
                 .ingestor_capabilities(NonZeroU64::MIN, acknowledgement.support()),
             acknowledgement,
         };
-        let source = C::open(&plan.connector, 0)
+        let connector = C::open(&plan.connector, 0)
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let cadence = runtime
             .bind_domain_cadence(&ingestor.domain, every, cadence_start)
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let instance: Box<dyn IngestorInstance> = Box::new(PacedIngestorInstance {
-            source,
+            connector,
             cadence,
             intake_batch,
         });
         Ok(IngestorStart {
-            instances: vec![instance],
+            instance,
             companions: Vec::new(),
             buffered_intake: false,
             flush_each_intake: false,
@@ -352,7 +362,7 @@ impl<P> PacedIngestorStart<P> {
 
 /// One paced ingestor instance, which the host polls on its bound domain cadence.
 struct PacedIngestorInstance<C> {
-    source: C,
+    connector: C,
     cadence: DomainCadence,
     intake_batch: NonZeroUsize,
 }
@@ -367,12 +377,12 @@ where
         shutdown: watch::Receiver<bool>,
     ) -> BoxFuture<'static, ()> {
         let Self {
-            source,
+            connector,
             cadence,
             intake_batch,
         } = *self;
         Box::pin(run_paced_ingestor(
-            source,
+            connector,
             host,
             cadence,
             intake_batch,
@@ -383,10 +393,10 @@ where
 
 impl Runtime {
     /// Registers a composed ingestor and starts it: the branch runtimes its routes feed, its
-    /// readiness, a task for every companion and every instance, and the running ingestor that
+    /// readiness, its companion tasks and its ingestor task, and the running unit that
     /// stopping it removes.
     ///
-    /// Nothing here can fail, so a ingestor is registered only once everything that could stop it
+    /// Nothing here can fail, so an ingestor is registered only once everything that could stop it
     /// from starting has succeeded.
     pub(super) fn host_ingestor(
         &self,
@@ -394,10 +404,10 @@ impl Runtime {
         quiesce: Arc<IngestorQuiesceControl>,
         dependencies: IngestorDependencies,
         codec: Arc<CompiledCodec>,
-        source: IngestorStart,
+        connector: IngestorStart,
     ) {
         let IngestorStart {
-            instances,
+            instance,
             companions,
             buffered_intake,
             flush_each_intake,
@@ -405,7 +415,7 @@ impl Runtime {
             client_mounts,
             connector_label,
             domain_offsets,
-        } = source;
+        } = connector;
         let IngestorDependencies {
             handles,
             output_routes,
@@ -419,66 +429,58 @@ impl Runtime {
             &ModelName::from(&ingestor.name),
             branched_templates,
         );
-        let instance_count: u64 = instances.len().arch_into();
-        let expected_instances = NonZeroU64::new(instance_count).assured(
-            "every source composition opens the non-zero instance count its source declares",
-        );
-        let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, expected_instances);
-
+        let instance_index = ingestor.instance_index();
+        let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, ingestor.unit);
         let (shutdown_tx, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(instances.len());
-        for companion in companions {
-            tasks.push(nervix_primitives::task::spawn(
-                companion.start(shutdown_tx.subscribe()),
-            ));
-        }
-        for (instance_index, (instance, readiness)) in
-            (0_u64..).zip(instances.into_iter().zip(readiness))
-        {
-            let host = RuntimeIngestorHost::new(RuntimeIngestorHostSpec {
-                handles: handles.clone(),
-                runtime: self.clone(),
-                domain: domain.clone(),
-                ingestor: ingestor.name.clone(),
-                timestamp_source: ingestor.timestamp_source.clone(),
-                output_routes: output_routes.clone(),
-                filter_where: filter_where.clone(),
-                codec: codec.clone(),
-                metrics: metrics.clone(),
-                branched_senders: branched_runtime.senders.clone(),
-                quiesce: quiesce.clone(),
-                shutdown: shutdown_tx.subscribe(),
-                instance_index,
-                readiness,
-                buffered_intake,
-                flush_each_intake,
-                unacknowledged_admission,
-                general_error_policy: ingestor.general_error_policy.clone(),
-            });
-            let run = instance.start(host, shutdown_tx.subscribe());
-            let task_domain = domain.clone();
-            let task_ingestor = ingestor.name.clone();
-            let task_client_mounts = client_mounts.clone();
-            let connector_label = connector_label.clone();
-            tasks.push(nervix_primitives::task::spawn(async move {
-                let _client_mounts = task_client_mounts;
-                info!(
-                    domain = task_domain.as_str(),
-                    ingestor = task_ingestor.as_str(),
-                    connector = connector_label,
-                    instance = instance_index,
-                    "started source ingestor instance"
-                );
-                run.await;
-                info!(
-                    domain = task_domain.as_str(),
-                    ingestor = task_ingestor.as_str(),
-                    connector = connector_label,
-                    instance = instance_index,
-                    "stopped source ingestor instance"
-                );
-            }));
-        }
+        let mut tasks = companions
+            .into_iter()
+            .map(|companion| {
+                nervix_primitives::task::spawn(companion.start(shutdown_tx.subscribe()))
+            })
+            .collect::<Vec<_>>();
+        let host = RuntimeIngestorHost::new(RuntimeIngestorHostSpec {
+            handles: handles.clone(),
+            runtime: self.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.name.clone(),
+            unit: ingestor.unit,
+            timestamp_source: ingestor.timestamp_source.clone(),
+            output_routes: output_routes.clone(),
+            filter_where: filter_where.clone(),
+            codec: codec.clone(),
+            metrics: metrics.clone(),
+            branched_senders: branched_runtime.senders.clone(),
+            quiesce: quiesce.clone(),
+            shutdown: shutdown_tx.subscribe(),
+            readiness,
+            buffered_intake,
+            flush_each_intake,
+            unacknowledged_admission,
+            general_error_policy: ingestor.general_error_policy.clone(),
+        });
+        let run = instance.start(host, shutdown_tx.subscribe());
+        let task_domain = domain.clone();
+        let task_ingestor = ingestor.name.clone();
+        let task_client_mounts = client_mounts.clone();
+        let connector_label = connector_label.clone();
+        tasks.push(nervix_primitives::task::spawn(async move {
+            let _client_mounts = task_client_mounts;
+            info!(
+                domain = task_domain.as_str(),
+                ingestor = task_ingestor.as_str(),
+                connector = connector_label,
+                instance = instance_index,
+                "started ingestor instance"
+            );
+            run.await;
+            info!(
+                domain = task_domain.as_str(),
+                ingestor = task_ingestor.as_str(),
+                connector = connector_label,
+                instance = instance_index,
+                "stopped ingestor instance"
+            );
+        }));
 
         self.inner.ingestors.insert(
             ingestor.runtime_key(),
@@ -492,7 +494,7 @@ impl Runtime {
     }
 }
 
-/// What a ingestor failure says to an operator: the most specific cause beneath it.
+/// What an ingestor failure says to an operator: the most specific cause beneath it.
 ///
 /// The contract's own context names only the operation that failed, such as a resume. The cause a
 /// connector reports beneath it, such as a refused connection or a conflicting client identity, is
@@ -523,7 +525,7 @@ pub(super) struct RuntimeIngestorHostSpec {
     pub(super) branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     pub(super) quiesce: Arc<IngestorQuiesceControl>,
     pub(super) shutdown: watch::Receiver<bool>,
-    pub(super) instance_index: u64,
+    pub(super) unit: Unit,
     pub(super) readiness: ingestor_quiesce::IngestorInstanceReadiness,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
@@ -558,17 +560,8 @@ pub(super) struct RuntimeIngestorHost {
     buffered_intake: bool,
     flush_each_intake: bool,
     unacknowledged_admission: QueueAdmission,
-    /// Counts the unacknowledged payloads this host did not deliver because the node's extension
-    /// workers had no room to unfold them.
-    unfolding_refused: prometheus::IntCounter,
-    /// Counts the positions this host discarded after a reconnect because the broker redelivers
-    /// them.
-    transport_redeliveries: prometheus::IntCounter,
-    /// Counts the payloads this host's ingestor dropped because they exceed its client's size bound.
-    oversized_payloads: prometheus::IntCounter,
-    /// Counts header values the connector skipped because their bytes are not valid UTF-8, for
-    /// this host's polls and the endpoint bindings it hands out.
-    header_values_dropped: prometheus::IntCounter,
+    /// Retained ingestor host counters, also handed to endpoint bindings where needed.
+    interactions: IngestorInteractionMetrics,
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
     /// it hands out.
     decode_rejections: DecodeRejections,
@@ -579,15 +572,18 @@ pub(super) struct RuntimeIngestorHost {
 
 impl RuntimeIngestorHost {
     pub(super) fn new(spec: RuntimeIngestorHostSpec) -> Self {
-        let status_key = DomainNodeRef::node_in(
-            spec.domain.clone(),
-            ModelKind::Ingestor,
-            spec.ingestor.clone(),
+        let status_key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(
+                spec.domain.clone(),
+                ModelKind::Ingestor,
+                spec.ingestor.clone(),
+            ),
+            spec.unit,
         );
         let status = spec.runtime.ingestor_status(&status_key);
-        let ack_root_trackers = spec
-            .runtime
-            .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor);
+        let ack_root_trackers =
+            spec.runtime
+                .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor, spec.unit);
         let collector = IngestRouteCollector::new(
             spec.output_routes.metadata.clone(),
             INGEST_GROUP_MAX_ROWS,
@@ -595,33 +591,16 @@ impl RuntimeIngestorHost {
         );
         let quiesce_observation = spec.quiesce.observation();
         let dispatcher = spec.runtime.inner.remote_dispatcher.load();
-        let unfolding_refused = spec.runtime.inner.metrics.ingestor_unfolding_refused(
-            &spec.domain,
-            &spec.ingestor,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let transport_redeliveries = spec.runtime.inner.metrics.ingestor_transport_redeliveries(
-            &spec.domain,
-            &spec.ingestor,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let oversized_payloads = spec.runtime.inner.metrics.ingestor_oversized_payloads(
-            &spec.domain,
-            &spec.ingestor,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let header_values_dropped = spec.runtime.inner.metrics.ingestor_header_values_dropped(
-            &spec.domain,
-            &spec.ingestor,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let decode_rejections = DecodeRejections::new(
-            spec.general_error_policy,
-            spec.runtime.inner.metrics.ingestor_decode_rejections(
+        let (interactions, decode_rejections_counter) =
+            spec.runtime.inner.metrics.register_ingestor_interactions(
                 &spec.domain,
                 &spec.ingestor,
+                spec.unit,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-            ),
+            );
+        let decode_rejections = DecodeRejections::new(
+            spec.general_error_policy,
+            decode_rejections_counter,
             status.clone(),
         );
         let delivery_stop = spec.shutdown.clone();
@@ -629,7 +608,7 @@ impl RuntimeIngestorHost {
             .runtime
             .inner
             .fault_injection
-            .source_confirmation_delay(&status_key);
+            .ingestor_confirmation_delay(&status_key.entity);
         Self {
             handles: spec.handles,
             status,
@@ -647,16 +626,19 @@ impl RuntimeIngestorHost {
             ack_root_trackers,
             shutdown: spec.shutdown,
             delivery_stop,
-            instance_index: spec.instance_index,
+            instance_index: match spec.unit.kind() {
+                nervix_models::UnitKind::Single => 0,
+                nervix_models::UnitKind::Instance(index) => index,
+                nervix_models::UnitKind::Partition(_) => {
+                    unreachable!("ingestor hosts run ingestor units")
+                }
+            },
             readiness: spec.readiness,
             collector,
             buffered_intake: spec.buffered_intake,
             flush_each_intake: spec.flush_each_intake,
             unacknowledged_admission: spec.unacknowledged_admission,
-            unfolding_refused,
-            transport_redeliveries,
-            oversized_payloads,
-            header_values_dropped,
+            interactions,
             decode_rejections,
             confirmation_delay,
         }
@@ -681,7 +663,7 @@ impl RuntimeIngestorHost {
             metrics: self.metrics.clone(),
             branched_senders: self.branched_senders.clone(),
             decode_rejections: self.decode_rejections.clone(),
-            header_values_dropped: self.header_values_dropped.clone(),
+            header_values_dropped: self.interactions.header_values_dropped.clone(),
         }
     }
 
@@ -752,7 +734,7 @@ impl RuntimeIngestorHost {
             nervix_primitives::task::consume_budget().await;
             let metadata = BufferedIngestMetadata::retain(&message.metadata);
             let retained = BufferedIngestPayload::new(message.payload, metadata, actual_utc_now());
-            match self.quiesce.intake(self.instance_index, retained, false) {
+            match self.quiesce.intake(retained, false) {
                 IngestorQuiesceIntake::Dispatch(_) => admitted.push(message),
                 IngestorQuiesceIntake::Buffered
                 | IngestorQuiesceIntake::Dropped
@@ -907,7 +889,7 @@ impl RuntimeIngestorHost {
                         }
                         LiveDeliveryEnd::Redecide => {
                             self.collector.discard_undispatched_payloads();
-                            // A ingestor whose input bypasses the quiesce control dispatches what
+                            // An ingestor whose input bypasses the quiesce control dispatches what
                             // it already read whatever the decision, so its batch waits again.
                             if !self.buffered_intake {
                                 continue;
@@ -968,7 +950,7 @@ impl RuntimeIngestorHost {
     ) -> IngestorIntakeResult<bool> {
         // Observed before the decision is taken, so a newer one is never missed.
         let decided = self.quiesce.observation();
-        match self.quiesce.intake(self.instance_index, payload, false) {
+        match self.quiesce.intake(payload, false) {
             IngestorQuiesceIntake::Dispatch(payload) => {
                 self.deliver_unacknowledged(payload, decided).await
             }
@@ -1020,7 +1002,7 @@ impl RuntimeIngestorHost {
                 LiveDeliveryEnd::Redecide => {
                     self.collector.discard_undispatched_payloads();
                     decided = self.quiesce.observation();
-                    match self.quiesce.intake(self.instance_index, payload, false) {
+                    match self.quiesce.intake(payload, false) {
                         IngestorQuiesceIntake::Dispatch(returned) => {
                             payload = returned;
                             continue;
@@ -1071,7 +1053,9 @@ impl RuntimeIngestorHost {
     /// Counts `payloads` an unacknowledged intake did not deliver because the node's extension
     /// workers had no room to unfold them.
     fn count_refused(&self, payloads: usize) {
-        self.unfolding_refused.inc_by(payloads.arch_into());
+        self.interactions
+            .unfolding_refused
+            .inc_by(payloads.arch_into());
     }
 
     /// Consumes every payload of an unacknowledged or retained batch its codec refused, as the
@@ -1223,7 +1207,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
 
     fn report_error(&self, message: String) {
         self.runtime.events().report_error(format!(
-            "source error for ingestor '{}' in domain '{}': {message}",
+            "ingestor error for ingestor '{}' in domain '{}': {message}",
             self.ingestor.as_str(),
             self.domain.as_str(),
         ));
@@ -1231,7 +1215,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
 
     fn handle_ack_failure(&self, reason: String) {
         self.runtime.events().report_error(format!(
-            "source ACK chain failed for ingestor '{}' in domain '{}': {reason}",
+            "ingestor ACK chain failed for ingestor '{}' in domain '{}': {reason}",
             self.ingestor.as_str(),
             self.domain.as_str(),
         ));
@@ -1244,11 +1228,15 @@ impl IngestorHostServices for RuntimeIngestorHost {
             positions,
             "discarded positions of a lost connection that the broker redelivers"
         );
-        self.transport_redeliveries.inc_by(positions.arch_into());
+        self.interactions
+            .transport_redeliveries
+            .inc_by(positions.arch_into());
     }
 
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
-        self.oversized_payloads.inc_by(payloads.get().arch_into());
+        self.interactions
+            .oversized_payloads
+            .inc_by(payloads.get().arch_into());
     }
 
     fn record_unconfirmed_stop(&self, positions: usize) {
@@ -1267,7 +1255,7 @@ impl RuntimeIngestorHost {
     /// Delivers the oldest payload this instance's quiesce buffer retained, and answers whether it
     /// delivered one.
     ///
-    /// Nothing can present a retained payload again: an endpoint already answered it and a ingestor
+    /// Nothing can present a retained payload again: an endpoint already answered it and an ingestor
     /// already moved past it. Its unfolding therefore waits for a place on the node's extension
     /// workers rather than being refused, and the payload stays retained, counted with its bytes,
     /// until its messages are accepted into the ingest group. A shutdown or a new quiesce ends
@@ -1283,7 +1271,7 @@ impl RuntimeIngestorHost {
         )
     )]
     async fn deliver_retained(&mut self) -> IngestorIntakeResult<bool> {
-        let Some(retained) = self.quiesce.take_buffered(self.instance_index) else {
+        let Some(retained) = self.quiesce.take_buffered() else {
             return Ok(false);
         };
         let decode = self.runtime.decode_raw_ingest_payload(
@@ -1410,8 +1398,8 @@ enum PacedIngestorAction {
     Stop,
 }
 
-async fn prepare_paced_source<C, H>(
-    source: &mut C,
+async fn prepare_paced_ingestor<C, H>(
+    connector: &mut C,
     host: &mut H,
     ready: &mut bool,
     shutdown: &mut watch::Receiver<bool>,
@@ -1424,9 +1412,9 @@ where
         return PacedIngestorAction::Stop;
     }
     if host.should_suspend_intake() {
-        flush_paced_source(host).await;
+        flush_paced_ingestor(host).await;
         if *ready {
-            if let Err(error) = source.suspend().await {
+            if let Err(error) = connector.suspend().await {
                 host.report_error(format!("{error:#}"));
             }
             *ready = false;
@@ -1443,9 +1431,9 @@ where
         };
     }
 
-    if !*ready || source.needs_resume() {
-        flush_paced_source(host).await;
-        match source.resume().await {
+    if !*ready || connector.needs_resume() {
+        flush_paced_ingestor(host).await;
+        match connector.resume().await {
             Ok(IngestorResume::Ready) => {
                 *ready = true;
                 host.mark_ready();
@@ -1464,7 +1452,7 @@ where
                 *ready = false;
                 host.mark_unready();
                 host.record_poll_error(format!("{error:#}"));
-                return if wait_for_paced_retry(host, shutdown, SOURCE_ERROR_RETRY).await {
+                return if wait_for_paced_retry(host, shutdown, INGESTOR_ERROR_RETRY).await {
                     PacedIngestorAction::Restart
                 } else {
                     PacedIngestorAction::Stop
@@ -1480,11 +1468,11 @@ where
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the retained paced source handles every poll, retry and acknowledgement"
+        reason = "the retained paced ingestor handles every poll, retry and acknowledgement"
     )
 )]
 async fn run_paced_ingestor<C, H, D>(
-    mut source: C,
+    mut connector: C,
     mut host: H,
     mut cadence: D,
     intake_batch: NonZeroUsize,
@@ -1499,7 +1487,7 @@ async fn run_paced_ingestor<C, H, D>(
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await {
+        match prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await {
             PacedIngestorAction::Poll => {}
             PacedIngestorAction::Restart => continue,
             PacedIngestorAction::Stop => break,
@@ -1507,7 +1495,7 @@ async fn run_paced_ingestor<C, H, D>(
 
         match host.replay_buffered().await {
             Ok(true) => {
-                flush_paced_source(&mut host).await;
+                flush_paced_ingestor(&mut host).await;
                 continue;
             }
             Ok(false) => {}
@@ -1529,7 +1517,7 @@ async fn run_paced_ingestor<C, H, D>(
         let due_at = match due_at {
             Ok(due_at) => due_at,
             Err(error) => {
-                host.report_error(format!("could not advance source cadence: {error:#}"));
+                host.report_error(format!("could not advance ingestor cadence: {error:#}"));
                 break;
             }
         };
@@ -1547,7 +1535,7 @@ async fn run_paced_ingestor<C, H, D>(
             _ = host.wait_for_quiesce_change() => {
                 continue;
             }
-            poll = source.poll(due_at) => poll,
+            poll = connector.poll(due_at) => poll,
         };
         let poll = match poll {
             Ok(poll) => poll,
@@ -1558,17 +1546,18 @@ async fn run_paced_ingestor<C, H, D>(
         };
         host.clear_transient_error();
         match host.intake_poll(poll, intake_batch).await {
-            Ok(true) => flush_paced_source(&mut host).await,
+            Ok(true) => flush_paced_ingestor(&mut host).await,
             Ok(false) => {}
             Err(error) => host.report_error(format!("{error:#}")),
         }
     }
 
-    flush_paced_source(&mut host).await;
+    flush_paced_ingestor(&mut host).await;
     if let Err(error) = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
-        "terminal source teardown closes its exact connector instance after the polling loop ends",
-        source.close()
+        "terminal ingestor teardown closes its exact connector instance after the polling loop \
+         ends",
+        connector.close()
     )
     .await
     {
@@ -1577,7 +1566,7 @@ async fn run_paced_ingestor<C, H, D>(
     host.mark_unready();
 }
 
-async fn flush_paced_source<H>(host: &mut H)
+async fn flush_paced_ingestor<H>(host: &mut H)
 where
     H: IngestorHostServices,
 {
@@ -1611,11 +1600,11 @@ where
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the retained request source handles every admitted request and acknowledgement"
+        reason = "the retained request ingestor handles every admitted request and acknowledgement"
     )
 )]
 pub(super) async fn run_request_ingestor<C>(
-    mut source: C,
+    mut connector: C,
     mut host: IngestorHost,
     mut shutdown: watch::Receiver<bool>,
 ) where
@@ -1643,8 +1632,9 @@ pub(super) async fn run_request_ingestor<C>(
 
     if let Err(error) = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
-        "terminal source teardown closes its exact connector instance after the polling loop ends",
-        source.close()
+        "terminal ingestor teardown closes its exact connector instance after the polling loop \
+         ends",
+        connector.close()
     )
     .await
     {
@@ -1673,11 +1663,11 @@ struct BatchSettlement {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the retained source handles every poll, retry and acknowledgement"
+        reason = "the retained ingestor handles every poll, retry and acknowledgement"
     )
 )]
 pub(super) async fn run_ingestor_instance_with_retry<C>(
-    mut source: C,
+    mut connector: C,
     mut host: IngestorHost,
     policy: BrokerIngestorPolicy,
     mut shutdown: watch::Receiver<bool>,
@@ -1706,7 +1696,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         if host.should_suspend_intake() {
             flush_for_lifecycle(&mut host).await;
             if ready {
-                if let Err(error) = source.suspend().await {
+                if let Err(error) = connector.suspend().await {
                     host.report_error(format!("{error:#}"));
                 }
                 ready = false;
@@ -1723,7 +1713,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
             continue;
         }
 
-        if !ready || source.needs_resume() {
+        if !ready || connector.needs_resume() {
             flush_for_lifecycle(&mut host).await;
             let resumed = nervix_primitives::select! {
                 biased;
@@ -1734,7 +1724,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                     continue;
                 }
                 _ = host.wait_for_quiesce_change() => continue,
-                resumed = source.resume() => resumed,
+                resumed = connector.resume() => resumed,
             };
             match resumed {
                 Ok(IngestorResume::Ready) => {
@@ -1782,14 +1772,14 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         // unacknowledged message. Reestablish its assignment and retry that same rewind before
         // reading another batch: acknowledging a later Kafka offset would otherwise commit past the
         // missing record. Only a replayable ingestor still holds a pending rejection here, because a
-        // resume discards a broker-redelivered one and a ingestor without positions never keeps one.
+        // resume discards a broker-redelivered one and an ingestor without positions never keeps one.
         if let Some(positions) = pending_rejection.take() {
-            if let Err(error) = source.reject(&positions).await {
+            if let Err(error) = connector.reject(&positions).await {
                 let delay = ingestor_retry_delay(retry_delay);
                 host.record_transient_error(ingestor_failure_reason(&error), delay);
                 host.report_error(format!("{error:#}"));
                 pending_rejection = Some(positions);
-                if let Err(error) = source.suspend().await {
+                if let Err(error) = connector.suspend().await {
                     host.report_error(format!("{error:#}"));
                 }
                 ready = false;
@@ -1804,7 +1794,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         }
 
         let request = batch_request(acknowledgement);
-        let read = read_batch(&mut source, &mut host, &mut shutdown, request).await;
+        let read = read_batch(&mut connector, &mut host, &mut shutdown, request).await;
         let end = read.end;
         let messages = match read.into_outcome(&host) {
             ReadOutcome::TakeIn(messages) => messages,
@@ -1835,7 +1825,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         // the stop that cancelled it.
         if !messages.is_empty() {
             let retry_after = ingestor_retry_delay(retry_delay);
-            match handle_batch(&mut source, &mut host, policy, retry_after, messages).await {
+            match handle_batch(&mut connector, &mut host, policy, retry_after, messages).await {
                 BatchDisposition::Accepted => {
                     retry_delay = retry_policy.backoff;
                 }
@@ -1848,7 +1838,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 }
                 BatchDisposition::RetryRejection(positions) => {
                     pending_rejection = Some(positions);
-                    if let Err(error) = source.suspend().await {
+                    if let Err(error) = connector.suspend().await {
                         host.report_error(format!("{error:#}"));
                     }
                     ready = false;
@@ -1870,8 +1860,9 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
     flush_for_lifecycle(&mut host).await;
     if let Err(error) = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
-        "terminal source teardown closes its exact connector instance after the polling loop ends",
-        source.close()
+        "terminal ingestor teardown closes its exact connector instance after the polling loop \
+         ends",
+        connector.close()
     )
     .await
     {
@@ -1900,12 +1891,12 @@ fn batch_request(acknowledgement: IngestorAckPolicy) -> IngestorBatchRequest {
 #[cfg_attr(
     nervix_lint,
     nervix::dispatch(
-        reason = "the source driver owns position cloning while this admitted batch retains its \
+        reason = "the ingestor driver owns position cloning while this admitted batch retains its \
                   acknowledgement list"
     )
 )]
 async fn handle_batch<C>(
-    source: &mut C,
+    connector: &mut C,
     host: &mut IngestorHost,
     policy: BrokerIngestorPolicy,
     retry_after: Duration,
@@ -1923,7 +1914,7 @@ where
     {
         return IndividualBatch::intake(host, messages, timeout)
             .await
-            .settle(source, host, settlement)
+            .settle(connector, host, settlement)
             .await;
     }
     let positions = messages
@@ -1944,7 +1935,7 @@ where
                 host.report_error(format!("{error:#}"));
                 return BatchDisposition::Accepted;
             }
-            confirm_batch(source, host, settlement, positions).await
+            confirm_batch(connector, host, settlement, positions).await
         }
         IngestorAckPolicy::Sequential { timeout, .. }
         | IngestorAckPolicy::Parallel { timeout, .. } => {
@@ -1953,11 +1944,11 @@ where
                 Ok(acknowledgement) => acknowledgement,
                 Err(error) => {
                     host.report_error(format!("{error:#}"));
-                    return reject_batch(source, host, settlement, positions).await;
+                    return reject_batch(connector, host, settlement, positions).await;
                 }
             };
             settle_acknowledged_batch(
-                source,
+                connector,
                 host,
                 settlement,
                 acknowledgement,
@@ -1976,7 +1967,7 @@ where
 /// drops, so it drops only once the ingestor has settled the positions. A stop that arrives before
 /// every tree resolved leaves the positions unconfirmed, which the host reports.
 async fn settle_acknowledged_batch<C>(
-    source: &mut C,
+    connector: &mut C,
     host: &mut IngestorHost,
     settlement: BatchSettlement,
     mut acknowledgement: IngestorBatchAcknowledgement,
@@ -1989,11 +1980,11 @@ where
     let outcome = acknowledgement.wait(timeout).await;
     let disposition = match outcome {
         IngestorAcknowledgementOutcome::Ack => {
-            confirm_batch(source, host, settlement, positions).await
+            confirm_batch(connector, host, settlement, positions).await
         }
         IngestorAcknowledgementOutcome::NoAck(reason) => {
             host.handle_ack_failure(reason);
-            reject_batch(source, host, settlement, positions).await
+            reject_batch(connector, host, settlement, positions).await
         }
         IngestorAcknowledgementOutcome::Shutdown => {
             host.record_unconfirmed_stop(positions.len());
@@ -2009,7 +2000,7 @@ where
 /// A confirmation that fails is the ingestor's transient status until a later one succeeds, and
 /// the positions are rejected for their position class to handle.
 async fn confirm_batch<C>(
-    source: &mut C,
+    connector: &mut C,
     host: &mut IngestorHost,
     settlement: BatchSettlement,
     positions: Vec<C::Position>,
@@ -2017,14 +2008,14 @@ async fn confirm_batch<C>(
 where
     C: BrokerIngestorConnector,
 {
-    let confirmed = source.acknowledge(&positions).await;
+    let confirmed = connector.acknowledge(&positions).await;
     let Err(error) = confirmed else {
         host.clear_transient_error();
         return BatchDisposition::Accepted;
     };
     host.record_transient_error(ingestor_failure_reason(&error), settlement.retry_after);
     host.report_error(format!("{error:#}"));
-    reject_batch(source, host, settlement, positions).await
+    reject_batch(connector, host, settlement, positions).await
 }
 
 /// Rejects `positions` so the ingestor presents them again, and decides by the ingestor's position
@@ -2033,7 +2024,7 @@ where
 /// A rejection that fails is the ingestor's transient status, as a confirmation that fails is,
 /// until a later confirmation succeeds.
 async fn reject_batch<C>(
-    source: &mut C,
+    connector: &mut C,
     host: &mut IngestorHost,
     settlement: BatchSettlement,
     positions: Vec<C::Position>,
@@ -2041,7 +2032,7 @@ async fn reject_batch<C>(
 where
     C: BrokerIngestorConnector,
 {
-    let Err(error) = source.reject(&positions).await else {
+    let Err(error) = connector.reject(&positions).await else {
         return BatchDisposition::Retry;
     };
     host.record_transient_error(ingestor_failure_reason(&error), settlement.retry_after);
@@ -2050,7 +2041,7 @@ where
         PositionClass::Replayable | PositionClass::BrokerRedelivered => {
             BatchDisposition::RetryRejection(positions)
         }
-        // A ingestor without positions has nothing a later rejection could name.
+        // An ingestor without positions has nothing a later rejection could name.
         PositionClass::None => BatchDisposition::Retry,
     }
 }
@@ -2062,7 +2053,7 @@ async fn flush_for_lifecycle(host: &mut IngestorHost) {
 }
 
 fn ingestor_retry_delay(delay: Duration) -> Duration {
-    delay.max(SOURCE_ERROR_RETRY)
+    delay.max(INGESTOR_ERROR_RETRY)
 }
 
 async fn wait_for_retry(

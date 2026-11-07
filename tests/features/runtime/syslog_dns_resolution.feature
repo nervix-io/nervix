@@ -16,7 +16,7 @@ Feature: Syslog name resolution
         severity U8,
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener CONFIG {
         'protocol' = 'udp',
@@ -73,7 +73,7 @@ Feature: Syslog name resolution
     And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY input_events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY delivered_events SCHEMA syslog_event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_input CONFIG {
@@ -136,7 +136,7 @@ Feature: Syslog name resolution
     When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY input_events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY delivered_events SCHEMA syslog_event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_input CONFIG {
@@ -202,7 +202,7 @@ Feature: Syslog name resolution
     And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY input_events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY delivered_events SCHEMA syslog_event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_input CONFIG {

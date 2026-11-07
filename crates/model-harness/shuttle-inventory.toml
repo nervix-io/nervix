@@ -10,6 +10,12 @@
 
 [[package]]
 checks = [
+  "shuttle_tests::shuttle_key_leases_refund_exactly_and_never_exceed_the_global_capacity",
+]
+name = "nervix-rate-limit"
+
+[[package]]
+checks = [
   "tests::shuttle_checks::shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge",
   "tests::shuttle_checks::shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place",
   "tests::shuttle_checks::shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit",
@@ -48,13 +54,18 @@ checks = [
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss",
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange",
   "domain_clock::shuttle_tests::shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock",
+  "exchange::shuttle_tests::shuttle_a_closed_request_registry_ends_its_silent_reader",
+  "exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter",
+  "exchange::shuttle_tests::shuttle_a_reply_of_another_kind_racing_registration_interrupts_every_waiter",
   "producer::shuttle_tests::shuttle_a_submission_racing_its_producers_end_observes_the_end",
   "producer::shuttle_tests::shuttle_close_fences_a_producer_restore_interrupted_by_another_loss",
   "producer::shuttle_tests::shuttle_close_fences_a_producer_restore_started_on_the_same_exchange",
   "producer::slots::shuttle_tests::shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit",
   "producer::slots::shuttle_tests::shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once",
   "producer::slots::shuttle_tests::shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit",
+  "restore::shuttle_tests::shuttle_finishing_a_restore_attempt_fences_its_last_frame",
   "subscriptions::shuttle_tests::shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change",
+  "subscriptions::shuttle_tests::shuttle_a_restoration_ended_for_good_racing_a_deletion_releases_the_name",
 ]
 name = "nervix-client-core"
 
@@ -98,6 +109,7 @@ name = "nervix-connector-redis"
 
 [[package]]
 checks = [
+  "queue::ingestor::shuttle_tests::shuttle_a_cancelled_parallel_read_hands_over_every_message_its_receives_gathered",
   "queue::ingestor::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_message_its_receives_took",
   "queue::ingestor::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
 ]
@@ -107,6 +119,8 @@ name = "nervix-connector-sqs"
 checks = [
   "queue::ingestor::reader::shuttle_tests::shuttle_a_batch_deadline_racing_cancellation_preserves_every_delivery",
   "queue::ingestor::reader::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_delivery_once_and_in_order",
+  "publisher::confirmation_window::shuttle_tests::shuttle_a_return_followed_by_a_multiple_ack_rejects_only_its_message",
+  "publisher::confirmation_window::shuttle_tests::shuttle_a_deadline_never_delivers_a_partially_attributed_mandatory_window",
 ]
 name = "nervix-connector-rabbitmq"
 
@@ -115,6 +129,9 @@ checks = [
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
+  "application::completion::progress::shuttle_tests::shuttle_a_barrier_that_observes_before_it_reads_sees_every_racing_report_and_advance",
+  "application::completion::progress::shuttle_tests::shuttle_racing_reports_of_one_incarnation_keep_its_newest_progress",
+  "application::resource::upload_executions::tests::shuttle_waiter_cancellation_and_retirement_keep_one_execution_per_upload",
   "application::restore::shuttle_tests::shuttle_a_resumed_restore_never_repeats_a_recorded_effect",
   "application::restore::shuttle_tests::shuttle_an_abandoned_restore_upload_releases_its_quota_exactly_once",
   "application::restore::shuttle_tests::shuttle_concurrent_restore_retries_join_one_execution",
@@ -122,6 +139,10 @@ checks = [
   "application::shutdown::shuttle_tests::shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline",
   "application::termination_signals::shuttle_tests::shuttle_a_repeated_signal_before_the_deadline_ends_the_process_with_the_status_of_that_signal",
   "application::termination_signals::shuttle_tests::shuttle_an_expired_deadline_and_a_repeated_signal_let_exactly_one_forced_exit_end_the_process",
+  "application::domain_clock::attachments::tests::modeled::shuttle_attachment_replacement_and_stop_wake_the_exact_delivery_lifetime",
+  "application::domain_clock::attachments::tests::modeled::shuttle_an_attachment_survives_a_preceding_availability_snapshot",
+  "application::domain_clock::attachments::tests::modeled::shuttle_a_duplicate_attachment_survives_a_preceding_availability_snapshot",
+  "cluster::peer_health_watcher::shuttle_tests::shuttle_a_policy_change_racing_a_retained_health_wait_is_never_missed",
   "runtime::backup_capture_fence::shuttle_tests::shuttle_backup_cut_includes_pre_cut_branch_publication",
   "runtime::backup_state::branch_state_shuttle_tests::shuttle_a_forced_deduplicator_publication_holds_every_key_acknowledged_before_the_cut",
   "runtime::backup_state::branch_state_shuttle_tests::shuttle_a_forced_window_publication_holds_every_step_acknowledged_before_the_cut",
@@ -151,6 +172,8 @@ checks = [
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_delivery_binding_racing_terminal_retirement_cannot_publish_a_live_channel",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_branch_retirement_racing_a_route_refresh_never_revives_a_retained_producer",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_replacing_one_partition_owner_retires_only_that_partitions_channels",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_fencing_one_partition_holds_only_its_bindings_until_successor_publication",
   "runtime::domain_execution::shuttle_tests::shuttle_a_reader_observes_one_complete_typed_routing_revision",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained",
@@ -190,15 +213,19 @@ checks = [
   "runtime::ingestors::connector::shuttle_tests::shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took",
   "runtime::ingestors::connector::tests::shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_outcome",
   "runtime::ingestors::connector::tests::shuttle_individual_settlement_keeps_admitted_graph_work_until_transport_recovery",
+  "runtime::ingestors::connector::shuttle_tests::shuttle_an_instance_handoff_leaves_a_sibling_running_and_cannot_release_its_replacement",
   "runtime::ingestors::connector::shuttle_tests::shuttle_broker_ingestor_observes_engagement_during_dispatch",
   "runtime::ingestors::connector::shuttle_tests::shuttle_paced_ingestor_observes_engagement_during_dispatch",
   "runtime::ingestors::connector::shuttle_tests::shuttle_request_ingestor_observes_engagement_during_dispatch",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_instances_apply_a_generation_start_once_without_rewinding_commits",
+  "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_pending_start_seeds_survive_commits_acknowledgements_and_late_candidates",
+  "runtime::kafka_start::shuttle_checks::shuttle_a_start_racing_ownership_capture_finishes_before_the_cut_or_is_refused",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed",
   "runtime::local_drain::shuttle_tests::shuttle_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it",
   "runtime::local_drain::shuttle_tests::shuttle_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it",
   "runtime::local_drain::shuttle_tests::shuttle_a_batch_published_while_a_drain_observes_is_never_missing_from_it",
+  "runtime::local_drain::shuttle_tests::shuttle_a_partition_admission_remains_visible_to_the_whole_domain_drain",
   "runtime::local_drain::shuttle_tests::shuttle_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complete",
   "runtime::local_drain::shuttle_tests::shuttle_an_ownership_handoff_drain_sees_work_resumed_before_flush_completion",
   "runtime::materialized_read::shuttle_tests::shuttle_a_parked_message_is_woken_by_the_materialized_state_it_waits_for",
@@ -211,6 +238,8 @@ checks = [
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_a_replaced_owner_never_publishes_over_its_successor",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_capacity_and_expiry_publish_whole_memberships",
+  "runtime::relay_boundary::shuttle_tests::shuttle_a_detached_consumer_joins_during_attached_backpressure",
+  "runtime::relay_boundary::shuttle_tests::shuttle_a_partition_handoff_fences_its_delivery_and_materialized_reads_while_its_sibling_flows",
   "runtime::relay_boundary::shuttle_tests::shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery",
   "runtime::relay_boundary::shuttle_tests::shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves",
   "runtime::relay_channel::shuttle_tests::shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence",
@@ -222,6 +251,8 @@ checks = [
   "runtime::relay_channel::shuttle_tests::shuttle_losing_every_consumer_delivers_or_returns_the_waiting_batch",
   "runtime::relay_channel::shuttle_tests::shuttle_overlapping_gate_leases_all_release_before_dispatch_resumes",
   "runtime::relay_channel::shuttle_tests::shuttle_publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave",
+  "runtime::relay_channel::tests::shuttle_an_audience_registering_during_parent_shutdown_observes_the_ending",
+  "runtime::relay_channel::tests::shuttle_cancelling_a_partial_audience_admission_wakes_a_sibling_publisher",
   "runtime::relay_subscription::shuttle_tests::shuttle_an_attachment_racing_a_redefinition_is_refused_or_closed_by_it",
   "runtime::remote_dispatch::shuttle_tests::shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached",
   "runtime::remote_dispatch::shuttle_tests::shuttle_delayed_events_cannot_resolve_a_reused_delivery_position",

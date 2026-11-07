@@ -40,17 +40,17 @@ Feature: HTTP codec ingestion
         enabled boolean,
         text string,
         occurred_at string,
-        body bytes,
+        body string,
         nested array,
         optional_note string OPTIONAL
       );
-      CREATE CODEC json_value_codec
-        FROM WIRE JSON SCHEMA json_value_wire
+      CREATE WIRE JSON CODEC json_value_codec
+        FROM WIRE SCHEMA json_value_wire
         TO SCHEMA json_value
-        ENCODE occurred_at AS RFC3339;
+        ENCODE occurred_at AS RFC3339, body AS BASE64;
       CREATE RELAY json_values SCHEMA json_value UNBRANCHED;
       CREATE VHOST edge json-values-{{test_id}}.example.com;
-      CREATE ENDPOINT json_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT json_values_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR json_values_ingestor
         FROM json_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_value_codec
@@ -158,7 +158,7 @@ Feature: HTTP codec ingestion
       | 1            | VEC<ARRAY<I16, 2>> |
       | 3            | VEC<ARRAY<I16, 2>> |
 
-  Scenario Outline: A <wire_format> codec binds every exact wire type to the internal type of its name
+  Scenario Outline: A CBOR codec binds each representation to its declared internal type
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -180,25 +180,25 @@ Feature: HTTP codec ingestion
         f64_value F64,
         occurred_at DATETIME
       );
-      CREATE WIRE <wire_format> SCHEMA exact_value_wire MODE STRICT (
-        u8_max U8,
-        i8_min I8,
-        u16_max U16,
-        i16_min I16,
-        u32_max U32,
-        i32_min I32,
-        u64_max U64,
-        i64_min I64,
-        f32_value F32,
-        f64_value F64,
-        occurred_at DATETIME
+      CREATE WIRE CBOR SCHEMA exact_value_wire MODE STRICT (
+        u8_max integer,
+        i8_min integer,
+        u16_max integer,
+        i16_min integer,
+        u32_max integer,
+        i32_min integer,
+        u64_max integer,
+        i64_min integer,
+        f32_value float,
+        f64_value float,
+        occurred_at text
       );
-      CREATE CODEC exact_value_codec
-        FROM WIRE <wire_format> SCHEMA exact_value_wire
-        TO SCHEMA exact_value;
+      CREATE WIRE CBOR CODEC exact_value_codec
+        FROM WIRE SCHEMA exact_value_wire
+        TO SCHEMA exact_value ENCODE occurred_at AS RFC3339;
       CREATE RELAY exact_values SCHEMA exact_value UNBRANCHED;
       CREATE VHOST edge exact-values-{{test_id}}.example.com;
-      CREATE ENDPOINT exact_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT exact_values_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR exact_values_ingestor
         FROM exact_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_value_codec
@@ -211,7 +211,7 @@ Feature: HTTP codec ingestion
       CREATE SUBSCRIPTION exact_values_subscription TO exact_values;
       START;
       """
-    When http payload encoded as "<wire_format>" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
+    When http payload encoded as "CBOR" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
       """
       {"u8_max":255,"i8_min":-128,"u16_max":65535,"i16_min":-32768,"u32_max":4294967295,"i32_min":-2147483648,"u64_max":18446744073709551615,"i64_min":-9223372036854775808,"f32_value":1.25,"f64_value":-2.5,"occurred_at":"2024-02-29T12:34:56.123456789Z"}
       """
@@ -219,7 +219,7 @@ Feature: HTTP codec ingestion
       """
       {"f32_value":1.25,"f64_value":-2.5,"i16_min":-32768,"i32_min":-2147483648,"i64_min":-9223372036854775808,"i8_min":-128,"occurred_at":"2024-02-29T12:34:56.123456789+00:00","u16_max":65535,"u32_max":4294967295,"u64_max":18446744073709551615,"u8_max":255}
       """
-    When http payload encoded as "<wire_format>" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
+    When http payload encoded as "CBOR" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
       """
       {"u8_max":256,"i8_min":0,"u16_max":0,"i16_min":0,"u32_max":0,"i32_min":0,"u64_max":0,"i64_min":0,"f32_value":0.5,"f64_value":0.5,"occurred_at":"2024-02-29T12:34:56Z"}
       """
@@ -229,11 +229,9 @@ Feature: HTTP codec ingestion
       """
 
     Examples:
-      | cluster_size | wire_format |
-      | 1            | JSON        |
-      | 3            | JSON        |
-      | 1            | CBOR        |
-      | 3            | CBOR        |
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: A <wire_format> number reads as the F32 whose shortest decimal it is
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -246,12 +244,12 @@ Feature: HTTP codec ingestion
       """
       CREATE SCHEMA single_value ( value F32 );
       CREATE WIRE <wire_format> SCHEMA single_value_wire MODE STRICT ( value number );
-      CREATE CODEC single_value_codec
-        FROM WIRE <wire_format> SCHEMA single_value_wire
+      CREATE WIRE <wire_format> CODEC single_value_codec
+        FROM WIRE SCHEMA single_value_wire
         TO SCHEMA single_value;
       CREATE RELAY single_values SCHEMA single_value UNBRANCHED;
       CREATE VHOST edge single-values-{{test_id}}.example.com;
-      CREATE ENDPOINT single_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT single_values_endpoint ON edge PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR single_values_ingestor
         FROM single_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING single_value_codec
@@ -295,17 +293,16 @@ Feature: HTTP codec ingestion
         user_id <user_id_wire_type>,
         tenant <tenant_wire_type>
       );
-        CREATE CODEC notification_codec
-        FROM WIRE <wire_format> SCHEMA notification_wire
+        CREATE WIRE <wire_format> CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -332,13 +329,13 @@ Feature: HTTP codec ingestion
     Examples:
       | cluster_size | replica_count | wire_format | tenant_wire_type | user_id_wire_type |
       | 1            | 0             | JSON        | string           | integer           |
-      | 1            | 0             | CBOR        | string           | integer           |
+      | 1            | 0             | CBOR        | text             | integer           |
       | 1            | 0             | AVRO        | STRING           | LONG              |
       | 3            | 0             | JSON        | string           | integer           |
-      | 3            | 0             | CBOR        | string           | integer           |
+      | 3            | 0             | CBOR        | text             | integer           |
       | 3            | 0             | AVRO        | STRING           | LONG              |
       | 3            | 1             | JSON        | string           | integer           |
-      | 3            | 1             | CBOR        | string           | integer           |
+      | 3            | 1             | CBOR        | text             | integer           |
       | 3            | 1             | AVRO        | STRING           | LONG              |
 
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a schemaful codec
@@ -357,20 +354,19 @@ Feature: HTTP codec ingestion
       );
         CREATE WIRE <wire_format> SCHEMA metrics_wire MODE STRICT (
         device STRING,
-        cpu_last_64 ARRAY,
-        labels ARRAY OPTIONAL
+        cpu_last_64 <cpu_wire_type>,
+        labels <labels_wire_type> OPTIONAL
       );
-        CREATE CODEC metrics_codec
-        FROM WIRE <wire_format> SCHEMA metrics_wire
+        CREATE WIRE <wire_format> CODEC metrics_codec
+        FROM WIRE SCHEMA metrics_wire
         TO SCHEMA metrics;
         CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
         CREATE IF NOT EXISTS BRANCH by_metrics_ingestor SCHEMA device_branch TTL 5m;
         CREATE RELAY metrics_stream SCHEMA metrics BRANCHED BY by_metrics_ingestor;
         CREATE VHOST edge http-arrays-{{test_id}}.example.com;
-        CREATE ENDPOINT metrics_endpoint
+        CREATE HTTP ENDPOINT metrics_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR metrics_ingestor
         FROM metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
@@ -395,11 +391,11 @@ Feature: HTTP codec ingestion
     And the last relay subscription payload contains key fragment '{"device":"edge-1"}'
 
     Examples:
-      | cluster_size | wire_format | cpu_type      | labels_type |
-      | 1            | JSON        | ARRAY<F32, 3> | VEC<STRING> |
-      | 1            | AVRO        | ARRAY<F32, 3> | VEC<STRING> |
-      | 3            | JSON        | ARRAY<F32, 3> | VEC<STRING> |
-      | 3            | AVRO        | ARRAY<F32, 3> | VEC<STRING> |
+      | cluster_size | wire_format | cpu_type      | labels_type | cpu_wire_type | labels_wire_type |
+      | 1            | JSON        | ARRAY<F32, 3> | VEC<STRING> | ARRAY         | ARRAY            |
+      | 1            | AVRO        | ARRAY<F32, 3> | VEC<STRING> | ARRAY<FLOAT>  | ARRAY<STRING>    |
+      | 3            | JSON        | ARRAY<F32, 3> | VEC<STRING> | ARRAY         | ARRAY            |
+      | 3            | AVRO        | ARRAY<F32, 3> | VEC<STRING> | ARRAY<FLOAT>  | ARRAY<STRING>    |
 
   Scenario Outline: HTTP endpoint ingestor preserves multidimensional fixed and variable array shapes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -420,15 +416,14 @@ Feature: HTTP codec ingestion
         matrix ARRAY,
         samples ARRAY
       );
-      CREATE CODEC shaped_metrics_codec
-        FROM WIRE JSON SCHEMA shaped_metrics_wire
+      CREATE WIRE JSON CODEC shaped_metrics_codec
+        FROM WIRE SCHEMA shaped_metrics_wire
         TO SCHEMA shaped_metrics;
       CREATE RELAY shaped_metrics_stream SCHEMA shaped_metrics UNBRANCHED;
       CREATE VHOST edge shaped-arrays-{{test_id}}.example.com;
-      CREATE ENDPOINT shaped_metrics_endpoint
+      CREATE HTTP ENDPOINT shaped_metrics_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
       CREATE HTTP ENDPOINT INGESTOR shaped_metrics_ingestor
         FROM shaped_metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shaped_metrics_codec
@@ -479,12 +474,12 @@ Feature: HTTP codec ingestion
         user_id <user_id_wire_type>
       );
 
-      CREATE CODEC strict_notification_codec
-        FROM WIRE <wire_format> SCHEMA strict_notification_wire
+      CREATE WIRE <wire_format> CODEC strict_notification_codec
+        FROM WIRE SCHEMA strict_notification_wire
         TO SCHEMA notification;
 
-      CREATE CODEC loose_notification_codec
-        FROM WIRE <wire_format> SCHEMA loose_notification_wire
+      CREATE WIRE <wire_format> CODEC loose_notification_codec
+        FROM WIRE SCHEMA loose_notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY strict_notifications SCHEMA notification UNBRANCHED;
@@ -492,17 +487,15 @@ Feature: HTTP codec ingestion
 
       CREATE VHOST edge strict-loose-{{test_id}}.example.com;
 
-      CREATE ENDPOINT strict_ingress
+      CREATE HTTP ENDPOINT strict_ingress
         ON edge
-        PATH '/strict'
-        TYPE HTTP;
+        PATH '/strict';
 
-      CREATE ENDPOINT loose_ingress
+      CREATE HTTP ENDPOINT loose_ingress
         ON edge
-        PATH '/loose'
-        TYPE HTTP;
+        PATH '/loose';
 
-      CREATE HTTP ENDPOINT INGESTOR strict_notifications_source
+      CREATE HTTP ENDPOINT INGESTOR strict_notifications_ingestor
         FROM strict_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING strict_notification_codec
         TO strict_notifications
@@ -512,7 +505,7 @@ Feature: HTTP codec ingestion
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE HTTP ENDPOINT INGESTOR loose_notifications_source
+      CREATE HTTP ENDPOINT INGESTOR loose_notifications_ingestor
         FROM loose_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING loose_notification_codec
         TO loose_notifications
@@ -545,8 +538,8 @@ Feature: HTTP codec ingestion
       | cluster_size | wire_format | tenant_wire_type | user_id_wire_type |
       | 1            | JSON        | string           | integer           |
       | 3            | JSON        | string           | integer           |
-      | 1            | CBOR        | string           | integer           |
-      | 3            | CBOR        | string           | integer           |
+      | 1            | CBOR        | text             | integer           |
+      | 3            | CBOR        | text             | integer           |
 
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a JAQ-native codec
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -562,18 +555,16 @@ Feature: HTTP codec ingestion
         cpu_last_64 <cpu_type>,
         labels <labels_type> OPTIONAL
       );
-        CREATE CODEC metrics_codec
-        FROM <wire_format>
+        CREATE JAQ <wire_format> CODEC metrics_codec
         TO SCHEMA metrics
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
         CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
         CREATE IF NOT EXISTS BRANCH by_metrics_ingestor SCHEMA device_branch TTL 5m;
         CREATE RELAY metrics_stream SCHEMA metrics BRANCHED BY by_metrics_ingestor;
         CREATE VHOST edge http-binary-arrays-{{test_id}}.example.com;
-        CREATE ENDPOINT metrics_endpoint
+        CREATE HTTP ENDPOINT metrics_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR metrics_ingestor
         FROM metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
@@ -615,18 +606,16 @@ Feature: HTTP codec ingestion
         tenant STRING,
         user_id I64
       );
-        CREATE CODEC notification_codec
-        FROM <wire_format>
+        CREATE JAQ <wire_format> CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

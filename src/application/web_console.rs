@@ -21,7 +21,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use error_stack::{Report, ResultExt};
+use error_stack::Report;
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -47,7 +47,6 @@ use nervix_models::{
     ResourceUploadIdentity, ResourceUploadKey, UserName,
 };
 use nervix_primitives::{
-    net::TcpListener,
     sync::{CancellationToken, StdArc},
     task::JoinSet,
 };
@@ -60,13 +59,14 @@ use tokio_tungstenite::{
 use tracing::warn;
 
 use super::{
-    AppError,
     authentication::{
-        CredentialRejection, busy_authentication_response, credentials_from_web_console_request,
+        AuthenticationRefusal, busy_authentication_response, credentials_from_web_console_request,
         unauthorized_basic_response,
     },
+    client_traffic::ClientCall,
     http_endpoint::{is_websocket_upgrade_request, response_with_bytes, text_response},
-    session::websocket::console_websocket_config,
+    public_listener::PublicListener,
+    session::{SessionTransport, websocket::console_websocket_config},
     session_service::SessionServiceImpl,
 };
 use crate::resource::{ResourceStoreError, StagedResourceArchive};
@@ -135,32 +135,53 @@ fn redirect_response(location: &'static str) -> HyperResponse<Full<Bytes>> {
         )
 }
 
+impl AuthenticationRefusal {
+    /// The answer to a console call this refusal ended: a `Basic` challenge for credentials that
+    /// were missing or did not authenticate, or the answer that the node could not judge them now.
+    fn console_response(self) -> HyperResponse<Full<Bytes>> {
+        match self {
+            Self::Missing | Self::Rejected => unauthorized_basic_response(),
+            Self::Unavailable => busy_authentication_response(),
+        }
+    }
+}
+
+/// Authenticates the credentials a console request from `peer` presented and records the call.
+async fn authenticate_console_request(
+    service: &SessionServiceImpl,
+    peer: SocketAddr,
+    request: &HyperRequest<HyperIncoming>,
+) -> Result<UserName, AuthenticationRefusal> {
+    let call = ClientCall {
+        transport: SessionTransport::Console,
+        peer: Some(peer),
+    };
+    let credentials = credentials_from_web_console_request(request);
+    service
+        .authenticate_client(call, credentials.as_ref())
+        .await
+}
+
 async fn handle_web_console_request(
     service: SessionServiceImpl,
+    peer: SocketAddr,
     request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
     if request.method() == Method::GET && request.uri().path() == WEB_CONSOLE_AUTH_CHECK_PATH {
-        let Some(credentials) = credentials_from_web_console_request(&request) else {
-            return Ok(text_response(
-                StatusCode::UNAUTHORIZED,
-                "authentication failed",
-            ));
-        };
-        return Ok(
-            match service.authenticate_basic_credentials(&credentials).await {
-                Ok(_) => text_response(StatusCode::NO_CONTENT, ""),
-                Err(CredentialRejection::Failed) => {
-                    text_response(StatusCode::UNAUTHORIZED, "authentication failed")
-                }
-                Err(CredentialRejection::Busy) => busy_authentication_response(),
-            },
-        );
+        let authenticated = authenticate_console_request(&service, peer, &request).await;
+        return Ok(match authenticated {
+            Ok(_) => text_response(StatusCode::NO_CONTENT, ""),
+            Err(AuthenticationRefusal::Missing | AuthenticationRefusal::Rejected) => {
+                text_response(StatusCode::UNAUTHORIZED, "authentication failed")
+            }
+            Err(AuthenticationRefusal::Unavailable) => busy_authentication_response(),
+        });
     }
 
     if request.method() == Method::GET
         && let Some(call) = ConsoleCall::of_path(request.uri().path())
     {
-        return Ok(upgrade_console_websocket(service, request, call).await);
+        return Ok(upgrade_console_websocket(service, peer, request, call).await);
     }
 
     if request.method() == Method::OPTIONS
@@ -171,13 +192,10 @@ async fn handle_web_console_request(
 
     if request.method() == Method::POST && request.uri().path() == WEB_CONSOLE_RESOURCE_UPLOAD_PATH
     {
-        let Some(credentials) = credentials_from_web_console_request(&request) else {
-            return Ok(unauthorized_basic_response());
-        };
-        let authenticated_user = match service.authenticate_basic_credentials(&credentials).await {
+        let authenticated = authenticate_console_request(&service, peer, &request).await;
+        let authenticated_user = match authenticated {
             Ok(user) => user,
-            Err(CredentialRejection::Failed) => return Ok(unauthorized_basic_response()),
-            Err(CredentialRejection::Busy) => return Ok(busy_authentication_response()),
+            Err(refusal) => return Ok(refusal.console_response()),
         };
 
         return Ok(service
@@ -225,16 +243,14 @@ async fn handle_web_console_request(
 /// Authenticates a console WebSocket request and upgrades it to serve `call`.
 async fn upgrade_console_websocket(
     service: SessionServiceImpl,
+    peer: SocketAddr,
     mut request: HyperRequest<HyperIncoming>,
     call: ConsoleCall,
 ) -> HyperResponse<Full<Bytes>> {
-    let Some(credentials) = credentials_from_web_console_request(&request) else {
-        return unauthorized_basic_response();
-    };
-    let authenticated_user = match service.authenticate_basic_credentials(&credentials).await {
+    let authenticated = authenticate_console_request(&service, peer, &request).await;
+    let authenticated_user = match authenticated {
         Ok(user) => user,
-        Err(CredentialRejection::Failed) => return unauthorized_basic_response(),
-        Err(CredentialRejection::Busy) => return busy_authentication_response(),
+        Err(refusal) => return refusal.console_response(),
     };
 
     if !is_websocket_upgrade_request(&request) {
@@ -344,24 +360,19 @@ fn web_console_bundle_error(error: Report<ResourceStoreError>) -> (StatusCode, S
 
 pub(in crate::application) async fn serve_web_console_http(
     service: SessionServiceImpl,
-    listener: TcpListener,
+    mut listener: PublicListener,
     shutdown: CancellationToken,
-) -> Result<(), Report<AppError>> {
+) {
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = nervix_primitives::select! {
+        nervix_primitives::task::consume_budget().await;
+        let (stream, peer) = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
-            accepted = listener.accept() => {
-                accepted.change_context(AppError::ServeWebConsole)
-            }
+            accepted = listener.accept() => accepted,
         };
-        let (stream, _) = accepted?;
-        stream
-            .set_nodelay(true)
-            .change_context(AppError::ServeWebConsole)?;
         let service = service.clone();
         connection_tasks.spawn(async move {
             let io = TokioIo::new(stream);
@@ -369,7 +380,9 @@ pub(in crate::application) async fn serve_web_console_http(
             if let Err(error) = http1::Builder::new()
                 .serve_connection(
                     io,
-                    service_fn(move |request| handle_web_console_request(service.clone(), request)),
+                    service_fn(move |request| {
+                        handle_web_console_request(service.clone(), peer, request)
+                    }),
                 )
                 .with_upgrades()
                 .await
@@ -380,31 +393,25 @@ pub(in crate::application) async fn serve_web_console_http(
     }
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
-    Ok(())
 }
 
 pub(in crate::application) async fn serve_web_console_https(
     service: SessionServiceImpl,
     tls_server_config: StdArc<ServerConfig>,
-    listener: TcpListener,
+    mut listener: PublicListener,
     shutdown: CancellationToken,
-) -> Result<(), Report<AppError>> {
+) {
     let tls_acceptor = TlsAcceptor::from(tls_server_config);
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = nervix_primitives::select! {
+        nervix_primitives::task::consume_budget().await;
+        let (stream, peer) = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
-            accepted = listener.accept() => {
-                accepted.change_context(AppError::ServeWebConsole)
-            }
+            accepted = listener.accept() => accepted,
         };
-        let (stream, _) = accepted?;
-        stream
-            .set_nodelay(true)
-            .change_context(AppError::ServeWebConsole)?;
         let tls_acceptor = tls_acceptor.clone();
         let service = service.clone();
         connection_tasks.spawn(async move {
@@ -420,7 +427,9 @@ pub(in crate::application) async fn serve_web_console_https(
             if let Err(error) = http1::Builder::new()
                 .serve_connection(
                     io,
-                    service_fn(move |request| handle_web_console_request(service.clone(), request)),
+                    service_fn(move |request| {
+                        handle_web_console_request(service.clone(), peer, request)
+                    }),
                 )
                 .with_upgrades()
                 .await
@@ -431,7 +440,6 @@ pub(in crate::application) async fn serve_web_console_https(
     }
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
-    Ok(())
 }
 
 pub(in crate::application) fn web_console_advertise_url(
@@ -439,15 +447,15 @@ pub(in crate::application) fn web_console_advertise_url(
     listen_addr: SocketAddr,
     https_listen_addr: Option<SocketAddr>,
 ) -> error_stack::Result<NodeServiceUrl, NodeServiceUrlParseError> {
-    if let Some(endpoint) = advertise_addr {
-        return NodeServiceUrl::new("http", &endpoint);
-    }
-
     let (scheme, default_addr) = match https_listen_addr {
         Some(addr) => ("https", addr),
         None => ("http", listen_addr),
     };
-    NodeServiceUrl::new(scheme, &NodeEndpoint::from(default_addr))
+    let endpoint = match advertise_addr {
+        Some(endpoint) => endpoint,
+        None => NodeEndpoint::from(default_addr),
+    };
+    NodeServiceUrl::new(scheme, &endpoint)
 }
 
 impl SessionServiceImpl {
@@ -655,13 +663,13 @@ mod tests {
         );
         assert_eq!(
             web_console_advertise_url(
-                Some(NodeEndpoint::from(test_addr(17420))),
+                Some(NodeEndpoint::from(test_addr(17443))),
                 test_addr(17420),
                 Some(test_addr(17443))
             )
             .assured("an advertised endpoint forms a url")
             .as_str(),
-            "http://127.0.0.1:17420"
+            "https://127.0.0.1:17443"
         );
         assert_eq!(
             web_console_advertise_url(None, test_addr(17420), None)

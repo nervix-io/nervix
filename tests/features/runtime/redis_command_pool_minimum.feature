@@ -17,10 +17,10 @@ Feature: Redis command pool minimum
       """
       CREATE SCHEMA metric (value I64);
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (value integer);
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge pool-minimum-{{test_id}}.example.com;
-      CREATE ENDPOINT metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT metrics_endpoint ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR http_metrics
         FROM metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec

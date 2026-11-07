@@ -3,7 +3,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** A declaration of every metadata type, generated read sets and messages with their
-//!   values, headers and positions, and the oracle their retained copies and columns are held to.
+//!   values, unrepresentable values among them, headers and positions, and the oracle their
+//!   retained copies, columns and refusals are held to.
 //! - **Depends on.** The production metadata projection and column builders, the connector
 //!   contract's retained metadata, headers and value sink, and the quiesce buffer's retained row.
 //! - **Must not know.** Connectors, transports, programs or the registry.
@@ -21,12 +22,15 @@ use std::{
 use arrow_array::{
     Array,
     cast::AsArray as _,
-    types::{Int32Type, Int64Type, TimestampNanosecondType, UInt16Type},
+    types::{
+        Int32Type, Int64Type, TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type,
+        UInt64Type,
+    },
 };
 use nervix_arbitrary::Entropy;
 use nervix_connector::{
-    IngestMessageHeaders, IngestMessageMetadata, IngestMetadataValues, IngestRowHeaders,
-    IngestTransportPosition, RetainedIngestHeaders, RetainedIngestMetadata,
+    IngestMessageHeaders, IngestMessageMetadata, IngestMetadataFailure, IngestMetadataValues,
+    IngestRowHeaders, IngestTransportPosition, RetainedIngestHeaders, RetainedIngestMetadata,
     RetainedIngestMetadataValue as Value,
 };
 use nervix_models::Timestamp;
@@ -44,16 +48,22 @@ const DECLARED_FIELDS: &[IngestorMetadataField] = &[
     IngestorMetadataField::new("topic", IngestorMetadataType::String),
     IngestorMetadataField::new("key", IngestorMetadataType::Bytes),
     IngestorMetadataField::new("redelivered", IngestorMetadataType::Bool),
+    IngestorMetadataField::new("priority", IngestorMetadataType::U8),
     IngestorMetadataField::new("status", IngestorMetadataType::U16),
+    IngestorMetadataField::new("receive_count", IngestorMetadataType::U32),
     IngestorMetadataField::new("partition", IngestorMetadataType::I32),
     IngestorMetadataField::new("offset", IngestorMetadataType::I64),
+    IngestorMetadataField::new("delivery_tag", IngestorMetadataType::U64),
     IngestorMetadataField::new("polled_at", IngestorMetadataType::Datetime),
     IngestorMetadataField::new("peer_addr", IngestorMetadataType::String),
     IngestorMetadataField::new("token", IngestorMetadataType::Bytes),
     IngestorMetadataField::new("retained", IngestorMetadataType::Bool),
+    IngestorMetadataField::new("level", IngestorMetadataType::U8),
     IngestorMetadataField::new("code", IngestorMetadataType::U16),
+    IngestorMetadataField::new("attempt", IngestorMetadataType::U32),
     IngestorMetadataField::new("sequence", IngestorMetadataType::I32),
     IngestorMetadataField::new("lag", IngestorMetadataType::I64),
+    IngestorMetadataField::new("count", IngestorMetadataType::U64),
     IngestorMetadataField::new("published_at", IngestorMetadataType::Datetime),
 ];
 
@@ -132,6 +142,7 @@ impl GeneratedPosition {
 /// declared order, its headers and its position.
 struct GeneratedMessage {
     values: Vec<Value>,
+    defers_values: bool,
     /// Whether the message hands its text over rendered, as a connector that formats a transport
     /// value does, rather than borrowed.
     renders_text: bool,
@@ -144,26 +155,45 @@ struct GeneratedMessage {
 
 impl IngestMessageMetadata for GeneratedMessage {
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
-        for value in &self.values {
-            match value {
-                Value::Absent => values.absent(),
-                Value::String(text) => {
-                    if self.renders_text {
-                        values.rendered(text);
-                    } else {
-                        values.string(text);
-                    }
-                }
-                Value::Bytes(bytes) => values.bytes(bytes),
-                Value::Bool(value) => values.bool(*value),
-                Value::U16(value) => values.u16(*value),
-                Value::I32(value) => values.i32(*value),
-                Value::I64(value) => values.i64(*value),
-                Value::Datetime(value) => values.datetime(*value),
+        for (field, value) in DECLARED_FIELDS.iter().zip(&self.values) {
+            if self.defers_values {
+                values.deferred(field.ty(), &|values| self.emit_value(value, values));
+            } else {
+                self.emit_value(value, values);
             }
         }
     }
 }
+
+impl GeneratedMessage {
+    fn emit_value(&self, value: &Value, values: &mut dyn IngestMetadataValues) {
+        match value {
+            Value::Absent => values.absent(),
+            Value::String(text) => {
+                if self.renders_text {
+                    values.rendered(text);
+                } else {
+                    values.string(text);
+                }
+            }
+            Value::Bytes(bytes) => values.bytes(bytes),
+            Value::Bool(value) => values.bool(*value),
+            Value::U8(value) => values.u8(*value),
+            Value::U16(value) => values.u16(*value),
+            Value::U32(value) => values.u32(*value),
+            Value::I32(value) => values.i32(*value),
+            Value::I64(value) => values.i64(*value),
+            Value::U64(value) => values.u64(*value),
+            Value::Datetime(value) => values.datetime(*value),
+            Value::Unrepresentable { ty, value } => values.unrepresentable(*ty, value),
+            Value::Invalid { ty, failure } => values.invalid(*ty, failure),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("transport metadata refusal {0}")]
+struct GeneratedMetadataFailure(u8);
 
 impl GeneratedMessage {
     fn row(&self) -> IngestMetadataRow<'_> {
@@ -240,9 +270,24 @@ impl Cases<'_> {
         bytes
     }
 
+    fn u8(&mut self) -> u8 {
+        let value = self.entropy.boundary_biased(0..=u64::from(u8::MAX));
+        u8::try_from(value).verified("the value was drawn from the u8 range")
+    }
+
     fn u16(&mut self) -> u16 {
         let value = self.entropy.boundary_biased(0..=u64::from(u16::MAX));
         u16::try_from(value).verified("the value was drawn from the u16 range")
+    }
+
+    fn u32(&mut self) -> u32 {
+        let value = self.entropy.boundary_biased(0..=u64::from(u32::MAX));
+        u32::try_from(value).verified("the value was drawn from the u32 range")
+    }
+
+    /// Any `u64`, landing on the ends of its range and next to them as often as elsewhere.
+    fn u64(&mut self) -> u64 {
+        self.entropy.boundary_biased(0..=u64::MAX)
     }
 
     /// Any `i32`, landing on zero, the extremes and their neighbours as often as elsewhere.
@@ -261,17 +306,34 @@ impl Cases<'_> {
         }
     }
 
+    /// A value of `ty` half the time, otherwise an absence or, less often, a value the transport
+    /// carried that `ty` cannot hold, described by generated text.
     fn value(&mut self, ty: IngestorMetadataType) -> Value {
-        if self.entropy.flag() {
-            return Value::Absent;
+        match self.entropy.byte() % 10 {
+            0..=4 => self.present(ty),
+            5..=7 => Value::Absent,
+            8 => Value::Unrepresentable {
+                ty,
+                value: self.text(),
+            },
+            _ => Value::Invalid {
+                ty,
+                failure: IngestMetadataFailure::new(GeneratedMetadataFailure(self.entropy.byte())),
+            },
         }
+    }
+
+    fn present(&mut self, ty: IngestorMetadataType) -> Value {
         match ty {
             IngestorMetadataType::String => Value::String(self.text()),
             IngestorMetadataType::Bytes => Value::Bytes(self.bytes()),
             IngestorMetadataType::Bool => Value::Bool(self.entropy.flag()),
+            IngestorMetadataType::U8 => Value::U8(self.u8()),
             IngestorMetadataType::U16 => Value::U16(self.u16()),
+            IngestorMetadataType::U32 => Value::U32(self.u32()),
             IngestorMetadataType::I32 => Value::I32(self.i32()),
             IngestorMetadataType::I64 => Value::I64(self.entropy.any_i64()),
+            IngestorMetadataType::U64 => Value::U64(self.u64()),
             IngestorMetadataType::Datetime => {
                 Value::Datetime(Timestamp::from_unix_nanos(self.entropy.any_i64()))
             }
@@ -328,6 +390,7 @@ impl Cases<'_> {
         let position = self.position();
         GeneratedMessage {
             values,
+            defers_values: self.entropy.flag(),
             renders_text,
             headers,
             snapshot,
@@ -478,10 +541,18 @@ impl MetadataCase {
                     .values
                     .get(position)
                     .verified("every message hands over a value for every declared field");
-                expected.push(value.clone());
+                expected.push(projected(value));
             }
             assert_eq!(column_values(column.as_ref(), *field), expected);
         }
+
+        let mut expected_refusals = Vec::with_capacity(self.messages.len());
+        for (row, message) in self.messages.iter().enumerate() {
+            let expected = message.refusal(&read);
+            assert_eq!(refusal_of(&metadata, row), expected, "row {row}");
+            expected_refusals.push(expected);
+        }
+        self.assert_refusals_follow_a_selection(&metadata, &expected_refusals);
 
         for (row, message) in self.messages.iter().enumerate() {
             let header_row = metadata
@@ -501,6 +572,95 @@ impl MetadataCase {
     }
 }
 
+impl MetadataCase {
+    /// Keeping every other row keeps exactly those rows' refusals, each still with its own row, so
+    /// a refusal belongs to the message it was handed over for however the rows are selected.
+    fn assert_refusals_follow_a_selection(
+        &self,
+        metadata: &IngestFilterMapMetadata,
+        expected: &[Option<ExpectedRefusal>],
+    ) {
+        let mut keep = arrow_array::builder::BooleanBufferBuilder::new(self.messages.len());
+        let mut kept = Vec::new();
+        for (row, refusal) in expected.iter().enumerate() {
+            let is_kept = row % 2 == 0;
+            keep.append(is_kept);
+            if is_kept {
+                kept.push(refusal.clone());
+            }
+        }
+        let selected = metadata
+            .select(&keep.finish())
+            .verified("the selection has one bit for every row of the group");
+        assert_eq!(selected.len(), kept.len());
+        for (row, refusal) in kept.into_iter().enumerate() {
+            assert_eq!(refusal_of(&selected, row), refusal, "selected row {row}");
+        }
+    }
+}
+
+/// What a refused message names: the read field whose value its type cannot hold, and the
+/// description the message gave of that value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedRefusal {
+    field: &'static str,
+    value: ExpectedRefusalValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExpectedRefusalValue {
+    Unrepresentable(String),
+    Invalid(IngestMetadataFailure),
+}
+
+impl GeneratedMessage {
+    /// The refusal of a group whose programs read the fields `read` marks: the first read field,
+    /// in declared order, whose value is unrepresentable, or none.
+    fn refusal(&self, read: &[bool]) -> Option<ExpectedRefusal> {
+        for ((field, is_read), value) in DECLARED_FIELDS.iter().zip(read).zip(&self.values) {
+            if !is_read {
+                continue;
+            }
+            let value = match value {
+                Value::Unrepresentable { value, .. } => {
+                    ExpectedRefusalValue::Unrepresentable(value.clone())
+                }
+                Value::Invalid { failure, .. } => ExpectedRefusalValue::Invalid(failure.clone()),
+                _ => continue,
+            };
+            return Some(ExpectedRefusal {
+                field: field.name(),
+                value,
+            });
+        }
+        None
+    }
+}
+
+fn refusal_of(metadata: &IngestFilterMapMetadata, row: usize) -> Option<ExpectedRefusal> {
+    let refusal = metadata.refusal(row)?;
+    Some(ExpectedRefusal {
+        field: refusal.field.name(),
+        value: match &refusal.value {
+            MetadataRefusalValue::Unrepresentable(value) => {
+                ExpectedRefusalValue::Unrepresentable(value.clone())
+            }
+            MetadataRefusalValue::Invalid(failure) => {
+                ExpectedRefusalValue::Invalid(failure.clone())
+            }
+        },
+    })
+}
+
+/// The value a read field's column holds for a message's value: a value its type cannot hold
+/// reads as null there, because the message is refused rather than read.
+fn projected(value: &Value) -> Value {
+    match value {
+        Value::Unrepresentable { .. } | Value::Invalid { .. } => Value::Absent,
+        other => other.clone(),
+    }
+}
+
 /// The values a built column holds, read back row by row, `Absent` where it holds a null.
 fn column_values(column: &dyn Array, field: IngestorMetadataField) -> Vec<Value> {
     assert_eq!(
@@ -514,6 +674,72 @@ fn column_values(column: &dyn Array, field: IngestorMetadataField) -> Vec<Value>
         values.push(column_value(column, field.ty(), row));
     }
     values
+}
+
+#[test]
+fn deferred_metadata_computes_only_requested_fields() {
+    const FIELDS: &[IngestorMetadataField] = &[
+        IngestorMetadataField::new("unused", IngestorMetadataType::String),
+        IngestorMetadataField::new("read", IngestorMetadataType::U64),
+    ];
+    struct Fields;
+    impl IngestMessageMetadata for Fields {
+        fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+            values.deferred(IngestorMetadataType::String, &|_| {
+                panic!("the unread field is not evaluated")
+            });
+            values.deferred(IngestorMetadataType::U64, &|values| values.u64(7));
+        }
+    }
+    let projection =
+        IngestMetadataProjection::reading(IngestorMetadataDeclaration::new(FIELDS), ["read"])
+            .unwrap();
+    let mut builders = IngestMetadataBuilders::new(projection, 1);
+    builders
+        .append(&IngestMetadataRow {
+            fields: &Fields,
+            headers: IngestRowHeaders::NONE,
+            position: None,
+        })
+        .unwrap();
+    let metadata = builders.finish().unwrap();
+    let column = metadata.field_column("read").unwrap().unwrap();
+    assert_eq!(column.as_primitive::<UInt64Type>().value(0), 7);
+}
+
+#[test]
+fn deferred_metadata_requires_exactly_one_value_per_callback() {
+    const FIELDS: &[IngestorMetadataField] = &[
+        IngestorMetadataField::new("first", IngestorMetadataType::U64),
+        IngestorMetadataField::new("second", IngestorMetadataType::U64),
+    ];
+    struct Fields(usize);
+    impl IngestMessageMetadata for Fields {
+        fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+            values.deferred(IngestorMetadataType::U64, &|values| {
+                for _ in 0..self.0 {
+                    values.u64(7);
+                }
+            });
+            values.u64(9);
+        }
+    }
+    for count in [0, 2] {
+        let projection =
+            IngestMetadataProjection::reading(IngestorMetadataDeclaration::new(FIELDS), ["first"])
+                .unwrap();
+        let mut builders = IngestMetadataBuilders::new(projection, 1);
+        let failure = builders
+            .append(&IngestMetadataRow {
+                fields: &Fields(count),
+                headers: IngestRowHeaders::NONE,
+                position: None,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(failure.current_context(), IngestMetadataError::DeferredValues { field: "first", visited } if *visited == count)
+        );
+    }
 }
 
 fn column_value(column: &dyn Array, ty: IngestorMetadataType, row: usize) -> Value {
@@ -534,9 +760,17 @@ fn column_value(column: &dyn Array, ty: IngestorMetadataType, row: usize) -> Val
             let column = column.as_boolean_opt().verified(TYPED);
             Value::Bool(column.value(row))
         }
+        IngestorMetadataType::U8 => {
+            let column = column.as_primitive_opt::<UInt8Type>().verified(TYPED);
+            Value::U8(column.value(row))
+        }
         IngestorMetadataType::U16 => {
             let column = column.as_primitive_opt::<UInt16Type>().verified(TYPED);
             Value::U16(column.value(row))
+        }
+        IngestorMetadataType::U32 => {
+            let column = column.as_primitive_opt::<UInt32Type>().verified(TYPED);
+            Value::U32(column.value(row))
         }
         IngestorMetadataType::I32 => {
             let column = column.as_primitive_opt::<Int32Type>().verified(TYPED);
@@ -545,6 +779,10 @@ fn column_value(column: &dyn Array, ty: IngestorMetadataType, row: usize) -> Val
         IngestorMetadataType::I64 => {
             let column = column.as_primitive_opt::<Int64Type>().verified(TYPED);
             Value::I64(column.value(row))
+        }
+        IngestorMetadataType::U64 => {
+            let column = column.as_primitive_opt::<UInt64Type>().verified(TYPED);
+            Value::U64(column.value(row))
         }
         IngestorMetadataType::Datetime => {
             let column = column

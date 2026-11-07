@@ -7,10 +7,10 @@ use nervix_models::{
     CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateCorrelator,
     CreateDeduplicator, CreateGenerator, CreateInferencer, CreateJunction, CreateReingestor,
     CreateReorderer, CreateWasmProcessor, CreateWindowProcessor, Expression,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
-    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-    RequestedResourceVersion, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound,
-    WindowStateLimit,
+    InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+    InferencerTensorRepresentation, InferencerTensorSchema, RequestedResourceVersion,
+    WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound, WindowStateLimit,
 };
 
 use crate::{
@@ -242,6 +242,31 @@ impl Arbitrary<'_> {
                 schema: self.tensor_schema(batched),
             });
         }
+        let mut state = Vec::new();
+        if !batched && self.entropy.flag() {
+            for _ in 0..self
+                .entropy
+                .positive_count(NonZeroUsize::new(ITEMS).assured("state holds at least one tensor"))
+            {
+                let mut schema = self.tensor_schema(false);
+                for dimension in &mut schema.dimensions {
+                    *dimension = InferencerTensorDimension::Fixed(
+                        NonZeroU32::new(1 + u32::from(self.entropy.byte() % 4))
+                            .verified("a bounded state axis is positive"),
+                    );
+                }
+                state.push(InferencerStateBinding {
+                    input: self.string(),
+                    output: self.string(),
+                    schema,
+                    initial: if self.entropy.flag() {
+                        InferencerStateInitial::Zeros
+                    } else {
+                        InferencerStateInitial::Constant(self.expression())
+                    },
+                });
+            }
+        }
         CreateInferencer {
             name: self.name(),
             from: self.processor_inputs(true),
@@ -255,6 +280,7 @@ impl Arbitrary<'_> {
             resource_version: self.requested_version(),
             file: self.string(),
             inputs,
+            state,
             output_schema,
             mode: self.ack_mode(),
             filter_where: self.optional_expression(),

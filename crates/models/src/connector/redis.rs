@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Redis client Model with its connection pool, the Pub/Sub source and emitter
-//!   Models with their delivery mode, the channel or channel pattern a source subscribes to and the
+//! - **Owns.** The Redis client Model with its connection pool, the Pub/Sub ingestor and emitter
+//!   Models with their delivery mode, the channel or channel pattern an ingestor subscribes to and the
 //!   channel an emitter publishes to with the rules they follow, the metadata a delivered message
 //!   carries, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
@@ -145,7 +145,7 @@ pub struct RedisPubSubIngestor {
     pub quiesce: IngestQuiesceMode,
 }
 
-/// The metadata of every message a subscription delivers, in the order its source hands it over:
+/// The metadata of every message a subscription delivers, in the order its ingestor hands it over:
 /// the channel the message was published to, and the pattern that matched it, which a channel
 /// subscription leaves null.
 const REDIS_PUBSUB_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
@@ -179,7 +179,11 @@ const REDIS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
     ],
-    driver_limits: &[],
+    driver_limits: &[
+        "Redis closes a subscription whose unsent messages pass the server's \
+         client-output-buffer-limit for Pub/Sub clients, by default 32 MiB at once or 8 MiB held \
+         for 60 seconds; the messages it held are lost.",
+    ],
 };
 
 /// What the connector of a REDIS PUBSUB emitter holds and how long it waits.
@@ -193,23 +197,27 @@ const REDIS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     }],
     waits: &[
         DeclaredWait {
-            wait: "checking out a connection, a new one's name resolution, connection, TLS and \
-                   Redis setup included",
+            wait: "checking out a connection, the PING that tests it and a new one's name \
+                   resolution, connection, TLS and Redis setup included",
             bound: WaitBound::Key {
                 key: DeadlineKey::ConnectTimeout,
                 omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
             },
         },
         DeclaredWait {
-            wait: "the answer to a PUBLISH",
+            wait: "the answer to the checkout's PING and to the PUBLISH",
             bound: WaitBound::Driver("500 ms"),
         },
     ],
-    driver_limits: &[],
+    driver_limits: &[
+        "A payload above the server's proto-max-bulk-len is rejected, and Redis then closes the \
+         connection that sent it.",
+    ],
 };
 
 impl IngestorDeclaration for RedisPubSubIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         // Redis Pub/Sub carries the channel, the pattern that matched it and the payload, without
         // transport headers.
         headers: None,
@@ -232,6 +240,10 @@ impl IngestorDeclaration for RedisPubSubIngestor {
 impl IngestorEntityBody for RedisPubSubIngestor {
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -262,15 +274,56 @@ impl RedisPubSubIngestMode {
     }
 }
 
+/// One change an `ALTER REDIS PUBSUB INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RedisPubSubIngestorChange {
+    /// `SET CHANNEL '<channel>'` or `SET PATTERN '<pattern>'`: the one subscription the body
+    /// writes, whichever locator names it.
+    Subscription(RedisSubscriptionTarget),
+    /// `SET MODE <mode>`.
+    Mode(RedisPubSubIngestMode),
+}
+
+impl crate::IngestorEntityChange for RedisPubSubIngestorChange {
+    type Entity = RedisPubSubIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut RedisPubSubIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Subscription(subscription) => entity.subscription = subscription.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Subscription(subscription) => format!(
+                "SET {} {}",
+                subscription.locator().keywords,
+                crate::string_literal(subscription.as_str())
+            ),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Redis = "REDIS";
-    /// What a Redis source reads.
+    /// What a Redis ingestor reads.
     pub enum RedisIngestor;
     /// The alterations of the ingestors that read a Redis entity.
     pub enum RedisIngestorAlteration;
-    /// The entities a Redis source reads.
+    /// The entities a Redis ingestor reads.
     pub enum RedisIngestorEntity {
-        PubSub(RedisPubSubIngestor) = "PUBSUB", "Redis Pub/Sub";
+        PubSub(RedisPubSubIngestor => RedisPubSubIngestorChange) = "PUBSUB", "Redis Pub/Sub";
     }
 }
 
@@ -290,6 +343,7 @@ impl EmitterDeclaration for RedisPubSubEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Redis),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         // The server enforces proto-max-bulk-len; this transport learns no size ceiling.
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
@@ -315,15 +369,51 @@ impl EmitterEntityBody for RedisPubSubEmitter {
     }
 }
 
+/// One change an `ALTER REDIS PUBSUB EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RedisPubSubEmitterChange {
+    /// `SET CHANNEL '<name>'`.
+    Channel(RedisChannelName),
+    /// `SET MODE <mode>`.
+    Mode(RedisPubSubPublishingMode),
+}
+
+impl crate::EmitterEntityChange for RedisPubSubEmitterChange {
+    type Entity = RedisPubSubEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut RedisPubSubEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Channel(name) => entity.channel = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Channel(name) => format!("SET CHANNEL {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Redis = "REDIS";
     /// What a Redis emitter writes.
     pub enum RedisEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum RedisPubSubEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum RedisEmitterChange;
     /// The entities a Redis emitter writes.
     pub enum RedisEmitterEntity {
-        PubSub(RedisPubSubEmitter, RedisPubSubPublishingMode) = "PUBSUB";
+        PubSub(RedisPubSubEmitter, RedisPubSubPublishingMode, RedisPubSubEmitterChange) = "PUBSUB";
     }
 }
 

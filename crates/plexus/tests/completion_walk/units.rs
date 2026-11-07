@@ -37,7 +37,7 @@ fn finding(kind: FindingKind, label: &str, path: &[&str]) -> Finding {
     Finding::new(
         kind,
         Some(label.to_string()),
-        "CREATE CODEC nx_codec VERSION".to_string(),
+        "CREATE PROTOBUF CODEC nx_codec USING RESOURCE nx_resource VERSION".to_string(),
         path.iter().map(|label| (*label).to_string()).collect(),
         Vec::new(),
         String::new(),
@@ -101,6 +101,46 @@ fn the_top_level_suggestion_set_is_probed_not_empty() {
 }
 
 // -- label classification and materialization --
+
+#[test]
+fn expression_references_fill_complete_syntactic_units() {
+    use meticulous::ResultExt as _;
+
+    struct Case {
+        prefix: &'static str,
+        label: &'static str,
+        suffix: &'static str,
+    }
+    let materializer = Materializer::new();
+    for case in [
+        Case {
+            prefix: "CREATE JUNCTION j FROM incoming UNBRANCHED TO outgoing SET ",
+            label: "ref:expression_target",
+            suffix: " FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        },
+        Case {
+            prefix: "CREATE JUNCTION j FROM incoming UNBRANCHED TO outgoing SET x = udf::",
+            label: "ref:expression_udf",
+            suffix: " FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        },
+        Case {
+            prefix: "CREATE KAFKA TOPIC EMITTER e FROM incoming TO broker TOPIC 'events' MODE NO \
+                     ACK RETRY POLICY BACKOFF 1s MAX 2s ENCODE USING codec INVOKE ",
+            label: "ref:expression_invocation",
+            suffix: " FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        },
+    ] {
+        let filler = materializer
+            .materialize(case.label, 0)
+            .assured("the walker registers fillers for these three expression references");
+        let statement = format!("{}{}{}", case.prefix, filler.text, case.suffix);
+        assert_eq!(
+            Grammar::Client.parse(&statement),
+            ParseOutcome::Accepted,
+            "{statement}"
+        );
+    }
+}
 
 #[test]
 fn websocket_upgrade_header_completion_builds_a_literal_header_declaration() {
@@ -349,6 +389,7 @@ fn every_registered_filler_lexes() {
         "timestamp",
         "deduplicate_on",
         "reorder_by",
+        "key_expression",
         "timestamp_expression",
         "value_expression",
     ] {
@@ -559,7 +600,7 @@ fn completion_never_goes_silent_on_a_reachable_branch() {
     // so it is asserted directly rather than left to the baseline.
     for seed in [
         "",
-        "CREATE CODEC nx_codec",
+        "CREATE WIRE JSON CODEC nx_codec",
         "CREATE SCHEMA nx_schema (",
         "CREATE MQTT TOPIC INGESTOR nx_ingestor FROM nx_client",
     ] {

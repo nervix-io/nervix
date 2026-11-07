@@ -12,7 +12,6 @@
 
 use std::borrow::Cow;
 
-use ahash_compile_time::HashSet;
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use delivery::{AcknowledgedPolicy, acknowledged_policy, request_policy, unconfirmed_policy};
 use envelope::entity_envelope;
@@ -356,6 +355,7 @@ where
 struct DeclaredEmitter {
     name: EmitterName,
     from: ProcessorInputs,
+    mode: AckMode,
     materialized_state: Vec<MaterializedStateDependency>,
     destination: ParsedDestination<EmitterEntity>,
 }
@@ -373,13 +373,15 @@ where
         .ignore_then(emitter_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(ack_mode().or_not())
         .then(materialized_state_dependencies())
         .then_ignore(kw(Identifier::To))
         .then(with_batch::<S, _>(definition))
         .map(
-            |(((name, from), materialized_state), parsed)| DeclaredEmitter {
+            |((((name, from), mode), materialized_state), parsed)| DeclaredEmitter {
                 name,
                 from,
+                mode: mode.unwrap_or_default(),
                 materialized_state,
                 destination: ParsedDestination {
                     destination: parsed.destination.into(),
@@ -398,14 +400,13 @@ pub fn create_emitter_parser<'src>()
 {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then(declared_creation())
         .then(flush_each())
         .then(message_error_policy())
         .then(general_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
-            |(((((if_not_exists, mode), declared), flush_policy), message), general)| {
+            |((((if_not_exists, declared), flush_policy), message), general)| {
                 let parsed = declared.destination;
                 CreateStatement::new(
                     CreateEmitter {
@@ -417,7 +418,7 @@ pub fn create_emitter_parser<'src>()
                         envelope: Box::new(parsed.envelope),
                         batch: parsed.batch,
                         construction: parsed.construction.unwrap_or_default(),
-                        mode: mode.unwrap_or(AckMode::Attached),
+                        mode: declared.mode,
                         flush_policy,
                         error_policies: ErrorPolicies { message, general },
                     },
@@ -428,22 +429,22 @@ pub fn create_emitter_parser<'src>()
         .boxed()
 }
 
-fn alteration<'src, S, P, M>(
+fn alteration<'src, S, P, C>(
     definition: P,
-    mode: M,
+    change: C,
 ) -> impl Parser<'src, &'src [Token], AlterEmitter, extra::Err<ParseError<'src>>> + Clone
 where
     S: EmitterEntityModel + Into<EmitterEntity> + Clone + 'src,
-    S::PublishingMode: Into<EmitterModeChange> + Clone + 'src,
+    S::Change: Into<EmitterChange> + 'src,
     P: Parser<'src, &'src [Token], ParsedDestination<S>, extra::Err<ParseError<'src>>>
         + Clone
         + 'src,
-    M: Parser<'src, &'src [Token], S::PublishingMode, extra::Err<ParseError<'src>>> + Clone + 'src,
+    C: Parser<'src, &'src [Token], S::Change, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     head(S::KIND)
         .ignore_then(emitter_ref())
         .then(
-            operation::<S, _, _>(definition, mode)
+            operation::<S, _, _>(definition, change)
                 .separated_by(alter_op_separator())
                 .at_least(1)
                 .collect::<Vec<_>>(),
@@ -464,18 +465,46 @@ pub fn alter_emitter_parser<'src>()
         .boxed()
 }
 
-fn operation<'src, S, P, M>(
-    definition: P,
-    mode: M,
-) -> impl Parser<'src, &'src [Token], AlterEmitterOperation, extra::Err<ParseError<'src>>> + Clone
+/// A parser of one `ALTER EMITTER` operation.
+type Operation<'src> =
+    Boxed<'src, 'src, &'src [Token], AlterEmitterOperation, extra::Err<ParseError<'src>>>;
+
+/// One operation of an `ALTER` of an emitter of `S`: those every emitter accepts, the entity's own
+/// changes `change` reads, `SET TO` with the complete body `definition` reads, and those the
+/// entity's declaration admits.
+fn operation<'src, S, P, C>(definition: P, change: C) -> Operation<'src>
 where
     S: EmitterEntityModel + Into<EmitterEntity> + Clone + 'src,
-    S::PublishingMode: Into<EmitterModeChange> + Clone + 'src,
+    S::Change: Into<EmitterChange> + 'src,
     P: Parser<'src, &'src [Token], ParsedDestination<S>, extra::Err<ParseError<'src>>>
         + Clone
         + 'src,
-    M: Parser<'src, &'src [Token], S::PublishingMode, extra::Err<ParseError<'src>>> + Clone + 'src,
+    C: Parser<'src, &'src [Token], S::Change, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
+    let set_to = kw_phrase2(Identifier::Set, Identifier::To)
+        .ignore_then(definition)
+        .map(|parsed| AlterEmitterOperation::SetTo {
+            destination: Box::new(parsed.destination.into()),
+            body: parsed.body,
+            envelope: Box::new(parsed.envelope),
+            construction: parsed.construction,
+        })
+        .boxed();
+    let entity_change = change
+        .map(|change| AlterEmitterOperation::Change {
+            change: change.into(),
+        })
+        .boxed();
+    let mut choices = input_operations();
+    choices.push(set_to);
+    choices.push(entity_change);
+    choices.extend(delivery_operations());
+    choices.extend(declared_operations(S::KIND));
+    choice(choices).boxed()
+}
+
+/// `ADD FROM`, `DROP FROM` and `ALTER FROM`: the relays an emitter reads and how it filters each.
+fn input_operations<'src>() -> Vec<Operation<'src>> {
     let add_from = kw_phrase2(Identifier::Add, Identifier::From)
         .ignore_then(relay_ref())
         .then(where_expression().or_not())
@@ -501,14 +530,12 @@ where
             },
             None => AlterEmitterOperation::AlterFromDropWhere { relay },
         });
-    let set_to = kw_phrase2(Identifier::Set, Identifier::To)
-        .ignore_then(definition)
-        .map(|parsed| AlterEmitterOperation::SetTo {
-            destination: Box::new(parsed.destination.into()),
-            body: parsed.body,
-            envelope: Box::new(parsed.envelope),
-            construction: parsed.construction,
-        });
+    vec![add_from.boxed(), drop_from.boxed(), alter_from.boxed()]
+}
+
+/// The operations every emitter accepts on how it collects, attaches, flushes and reports its
+/// general errors.
+fn delivery_operations<'src>() -> Vec<Operation<'src>> {
     let set_collect = kw(Identifier::Set)
         .ignore_then(collect_for())
         .map(|policy| AlterEmitterOperation::SetCollect { policy });
@@ -517,24 +544,26 @@ where
     let set_attachment = kw(Identifier::Set)
         .ignore_then(ack_mode())
         .map(|mode| AlterEmitterOperation::SetAttachment { mode });
-    let set_mode = kw_phrase2(Identifier::Set, Identifier::Mode)
-        .ignore_then(mode)
-        .map(|mode| AlterEmitterOperation::SetPublishingMode { mode: mode.into() });
     let set_flush = kw(Identifier::Set)
         .ignore_then(flush_each())
         .map(|flush_policy| AlterEmitterOperation::SetFlush { flush_policy });
-    let mut choices = vec![
-        add_from.boxed(),
-        drop_from.boxed(),
-        alter_from.boxed(),
-        set_to.boxed(),
+    let set_general_error =
+        set_general_error_policy().map(|policy| AlterEmitterOperation::SetGeneralError { policy });
+    vec![
         set_collect.boxed(),
         drop_collect.boxed(),
         set_attachment.boxed(),
-        set_mode.boxed(),
         set_flush.boxed(),
-    ];
-    let capabilities = S::KIND.capabilities();
+        set_general_error.boxed(),
+    ]
+}
+
+/// The operations an emitter of `kind` accepts because its declaration admits them: its client,
+/// its codec, its batching, the clauses and properties of its envelope, and as much of its
+/// construction as its body form lets it write.
+fn declared_operations<'src>(kind: EmitterEntityKind) -> Vec<Operation<'src>> {
+    let capabilities = kind.capabilities();
+    let mut choices = Vec::new();
     if let EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) =
         capabilities.reference
     {
@@ -571,20 +600,19 @@ where
                 .boxed(),
         );
     }
-    if capabilities.option("COMMIT EACH").is_some() {
-        choices.push(
-            kw(Identifier::Set)
-                .ignore_then(iceberg::commit_each())
-                .map(
-                    |(commit_each, max_commit_size)| AlterEmitterOperation::SetCommit {
-                        commit_each,
-                        max_commit_size,
-                    },
-                )
-                .boxed(),
-        );
-    }
-    choice(choices).boxed()
+    choices.extend(envelope::alterations(&capabilities));
+    let changes = match capabilities.body {
+        EmitterBodyForm::Values => ConstructionChanges::FilterOnly,
+        EmitterBodyForm::Codec | EmitterBodyForm::CodecOrWithoutBody | EmitterBodyForm::Native => {
+            ConstructionChanges::Every
+        }
+    };
+    choices.push(
+        construction_alteration(changes)
+            .map(|alteration| AlterEmitterOperation::Construction { alteration })
+            .boxed(),
+    );
+    choices
 }
 
 fn declared_creation<'src>()
@@ -599,6 +627,7 @@ fn declared_creation<'src>()
         creation::<RedisPubSubEmitter, _>(redis::pubsub_body(EmitterContext::Create)),
         creation::<MqttTopicEmitter, _>(mqtt::topic_body(EmitterContext::Create)),
         creation::<NatsSubjectEmitter, _>(nats::subject_body(EmitterContext::Create)),
+        creation::<NatsStreamEmitter, _>(nats::stream_body(EmitterContext::Create)),
         creation::<ZeroMqPushEmitter, _>(zeromq::push_body(EmitterContext::Create)),
         creation::<SqsQueueEmitter, _>(sqs::queue_body(EmitterContext::Create)),
         creation::<SentryEventEmitter, _>(sentry::event_body(EmitterContext::Create)),
@@ -618,58 +647,65 @@ fn declared_alteration<'src>()
     boxed_choice!(
         alteration::<ClientConsumerEmitter, _, _>(
             client::consumer_body(EmitterContext::Alter),
-            client::mode()
+            client::change()
         ),
         alteration::<HttpRequestEmitter, _, _>(
             http::request_body(EmitterContext::Alter),
-            http::mode()
+            http::change()
         ),
         alteration::<KafkaTopicEmitter, _, _>(
             kafka::topic_body(EmitterContext::Alter),
-            kafka::mode()
+            kafka::change()
         ),
         alteration::<PulsarTopicEmitter, _, _>(
             pulsar::topic_body(EmitterContext::Alter),
-            pulsar::mode()
+            pulsar::change()
         ),
         alteration::<RabbitMqQueueEmitter, _, _>(
             rabbitmq::queue_body(EmitterContext::Alter),
-            rabbitmq::mode()
+            rabbitmq::queue_change()
         ),
         alteration::<RabbitMqExchangeEmitter, _, _>(
             rabbitmq::exchange_body(EmitterContext::Alter),
-            rabbitmq::exchange_mode()
+            rabbitmq::exchange_change()
         ),
         alteration::<RedisPubSubEmitter, _, _>(
             redis::pubsub_body(EmitterContext::Alter),
-            redis::mode()
+            redis::change()
         ),
-        alteration::<MqttTopicEmitter, _, _>(mqtt::topic_body(EmitterContext::Alter), mqtt::mode()),
+        alteration::<MqttTopicEmitter, _, _>(
+            mqtt::topic_body(EmitterContext::Alter),
+            mqtt::change()
+        ),
         alteration::<NatsSubjectEmitter, _, _>(
             nats::subject_body(EmitterContext::Alter),
-            nats::mode()
+            nats::subject_change()
+        ),
+        alteration::<NatsStreamEmitter, _, _>(
+            nats::stream_body(EmitterContext::Alter),
+            nats::stream_change()
         ),
         alteration::<ZeroMqPushEmitter, _, _>(
             zeromq::push_body(EmitterContext::Alter),
-            zeromq::mode()
+            zeromq::change()
         ),
-        alteration::<SqsQueueEmitter, _, _>(sqs::queue_body(EmitterContext::Alter), sqs::mode()),
+        alteration::<SqsQueueEmitter, _, _>(sqs::queue_body(EmitterContext::Alter), sqs::change()),
         alteration::<SentryEventEmitter, _, _>(
             sentry::event_body(EmitterContext::Alter),
-            sentry::mode()
+            sentry::change()
         ),
         alteration::<SyslogCollectorEmitter, _, _>(
             syslog::collector_body(EmitterContext::Alter),
-            syslog::mode()
+            syslog::change()
         ),
-        alteration::<OtelLogsEmitter, _, _>(otel::logs_body(), otel::logs_mode()),
-        alteration::<OtelTracesEmitter, _, _>(otel::traces_body(), otel::traces_mode()),
-        alteration::<OtelMetricsEmitter, _, _>(otel::metrics_body(), otel::metrics_mode()),
-        alteration::<ClickHouseTableEmitter, _, _>(clickhouse::table_body(), clickhouse::mode()),
-        alteration::<PostgresTableEmitter, _, _>(postgres::table_body(), postgres::mode()),
-        alteration::<MySqlTableEmitter, _, _>(mysql::table_body(), mysql::mode()),
-        alteration::<MongoDbCollectionEmitter, _, _>(mongodb::collection_body(), mongodb::mode()),
-        alteration::<IcebergTableEmitter, _, _>(iceberg::table_body(), iceberg::mode())
+        alteration::<OtelLogsEmitter, _, _>(otel::logs_body(), otel::logs_change()),
+        alteration::<OtelTracesEmitter, _, _>(otel::traces_body(), otel::traces_change()),
+        alteration::<OtelMetricsEmitter, _, _>(otel::metrics_body(), otel::metrics_change()),
+        alteration::<ClickHouseTableEmitter, _, _>(clickhouse::table_body(), clickhouse::change()),
+        alteration::<PostgresTableEmitter, _, _>(postgres::table_body(), postgres::change()),
+        alteration::<MySqlTableEmitter, _, _>(mysql::table_body(), mysql::change()),
+        alteration::<MongoDbCollectionEmitter, _, _>(mongodb::collection_body(), mongodb::change()),
+        alteration::<IcebergTableEmitter, _, _>(iceberg::table_body(), iceberg::change())
     )
 }
 

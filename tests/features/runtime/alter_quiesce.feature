@@ -12,8 +12,8 @@ Feature: Model alteration quiesce classification
       """
       CREATE SCHEMA alter_event ( seq I64 );
       CREATE WIRE JSON SCHEMA alter_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC alter_event_codec
-        FROM WIRE JSON SCHEMA alter_event_wire
+      CREATE WIRE JSON CODEC alter_event_codec
+        FROM WIRE SCHEMA alter_event_wire
         TO SCHEMA alter_event;
       CREATE RELAY alter_events SCHEMA alter_event UNBRANCHED CAPACITY 3;
 
@@ -23,8 +23,8 @@ Feature: Model alteration quiesce classification
           'bind' = 'false'
         };
       CREATE VHOST alter_edge http-{{test_id}}-quiesce.example.com;
-      CREATE ENDPOINT alter_ingress ON alter_edge PATH '/alter-quiesce' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR alter_source
+      CREATE HTTP ENDPOINT alter_ingress ON alter_edge PATH '/alter-quiesce';
+      CREATE HTTP ENDPOINT INGESTOR alter_ingestor
         FROM alter_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING alter_event_codec
         TO alter_events

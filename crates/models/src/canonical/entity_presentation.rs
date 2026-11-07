@@ -23,18 +23,20 @@ use super::{
 };
 use crate::{
     ClickHouseEmitter, ClientProducerIngestor, EmitterEntity, EmitterEntityKind, EmitterReference,
-    HttpEmitter, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestor, IcebergCatalog,
-    IcebergEmitter, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntity,
-    IngestorEntityBody, IngestorEntityKind, IngestorEntityModel, IngestorInput, KafkaEmitter,
-    KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration, MongoDbEmitter,
-    MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlEmitter, NatsEmitter, NatsIngestor,
+    HttpEmitter, HttpEndpointIngestor, HttpIngestor, HttpRequestHeader, HttpRequestHeaderValue,
+    HttpRequestIngestor, IcebergCatalog, IcebergEmitter, IngestAcknowledgement, IngestQuiesceMode,
+    IngestorDeclaration, IngestorEntity, IngestorEntityBody, IngestorEntityKind,
+    IngestorEntityModel, IngestorInput, KafkaEmitter, KafkaIngestor, KafkaOffsetMode,
+    KafkaTopicIngestor, LocatorDeclaration, MongoDbEmitter, MqttEmitter, MqttIngestor,
+    MqttTopicIngestor, MySqlEmitter, NatsEmitter, NatsIngestor, NatsStreamIngestor,
     NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
-    OtelMetricKind, PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor, PulsarEmitter,
-    PulsarIngestor, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor, RabbitMqQueueIngestor,
-    RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter, SqsEmitter, SqsFifoGroup,
-    SqsIngestor, SqsQueueIngestor, SyslogIngestor, SyslogListenerIngestor,
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestor, ZeroMqIngestor,
-    ZeroMqPullIngestor,
+    OtelMetricKind, OtelScope, PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor,
+    PulsarEmitter, PulsarIngestor, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor,
+    RabbitMqQueueIngestor, RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter,
+    SqsEmitter, SqsIngestor, SqsQueueIngestor, SyslogIngestor, SyslogListenerIngestor,
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestor,
+    WebsocketsUpgradeHeader, ZeroMqIngestor, ZeroMqPullIngestor,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -390,22 +392,52 @@ reference_ingestor_presentations!(
     SyslogListenerIngestor,
 );
 
+/// What `HEADERS` writes for the headers a WebSocket client sends with its upgrade request.
+pub(crate) fn upgrade_headers_to_plexus(headers: &[WebsocketsUpgradeHeader]) -> String {
+    let fields: Vec<_> = headers
+        .iter()
+        .map(|header| {
+            format!(
+                "{} = {}",
+                string_literal(&header.name),
+                string_literal(&header.value)
+            )
+        })
+        .collect();
+    braced_fields(&fields)
+}
+
+/// What `HEADERS` writes for the headers a polled request sends, each a literal or the secret of
+/// the client that holds it.
+pub(crate) fn request_headers_to_plexus(headers: &[HttpRequestHeader]) -> String {
+    let fields: Vec<_> = headers
+        .iter()
+        .map(|header| {
+            let value = match &header.value {
+                HttpRequestHeaderValue::Literal(value) => string_literal(value),
+                HttpRequestHeaderValue::ClientSecret(key) => {
+                    format!("CLIENT SECRET {}", string_literal(key))
+                }
+            };
+            format!("{} = {value}", string_literal(&header.name))
+        })
+        .collect();
+    braced_fields(&fields)
+}
+
+/// `fields` between braces, `{}` when there are none.
+fn braced_fields(fields: &[String]) -> String {
+    if fields.is_empty() {
+        return "{}".to_owned();
+    }
+    format!("{{ {} }}", fields.join(", "))
+}
+
 impl IngestorPresentationModel for WebsocketsConnectionIngestor {
     fn entity_presentation(&self) -> EntityPresentation {
         let mut presentation = EntityPresentation::ingestor(self);
         if !self.headers.is_empty() {
-            let fields: Vec<_> = self
-                .headers
-                .iter()
-                .map(|header| {
-                    format!(
-                        "{} = {}",
-                        string_literal(&header.name),
-                        string_literal(&header.value)
-                    )
-                })
-                .collect();
-            presentation.written_option("HEADERS", format!("{{ {} }}", fields.join(", ")));
+            presentation.written_option("HEADERS", upgrade_headers_to_plexus(&self.headers));
         }
         presentation
     }
@@ -416,18 +448,7 @@ impl IngestorPresentationModel for HttpRequestIngestor {
         let mut presentation = EntityPresentation::ingestor(self);
         presentation.written_option("METHOD", string_literal(&self.method));
         if !self.headers.is_empty() {
-            let fields: Vec<_> = self
-                .headers
-                .iter()
-                .map(|header| {
-                    format!(
-                        "{} = {}",
-                        string_literal(&header.name),
-                        string_literal(&header.value)
-                    )
-                })
-                .collect();
-            presentation.written_option("HEADERS", format!("{{ {} }}", fields.join(", ")));
+            presentation.written_option("HEADERS", request_headers_to_plexus(&self.headers));
         }
         presentation.optional_option(
             "MAX BODY SIZE",
@@ -438,19 +459,44 @@ impl IngestorPresentationModel for HttpRequestIngestor {
     }
 }
 
+impl KafkaOffsetMode {
+    /// What `OFFSET BY` writes for this mode.
+    pub(crate) fn to_canonical_plexus(&self) -> String {
+        match self {
+            Self::Domain => "DOMAIN".to_owned(),
+            Self::ConsumerGroup { group, start_at } => {
+                format!(
+                    "CONSUMER GROUP {} START AT {start_at}",
+                    string_literal(group.as_str())
+                )
+            }
+        }
+    }
+}
+
 impl IngestorPresentationModel for KafkaTopicIngestor {
     fn entity_presentation(&self) -> EntityPresentation {
         let mut presentation = EntityPresentation::ingestor(self);
         presentation.external_locator(self.topic.as_str());
-        let offset = match &self.offset_mode {
-            KafkaOffsetMode::Domain => "DOMAIN".to_owned(),
-            KafkaOffsetMode::ConsumerGroup(group) => {
-                format!("CONSUMER GROUP {}", string_literal(group.as_str()))
-            }
-        };
-        presentation.written_option("OFFSET BY", offset);
+        presentation.written_option("OFFSET BY", self.offset_mode.to_canonical_plexus());
         presentation.defaulted_option("INSTANCES", self.instances.to_string());
         presentation
+    }
+}
+
+impl PulsarSubscription {
+    /// What `SUBSCRIPTION` writes for this subscription: its name, then who owns it. The type it
+    /// reads as is an option of its own, `TYPE`.
+    pub(crate) fn to_canonical_plexus(&self) -> String {
+        self.ownership.subscription_clause(&self.name)
+    }
+}
+
+impl PulsarSubscriptionOwnership {
+    /// What `SUBSCRIPTION` writes for the subscription `name` this owner holds: its name, then who
+    /// owns it.
+    pub(crate) fn subscription_clause(self, name: &PulsarSubscriptionName) -> String {
+        format!("{} {}", string_literal(name.as_str()), self.keywords())
     }
 }
 
@@ -458,14 +504,8 @@ impl IngestorPresentationModel for PulsarTopicIngestor {
     fn entity_presentation(&self) -> EntityPresentation {
         let mut presentation = EntityPresentation::ingestor(self);
         presentation.external_locator(self.topic.as_str());
-        presentation.written_option(
-            "SUBSCRIPTION",
-            format!(
-                "{} {}",
-                string_literal(self.subscription.name.as_str()),
-                self.subscription.ownership.keywords()
-            ),
-        );
+        presentation.written_option("SUBSCRIPTION", self.subscription.to_canonical_plexus());
+        presentation.written_option("TYPE", self.subscription.kind.to_string());
         presentation.defaulted_option("INSTANCES", self.instances.to_string());
         presentation
     }
@@ -488,6 +528,15 @@ impl IngestorPresentationModel for NatsSubjectIngestor {
         presentation.external_locator(self.subject.as_str());
         presentation.written_option("QUEUE GROUP", string_literal(self.queue_group.as_str()));
         presentation.defaulted_option("INSTANCES", self.instances.to_string());
+        presentation
+    }
+}
+
+impl IngestorPresentationModel for NatsStreamIngestor {
+    fn entity_presentation(&self) -> EntityPresentation {
+        let mut presentation = EntityPresentation::ingestor(self);
+        presentation.external_locator(self.stream.as_str());
+        presentation.written_option("CONSUMER", string_literal(self.consumer.as_str()));
         presentation
     }
 }
@@ -536,6 +585,7 @@ impl IngestorEntity {
             Self::Pulsar(PulsarIngestor::Topic(entity)) => entity.entity_presentation(),
             Self::Mqtt(MqttIngestor::Topic(entity)) => entity.entity_presentation(),
             Self::Nats(NatsIngestor::Subject(entity)) => entity.entity_presentation(),
+            Self::Nats(NatsIngestor::Stream(entity)) => entity.entity_presentation(),
             Self::RabbitMq(RabbitMqIngestor::Queue(entity)) => entity.entity_presentation(),
             Self::Redis(RedisIngestor::PubSub(entity)) => entity.entity_presentation(),
             Self::Prometheus(PrometheusIngestor::Query(entity)) => entity.entity_presentation(),
@@ -616,18 +666,14 @@ impl EmitterEntity {
                 presentation.external_locator(entity.channel.as_str())
             }
             Self::Mqtt(MqttEmitter::Topic(entity)) => {
-                presentation.external_locator(entity.topic.as_str())
+                presentation.external_locator(entity.topic.as_str());
+                presentation.written_option("QOS", entity.qos.spelling().to_owned());
             }
-            Self::Nats(NatsEmitter::Subject(entity)) => {
-                presentation.external_locator(entity.subject.as_str())
-            }
+            Self::Nats(entity) => entity.present_options(presentation),
             Self::Sqs(SqsEmitter::Queue(entity)) => {
                 presentation.external_locator(entity.queue.as_str());
                 let group = match &entity.fifo_group {
-                    Some(SqsFifoGroup::FromBranch) => Some("FROM BRANCH".to_owned()),
-                    Some(SqsFifoGroup::Expression(expression)) => {
-                        Some(expression_to_plexus(expression)?)
-                    }
+                    Some(group) => Some(expression_to_plexus(group)?),
                     None => None,
                 };
                 presentation.optional_option("FIFO GROUP", group);
@@ -665,13 +711,25 @@ impl EmitterEntity {
     }
 }
 
+impl NatsEmitter {
+    fn present_options(&self, presentation: &mut EntityPresentation) {
+        match self {
+            Self::Subject(entity) => presentation.external_locator(entity.subject.as_str()),
+            Self::Stream(entity) => {
+                presentation.external_locator(entity.stream.as_str());
+                presentation.written_option("SUBJECT", string_literal(entity.subject.as_str()));
+            }
+        }
+    }
+}
+
 impl EntityPresentation {
     fn otel_options(
         &mut self,
         entity: &OtelEmitter,
     ) -> error_stack::Result<(), CanonicalPlexusError> {
         if let OtelEmitter::Metrics(entity) = entity {
-            self.written_option("METRIC", Self::metric_value(&entity.metric));
+            self.written_option("METRIC", entity.metric.to_canonical_plexus());
         }
         let mappings = entity.mappings();
         if !mappings.attributes.is_empty() {
@@ -683,27 +741,43 @@ impl EntityPresentation {
             self.payload_option("RESOURCE", PayloadOption::Mapping(items));
         }
         if let Some(scope) = &mappings.scope {
-            let mut value = string_literal(&scope.name);
-            if let Some(version) = &scope.version {
-                value.push_str(" VERSION ");
-                value.push_str(&string_literal(version));
-            }
-            self.payload_option("SCOPE", PayloadOption::Text(value));
+            self.payload_option("SCOPE", PayloadOption::Text(scope.value_to_plexus()));
         }
         Ok(())
     }
+}
 
-    fn metric_value(metric: &OtelMetric) -> String {
+impl OtelScope {
+    /// What `SCOPE` writes for this scope: its name, then its version where it has one.
+    fn value_to_plexus(&self) -> String {
+        let mut value = string_literal(&self.name);
+        if let Some(version) = &self.version {
+            value.push_str(" VERSION ");
+            value.push_str(&string_literal(version));
+        }
+        value
+    }
+
+    /// The scope written as its `SCOPE` clause.
+    pub(crate) fn to_canonical_plexus(&self) -> String {
+        format!("SCOPE {}", self.value_to_plexus())
+    }
+}
+
+impl OtelMetric {
+    /// What `METRIC` writes for this metric: its name and unit, its description where it has one,
+    /// then its kind.
+    pub(crate) fn to_canonical_plexus(&self) -> String {
         let mut words = vec![
-            string_literal(&metric.name),
+            string_literal(&self.name),
             "UNIT".to_owned(),
-            string_literal(&metric.unit),
+            string_literal(&self.unit),
         ];
-        if let Some(description) = &metric.description {
+        if let Some(description) = &self.description {
             words.push("DESCRIPTION".to_owned());
             words.push(string_literal(description));
         }
-        match &metric.kind {
+        match &self.kind {
             OtelMetricKind::Gauge => words.push("GAUGE".to_owned()),
             OtelMetricKind::Sum {
                 monotonic,

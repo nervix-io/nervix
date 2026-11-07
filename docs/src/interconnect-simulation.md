@@ -61,6 +61,8 @@ them substitutes for another.
 | `crates/interconnect/tests/simulation/backup.rs` | Harness | Authenticated backup capture and section fetch across a partition, repair, and owner restart during transfer |
 | `crates/interconnect/tests/simulation/isolation.rs` | Harness | The three-host stalled-peer scenario and the capacity bounds it checks |
 | `crates/interconnect/tests/simulation/materialized.rs` | Harness | Typed branch descriptions and 3 MiB Arrow payloads in 64 KiB bulk chunks across a partition, repair and serving transport replacement |
+| `crates/interconnect/tests/simulation/progress.rs` | Harness | Application progress reports and revision queries between a reporter and a leader across a partition, a held reply and repair |
+| `crates/interconnect/tests/simulation/process_target.rs` | Harness | Exact-process requests before and after the receiver transport restarts under the same authenticated node name |
 | `crates/interconnect/src/authentication/simulation_tests.rs` | Harness | Certificate validity, expiry drain, handshake deadlines, and trace replay under the simulated clock |
 | `crates/interconnect/src/wire.rs`, module `simulation_checks` | Harness | Seeded rkyv round trips through the execution owner |
 | `crates/execution/src/workers.rs`, module `simulation_checks` | Harness | Queue slots, admission order, and charge ownership of the Turmoil CPU strategy |
@@ -581,6 +583,7 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | relay cancellation before grant | The same | 72 | 60 s / 50,000 / 90 s | A cancellation that reaches the receiver first fences the delivery |
 | relay cancellation while reply is lost | The same | 73 | 60 s / 50,000 / 90 s | Cancellation wins the admission fence while the body reply is lost |
 | relay cancellation during reconnect | The same | 74 | 60 s / 50,000 / 90 s | Cancellation wins the admission fence while the sender reconnects |
+| partitioned relay deliveries across a lost reply | `transport::relay::partitioned_relay_deliveries_keep_their_units_across_lost_replies_and_reconnect` | 121 | 85 s / 100,000 / 90 s | Two partitions of one relay deliver on their own channels: the receiver takes each payload with the partition it names, partition 0's reply lost after admission is reconciled on the reconnected link without a second enqueue and resolves its acknowledgement once, and partition 1 is admitted on its own channel |
 | receiver restart after relay body receipt | `transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work` | 81 | 90 s / 50,000 / 90 s | A new process epoch leaves the unresolved delivery indeterminate and admits fresh work |
 | receiver restart after runtime admission | The same | 83 | 90 s / 50,000 / 90 s | The same after runtime admission |
 | receiver restart with delayed relay response | The same | 85, 1036 | 90 s / 50,000 / 90 s | A released pre-crash reply confirms only historical receipt; admission stays indeterminate against the new epoch |
@@ -593,6 +596,8 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | join refusal across a partition | `transport::prerequisites::a_joiner_beyond_the_heartbeat_bound_is_refused_once_a_partition_heals` | 111 | 30 s / 50,000 / 90 s | A joiner whose heartbeat is beyond the bound stays joining for three seconds of partition, is refused by its member naming the heartbeat and both values once the partition heals, and counts the refusal under its own reason; the member's own join is untouched, and a compatible latecomer joins through it |
 | rolling heartbeat change | `transport::prerequisites::a_rolling_heartbeat_change_joins_within_the_bound_and_is_refused_beyond_it` | 113 | 30 s / 50,000 / 90 s | Three hosts join; one crashes and restarts with a heartbeat within the bound and rejoins; another crashes and restarts with one beyond the bound and is refused by the first peer it reaches, while the two others stay joined and connected |
 | stale recorded endpoint | `transport::prerequisites::a_recorded_endpoint_another_cluster_now_serves_is_a_stale_route` | 115 | 30 s / 50,000 / 90 s | A node of another cluster that shares the certificate authority serves the endpoint a returning node recorded for a departed member: bootstrapping it fails as a stale route naming the endpoint and the member, counts no prerequisite refusal and leaves the node joining, and the node then joins through a recorded member that still answers |
+| application progress through a partition and a held reply | `transport::progress::application_progress_reaches_the_leader_through_a_partition_a_held_reply_and_repair` | 131, 133 | 85 s / 100,000 / 90 s | The leader holds the reporter's first progress report; across a partition the reporter's next report and the leader's revision query each fail within their two-second deadlines; after repair, once each side's liveness probe answers again, the reporter's reply is held and the leader's query meets its deadline; once released, the query supplies the progress the failed report carried, and a newer report followed by a late older one leaves the newer progress held. This exercises the production progress shapes, their deadlines and their merge over the transport; the server's barriers, reporter and leader fencing are covered by their owner tests, the Shuttle check and the public scenarios. |
+| process-bound request across transport replacement | `transport::process_target::a_process_bound_request_cannot_reach_a_replacement_transport` | 137, 139 | 30 s / 50,000 / 90 s | An exact-process request succeeds; the receiver restarts its transport at the same address with a distinct authenticated process epoch; a request retaining the preceding epoch fails before its handler, and a request naming the replacement succeeds. The connection lease supplies the epoch fence without adding fields to each request payload. |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
 entropy, and trace checks and the fresh-process record and replay checks, and two ignored scenarios
@@ -845,7 +850,11 @@ prerequisite, not part of this simulation's claim:
   sockets, must run on the host that owns it; code that escapes to another runtime or thread escapes
   the simulation.
 - **Domain time.** Domain-clock authority, generations, and deadlines would need controlled time
-  that preserves the [Domain Clock](./domain-clock.md) contracts.
+  that preserves the [Domain Clock](./domain-clock.md) contracts. Receiver-opened clock delivery
+  also needs the server's clock installer, committed authority mapping, installed-clock progress
+  and effective availability owner. A transport fixture exchanging attachment requests alone
+  does not execute that owner or establish attachment through a blocked graph installation;
+  those behaviors retain their Cucumber and production-owner Shuttle evidence.
 - **Connectors.** Every connector's I/O, acknowledgement, and commit boundary would need to be
   classified as a simulated fixture or a real-process test.
 - **Host-independent capacities.** Execution worker counts would need fixed values, so admission

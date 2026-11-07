@@ -23,8 +23,8 @@ Feature: Branched session subscriptions
         user_id integer
       );
 
-      CREATE CODEC incoming_notification_codec
-        FROM WIRE JSON SCHEMA incoming_notification_wire
+      CREATE WIRE JSON CODEC incoming_notification_codec
+        FROM WIRE SCHEMA incoming_notification_wire
         TO SCHEMA incoming_notification;
 
       CREATE SCHEMA sensitive_tenant_branch (
@@ -39,12 +39,11 @@ Feature: Branched session subscriptions
         BRANCHED BY by_sensitive_tenant;
 
       CREATE VHOST edge sensitive-branch-{{test_id}}.example.com;
-      CREATE ENDPOINT sensitive_branch_ingress
+      CREATE HTTP ENDPOINT sensitive_branch_ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
-      CREATE HTTP ENDPOINT INGESTOR sensitive_branch_source
+      CREATE HTTP ENDPOINT INGESTOR sensitive_branch_ingestor
         FROM sensitive_branch_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_notification_codec
         TO public_notifications
@@ -93,8 +92,8 @@ Feature: Branched session subscriptions
         user_id integer,
         tenant string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
@@ -164,8 +163,8 @@ Feature: Branched session subscriptions
         raw string,
         normalized string OPTIONAL
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;

@@ -16,6 +16,8 @@
 )]
 
 mod branch_state_schemas;
+mod cluster_parameters;
+pub(crate) use cluster_parameters::{validate_model_parameters, validate_resource_parameters};
 mod creation_order;
 mod domain_activation_plan;
 mod domain_state;
@@ -25,6 +27,7 @@ mod error;
 mod execution_revision;
 mod graph;
 mod ingestor_plan;
+mod ingestor_units;
 mod message_error_plan;
 mod mutation;
 mod placement;
@@ -35,6 +38,7 @@ mod resource_plan;
 mod restore_plan;
 mod schedule_delta;
 mod scheduler;
+mod unit_placement;
 pub(crate) use scheduler::assign_server_listener_nodes;
 mod storage;
 #[cfg(test)]
@@ -65,9 +69,11 @@ pub(crate) use entrypoint_plan::{
 /// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through
 /// the names below.
 pub(crate) use error::RegistryError;
+#[cfg(test)]
+pub(crate) use execution_revision::ExecutionRevisionError;
 pub(crate) use execution_revision::{
     DynamicExecutionUpdate, EntitySwapExecution, ExecutionDelta, ExecutionNode, ExecutionRevision,
-    ExecutionRevisionError, PlannedClusterRevision,
+    PlannedClusterRevision,
 };
 pub(crate) use graph::{ActiveGraph, EdgeKind};
 pub(crate) use ingestor_plan::{
@@ -76,12 +82,12 @@ pub(crate) use ingestor_plan::{
     IngestorConnectorPlan, IngestorInputPlan, IngestorSpec, IngestorStartPlan,
     KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan,
     KafkaTopicIngestorStartPlan, MqttIngestorStartPlan, MqttTopicIngestorStartPlan,
-    NatsIngestorStartPlan, NatsSubjectIngestorStartPlan, PrometheusIngestorStartPlan,
-    PrometheusQueryIngestorStartPlan, PulsarIngestorStartPlan, PulsarTopicIngestorStartPlan,
-    RabbitMqIngestorStartPlan, RabbitMqQueueIngestorStartPlan, RedisIngestorStartPlan,
-    RedisPubSubIngestorStartPlan, SqsIngestorStartPlan, SqsQueueIngestorStartPlan,
-    SyslogIngestorStartPlan, SyslogListenerIngestorStartPlan, TransportInputPlan,
-    WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
+    NatsIngestorStartPlan, NatsStreamIngestorStartPlan, NatsSubjectIngestorStartPlan,
+    PrometheusIngestorStartPlan, PrometheusQueryIngestorStartPlan, PulsarIngestorStartPlan,
+    PulsarTopicIngestorStartPlan, RabbitMqIngestorStartPlan, RabbitMqQueueIngestorStartPlan,
+    RedisIngestorStartPlan, RedisPubSubIngestorStartPlan, SqsIngestorStartPlan,
+    SqsQueueIngestorStartPlan, SyslogIngestorStartPlan, SyslogListenerIngestorStartPlan,
+    TransportInputPlan, WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
     WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan, ZeroMqPullIngestorStartPlan,
 };
 #[cfg(test)]
@@ -96,9 +102,12 @@ pub(crate) use placement::{
 pub(crate) use processor_plan::{
     BranchedNodeSpecs, BranchedProcessorNodeSpec, BranchedProcessorOperationSpec,
     BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec, BranchedProcessorSpec,
+    InferencerStatePlan,
 };
 #[cfg(test)]
-pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
+pub(crate) use processor_plan::{
+    InferencerStatePortPlan, PlannedModel, branched_node_specs_from_models,
+};
 pub(crate) use reingestor_plan::{ReingestorInputPlan, ReingestorPlan};
 pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 pub(crate) use resource_plan::{

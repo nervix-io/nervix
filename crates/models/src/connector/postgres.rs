@@ -82,6 +82,7 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
             K::defaulted("pool_idle_timeout_ms", V::Milliseconds, "600000"),
             K::defaulted("pool_max_lifetime_ms", V::Milliseconds, "1800000"),
             K::defaulted("pool_test_before_acquire", V::Boolean, "true"),
+            K::TIMEOUT,
             K::TLS_CA.only_for_query(ADDRESS, OPTION, VERIFY_FULL),
             K::TLS_CERT.only_for_query(ADDRESS, OPTION, VERIFY_FULL),
             K::TLS_KEY.only_for_query(ADDRESS, OPTION, VERIFY_FULL),
@@ -294,11 +295,29 @@ const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredWait {
-            wait: "an insert and its metadata query",
+            wait: "each catalog query and each insert",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+        DeclaredWait {
+            wait: "closing an interrupted query connection",
+            bound: WaitBound::Driver("SQLx close-on-drop timeout, 5 s"),
+        },
+        // SQLx tests every connection returned to the pool, keeping its place in the pool until the
+        // server answers, and gives that test no deadline.
+        DeclaredWait {
+            wait: "testing a connection returned to the pool, which keeps its place until the \
+                   server answers",
             bound: WaitBound::Unbounded,
         },
     ],
-    driver_limits: &[],
+    driver_limits: &[
+        "timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout \
+         maximum.",
+        "Without timeout_ms, catalog queries and inserts have no Nervix response deadline.",
+    ],
 };
 
 impl EmitterDeclaration for PostgresTableEmitter {
@@ -306,6 +325,7 @@ impl EmitterDeclaration for PostgresTableEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Postgres),
         body: EmitterBodyForm::Values,
+        payload: super::EmitterPayloadFormat::BinaryArrays,
         batch: EmitterBatchLegality::Required {
             maximum: Some(POSTGRES_MESSAGE_SIZE_MAXIMUM),
         },
@@ -359,15 +379,78 @@ impl EmitterEntityBody for PostgresTableEmitter {
     }
 }
 
+/// One change an `ALTER POSTGRES TABLE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PostgresTableEmitterChange {
+    /// `SET TABLE '<table>'`.
+    Table(PostgresTableName),
+    /// `SET ON CONFLICT … DO NOTHING|UPDATE`, or `DROP ON CONFLICT` where the action is the
+    /// ordinary insert a statement that writes no `ON CONFLICT` makes.
+    OnConflict(PostgresConflictAction),
+    /// `SET MODE <mode>`.
+    Mode(PostgresTablePublishingMode),
+}
+
+impl crate::EmitterEntityChange for PostgresTableEmitterChange {
+    type Entity = PostgresTableEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut PostgresTableEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Table(table) => entity.table = table.clone(),
+            Self::OnConflict(action) => {
+                if *action == PostgresConflictAction::None
+                    && entity.conflict_action == PostgresConflictAction::None
+                {
+                    return Err(error_stack::Report::new(
+                        crate::AlterEmitterError::OptionNotWritten {
+                            entity: <PostgresTableEmitter as crate::EmitterEntityModel>::KIND,
+                            option: "ON CONFLICT",
+                        },
+                    ));
+                }
+                action.validate(&entity.values).map_err(|error| {
+                    error_stack::Report::new(error).change_context(
+                        crate::AlterEmitterError::ConflictAction {
+                            entity: <PostgresTableEmitter as crate::EmitterEntityModel>::KIND,
+                        },
+                    )
+                })?;
+                entity.conflict_action = action.clone();
+            }
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Table(table) => format!("SET TABLE {}", crate::string_literal(table.as_str())),
+            Self::OnConflict(action) => match action.conflict_clause() {
+                Some(clause) => format!("SET {clause}"),
+                None => "DROP ON CONFLICT".to_owned(),
+            },
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Postgres = "POSTGRES";
     /// What a PostgreSQL emitter writes.
     pub enum PostgresEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum PostgresTableEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum PostgresEmitterChange;
     /// The entities a PostgreSQL emitter writes.
     pub enum PostgresEmitterEntity {
-        Table(PostgresTableEmitter, PostgresTablePublishingMode) = "TABLE";
+        Table(PostgresTableEmitter, PostgresTablePublishingMode, PostgresTableEmitterChange) = "TABLE";
     }
 }
 

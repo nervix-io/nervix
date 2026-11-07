@@ -67,8 +67,8 @@ CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
   quantity integer
 );
 
-CREATE CODEC order_codec
-  FROM WIRE JSON SCHEMA order_wire
+CREATE WIRE JSON CODEC order_codec
+  FROM WIRE SCHEMA order_wire
   TO SCHEMA order_record;
 ```
 
@@ -118,7 +118,7 @@ the result to a relay:
 CREATE KAFKA TOPIC INGESTOR kafka_orders
   FROM kafka_local
   TOPIC 'orders'
-  OFFSET BY CONSUMER GROUP 'quickstart'
+  OFFSET BY CONSUMER GROUP 'quickstart' START AT LATEST
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING order_codec
   TO orders
@@ -135,7 +135,7 @@ Reading top to bottom:
   `KAFKA CLIENT`, and the topic and consumer group are string literals sent to Kafka exactly
   as written.
 - `OFFSET BY CONSUMER GROUP` tracks progress in Kafka; `MODE ACK SEQUENTIAL` acknowledges records
-  in order. The full Kafka source grammar is in
+  in order. The full Kafka ingestor grammar is in
   [Supported Ingestor Types](ingestors.md#supported-ingestor-types).
 - `TO orders` starts a route. Routes begin empty: `INHERIT ALL` copies every decoded field into
   the outgoing record, and later steps show `SET` constructing new values. See
@@ -205,8 +205,8 @@ CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
   quantity integer
 );
 
-CREATE CODEC order_codec
-  FROM WIRE JSON SCHEMA order_wire
+CREATE WIRE JSON CODEC order_codec
+  FROM WIRE SCHEMA order_wire
   TO SCHEMA order_record;
 
 CREATE RELAY orders SCHEMA order_record UNBRANCHED;
@@ -225,7 +225,7 @@ CREATE REDIS CLIENT redis_local
 CREATE KAFKA TOPIC INGESTOR kafka_orders
   FROM kafka_local
   TOPIC 'orders'
-  OFFSET BY CONSUMER GROUP 'quickstart'
+  OFFSET BY CONSUMER GROUP 'quickstart' START AT LATEST
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING order_codec
   TO orders

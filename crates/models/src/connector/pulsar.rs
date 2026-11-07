@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Pulsar client Model, the topic source and emitter Models with their delivery
-//!   modes, the topic and subscription names a source reads with the rules Pulsar holds them to,
-//!   the namespace that qualifies a local topic name, who owns a source's subscription, and what
-//!   each entity declares.
+//! - **Owns.** The Pulsar client Model, the topic ingestor and emitter Models with their delivery
+//!   modes, the topic and subscription names an ingestor reads with the rules Pulsar holds them to,
+//!   the namespace that qualifies a local topic name, who owns an ingestor's subscription and the
+//!   type it reads as, and what each entity declares.
 //!   Client declarations also own public configuration keys, types, defaults and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The Pulsar driver, or how a topic is consumed or
 //!   produced to.
 
@@ -19,7 +19,6 @@
 use std::num::NonZeroU64;
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -36,8 +35,9 @@ use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
+    EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
+    IngestStartPosition, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
     OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
@@ -51,18 +51,22 @@ const PULSAR_TLS_SCHEME: &str = "pulsar+ssl";
 ///
 /// A local topic name is placed in `namespace`, so the namespace is exactly a tenant and a
 /// namespace, the two levels a qualified topic names before the topic. A plaintext connection uses
-/// no TLS setting, so every TLS key requires a `pulsar+ssl` address.
+/// no TLS setting, so every TLS key requires a `pulsar+ssl` address. The token is a credential, and
+/// the certificate and its key are a pair.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
         &[
             K::required("addr", V::Url(&["pulsar", PULSAR_TLS_SCHEME])),
+            K::optional("auth_token", V::String).secret(),
             K::defaulted("namespace", V::Levels("tenant/namespace"), "public/default"),
             K::optional("tls_allow_insecure_connection", V::Boolean)
                 .only_for_scheme("addr", PULSAR_TLS_SCHEME),
             K::TLS_CA.only_for_scheme("addr", PULSAR_TLS_SCHEME),
+            K::TLS_CERT.only_for_scheme("addr", PULSAR_TLS_SCHEME),
             K::optional("tls_hostname_verification_enabled", V::Boolean)
                 .only_for_scheme("addr", PULSAR_TLS_SCHEME),
+            K::TLS_KEY.only_for_scheme("addr", PULSAR_TLS_SCHEME),
         ],
         &[],
         &[],
@@ -140,21 +144,77 @@ pub struct PulsarTopicIngestor {
     pub client: ClientName,
     pub topic: PulsarTopicName,
     pub subscription: PulsarSubscription,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: PulsarIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
 
-/// The durable subscription a Pulsar source reads through, and who owns it on the broker.
+impl PulsarTopicIngestor {
+    /// Whether this ingestor's instances fit the type of its subscription. A type that reads through
+    /// one consumer requires one fixed instance rather than a partition-dependent count.
+    pub fn instances_fit_subscription(&self) -> bool {
+        matches!(self.instances, crate::IngestorInstances::Count(count) if count.get() == 1)
+            || !self.subscription.kind.reads_through_one_consumer()
+    }
+}
+
+/// The durable subscription a Pulsar ingestor reads through, who owns it on the broker, and the type
+/// its consumers read it as.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct PulsarSubscription {
     pub name: PulsarSubscriptionName,
     pub ownership: PulsarSubscriptionOwnership,
+    pub kind: PulsarSubscriptionType,
 }
 
-/// Who owns a Pulsar source's subscription, which its statement declares after the
+/// How a Pulsar subscription shares what its topic holds among the consumers that join it, which
+/// its statement declares after the subscription's owner.
+///
+/// The type decides ordering, parallelism and failover, so a statement states it rather than Nervix
+/// choosing one. The broker holds one type per subscription while any consumer is connected, and
+/// takes a new one from the first consumer to join an empty subscription.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::EnumIter,
+    strum::Display,
+    strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum PulsarSubscriptionType {
+    /// `SHARED`: every consumer takes messages, with no order across them.
+    Shared,
+    /// `KEY_SHARED`: every consumer takes messages, and one consumer takes all of a key's.
+    KeyShared,
+    /// `FAILOVER`: one consumer takes messages while the others stand by to replace it.
+    Failover,
+    /// `EXCLUSIVE`: the broker admits one consumer and refuses any other.
+    Exclusive,
+}
+
+impl PulsarSubscriptionType {
+    /// The word a statement writes for this type after `TYPE`.
+    pub fn keyword(self) -> &'static str {
+        self.into()
+    }
+
+    /// Whether the broker delivers through one consumer at a time.
+    pub const fn reads_through_one_consumer(self) -> bool {
+        matches!(self, Self::Failover | Self::Exclusive)
+    }
+}
+
+/// Who owns a Pulsar ingestor's subscription, which its statement declares after the
 /// subscription's name.
 ///
 /// The broker cannot say later who created a subscription, so the statement states it rather than
@@ -174,7 +234,7 @@ pub struct PulsarSubscription {
 pub enum PulsarSubscriptionOwnership {
     /// `OWNED BY INGESTOR START AT EARLIEST|LATEST`: joining creates an absent subscription at
     /// the declared position, and dropping the ingestor or its domain removes it.
-    Ingestor { start_at: PulsarStartPosition },
+    Ingestor { start_at: IngestStartPosition },
     /// `PROVISIONED`: an operator provisioned the subscription. Every open verifies that it exists,
     /// and Nervix never creates or removes it.
     Provisioned,
@@ -184,10 +244,10 @@ impl PulsarSubscriptionOwnership {
     /// Every complete subscription choice the declaration and visual draft offer.
     pub const CHOICES: [Self; 3] = [
         Self::Ingestor {
-            start_at: PulsarStartPosition::Earliest,
+            start_at: IngestStartPosition::Earliest,
         },
         Self::Ingestor {
-            start_at: PulsarStartPosition::Latest,
+            start_at: IngestStartPosition::Latest,
         },
         Self::Provisioned,
     ];
@@ -200,42 +260,20 @@ impl PulsarSubscriptionOwnership {
     pub const fn keywords(self) -> &'static str {
         match self {
             Self::Ingestor {
-                start_at: PulsarStartPosition::Earliest,
+                start_at: IngestStartPosition::Earliest,
             } => "OWNED BY INGESTOR START AT EARLIEST",
             Self::Ingestor {
-                start_at: PulsarStartPosition::Latest,
+                start_at: IngestStartPosition::Latest,
             } => "OWNED BY INGESTOR START AT LATEST",
             Self::Provisioned => "PROVISIONED",
         }
     }
 }
 
-/// Where Pulsar places a newly created owned subscription's cursor. Existing cursors prevail.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    strum::EnumIter,
-    strum::Display,
-    strum::AsRefStr,
-)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum PulsarStartPosition {
-    Earliest,
-    Latest,
-}
-
 impl PulsarSubscription {
     fn set_start_at(
         &mut self,
-        position: PulsarStartPosition,
+        position: IngestStartPosition,
     ) -> error_stack::Result<(), crate::AlterIngestorError> {
         match &mut self.ownership {
             PulsarSubscriptionOwnership::Ingestor { start_at } => *start_at = position,
@@ -251,52 +289,65 @@ impl PulsarSubscription {
     }
 }
 
-/// Operations of a Pulsar topic ingestor, retaining shared operations in their original order.
+/// One change an `ALTER PULSAR TOPIC INGESTOR` writes to the body of the ingestor it changes.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum PulsarTopicIngestorOperation {
-    Transport(crate::AlterTransportIngestorOperation<PulsarTopicIngestor>),
-    SetStartAt { position: PulsarStartPosition },
+pub enum PulsarTopicIngestorChange {
+    /// `SET TOPIC '<topic>'`.
+    Topic(PulsarTopicName),
+    /// `SET SUBSCRIPTION '<name>' OWNED BY INGESTOR START AT … | PROVISIONED`: the subscription and
+    /// who owns it, the type it reads as kept.
+    Subscription {
+        name: PulsarSubscriptionName,
+        ownership: PulsarSubscriptionOwnership,
+    },
+    /// `SET START AT EARLIEST|LATEST`: where an owned subscription starts, its name kept.
+    StartAt(IngestStartPosition),
+    /// `SET TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE`: the type the next join reads the
+    /// subscription as, its cursor and backlog kept.
+    Type(PulsarSubscriptionType),
+    /// `SET MODE <mode>`.
+    Mode(PulsarIngestMode),
 }
 
-impl From<crate::AlterTransportIngestorOperation<PulsarTopicIngestor>>
-    for PulsarTopicIngestorOperation
-{
-    fn from(operation: crate::AlterTransportIngestorOperation<PulsarTopicIngestor>) -> Self {
-        Self::Transport(operation)
-    }
-}
+impl crate::IngestorEntityChange for PulsarTopicIngestorChange {
+    type Entity = PulsarTopicIngestor;
 
-impl super::ingestor::TransportIngestorOperation for PulsarTopicIngestorOperation {
     fn apply_to(
         &self,
-        ingestor: &mut crate::CreateIngestor,
+        entity: &mut PulsarTopicIngestor,
     ) -> error_stack::Result<(), crate::AlterIngestorError> {
         match self {
-            Self::Transport(operation) => operation.apply_to(ingestor),
-            Self::SetStartAt { position } => {
-                let source = ingestor
-                    .input
-                    .transport_source_mut()
-                    .verified(super::entity_union::ALTERED_PAIR_CHECKED);
-                let crate::IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) = source else {
-                    unreachable!("{}", super::entity_union::ALTERED_PAIR_CHECKED);
-                };
-                source.subscription.set_start_at(*position)
+            Self::Topic(topic) => entity.topic = topic.clone(),
+            Self::Subscription { name, ownership } => {
+                entity.subscription.name = name.clone();
+                entity.subscription.ownership = *ownership;
             }
+            Self::StartAt(position) => entity.subscription.set_start_at(*position)?,
+            Self::Type(kind) => entity.subscription.kind = *kind,
+            Self::Mode(mode) => entity.mode = mode.clone(),
         }
+        Ok(())
     }
 
-    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
-        match self {
-            Self::Transport(operation) => operation.to_plexus(),
-            Self::SetStartAt { position } => Ok(format!("SET START AT {position}")),
-        }
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(topic) => format!("SET TOPIC {}", crate::string_literal(topic.as_str())),
+            Self::Subscription { name, ownership } => {
+                format!("SET SUBSCRIPTION {}", ownership.subscription_clause(name))
+            }
+            Self::StartAt(position) => format!("SET START AT {position}"),
+            Self::Type(kind) => format!("SET TYPE {kind}"),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
     }
 }
 
-/// How a Pulsar source acknowledges what its subscription delivers.
+/// How a Pulsar ingestor acknowledges what its subscription delivers.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -359,11 +410,11 @@ const PULSAR_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "connection: TCP, TLS and CONNECT",
-            bound: WaitBound::Driver("10 s per address, 12 retries"),
+            bound: WaitBound::Driver("10 s per address, one attempt"),
         },
         DeclaredWait {
             wait: "topic lookup and subscribe",
-            bound: WaitBound::Driver("30 s per attempt, retried without limit"),
+            bound: WaitBound::Driver("30 s, one attempt"),
         },
         DeclaredWait {
             wait: "an acknowledgement under ACK",
@@ -424,11 +475,25 @@ const PULSAR_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["Messages above the broker's announced maximum are rejected."],
 };
 
+/// The identity, producer metadata and delivery count of a Pulsar message.
+const PULSAR_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("topic", IngestorMetadataType::String),
+    IngestorMetadataField::new("message_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("publish_time", IngestorMetadataType::Datetime),
+    IngestorMetadataField::new("event_time", IngestorMetadataType::Datetime),
+    IngestorMetadataField::new("key", IngestorMetadataType::String),
+    IngestorMetadataField::new("ordering_key", IngestorMetadataType::Bytes),
+    IngestorMetadataField::new("producer_name", IngestorMetadataType::String),
+    IngestorMetadataField::new("sequence_id", IngestorMetadataType::I64),
+    IngestorMetadataField::new("redelivery_count", IngestorMetadataType::I64),
+]);
+
 impl IngestorDeclaration for PulsarTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: PULSAR_TOPIC_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
         position_class: PositionClass::Replayable,
@@ -468,6 +533,32 @@ impl IngestorDeclaration for PulsarTopicIngestor {
                     },
                 ]),
             },
+            OptionDeclaration {
+                keywords: "TYPE",
+                presence: OptionPresence::Required,
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: "SHARED",
+                        value: None,
+                        example: "TYPE SHARED",
+                    },
+                    OptionChoice {
+                        name: "KEY_SHARED",
+                        value: None,
+                        example: "TYPE KEY_SHARED",
+                    },
+                    OptionChoice {
+                        name: "FAILOVER",
+                        value: None,
+                        example: "TYPE FAILOVER",
+                    },
+                    OptionChoice {
+                        name: "EXCLUSIVE",
+                        value: None,
+                        example: "TYPE EXCLUSIVE",
+                    },
+                ]),
+            },
             OptionDeclaration::INSTANCES,
         ],
         bounds: PULSAR_INGESTOR_BOUNDS,
@@ -475,8 +566,16 @@ impl IngestorDeclaration for PulsarTopicIngestor {
 }
 
 impl IngestorEntityBody for PulsarTopicIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -494,13 +593,13 @@ impl IngestorEntityBody for PulsarTopicIngestor {
 
 connector_ingestors! {
     connector Pulsar = "PULSAR";
-    /// What a Pulsar source reads.
+    /// What a Pulsar ingestor reads.
     pub enum PulsarIngestor;
     /// The alterations of the ingestors that read a Pulsar entity.
     pub enum PulsarTopicIngestorAlteration;
-    /// The entities a Pulsar source reads.
+    /// The entities a Pulsar ingestor reads.
     pub enum PulsarIngestorEntity {
-        Topic(PulsarTopicIngestor => PulsarTopicIngestorOperation) = "TOPIC", "Pulsar";
+        Topic(PulsarTopicIngestor => PulsarTopicIngestorChange) = "TOPIC", "Pulsar";
     }
 }
 
@@ -520,6 +619,7 @@ impl EmitterDeclaration for PulsarTopicEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Pulsar),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: PulsarTopicPublishingMode::KINDS,
@@ -528,7 +628,16 @@ impl EmitterDeclaration for PulsarTopicEmitter {
             name: LocatorName::External(PulsarTopicName::DECLARATION),
         }),
         options: &[],
-        envelope: &[],
+        // A Pulsar message carries its event time and the time it is due beside its key,
+        // properties and payload. Its topic decides how it is stored, and it has no routing or
+        // retention flag, no reply target and no per-message identity a producer chooses. Its
+        // properties carry what a PROPERTIES block would, and its ordering key is a key.
+        envelope: &[
+            EnvelopeClauseKind::Key,
+            EnvelopeClauseKind::PartitionFromBranch,
+            EnvelopeClauseKind::Timestamp,
+            EnvelopeClauseKind::DeliverAfter,
+        ],
         properties: &[],
         bounds: PULSAR_EMITTER_BOUNDS,
     };
@@ -547,15 +656,51 @@ impl EmitterEntityBody for PulsarTopicEmitter {
     }
 }
 
+/// One change an `ALTER PULSAR TOPIC EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PulsarTopicEmitterChange {
+    /// `SET TOPIC '<name>'`.
+    Topic(PulsarTopicName),
+    /// `SET MODE <mode>`.
+    Mode(PulsarTopicPublishingMode),
+}
+
+impl crate::EmitterEntityChange for PulsarTopicEmitterChange {
+    type Entity = PulsarTopicEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut PulsarTopicEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Topic(name) => entity.topic = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(name) => format!("SET TOPIC {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Pulsar = "PULSAR";
     /// What a Pulsar emitter writes.
     pub enum PulsarEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum PulsarTopicEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum PulsarEmitterChange;
     /// The entities a Pulsar emitter writes.
     pub enum PulsarEmitterEntity {
-        Topic(PulsarTopicEmitter, PulsarTopicPublishingMode) = "TOPIC";
+        Topic(PulsarTopicEmitter, PulsarTopicPublishingMode, PulsarTopicEmitterChange) = "TOPIC";
     }
 }
 

@@ -58,6 +58,8 @@ fn property(name: &str) -> EnvelopeProperty {
 /// An envelope that writes every clause kind once.
 fn every_clause() -> EmitterEnvelope {
     EmitterEnvelope {
+        key: Some(text("key")),
+        partition_from_branch: true,
         persistent: true,
         mandatory: true,
         retain: true,
@@ -121,6 +123,8 @@ fn every_clause_and_property_its_entity_declares_is_admitted() {
 fn only(kind: EnvelopeClauseKind) -> EmitterEnvelope {
     let mut envelope = EmitterEnvelope::default();
     match kind {
+        EnvelopeClauseKind::Key => envelope.key = Some(text("key")),
+        EnvelopeClauseKind::PartitionFromBranch => envelope.partition_from_branch = true,
         EnvelopeClauseKind::Persistent => envelope.persistent = true,
         EnvelopeClauseKind::Mandatory => envelope.mandatory = true,
         EnvelopeClauseKind::Retain => envelope.retain = true,
@@ -241,6 +245,80 @@ fn a_clause_holds_an_expression_exactly_where_its_form_is_one() {
 }
 
 #[test]
+fn targeted_edits_require_their_entity_declaration_even_when_dropping() {
+    let entity = EmitterEntityKind::Sqs(crate::SqsEmitterEntity::Queue);
+    let original = EmitterEnvelope::default();
+    for alteration in [
+        EmitterEnvelopeAlteration::SetClause {
+            clause: EnvelopeClauseValue::Persistent,
+        },
+        EmitterEnvelopeAlteration::DropClause {
+            clause: EnvelopeClauseKind::Persistent,
+        },
+        EmitterEnvelopeAlteration::SetClause {
+            clause: EnvelopeClauseValue::Timestamp(text("timestamp")),
+        },
+        EmitterEnvelopeAlteration::DropClause {
+            clause: EnvelopeClauseKind::Timestamp,
+        },
+        EmitterEnvelopeAlteration::SetProperties {
+            properties: vec![property("content_type")],
+        },
+        EmitterEnvelopeAlteration::DropProperties,
+    ] {
+        let mut envelope = original.clone();
+        let error = envelope
+            .apply_alteration(entity, &alteration)
+            .expect_err("the entity declares none of these targeted edits");
+        assert!(matches!(
+            error.current_context(),
+            EnvelopeDeclarationError::UndeclaredClause { entity: actual, .. }
+                | EnvelopeDeclarationError::UndeclaredProperties { entity: actual }
+                if *actual == entity
+        ));
+        assert_eq!(envelope, original);
+    }
+}
+
+#[test]
+fn a_refused_property_replacement_keeps_the_complete_envelope() {
+    let entity = EmitterEntityKind::RabbitMq(crate::RabbitMqEmitterEntity::Queue);
+    let original = EmitterEnvelope {
+        persistent: true,
+        mandatory: true,
+        timestamp: Some(text("timestamp")),
+        properties: vec![property("content_type")],
+        ..Default::default()
+    };
+    for (properties, expected) in [
+        (Vec::new(), EnvelopeDeclarationError::EmptyProperties),
+        (
+            vec![property("unrecognized")],
+            EnvelopeDeclarationError::UndeclaredProperty {
+                entity,
+                name: "unrecognized".to_owned(),
+            },
+        ),
+        (
+            vec![property("priority"), property("priority")],
+            EnvelopeDeclarationError::DuplicateProperty {
+                name: "priority".to_owned(),
+            },
+        ),
+    ] {
+        let mut envelope = original.clone();
+        let error = envelope
+            .apply_alteration(
+                entity,
+                &EmitterEnvelopeAlteration::SetProperties { properties },
+            )
+            .expect_err("the property set must use distinct declared keys");
+        assert_eq!(error.current_context(), &expected);
+        assert_eq!(envelope, original);
+    }
+}
+
+#[test]
 fn an_emitter_presents_the_envelope_it_writes_among_its_inspection_rows() {
     let entity =
         crate::EmitterEntity::ZeroMq(crate::ZeroMqEmitter::Push(crate::ZeroMqPushEmitter {
@@ -337,7 +415,7 @@ fn an_emitter_statement_writes_its_envelope_after_its_payload() {
     // before the construction a statement would write and the emitter's batching and flush.
     assert_eq!(
         emitter.to_canonical_plexus().expect("the emitter renders"),
-        "CREATE ATTACHED ZEROMQ PUSH EMITTER publish_events\n  FROM events\n  TO zeromq_main\n    \
+        "CREATE ZEROMQ PUSH EMITTER publish_events\n  FROM events\n  ATTACHED\n  TO zeromq_main\n    \
          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s\n    ENCODE USING events_codec\n    \
          PERSISTENT\n    MESSAGE ID 'id'\n    PROPERTIES {\n      'content_type' = \
          'application/json',\n      'priority' = 5\n    }\n  FLUSH IMMEDIATE\n  ON MESSAGE ERROR \

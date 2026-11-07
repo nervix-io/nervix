@@ -19,6 +19,28 @@ Feature: Resource lifecycle
       | 1            |
       | 3            |
 
+  Scenario Outline: A malformed resource archive whose upload start a lapsed lease refused is sent again and judged on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE malformed;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given node "{{leader}}" refuses its next resource upload start as a leader that could not confirm its lease
+    When a malformed archive upload of resource "malformed" is sent to the leader node
+    Then node "{{leader}}" refused a resource upload start
+    And the last command error contains
+      """
+      failed to read entire block
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Describing a missing resource version reports a clear error
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -122,6 +144,22 @@ Feature: Resource lifecycle
       versions: 1
       """
 
+  Scenario: An incomplete upload sent to a follower is refused by the leader its redirect names
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE proto;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "follower"
+    When an incomplete upload of resource "proto" with identity "partial-body" is sent to node "{{follower}}"
+    Then the last command error contains
+      """
+      upload size mismatch: expected 2, received 1
+      """
+
   Scenario Outline: Uploaded resource is describable after replication
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -218,7 +256,7 @@ Feature: Resource lifecycle
       CREATE RESOURCE zip_codes;
       CREATE SCHEMA zip_entry (zip STRING, city STRING);
       CREATE WIRE JSON SCHEMA zip_wire MODE STRICT (zip string, city string);
-      CREATE CODEC zip_codec FROM WIRE JSON SCHEMA zip_wire TO SCHEMA zip_entry;
+      CREATE WIRE JSON CODEC zip_codec FROM WIRE SCHEMA zip_wire TO SCHEMA zip_entry;
       """
     Given client "uploader" is connected to the leader node
     When client "uploader" selects domain "{{domain}}"
@@ -390,6 +428,67 @@ Feature: Resource lifecycle
       """
     And the last client upload recovered version 1 from an earlier upload
     When client "uploader" upload of resource "proto" from "{{different_proto_dir}}" with identity "retry-one" fails with "already assigned version 1 with digest"
+    Then the last client upload refused version 1 with typed failure "IdentityConflict"
+    When client "uploader" executes these Plexus commands
+      """
+      DESCRIBE RESOURCE proto;
+      """
+    Then the last command output contains
+      """
+      versions: 1
+      """
+    And the last command output does not contain
+      """
+      versions: 1,2
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @resource_upload_idempotency
+  Scenario Outline: An upload whose installing call loses its reply reports its one assigned version
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "proto_dir" containing
+      """
+      {
+        "schema/root.proto": "syntax = \"proto3\";",
+        "schema/types/common.proto": "message Common {}"
+      }
+      """
+    And node "node-1" has resource directory "different_proto_dir" containing
+      """
+      {
+        "schema/root.proto": "syntax = \"proto3\"; message Different {}"
+      }
+      """
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE proto;
+      """
+    Then the current leader node is saved as placeholder "upload_leader"
+    Given node "{{upload_leader}}" loses the reply to its next installed resource upload
+    And client "uploader" is connected to the leader node
+    When client "uploader" selects domain "{{domain}}"
+    And client "uploader" uploads resource "proto" from "{{proto_dir}}" with identity "lost-reply"
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    And node "{{upload_leader}}" lost the reply to the resource upload it installed
+    And the last client upload installed version 1
+    And the last client upload repeated its call and recovered version 1
+    When client "uploader" uploads resource "proto" from "{{proto_dir}}" with identity "lost-reply"
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    And the last client upload recovered version 1 from an earlier upload
+    When client "uploader" upload of resource "proto" from "{{different_proto_dir}}" with identity "lost-reply" fails with "already assigned version 1 with digest"
+    Then the last client upload refused version 1 with typed failure "IdentityConflict"
     When client "uploader" executes these Plexus commands
       """
       DESCRIBE RESOURCE proto;
@@ -475,7 +574,7 @@ Feature: Resource lifecycle
       """
       uploaded resource version 1
       """
-    And the last client upload recovered version 1 from an earlier upload
+    And the last client upload repeated its call and recovered version 1
     And node "{{upload_leader}}" refused the publication until its reconciliation took the upload up
     When client "uploader" executes these Plexus commands
       """

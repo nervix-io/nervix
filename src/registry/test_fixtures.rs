@@ -78,7 +78,11 @@ pub(in crate::registry) fn unplaced_schedule(models: Vec<Model>) -> ScheduledNod
                     let schema = index
                         .configured::<CreateSchema>(&branch.schema)
                         .expect("the fixture declares every branch schema");
-                    ResolvedBranching::branched(branch_name.clone(), schema.clone())
+                    ResolvedBranching::branched(
+                        branch_name.clone(),
+                        schema.clone(),
+                        nervix_models::BranchPartitions::ONE,
+                    )
                 }
             };
             Some(resolved)
@@ -344,8 +348,12 @@ pub(in crate::registry) fn endpoint(
         name: EndpointName::parse(name).expect("valid identifier"),
         on_vhost: VhostName::parse(vhost_name).expect("valid identifier"),
         path: path.to_string(),
-        endpoint_type,
-        signaling_protocol: None,
+        kind: match endpoint_type {
+            nervix_models::EndpointType::Http => nervix_models::EndpointKind::Http,
+            nervix_models::EndpointType::Websockets => nervix_models::EndpointKind::Websockets {
+                signaling_protocol: None,
+            },
+        },
     })
 }
 
@@ -517,10 +525,11 @@ pub(in crate::registry) fn ingestor_statement(
             source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                 client: ClientName::parse(client).expect("valid identifier"),
                 topic: nervix_models::KafkaTopicName::parse("notifications").expect("valid topic"),
-                offset_mode: KafkaOffsetMode::ConsumerGroup(
-                    KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
-                ),
-                instances: nonzero!(1u64),
+                offset_mode: KafkaOffsetMode::ConsumerGroup {
+                    group: KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
+                    start_at: nervix_models::IngestStartPosition::Earliest,
+                },
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: KafkaIngestMode::AckSequential {
                     timeout: "30s".to_string(),
                     retry_policy: nervix_models::RetryPolicy {

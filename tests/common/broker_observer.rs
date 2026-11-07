@@ -20,6 +20,19 @@ use super::nats_observer::NatsObserver;
 
 pub(crate) const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The times one Pulsar message carried and when its observer read it, in Unix milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PulsarMessageTimes {
+    /// The `event_time` the producer wrote, absent where it wrote none.
+    pub(crate) event_time: Option<u64>,
+    /// The `deliver_at_time` the producer wrote, absent where it wrote none.
+    pub(crate) deliver_at: Option<i64>,
+    /// The `publish_time` the producer's client stamped on this copy when it sent it.
+    pub(crate) published_at: u64,
+    /// When the observing client took the message, by this host's clock.
+    pub(crate) received_at: u64,
+}
+
 /// When a broker says a record it delivered was made, for a broker whose records carry a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum BrokerRecordTime {
@@ -41,7 +54,9 @@ pub(crate) struct BrokerMessage {
     /// because those brokers keep no order of their own.
     pub(crate) headers: Vec<(String, String)>,
     /// The key the broker delivered with the payload: a Kafka record key or a Pulsar partition key.
-    pub(crate) key: Option<String>,
+    pub(crate) key: Option<Vec<u8>>,
+    /// The destination partition the broker read this message from, where its protocol names one.
+    pub(crate) partition: Option<i32>,
     /// The ordering group the broker delivered the payload in: an SQS FIFO message group.
     pub(crate) group: Option<String>,
     /// When the broker says the record was made: a Kafka record's create or log-append time.
@@ -49,6 +64,8 @@ pub(crate) struct BrokerMessage {
     /// The headers a broker delivered with a type of their own, sorted by name: SQS message
     /// attributes with their data types. Empty for a broker whose headers carry no type.
     pub(crate) typed_headers: Vec<TypedBrokerHeader>,
+    /// The times of a message a Pulsar broker delivered.
+    pub(crate) pulsar_times: Option<PulsarMessageTimes>,
 }
 
 /// One header a broker delivered with a type of its own, such as an SQS message attribute.
@@ -68,9 +85,11 @@ impl BrokerMessage {
             bytes: bytes.to_vec(),
             headers,
             key: None,
+            partition: None,
             group: None,
             time: None,
             typed_headers: Vec::new(),
+            pulsar_times: None,
         }
     }
 
@@ -79,8 +98,18 @@ impl BrokerMessage {
         self
     }
 
-    pub(crate) fn with_key(mut self, key: Option<String>) -> Self {
+    pub(crate) fn with_key(mut self, key: Option<Vec<u8>>) -> Self {
         self.key = key;
+        self
+    }
+
+    pub(crate) fn with_partition(mut self, partition: Option<i32>) -> Self {
+        self.partition = partition;
+        self
+    }
+
+    pub(crate) fn with_pulsar_times(mut self, times: PulsarMessageTimes) -> Self {
+        self.pulsar_times = Some(times);
         self
     }
 
@@ -99,10 +128,8 @@ impl BrokerMessage {
     fn from_nats(message: &NatsMessage) -> Self {
         let mut headers = Vec::new();
         if let Some(delivered) = message.headers.as_ref() {
-            for (name, values) in delivered.iter() {
-                for value in values {
-                    headers.push((name.to_string(), value.as_str().to_string()));
-                }
+            for (name, value) in delivered.iter_ordered() {
+                headers.push((name.to_string(), value.to_string()));
             }
         }
         Self::from_bytes(message.payload.as_ref(), headers)
@@ -151,6 +178,21 @@ impl BrokerObserver {
     pub(crate) fn nats(observer: NatsObserver) -> Self {
         Self {
             deliveries: ObservedDeliveries::Nats(observer),
+        }
+    }
+
+    pub(crate) async fn answer_nats_request(
+        &mut self,
+        expected_reply: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        match &mut self.deliveries {
+            ObservedDeliveries::Nats(observer) => {
+                observer.answer_next(expected_reply, payload).await
+            }
+            ObservedDeliveries::Forwarded { .. } => {
+                Err(io::Error::other("the observed destination is not NATS"))
+            }
         }
     }
 

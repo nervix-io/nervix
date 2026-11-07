@@ -101,40 +101,30 @@ impl ScheduleDelta {
                 .config
                 .change_aspects_against(&desired_node.config);
             let level = aspects.quiesce_level();
-            let reset_changed = desired_node.units.iter().any(|(unit, desired)| {
-                existing_node
+            let mut resets = Vec::new();
+            for (unit, desired) in &desired_node.units {
+                if existing_node
                     .units
                     .get(unit)
                     .is_some_and(|existing| existing.wasm_state_reset != desired.wasm_state_reset)
-            });
-            let partition_reset_changed = desired_node.units.iter().any(|(unit, desired)| {
-                *unit != nervix_models::Unit::Single
-                    && existing_node.units.get(unit).is_some_and(|existing| {
-                        existing.wasm_state_reset != desired.wasm_state_reset
-                    })
-            });
-            if partition_reset_changed {
-                entities.push(desired_node.identity());
+                    && let Some(reset) = &desired.wasm_state_reset
+                    && !resets.contains(reset)
+                {
+                    resets.push(reset.clone());
+                }
             }
-            if reset_changed
-                && let Some(reset) = desired_node
-                    .units
-                    .get(&nervix_models::Unit::Single)
-                    .and_then(|unit| unit.wasm_state_reset.as_ref())
-            {
+            for reset in resets {
                 updates.push(DynamicModelUpdate::WasmStateReset {
                     processor: desired_node.identifier.clone(),
-                    reset: reset.clone(),
+                    reset,
                 });
             }
-            // Forced recovery and a changed module binding still replace the complete processor.
-            // A coordinated reset carries its exact scope as a dynamic update, so the runtime can
-            // replace only those branch tasks and keep sibling branches live.
-            let coordinated_reset = Self::is_coordinated_wasm_reset(existing_node, desired_node);
+            // A coordinated reset replaces its selected branch tasks inside their unit supervisor.
+            // Binding changes and forced recovery still replace the complete processor.
             let generations_changed = desired_node.units.iter().any(|(unit, desired)| {
                 existing_node.units.get(unit).is_some_and(|existing| {
                     existing.wasm_state_generations != desired.wasm_state_generations
-                        && (*unit != nervix_models::Unit::Single || !coordinated_reset)
+                        && !Self::is_coordinated_wasm_reset(existing, desired)
                 })
             });
             if generations_changed {
@@ -194,32 +184,24 @@ impl ScheduleDelta {
         }
     }
 
-    fn is_coordinated_wasm_reset(existing: &ScheduledNode, desired: &ScheduledNode) -> bool {
-        let Some(reset) = desired
-            .units
-            .get(&nervix_models::Unit::Single)
-            .and_then(|unit| unit.wasm_state_reset.as_ref())
-        else {
+    fn is_coordinated_wasm_reset(
+        existing: &nervix_models::ScheduledUnit,
+        desired: &nervix_models::ScheduledUnit,
+    ) -> bool {
+        let Some(reset) = desired.wasm_state_reset.as_ref() else {
             return false;
         };
         if reset.phase() != WasmStateResetPhase::Publishing
             || existing
-                .units
-                .get(&nervix_models::Unit::Single)
-                .and_then(|unit| unit.wasm_state_reset.as_ref())
+                .wasm_state_reset
+                .as_ref()
                 .is_some_and(|current| current.request() == reset.request())
         {
             return false;
         }
         let (Some(existing_generations), Some(desired_generations)) = (
-            existing
-                .units
-                .get(&nervix_models::Unit::Single)
-                .and_then(|unit| unit.wasm_state_generations.as_ref()),
-            desired
-                .units
-                .get(&nervix_models::Unit::Single)
-                .and_then(|unit| unit.wasm_state_generations.as_ref()),
+            existing.wasm_state_generations.as_ref(),
+            desired.wasm_state_generations.as_ref(),
         ) else {
             return false;
         };
@@ -674,7 +656,7 @@ mod tests {
             reassignments,
             entities
                 .into_iter()
-                .map(|node| NodeUnitRef::new(node, nervix_models::Unit::Single))
+                .map(|node| NodeUnitRef::new(node, nervix_models::Unit::SINGLE))
                 .collect::<Vec<_>>()
         );
         assert!(dynamic_updates.is_empty());
@@ -784,7 +766,7 @@ mod tests {
                         kind: ModelKind::Ingestor,
                         identifier: named("event_source"),
                     },
-                    nervix_models::Unit::Single
+                    nervix_models::Unit::SINGLE
                 )],
                 dynamic_updates: Vec::new(),
             }
@@ -809,7 +791,7 @@ mod tests {
                         kind: ModelKind::Ingestor,
                         identifier: named("event_source"),
                     },
-                    nervix_models::Unit::Single
+                    nervix_models::Unit::SINGLE
                 )],
                 dynamic_updates: Vec::new(),
             }
@@ -838,7 +820,7 @@ mod tests {
                         kind: ModelKind::Ingestor,
                         identifier: named("event_source"),
                     },
-                    nervix_models::Unit::Single
+                    nervix_models::Unit::SINGLE
                 )],
                 dynamic_updates: Vec::new(),
             }
@@ -871,7 +853,7 @@ mod tests {
                         kind: ModelKind::Ingestor,
                         identifier: named("event_source"),
                     },
-                    nervix_models::Unit::Single
+                    nervix_models::Unit::SINGLE
                 )],
                 dynamic_updates: Vec::new(),
             }
@@ -902,7 +884,7 @@ mod tests {
                         kind: ModelKind::Ingestor,
                         identifier: named("event_source"),
                     },
-                    nervix_models::Unit::Single
+                    nervix_models::Unit::SINGLE
                 )],
                 dynamic_updates: vec![DynamicModelUpdate::RelayCapacity {
                     relay: named("events"),
@@ -938,16 +920,16 @@ mod tests {
         let mut existing = wasm_processor_schedule("node-1");
         let single = existing.nodes[0]
             .units
-            .shift_remove(&nervix_models::Unit::Single)
+            .shift_remove(&nervix_models::Unit::SINGLE)
             .expect("the fixture starts with one unit");
         existing.nodes[0]
             .units
-            .insert(nervix_models::Unit::Partition(0), single.clone());
+            .insert(nervix_models::Unit::partition(0), single.clone());
         existing.nodes[0]
             .units
-            .insert(nervix_models::Unit::Partition(1), single);
+            .insert(nervix_models::Unit::partition(1), single);
         let mut desired = existing.clone();
-        desired.nodes[0].units[&nervix_models::Unit::Partition(1)]
+        desired.nodes[0].units[&nervix_models::Unit::partition(1)]
             .wasm_state_generations
             .as_mut()
             .expect("the processor has guest-state generations")
@@ -1014,7 +996,7 @@ mod tests {
                 entities: vec![wasm_processor_ref()],
                 reassignments: vec![NodeUnitRef::new(
                     wasm_processor_ref(),
-                    nervix_models::Unit::Single
+                    nervix_models::Unit::SINGLE
                 )],
                 dynamic_updates: Vec::new(),
             }

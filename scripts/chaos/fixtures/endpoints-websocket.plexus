@@ -1,6 +1,6 @@
 BEGIN;
 
-CREATE ENDPOINT chaos_edge_stream ON chaos_edge PATH '/stream' TYPE WEBSOCKETS;
+CREATE WEBSOCKETS ENDPOINT chaos_edge_stream ON chaos_edge PATH '/stream';
 
 CREATE RELAY chaos_edge_frames SCHEMA chaos_edge_record UNBRANCHED CAPACITY 1;
 
@@ -14,8 +14,9 @@ CREATE WEBSOCKETS ENDPOINT INGESTOR chaos_edge_frame_source
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED KAFKA TOPIC EMITTER chaos_edge_frame_emitter
+CREATE KAFKA TOPIC EMITTER chaos_edge_frame_emitter
   FROM chaos_edge_frames
+  ATTACHED
   TO chaos_edge_kafka TOPIC 'chaos_edge_frames'
     MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
     ENCODE USING chaos_edge_json

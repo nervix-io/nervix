@@ -274,12 +274,12 @@ async fn requests_reach_the_answer_that_accepts_signed_for_the_configured_host()
         .await
         .expect("the answer that accepts returns the queue URL");
     assert_eq!(queue_url, format!("http://{SERVICE}/000000000000/{QUEUE}"));
-    let mut source = open_source(&config, fixture.dns()).await;
+    let mut ingestor = open_ingestor(&config, fixture.dns()).await;
     assert_eq!(
-        source
+        ingestor
             .resume()
             .await
-            .expect("the source reaches the same answer"),
+            .expect("the ingestor reaches the same answer"),
         IngestorResume::Ready
     );
 
@@ -557,18 +557,18 @@ async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
     );
 }
 
-/// A ingestor instance of the client `config` declares, polling the queue every check looks up.
-pub(crate) async fn open_source(
+/// An ingestor instance of the client `config` declares, polling the queue every check looks up.
+pub(crate) async fn open_ingestor(
     config: &[ClientConfigEntry],
     dns: DnsResolver,
 ) -> SqsQueueIngestor {
     let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
     let plan = SqsQueueIngestorPlan::new(config, queue, dns)
         .await
-        .expect("the source client configuration is valid");
+        .expect("the ingestor client configuration is valid");
     SqsQueueIngestor::open(&plan, 0)
         .await
-        .expect("opening a source sends no request")
+        .expect("opening an ingestor sends no request")
 }
 
 /// A request for the next batch, which an ingestor that has not looked its queue up never sends.
@@ -580,7 +580,7 @@ pub(crate) fn batch_request() -> IngestorBatchRequest {
 }
 
 #[nervix_primitives::test]
-async fn a_source_looks_its_queue_up_once_when_it_first_resumes() {
+async fn an_ingestor_looks_its_queue_up_once_when_it_first_resumes() {
     let fixture = Fixture::start().await;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
@@ -592,7 +592,7 @@ async fn a_source_looks_its_queue_up_once_when_it_first_resumes() {
     fixture.answer(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
     let service = stand_in(listener, 1, QueueAnswer::Url);
 
-    let mut source = open_source(
+    let mut ingestor = open_ingestor(
         &client_config(&format!("http://{SERVICE}:{port}")),
         fixture.dns(),
     )
@@ -600,21 +600,21 @@ async fn a_source_looks_its_queue_up_once_when_it_first_resumes() {
 
     // Opening built the client alone: it neither resolved the service's name nor polled.
     assert_eq!(fixture.authority.questions_for(SERVICE), 0);
-    assert!(source.needs_resume());
-    let batch = source
+    assert!(ingestor.needs_resume());
+    let batch = ingestor
         .next_batch(batch_request(), &IngestorReadCancellation::new())
         .await
-        .expect("a source without its queue's URL asks to resume");
+        .expect("an ingestor without its queue's URL asks to resume");
     assert!(matches!(batch, IngestorBatch::ResumeRequired));
 
     assert_eq!(
-        source
+        ingestor
             .resume()
             .await
             .expect("the stand-in returns the queue URL"),
         IngestorResume::Ready
     );
-    assert!(!source.needs_resume());
+    assert!(!ingestor.needs_resume());
     let requests = service.await.expect("the stand-in does not panic");
     assert_eq!(requests.len(), 1);
     assert!(
@@ -626,26 +626,26 @@ async fn a_source_looks_its_queue_up_once_when_it_first_resumes() {
     );
     // The stand-in no longer listens, so only an ingestor that kept the URL is ready again.
     assert_eq!(
-        source
+        ingestor
             .resume()
             .await
-            .expect("a source that has its queue's URL sends no request"),
+            .expect("an ingestor that has its queue's URL sends no request"),
         IngestorResume::Ready
     );
 }
 
 #[nervix_primitives::test]
-async fn a_source_that_cannot_reach_the_service_opens_and_fails_its_resume() {
+async fn an_ingestor_that_cannot_reach_the_service_opens_and_fails_its_resume() {
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
     let port = endpoint.port();
-    let mut source = open_source(
+    let mut ingestor = open_ingestor(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
     )
     .await;
 
-    let report = source
+    let report = ingestor
         .resume()
         .await
         .expect_err("a refused connection cannot return the queue URL");
@@ -665,8 +665,8 @@ async fn a_source_that_cannot_reach_the_service_opens_and_fails_its_resume() {
         "{message}"
     );
     assert!(
-        source.needs_resume(),
-        "a failed lookup leaves the source to resume again"
+        ingestor.needs_resume(),
+        "a failed lookup leaves the ingestor to resume again"
     );
 }
 
@@ -682,13 +682,13 @@ async fn a_queue_the_service_does_not_have_fails_the_resume_with_its_name() {
             .expect("a bound listener has an address")
             .port();
         let service = stand_in(listener, 1, answer);
-        let mut source = open_source(
+        let mut ingestor = open_ingestor(
             &client_config(&format!("http://127.0.0.1:{port}")),
             fixture.dns(),
         )
         .await;
 
-        let report = source
+        let report = ingestor
             .resume()
             .await
             .expect_err("the service does not have the queue");
@@ -706,7 +706,7 @@ async fn a_queue_the_service_does_not_have_fails_the_resume_with_its_name() {
             "{answer:?}: {report:?}"
         );
         assert_eq!(missing.to_string(), "SQS queue 'orders' does not exist");
-        assert!(source.needs_resume(), "{answer:?}");
+        assert!(ingestor.needs_resume(), "{answer:?}");
         let requests = service.await.expect("the stand-in does not panic");
         assert_eq!(
             requests.len(),
@@ -772,11 +772,13 @@ async fn a_ca_file_smithy_cannot_trust_fails_the_client_configuration_of_both_di
         let plan = SqsQueueIngestorPlan::new(&config, queue, fixture.dns()).await;
         let report = match plan {
             Ok(plan) => {
-                let mut source = SqsQueueIngestor::open(&plan, 0)
+                let mut ingestor = SqsQueueIngestor::open(&plan, 0)
                     .await
-                    .expect("opening a source sends no request");
-                let resume = source.resume().await;
-                panic!("a CA file with {case} configured a source, whose resume gave {resume:?}");
+                    .expect("opening an ingestor sends no request");
+                let resume = ingestor.resume().await;
+                panic!(
+                    "a CA file with {case} configured an ingestor, whose resume gave {resume:?}"
+                );
             }
             Err(report) => report,
         };
@@ -854,8 +856,8 @@ async fn a_queue_lookup_the_service_never_answers_ends_within_timeout_ms_after_o
         value: budget.as_millis().to_string(),
     });
 
-    let mut source = open_source(&config, fixture.dns()).await;
-    let resumed = nervix_primitives::time::timeout(GENEROUS_BUDGET, source.resume())
+    let mut ingestor = open_ingestor(&config, fixture.dns()).await;
+    let resumed = nervix_primitives::time::timeout(GENEROUS_BUDGET, ingestor.resume())
         .await
         .expect("a lookup the service never answers ends within the client's timeout_ms");
     let report = resumed.expect_err("a service that never answers returns no queue URL");
@@ -931,11 +933,11 @@ async fn a_session_token_is_sent_with_the_requests_of_both_directions() {
     SqsQueueEmitter::queue_url(&client, QUEUE)
         .await
         .expect("the stand-in returns the queue URL");
-    let mut source = open_source(&config, fixture.dns()).await;
-    source
+    let mut ingestor = open_ingestor(&config, fixture.dns()).await;
+    ingestor
         .resume()
         .await
-        .expect("the stand-in returns the queue URL to the source too");
+        .expect("the stand-in returns the queue URL to the ingestor too");
 
     let requests = service.await.expect("the stand-in does not panic");
     assert_eq!(requests.len(), 2);
@@ -972,7 +974,7 @@ async fn a_client_must_name_its_region_and_credentials_in_both_directions() {
         let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
         let plan = SqsQueueIngestorPlan::new(&config, queue, fixture.dns()).await;
         let Err(report) = plan else {
-            panic!("a source client without {missing} was configured");
+            panic!("an ingestor client without {missing} was configured");
         };
         assert!(
             matches!(
@@ -1010,7 +1012,7 @@ async fn a_ca_file_holding_a_certificate_configures_both_directions() {
     let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
     SqsQueueIngestorPlan::new(&config, queue, fixture.dns())
         .await
-        .expect("a source trusting a CA certificate is configured");
+        .expect("an ingestor trusting a CA certificate is configured");
 }
 
 #[nervix_primitives::test]

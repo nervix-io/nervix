@@ -22,7 +22,7 @@ detailed contracts of their respective engines and integrations.
 | Registry and decisions | Reference, type, sensitivity, capability, branch, and placement validation; pure schedule classification; construction of typed node and domain plans | A complete execution revision and a typed change decision |
 | Control plane | Committing models, domain state and schedules through consensus; ordering activation, quiescence, ownership handoff, and local installation | The committed schedule and domain state to the planner; the resulting revision to the runtime |
 | Engines and infrastructure | VM lowering and compilation, schema and codec engines, connector contracts, resource storage, WASM preparation, and state storage | Prepared programs or local resources when the runtime binds a plan |
-| Data plane | Binding a revision to local capabilities, publishing routing state, starting and refreshing tasks, branch-local execution, and ACK tracking | Arrow batches and external source or emitter operations |
+| Data plane | Binding a revision to local capabilities, publishing routing state, starting and refreshing tasks, branch-local execution, and ACK tracking | Arrow batches and external ingestor or emitter operations |
 
 Models, domain lifecycle, and schedules are strongly persisted control-plane state. Execution
 revisions and their compiled programs are reconstructed in memory from the committed schedule;
@@ -45,11 +45,35 @@ apply anything. The revision holds:
   schedule; and
 - the ownership-handoff fingerprint computed from the committed schedule's unit placements.
 
-Each scheduled node owns a map of `Unit::Single`, `Unit::Partition(p)`, or `Unit::Instance(i)`
+Each scheduled node owns a map of `Unit` identities with `Single`, `Partition(p)`, or `Instance(i)`
 placements. The unit carries its primary, assigned nodes, ownership transition, and WASM guest
 generations. The revision and planned resource assignments preserve those unit keys, and schedule
-reassignments name the node and unit together. Current graphs emit one `Single` unit for each node;
-the branch Model records one direct partition while the language has no partition syntax.
+reassignments name the node and unit together. Relays, processors and generators branched by a
+branch of several partitions emit one `Partition` unit per partition. An instance-capable ingestor
+emits one `Instance` unit per resolved intake index; other nodes emit one `Single` unit.
+
+Processor specifications share the logical node's compiled VM, inference and WASM artifacts.
+Published task plans are keyed by `NodeUnitRef` and carry that unit's WASM generations and reset.
+A changed unit lifetime replaces its publication while retaining reusable compiled artifacts.
+Processor, generator and placement-task ownership is unit-qualified, so an assignment delta ends
+only lost units and preserves unchanged sibling supervisors, checkpoint writers and replica polls.
+
+Ingestor entrypoints are keyed by `NodeUnitRef`. Planning lowers the common input declaration and
+routes once, then binds each unit's identity and Kafka primary into its start plan. Validation
+requires the complete declared unit set before a plan can run. The runtime registers ingestors,
+quiesce controls, ACK roots, readiness and status under `DomainNodeUnitRef`; `AlreadyRunning` names
+that exact unit. Each ingestor owns its route runtimes and `BranchLru`/`BranchAggregated` placements.
+Schedule application stops lost units, rebinds retained state originators and starts gained units
+without rebuilding unaffected sibling intake tasks. A changed ingestor unit set is one layout
+transition: each preceding unit contributes one persisted frozen cut. The coordinator retains
+its checkpoint descriptors and asks the source to project those exact bytes for each target,
+without checkpointing the full source again. Every target primary and replica receives prepared
+state before publication. Installation stops and joins the preceding intake
+layout before activating those cuts, including units retained on the same node. Kafka assignments
+are dealt for the target count in the same committed schedule. Offset joins retain the newest
+canonical start, prefer the actual preceding owner's progress over a pending seed, and retain
+seeds for an instance that had not initialized. Metric series retain their complete origin labels
+and values, with one checkpoint owner for each historical instance.
 
 The source digest identifies which schedule produced the installed revision. A planned change
 also carries its predecessor digest, so an incremental application is attempted only when the
@@ -60,7 +84,7 @@ encoding and does not substitute the source digest for it.
 
 Registry validation rejects invalid candidate Models before they become an active graph.
 Execution-revision construction resolves references and lowers the remaining schedule-specific
-contracts before local installation. A missing relay, schema, codec, branch, source, client, or
+contracts before local installation. A missing relay, schema, codec, branch, ingestor, client, or
 error destination fails at that planning boundary with the owning node or route identified. The
 runtime never repairs a missing decision with a Model lookup or an implicit default. Only a
 committed schedule supplies the placement and state authority used for installed execution.
@@ -68,7 +92,10 @@ committed schedule supplies the placement and state authority used for installed
 The WebSockets connection plan carries a validated `WebsocketsUpgradeHeaders` collection beside
 its resolved client and signaling reference. Validation and planning both preserve a typed refusal
 if literal fields violate HTTP bounds or protocol-owned names. Runtime composition passes the
-validated collection directly to the connector; it does not read or reinterpret the source Model.
+validated collection directly to the connector; it does not read or reinterpret the ingestor Model.
+Registry admission and parameter transitions check the canonical collection against committed
+header caps. Plan conversion retains physical representation bounds without imposing fixed
+defaults on an already admitted model.
 
 Process startup has an earlier registry path: `RuntimeChanges` carries each recovered active graph
 inside the registry and application boundary. Before runtime application, it projects that graph
@@ -83,25 +110,51 @@ both use the same schedule-to-revision planning boundary.
 | Revision part | Decision made before installation | Node-local binding or execution |
 | --- | --- | --- |
 | Domain activation | Compiled schemas; wire formats and codecs; relay schema, branch retention, capacity, and materialized-state presence; VHOST, endpoint, and signaling references | Load pinned descriptors, compile codecs and signaling protocols, install relay services and endpoint routes |
-| Entrypoints | Ingestor source, client, codec, ACK and quiesce contracts; ordered routes, filters, branch construction, and reingestor input edges | Bind VM programs and connector resources; open sources and attach relay consumers only after preparation succeeds |
+| Entrypoints | Ingestor connector, client, codec, ACK and quiesce contracts; ordered routes, filters, branch construction, and reingestor input edges | Bind VM programs and connector resources; open ingestors and attach relay consumers only after preparation succeeds |
 | Processor specifications | Node topology, exact branch policy, ordered outputs, materialized dependencies, and schedule residue that affects a revision | Bind prepared VM, window, inferencer, and WASM artifacts into a published processor plan; instantiate one task per concrete branch |
 | Resources | Pinned lookup file and codec, UDF program, generator source and ordered routes, WASM module file and scheduled assignment | Load the named local version, build lookup indexes, prepare modules, and start branch-local generator or processor work |
 | Emitters | Typed emitter and optional connector client or codec, ordered source relays and predicates, construction, request, ordering and envelope expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the emitter |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
 
-Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT, NATS and
-SQS alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only
-entities need no mode-admission recheck. Shared retry and acknowledgement-duration validation
-borrows the entity-owned policy. The destination's validated external-name type passes through the
-plan into connector configuration without normalization. Iceberg resolves its configured storage
+Emitter key plans retain the admitted `STRING` or `BYTES` expression constraint and the source's
+resolved branch contract. Binding preserves the exact inferred type and branch sensitivity;
+execution encodes only a string key's UTF-8 bytes. `PARTITION FROM BRANCH` retains the source
+partition rule separately from the external key, so a connector applies the source ordinal modulo
+the broker topic's partition count without deriving a key from branch identity. SQS FIFO group
+plans always hold an expression. The evaluated key, partition and group remain with the retained
+payload through packing and retries.
+
+An inferencer's state specification records its validated port pairs, fixed element counts,
+initial expressions and static tensor bytes per branch. Node-local binding materializes the initial
+tensors before publishing the processor template. Each concrete branch starts with that immutable
+initial generation and exclusively owns its successors. Stateful admission runs the model once per
+row before output-route buffering; native state outputs become the next invocation's inputs without
+an Arrow round trip. Route flushes dispatch already-computed output. The stateless inferencer keeps
+its existing flush-time execution. These tensor generations are volatile and are recreated from
+the prepared initial generation after restart, owner change or eviction.
+
+Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT and SQS
+alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only
+entities need no mode-admission recheck. NATS SUBJECT lowers to a core-write leaf with no
+acknowledgement policy, while NATS STREAM lowers to a separate leaf carrying the named stream,
+literal publish subject and validated PubAck window. The runtime starts the matching connector
+implementation from that leaf; neither implementation selects a publishing mode from a Model.
+Shared retry and acknowledgement-duration validation borrows the entity-owned policy. The
+destination's validated external-name type passes through the plan into connector configuration
+without normalization. Iceberg resolves its configured storage
 client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
 that resolved backend and never infers it from the statement or location.
 
+NATS ingestor composition binds the node executor into its connector plan, and its emitter uses
+the executor supplied by the emitter host. Both authenticate through the same options owner;
+mounted credentials reads take filesystem worker admission and charge their temporary bytes
+before allocation. A connector creates no independent executor at startup or reconnect.
+
 The registry establishes batching legality and direct-mapping key and type contracts from each
-entity's vocabulary declaration before planning. A emitter that requires `BATCH` therefore receives
+entity's vocabulary declaration before planning. An emitter that requires `BATCH` therefore receives
 the already-validated batch configuration; planning does not maintain another required-batching
 table. Transport-ingestor ACK, batch and retry durations are likewise validated before admission,
-including the shared schedulable bound, so an unusable policy cannot reach source installation.
+including the shared schedulable bound, so an unusable policy cannot reach ingestor installation.
 
 Connector plans preserve the vocabulary's connector/entity nesting. The ingestor planner emits,
 for example, `IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(...))`; the emitter planner
@@ -113,10 +166,13 @@ configuration. HTTP and WebSockets endpoint plans remain distinct entities while
 host's intake lifetime mechanism. Labels are derived from declarations and retained at plan/start
 time, without an allocation per published batch.
 
-An HTTP polling leaf carries the statement's validated method, literal headers and effective
-response size limit together with its cadence and client reference. Runtime composition resolves
-the client's mount and node DNS handle once, then passes those typed values to the connector;
-polling never reads a configuration Model to recover the request method.
+An HTTP polling leaf carries the validated method, header declarations with literal values or
+client-secret keys, and effective response size limit together with its cadence and client reference.
+Runtime composition resolves the client's mount and node DNS handle once and captures the current
+HTTP header caps. When it opens, the connector reads each referenced secret from the client's
+resolved configuration and checks the complete resolved headers against those caps before opening
+a request, retaining sensitivity on secret values. Polling never reads a configuration Model to
+recover the method or the policy.
 
 An Iceberg plan carries the statement's validated catalog namespace with its table identity.
 Local opening uses exactly those namespace levels, independently of the Nervix domain name.
@@ -131,7 +187,7 @@ omitted `PLATFORM` from the entity's declared default once; composition passes t
 the connector configuration. Preparation uses it only when the codec omits `platform`. The
 runtime neither reads the Sentry Model nor selects its own default.
 
-Kafka source installation also binds the node-owned executor into the connector plan. Partition
+Kafka ingestor installation also binds the node-owned executor into the connector plan. Partition
 inspectors used by scheduling and the host's partition watch use that same node executor. The
 connector interprets the effective native client deadline and admits its synchronous driver calls;
 the decision layer neither opens a consumer nor selects a worker backend.
@@ -170,8 +226,9 @@ it reports the complete error chain and retries on the admission loop's half-sec
 when neither committed value changes. A new schedule or domain update wakes it sooner. Each attempt
 reads the current coherent state through the same admission and installation sequence; it does not
 replay a captured failed revision or issue another configuration command. Successful installation
-waits for the next committed update without periodic application. Shutdown ends a pending retry
-wait.
+waits for the next committed update without periodic application. The callback retains its local
+parameter-notice observation across awaits and announces each installed revision once, after
+successful application. Shutdown ends a pending retry wait.
 
 Forced-recovery preparation subscribes to domain installation before checking for its execution,
 and takes the runtime's application sequence while selecting that execution. This waits for a
@@ -189,6 +246,10 @@ operation. A reader sees one complete routing snapshot; long-lived tasks cache i
 refresh their typed plan identity between batches. The endpoint routing index and other lifecycle
 resources are installed at their own cutover points under the application sequence. This is a
 node-local publication guarantee, not a distributed atomic transaction across cluster nodes.
+
+Processor binding uses the caller's node identity that selected its input units, or the caller's
+unplaced execution context. A scheduled standalone runtime supplies its node identity even when
+it has no dispatcher. Binding does not derive that identity again from transport availability.
 
 The routing snapshot also retains each materialized relay's installed-state publication and the
 domain's relay-state epoch. Assignments are registered before these handles are staged; a missing
@@ -208,7 +269,7 @@ bound on every live node regardless of domain status, leadership, or placement; 
 does not admit its graph's traffic. Resuming or changing the domain start version builds the
 appropriate running revision rather than treating passive state as an active task graph.
 
-Schedule planning assigns endpoint and Syslog sources from live voter membership, independently
+Schedule planning assigns endpoint and Syslog ingestors from live voter membership, independently
 of the eligible placement set. A cordoned restore coordinator therefore still serves its local
 endpoint intake after `RESUME`, while placed relays and processors execute on eligible nodes.
 Removing a voter recomputes listener assignments from the remaining live voters before publication.
@@ -217,9 +278,14 @@ WASM ownership preparation follows the installed revision's execution mode. A pa
 retains and transfers the validated checkpoint inventory without instantiating guests or reading
 its stopped clock. Guest restoration is deferred until `START` installs a running revision.
 
+Endpoint activation preserves `EndpointKind`: HTTP has no signaling data, while WebSockets carries
+its optional signaling reference. Installation resolves only that variant's reference into its
+compiled protocol. Published routes retain that same kind and prepared protocol; the endpoint-type
+projection used by request dispatch and ingestor capabilities derives from the kind.
+
 Server endpoint installation replaces that domain's complete set of host-and-path definitions in
-the node's immutable intake table. Source starts bind prepared intake lifetimes to the same table;
-source ending and domain teardown end those lifetimes before withdrawing them. Other domains'
+the node's immutable intake table. Ingestor starts bind prepared intake lifetimes to the same table;
+ingestor ending and domain teardown end those lifetimes before withdrawing them. Other domains'
 definitions and intakes survive the replacement. Passive execution keeps endpoint definitions for
 inspection but publishes none for request routing. HTTP resolves one route per request and a
 WebSocket retains the route and signaling protocol selected at upgrade. The detailed admission and
@@ -227,7 +293,7 @@ publication contract remains in [Data-Plane Concurrency](./data-plane-concurrenc
 
 The endpoint ingestor plan also lowers request policy once: `NoAck`, or an acknowledged policy
 with positive response capacity, physical timeout and retry delay. The decision rejects an
-unusable duration, incompatible quiesce policy or missing WebSocket signaling reference. Source
+unusable duration, incompatible quiesce policy or missing WebSocket signaling reference. Ingestor
 composition creates the intake's window and checks its prepared signaling encoder. Runtime
 requests consume that prepared policy and never read configuration Models or parse durations.
 
@@ -270,6 +336,9 @@ The swap sequence fences delivery before stopping an owner, prepares new local p
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot
 before waking materialized-state waiters. An owner that still executes locally across a placement
 change keeps its task; a moved owner rebinds only its affected runtime and state placement. A
+partition a node keeps owning keeps its owner task, while its relay-state task restarts around the
+rebinding with the originator the new assignment issued, as
+[Materialized relay entries](data-plane-concurrency.md#materialized-relay-entries) describes. A
 reassignment rebinds the replicated state of every node it names, so a Kafka ingestor kept this way
 takes the originator its domain offsets' new binding issued: a change that only replaces a replica
 of those offsets never refuses the ingestor's commits. An ingestor instance the schedule stopped
@@ -277,7 +346,7 @@ keeps the originator it last held, which every later binding refuses.
 
 The affected relay gates remain closed through publication. An already buffered owner batch takes
 a nonwaiting permit before fan-out: it finishes under the prior consumer set if admitted before
-the fence, or fails its record ACKs so its source retries under the published consumer set.
+the fence, or fails its record ACKs so its ingestor retries under the published consumer set.
 
 A forced ownership change additionally identifies the input relays of its reassigned nodes. Once
 their local dispatch gates close, installation retires the preceding channel generation of each
@@ -296,7 +365,7 @@ installation. Admission reconciliation retains its existing five-second budget p
 attempt, independently of the entity gate deadline and the remote admission's longer total budget.
 Other local preparation and drain work retain their own bounds. Admission that already won keeps
 its record-ACK obligations; an unconfirmed outcome fails those obligations and the acknowledged
-source retries using the replacement channel. Recovery can replay records already processed, so
+ingestor retries using the replacement channel. Recovery can replay records already processed, so
 this is not an exactly-once guarantee. Prepared forced-recovery checkpoints still activate under
 the desired placement before its tasks start. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
 owns cancellation and its uncertainty; [Data-Plane Concurrency](./data-plane-concurrency.md#dispatch-gate-engagement)
@@ -307,31 +376,38 @@ typed plan identity. [Transaction Quiescence And Impact Inspection](./transactio
 owns planned versus actual pause scope; [Control Plane](./control-plane.md) owns schedule
 publication and relocation.
 
-## Sources, Emitters, And Error Routes
+## Ingestors, Emitters, And Error Routes
 
-An ingestor start uses the scheduled source class, client configuration, codec, ACK boundary,
-and bound ordered routes from its entrypoint plan. A Pulsar plan retains the owned subscription's
-required creation position alongside its ownership; composition passes that typed choice to the
-connector without inventing a position for a provisioned cursor. A reingestor binds its source predicates and
+An ingestor start uses the scheduled ingestor class, client configuration, codec, ACK boundary,
+and bound ordered routes from its entrypoint plan. The registry validates a fixed instance count's
+native conversion and execution-unit entry layout before the schedule materializes those units.
+A Pulsar plan retains the owned subscription's
+required creation position alongside its ownership, and the subscription's required type;
+composition passes those typed choices to the connector without inventing a position for a
+provisioned cursor. A reingestor binds its source predicates and
 incoming-branch materialized dependencies before attaching relay inputs. Initial build, entity
 swap, reassignment, memory-pressure resume, and Kafka domain-offset placement all use those
 typed contracts. Route plans decide whether output is unbranched, preserves an incoming key, or
 constructs a new key; the actual branch state remains local to each concrete branch. Transport
 headers remain connector-owned and enter a relay only when copied into schema-backed fields.
 
-An input that owns external session state is retired from its previous typed plan after its source
-tasks stop. `IngestorStartPlan` decides whether the source changed, independently of codec or route
+An input that owns external session state is retired from its previous typed plan after its ingestor
+tasks stop. `IngestorStartPlan` decides whether the ingestor changed, independently of codec or route
 changes. Runtime installation snapshots locally owned retiring inputs before withdrawing the
 installed revision, and the composition root dispatches retirement. Passive revisions retain the
 same plans, so removing an ingestor after `STOP` can still release its MQTT sessions. The MQTT
-connector compares validated session identities and subscriptions, cleans up obsolete identities
-best-effort, and prepares changed sessions at the replacement endpoint before its source starts.
-No Model, source driver, or registry guard is retained across this transition. Ordinary shutdown
+host prepares its rendered client configurations, connector plan and resource mounts once
+per logical declaration on a node. Unit starts clone that immutable plan with their own read-ahead
+metric handle, preserving the global instance indices and avoiding repeated identity scans.
+Its connector compares validated session identities and subscriptions, cleans up obsolete identities
+best-effort, and prepares changed sessions at the replacement endpoint before its ingestor starts.
+No Model, ingestor driver, or registry guard is retained across this transition. Ordinary shutdown
 and ownership transfer with an unchanged input preserve external sessions. For Pulsar, a changed
 owned input reaches retirement too: the connector compares the two resolved service endpoints,
 qualified topics and subscription names before deciding whether to remove the preceding
 subscription. An unchanged subscription is retained even when the replacement declares it
-`PROVISIONED`; replacing its routes, codec, mode or instance count does not remove its backlog.
+`PROVISIONED`; replacing its routes, codec, mode, type or instance count does not remove its
+backlog.
 
 The emitter plan pairs its ordered relay inputs with one typed emitter and its applicable client,
 codec, expression, flush, batching, and error contracts. A native `TO CLIENT` emitter has no
@@ -341,7 +417,7 @@ program, and attachment boundary. Registry validation rejects an incompatible sc
 batch contract before the plan can run. A flush-only dynamic change keeps that delivery contract;
 a contract change replaces the endpoint and ends existing consumers. The host binds mounts and
 programs before opening an emitter; reconnects and retries reuse the typed configuration and retained
-prepared write. Swaps install consumer edges from the new plan. The connector receives source or
+prepared write. Swaps install consumer edges from the new plan. The connector receives ingestor or
 emitter settings and per-record outcomes, never graph placement authority, Models, ACK maps, or
 runtime state. [Connector Crates And The Connector Contract](./connector-contract.md) owns each
 external transport's header, retry, ACK, and commit behavior. [Client Session Protocol](./client-session-protocol.md)
@@ -366,10 +442,12 @@ error taxonomy and public reporting contract.
 
 Each typed node carries its branch and schema fingerprint and the state components it may own.
 Each unit carries its scheduled primary, assigned nodes, ownership transition, and guest-state
-generations. State placement and restoration use the node and unit together. Relays currently have
-one `Single` owner; only their optional materialized state has scheduler-selected replicas. A
-configured listener is
+generations. State placement and restoration use the node and unit together. Each relay unit has
+one execution owner; its optional materialized state has scheduler-selected replicas. A configured listener is
 different: it runs on every live server node even when its graph node is not the local primary.
+Each executing listener installs its own node-local metric checkpoint writer and restores that
+checkpoint on restart. A spread ingestor instead captures the metrics of its exact instance unit,
+including the physical-node contributions retained through ownership handoff.
 Remote relay-consumer edges are derived from the same planned nodes and inputs as local tasks.
 
 Planned handoff prepares state against the exact committed-schedule fingerprint. Reassignment
@@ -432,7 +510,7 @@ execution is reported as `RuntimeError::BuildDomainExecution`, naming the domain
 `ExecutionBuildError` step that failed and that step's own report beneath it, as
 [Errors And Diagnostics](./errors-and-diagnostics.md#absence-validation-and-planning) describes.
 The runtime records the whole chain as the domain's instantiation error, and an ingestor's start
-report as its transient error. It does not mark a failed cluster revision applied. Source and emitter
+report as its transient error. It does not mark a failed cluster revision applied. Ingestor and emitter
 delivery failures retain their existing ACK,
 retry, and message-error classification. Diagnostics identify operations and fields without
 including sensitive payload values.
@@ -441,7 +519,7 @@ The principal guarantees are one current plan shape, one complete typed revision
 domain schedule, no Model interpretation by production data-plane tasks, coherent node-local
 routing publication, exact branch and schema identities, and retries of unsuccessful revision
 applications. These do not make all cluster nodes switch simultaneously, persist in-flight
-messages, guarantee an external source or emitter is available, or turn a connector's delivery
+messages, guarantee an ingestor or emitter transport is available, or turn a connector's delivery
 contract into exactly-once end-to-end delivery. Engine-specific resource, batch, expression,
 and concurrency limits remain in their owning chapters.
 
@@ -461,6 +539,11 @@ status, accounting, metric, freeze and domain-clock dependencies. Their runtime 
 registration, teardown and observers; recurring operations use the retained capabilities. See
 [Data-Plane Concurrency](./data-plane-concurrency.md#retained-task-dependencies).
 
+Emitter payload counters and current-work gauges share the task's retained interaction handle.
+Preparation and write scopes update resolved children, without reaching the registry again.
+Buffer and prepared-payload owners withdraw only their own gauge contributions when they retire;
+process-local preparation totals survive those owner lifetimes.
+
 ## Replication Routing
 
 State construction publishes resolved replication routes to the installed state and that unit's
@@ -470,3 +553,11 @@ branch eviction and unit, entity or domain teardown retire those
 routes before removing registry entries. Frame handlers read the immutable route publication;
 announcers and entity catch-up tasks retain their route or lifecycle and never revisit execution
 or identity registries. See [Data-Plane Concurrency](./data-plane-concurrency.md#checkpoint-replication).
+
+## Parameter Revisions
+
+A coherent consensus runtime snapshot carries its committed parameter record alongside schedules
+and domains. A node installs that policy before constructing its execution revision and reporting
+prepared/ready. A returning node fences this step with the live revision used at construction and
+verifies equal values as it catches up. It does not activate a locally stored graph before that
+boundary. Policy installation changes no placement identity, stored state generation or ACK owner.

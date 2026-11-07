@@ -33,10 +33,10 @@
  *   Every blocking call accepts an optional `nx_cancel`. Triggering it, from any thread, makes the
  *   call return NX_ERROR_CANCELLED; a token created with a deadline makes the call return
  *   NX_ERROR_DEADLINE once the deadline passes. Cancelling a wait never rolls back work the server
- *   already admitted: a cancelled command keeps its execution reference, and executing the same
- *   `nx_execution` again recovers its outcome; a cancelled submission wait leaves the batch with
- *   its producer; a cancelled read leaves the read with its consumer; a cancelled settlement may
- *   still have settled its delivery.
+ *   already admitted: a cancelled durable command keeps its execution reference, and executing
+ *   the same `nx_execution` again recovers its outcome; a cancelled submission wait leaves the
+ *   batch with its producer; a cancelled read leaves the read with its consumer; a cancelled
+ *   settlement may still have settled its delivery.
  *
  * Bulk data
  *   Row events keep the verified frame they were decoded from. `nx_event_frame` borrows those
@@ -66,6 +66,7 @@ extern "C" {
 #endif
 
 typedef struct nx_session nx_session;
+typedef struct nx_connect_options nx_connect_options;
 typedef struct nx_execution nx_execution;
 typedef struct nx_outcome nx_outcome;
 typedef struct nx_schema nx_schema;
@@ -83,6 +84,20 @@ typedef struct nx_delivery nx_delivery;
 typedef struct nx_batch nx_batch;
 typedef struct nx_batch_builder nx_batch_builder;
 
+/* A client that begins on HTTPS requires HTTPS for every later seed and redirect. An explicit
+   requirement also refuses an HTTP initial endpoint. */
+typedef enum nx_tls_requirement {
+    NX_TLS_PREFERRED = 1,
+    NX_TLS_REQUIRED = 2
+} nx_tls_requirement;
+
+typedef enum nx_timeout_kind {
+    NX_TIMEOUT_CONNECT = 1,
+    NX_TIMEOUT_REQUEST = 2,
+    NX_TIMEOUT_RETRY = 3,
+    NX_TIMEOUT_BACKUP_WAIT = 4
+} nx_timeout_kind;
+
 /* What kind of failure an `nx_error` reports. */
 typedef enum nx_error_kind {
     /* An argument was missing, not UTF-8, out of range, or too small for the result. */
@@ -91,9 +106,9 @@ typedef enum nx_error_kind {
     NX_ERROR_CONNECT = 2,
     /* The session failed after it was opened. */
     NX_ERROR_TRANSPORT = 3,
-    /* Admitted work may have taken effect, and its outcome is not known. For a command the error
-       carries the execution reference, and executing the same `nx_execution` again recovers the
-       outcome. For a settlement the session was lost before the server's answer: the delivery
+    /* Admitted work may have taken effect, and its outcome is not known. For a durable command the
+       error carries the execution reference, and executing the same `nx_execution` again recovers
+       its outcome. For a settlement the session was lost before the server's answer: the delivery
        may be settled, or delivered again with a new reference. */
     NX_ERROR_UNCERTAIN = 4,
     /* The server refused to serve the request. Nothing was admitted. */
@@ -133,6 +148,17 @@ typedef enum nx_disposition {
     NX_DISPOSITION_EXECUTION_REFERENCE_EXPIRED = 8,
     NX_DISPOSITION_PREVIEW_STALE = 9
 } nx_disposition;
+
+/* Why a resource upload failed. */
+typedef enum nx_upload_failure {
+    NX_UPLOAD_INVALID_STREAM = 1,
+    NX_UPLOAD_RESOURCE_NOT_DECLARED = 2,
+    NX_UPLOAD_SIZE_MISMATCH = 3,
+    NX_UPLOAD_QUOTA_EXCEEDED = 4,
+    NX_UPLOAD_INSTALLATION_FAILED = 5,
+    /* The identity already names another archive; the retained upload outcome is unchanged. */
+    NX_UPLOAD_IDENTITY_CONFLICT = 6
+} nx_upload_failure;
 
 typedef enum nx_completion_status {
     NX_COMPLETION_READY = 1,
@@ -193,17 +219,49 @@ typedef enum nx_event_kind {
     NX_EVENT_DELIVERY_LOST = 2,
     /* Rows were skipped and the subscription stays open; `nx_event_row_count` is how many. */
     NX_EVENT_ROWS_SKIPPED = 3,
-    /* The server ended the subscription's generation, because its relay was redefined or removed.
-       It is the generation's last event, and the session never opens the generation again. */
+    /* The server ended the subscription's generation, because its relay was redefined or removed,
+       or a new session refused to open it again for the same reason; `nx_event_end_reason`
+       tells which. It is the generation's last event, and the session never opens the
+       generation again. */
     NX_EVENT_ENDED = 4,
     /* The session was lost, leaving a gap before the subscription is restored. */
     NX_EVENT_INTERRUPTED = 5,
     /* The session could not retain more events for this subscription. */
     NX_EVENT_CONSUMER_OVERFLOW = 6,
-    /* The session refused to open the interrupted subscription again, or did not answer; the
-       subscription stays interrupted and the session tries again later. */
+    /* The session refused for now to open the interrupted subscription again, for the cause
+       `nx_event_restoration_cause` reads; the subscription stays interrupted and the session
+       tries again after the reported wait. An unanswered reopening ends the session at its
+       request deadline; the waiting event reader opens the next session instead. */
     NX_EVENT_RESTORATION_FAILED = 7
 } nx_event_kind;
+
+/* Why a subscription's generation ended. */
+typedef enum nx_end_reason {
+    /* The relay, or the domain that held it, no longer exists. */
+    NX_END_RELAY_REMOVED = 1,
+    /* The relay was redefined, so the schema the subscription announced no longer describes its
+       rows. Subscribing again reads them under the current schema. */
+    NX_END_RELAY_CHANGED = 2
+} nx_end_reason;
+
+/* Why a session refused for now to open an interrupted subscription again, or to attach an
+   interrupted clock again. A clock's restoration reports only IN_TRANSACTION, REJECTED or FAILED. */
+typedef enum nx_restoration_cause {
+    /* The session holds a transaction, which refuses session-local requests until it ends. */
+    NX_RESTORATION_IN_TRANSACTION = 1,
+    /* The server refused the subscription's statement. */
+    NX_RESTORATION_INVALID_STATEMENT = 2,
+    /* The session already holds a subscription of that name. */
+    NX_RESTORATION_NAME_IN_USE = 3,
+    /* The subscription's filter does not compile against its relay's definition. */
+    NX_RESTORATION_INVALID_FILTER = 4,
+    /* The serving node could not open the subscription now. */
+    NX_RESTORATION_UNAVAILABLE = 5,
+    /* The session rejected the request without serving it. */
+    NX_RESTORATION_REJECTED = 6,
+    /* The library could not send the request, or could not use its reply. */
+    NX_RESTORATION_FAILED = 7
+} nx_restoration_cause;
 
 /* What a domain clock event reports. */
 typedef enum nx_clock_event_kind {
@@ -221,10 +279,10 @@ typedef enum nx_clock_event_kind {
        next session, and the clock that attachment reports follows as a STATE event; changes in
        between are not reported. */
     NX_CLOCK_EVENT_INTERRUPTED = 4,
-    /* The session refused to attach the interrupted clock again; the attachment stays interrupted
-       and the session tries again later. An attach the session leaves unanswered past the request
-       timeout is not reported this way: it ends that session, and the next session attaches the
-       clock again. */
+    /* The session refused for now to attach the interrupted clock again, for the cause
+       `nx_clock_event_restoration_cause` reads; the attachment stays interrupted and the session
+       tries again later. An attach the session leaves unanswered past the request timeout is not
+       reported this way: it ends that session, and the next session attaches the clock again. */
     NX_CLOCK_EVENT_RESTORATION_FAILED = 5
 } nx_clock_event_kind;
 
@@ -418,31 +476,56 @@ void nx_cancel_free(nx_cancel *cancel);
 
 /* ---- Sessions ----------------------------------------------------------------------------- */
 
+/* An options handle starts with the Rust client's defaults. The host may change it on one thread
+   at a time and release it after nx_session_connect: connecting copies the values it needs. Input
+   strings and certificate bytes are copied before each setter returns. The client validates all
+   URLs, the TLS policy, credentials and deadline bounds when it connects. */
+nx_connect_options *nx_connect_options_new(void);
+void nx_connect_options_free(nx_connect_options *options);
+nx_error *nx_connect_options_basic_auth(nx_connect_options *options, const uint8_t *username,
+                                        size_t username_len, const uint8_t *password,
+                                        size_t password_len);
+nx_error *nx_connect_options_tls_requirement(nx_connect_options *options, int32_t requirement);
+nx_error *nx_connect_options_ca_certificate(nx_connect_options *options, const uint8_t *pem,
+                                            size_t pem_len);
+nx_error *nx_connect_options_add_seed(nx_connect_options *options, const uint8_t *server,
+                                      size_t server_len);
+/* Milliseconds; each deadline must be from 1 millisecond through 24 hours. Invalid values are
+   rejected when the session connects. */
+nx_error *nx_connect_options_timeout(nx_connect_options *options, int32_t kind, uint64_t millis);
+
 /* Opens a session on `server`, an http or https URI of a node's session endpoint. `domain` may
-   be NULL for no selected domain. `username` and `password` are both NULL or both present. */
+   be NULL for no selected domain. `options` is required and is read as a snapshot; the host must
+   not change or release it while the call runs. */
 nx_error *nx_session_connect(const uint8_t *server, size_t server_len, const uint8_t *domain,
-                             size_t domain_len, const uint8_t *username, size_t username_len,
-                             const uint8_t *password, size_t password_len,
+                             size_t domain_len, const nx_connect_options *options,
                              const nx_cancel *cancel, nx_session **out);
 /* Releases the host's session, which ends once every producer, consumer and delivery of it is
    released too. Events, outcomes and batches read from it stay valid. */
 void nx_session_free(nx_session *session);
 
-/* Captures one command and its durable execution identity before anything is sent. */
+/* Captures one statement and an execution reference before anything is sent. Only durable commands
+   use the reference for outcome recovery; session-local requests have no durable identity. */
 nx_error *nx_session_prepare(nx_session *session, const uint8_t *query, size_t query_len,
                              const nx_cancel *cancel, nx_execution **out);
 void nx_execution_reference(const nx_execution *execution, const uint8_t **reference,
                             size_t *reference_len);
 void nx_execution_free(nx_execution *execution);
 
-/* Runs a prepared command. Running the same execution again after an uncertain, cancelled or
-   expired call recovers the command's outcome instead of running it twice. */
+/* Runs a prepared statement. For a durable command, running the same execution again after an
+   uncertain, cancelled or expired call recovers its outcome instead of running it twice. CREATE
+   SUBSCRIPTION, DELETE SUBSCRIPTION and ATTACH or DETACH DOMAIN CLOCK are session-local requests.
+   A repeated CREATE, DELETE or ATTACH may be refused after the first succeeded; for example a
+   repeated DELETE fails when the subscription is already absent. None recovers the earlier
+   outcome under the execution reference. Inspect the session or its events to establish current
+   state. */
 nx_error *nx_session_execute(nx_session *session, const nx_execution *execution,
                              const nx_cancel *cancel, nx_outcome **out);
 
 /* Waits for the next event of any subscription the session holds. The wait continues across a
    lost session: the events of subscriptions restored or opened on the next session follow, and
-   NX_ERROR_CLOSED is returned only when no server is known to open another session on. */
+   NX_ERROR_CLOSED is returned only when no server is known to open another session on. When unread
+   events are dropped from the bounded queue, it returns NX_ERROR_OVERFLOW; later reads continue. */
 nx_error *nx_session_next_event(nx_session *session, const nx_cancel *cancel, nx_event **out);
 
 /* Reads one bounded completion page for the full input at a UTF-8 byte cursor. `page_size` is
@@ -467,6 +550,9 @@ void nx_suggestions_free(nx_suggestions *suggestions);
 /* ---- Outcomes ----------------------------------------------------------------------------- */
 
 nx_disposition nx_outcome_disposition(const nx_outcome *outcome);
+/* Returns true and writes the typed upload failure when present. Completed uploads and other
+   commands return false without writing `failure`. A null out-parameter is allowed. */
+bool nx_outcome_upload_failure(const nx_outcome *outcome, nx_upload_failure *failure);
 void nx_outcome_message(const nx_outcome *outcome, const uint8_t **message, size_t *message_len);
 bool nx_outcome_execution_reference(const nx_outcome *outcome, const uint8_t **reference,
                                     size_t *reference_len);
@@ -523,6 +609,18 @@ void nx_event_subscription(const nx_event *event, const uint8_t **name, size_t *
 /* The rows a ROWS event carries, the rows a DELIVERY_LOST or ROWS_SKIPPED event counts, and zero
    for every other event. */
 uint64_t nx_event_row_count(const nx_event *event);
+/* Why the generation an ENDED event reports ended. Fails with NX_ERROR_TYPE for an event of
+   another kind, and with NX_ERROR_INVALID_ARGUMENT for a NULL `reason`. */
+nx_error *nx_event_end_reason(const nx_event *event, nx_end_reason *reason);
+/* Why the attempt a RESTORATION_FAILED event reports opened nothing. Fails with NX_ERROR_TYPE for
+   an event of another kind, and with NX_ERROR_INVALID_ARGUMENT for a NULL `cause`. */
+nx_error *nx_event_restoration_cause(const nx_event *event, nx_restoration_cause *cause);
+/* Only RESTORATION_FAILED carries these fields. The message is borrowed until the event is
+   released; the wait is nanoseconds. Another kind returns NX_ERROR_TYPE. A missing out-parameter
+   returns NX_ERROR_INVALID_ARGUMENT. */
+nx_error *nx_event_restoration_message(const nx_event *event, const uint8_t **message,
+                                       size_t *message_len);
+nx_error *nx_event_restoration_retry_after(const nx_event *event, uint64_t *retry_after_nanos);
 /* Adds a reference. Every reference, including the one `nx_session_next_event` returned, is
    released once with `nx_event_release`; the event and its frame are freed with the last one. */
 nx_event *nx_event_retain(nx_event *event);
@@ -567,9 +665,8 @@ nx_error *nx_event_cell_varlen(const nx_event *event, int32_t part, size_t row, 
    does not exist on the serving node, or the request was refused. An attach whose session was lost
    is sent again on the next session the library opens, and the call fails when none opens. An
    attach that returns NX_ERROR_CANCELLED or NX_ERROR_DEADLINE may still have attached the session:
-   executing the same nx_execution again is answered after the earlier attempt, completing or
-   refused as already attached, and nx_session_domain_clock then tells whether the session follows
-   the clock. */
+   repeating the same nx_execution sends another session-local request, which may be refused as
+   already attached. nx_session_domain_clock tells whether the session follows the clock. */
 
 /* Waits for the next event about the domain clocks the session follows. Events are coalesced per
    domain, so a caller that reads late receives the newest state and the newest tick of each domain
@@ -584,6 +681,13 @@ nx_clock_event_kind nx_clock_event_kind_of(const nx_clock_event *event);
 /* The domain whose clock the event concerns. */
 void nx_clock_event_domain(const nx_clock_event *event, const uint8_t **domain,
                            size_t *domain_len);
+/* Only RESTORATION_FAILED carries these fields. The message is borrowed until the event is
+   released; the wait is nanoseconds. Another kind returns NX_ERROR_TYPE. A missing out-parameter
+   returns NX_ERROR_INVALID_ARGUMENT. */
+nx_error *nx_clock_event_restoration_message(const nx_clock_event *event, const uint8_t **message,
+                                             size_t *message_len);
+nx_error *nx_clock_event_restoration_retry_after(const nx_clock_event *event,
+                                                uint64_t *retry_after_nanos);
 /* The START generation of a STATE or TICK event: the number of STARTs the domain has committed,
    zero before its first. This and every accessor below fail with NX_ERROR_TYPE for an event whose
    kind does not carry what they read. */
@@ -607,6 +711,10 @@ nx_error *nx_clock_event_tick(const nx_clock_event *event, uint64_t *tick_id,
                               int64_t *serving_logical);
 /* Why the server ended the attachment an ENDED event reports. */
 nx_error *nx_clock_event_end_reason(const nx_clock_event *event, nx_clock_end_reason *reason);
+/* Why the attempt a RESTORATION_FAILED event reports attached nothing: IN_TRANSACTION, REJECTED
+   or FAILED. */
+nx_error *nx_clock_event_restoration_cause(const nx_clock_event *event,
+                                           nx_restoration_cause *cause);
 /* Adds a reference. Every reference, including the one nx_session_next_clock_event returned, is
    released once with nx_clock_event_release; the event is freed with the last one. */
 nx_clock_event *nx_clock_event_retain(nx_clock_event *event);

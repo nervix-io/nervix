@@ -24,18 +24,17 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event ( seq I64, error_code STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_events
         FROM kafka_main TOPIC 'retried_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'retried_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'retried_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING ingest_codec
         TO events
@@ -44,7 +43,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER retried FROM events
+      CREATE KAFKA TOPIC EMITTER retried FROM events
+        ATTACHED
         TO kafka_main TOPIC 'retried_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 3s MAX 3s
           ENCODE USING event_codec
@@ -107,17 +107,16 @@ Feature: Emitter batch payloads through acknowledgements and retries
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_events
         FROM kafka_main TOPIC 'detached_retried_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'detached_retried_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'detached_retried_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING ingest_codec
         TO events
@@ -126,7 +125,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED KAFKA TOPIC EMITTER detached_retried FROM events
+      CREATE KAFKA TOPIC EMITTER detached_retried FROM events
+        DETACHED
         TO kafka_main TOPIC 'detached_retried_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 10s MAX 10s
           ENCODE USING event_codec
@@ -183,13 +183,13 @@ Feature: Emitter batch payloads through acknowledgements and retries
         operation STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge refused-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -255,12 +255,12 @@ Feature: Emitter batch payloads through acknowledgements and retries
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE SCHEMA emitter_error ( error_code STRING, source_user_id I64 );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA notification
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
       CREATE VHOST edge mongodb-retried-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec

@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The RabbitMQ client Model, the queue source and emitter Models and the exchange
+//! - **Owns.** The RabbitMQ client Model, the queue ingestor and emitter Models and the exchange
 //!   emitter Model with their delivery modes, the queue and exchange names with the rule AMQP holds
 //!   them to, the routing key an exchange emitter computes for every record, and what each entity
-//!   declares.
+//!   declares, the metadata a delivery exposes included.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The AMQP driver, or how a queue is consumed or a queue or an exchange is
 //!   published to.
 
@@ -16,7 +16,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::{NonZeroU16, NonZeroU64};
+use std::num::NonZeroU16;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -37,8 +37,9 @@ use crate::{
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     EnvelopeClauseKind, Expression, HeaderLayout, HeaderModel, IngestAcknowledgement,
     IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
-    LocatorName, OptionDeclaration, PositionClass, RetryPolicy,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionDeclaration, PositionClass,
+    RetryPolicy,
 };
 
 configured_client!(RabbitMq: unpooled, config CLIENT_CONFIG, CreateClientRabbitMq => RabbitMqConfigEntry);
@@ -89,7 +90,7 @@ fn rabbitmq_name_rule(text: &str) -> Result<(), ExternalNameError> {
 pub struct RabbitMqQueueIngestor {
     pub client: ClientName,
     pub queue: RabbitMqQueueName,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: RabbitMqIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -219,11 +220,33 @@ const RABBITMQ_EXCHANGE_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
+/// What a RabbitMQ delivery exposes: the envelope its broker attached to it, then the AMQP basic
+/// properties its publisher set, each in the exact type AMQP 0-9-1 writes. The timestamp is the
+/// instant AMQP's count of whole seconds since the Unix epoch names.
+const RABBITMQ_QUEUE_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("exchange", IngestorMetadataType::String),
+    IngestorMetadataField::new("routing_key", IngestorMetadataType::String),
+    IngestorMetadataField::new("delivery_tag", IngestorMetadataType::U64),
+    IngestorMetadataField::new("redelivered", IngestorMetadataType::Bool),
+    IngestorMetadataField::new("content_type", IngestorMetadataType::String),
+    IngestorMetadataField::new("content_encoding", IngestorMetadataType::String),
+    IngestorMetadataField::new("message_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("correlation_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("reply_to", IngestorMetadataType::String),
+    IngestorMetadataField::new("type", IngestorMetadataType::String),
+    IngestorMetadataField::new("app_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("user_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("priority", IngestorMetadataType::U8),
+    IngestorMetadataField::new("expiration", IngestorMetadataType::String),
+    IngestorMetadataField::new("timestamp", IngestorMetadataType::Datetime),
+]);
+
 impl IngestorDeclaration for RabbitMqQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: RABBITMQ_QUEUE_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::RabbitMq),
         position_class: PositionClass::BrokerRedelivered,
@@ -244,8 +267,16 @@ impl IngestorDeclaration for RabbitMqQueueIngestor {
 }
 
 impl IngestorEntityBody for RabbitMqQueueIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -305,15 +336,51 @@ impl RabbitMqIngestMode {
     }
 }
 
+/// One change an `ALTER RABBITMQ QUEUE INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RabbitMqQueueIngestorChange {
+    /// `SET QUEUE '<queue>'`.
+    Queue(RabbitMqQueueName),
+    /// `SET MODE <mode>`.
+    Mode(RabbitMqIngestMode),
+}
+
+impl crate::IngestorEntityChange for RabbitMqQueueIngestorChange {
+    type Entity = RabbitMqQueueIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut RabbitMqQueueIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Queue(queue) => entity.queue = queue.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Queue(queue) => format!("SET QUEUE {}", crate::string_literal(queue.as_str())),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector RabbitMq = "RABBITMQ";
-    /// What a RabbitMQ source reads.
+    /// What a RabbitMQ ingestor reads.
     pub enum RabbitMqIngestor;
     /// The alterations of the ingestors that read a RabbitMQ entity.
     pub enum RabbitMqQueueIngestorAlteration;
-    /// The entities a RabbitMQ source reads.
+    /// The entities a RabbitMQ ingestor reads.
     pub enum RabbitMqIngestorEntity {
-        Queue(RabbitMqQueueIngestor) = "QUEUE", "RabbitMQ";
+        Queue(RabbitMqQueueIngestor => RabbitMqQueueIngestorChange) = "QUEUE", "RabbitMQ";
     }
 }
 
@@ -327,12 +394,63 @@ pub struct RabbitMqQueueEmitter {
     pub queue: RabbitMqQueueName,
 }
 
+/// AMQP Basic properties shared by queue and exchange publication.
+const RABBITMQ_EMITTER_PROPERTIES: &[crate::PropertyDeclaration] = &[
+    crate::PropertyDeclaration {
+        name: "content_type",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "content_encoding",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "message_id",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "correlation_id",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "reply_to",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "expiration",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "priority",
+        ty: crate::PropertyType::U8,
+    },
+    crate::PropertyDeclaration {
+        name: "type",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "app_id",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "user_id",
+        ty: crate::PropertyType::String,
+    },
+];
+
+const RABBITMQ_EMITTER_ENVELOPE: &[EnvelopeClauseKind] = &[
+    EnvelopeClauseKind::Persistent,
+    EnvelopeClauseKind::Mandatory,
+    EnvelopeClauseKind::Timestamp,
+];
+
 impl EmitterDeclaration for RabbitMqQueueEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         reference: EmitterReferenceKind::Client(ConnectorKind::RabbitMq),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: RabbitMqQueuePublishingMode::KINDS,
@@ -341,8 +459,8 @@ impl EmitterDeclaration for RabbitMqQueueEmitter {
             name: LocatorName::External(RabbitMqQueueName::DECLARATION),
         }),
         options: &[],
-        envelope: &[EnvelopeClauseKind::Mandatory],
-        properties: &[],
+        envelope: RABBITMQ_EMITTER_ENVELOPE,
+        properties: RABBITMQ_EMITTER_PROPERTIES,
         bounds: RABBITMQ_QUEUE_EMITTER_BOUNDS,
     };
 }
@@ -379,6 +497,7 @@ impl EmitterDeclaration for RabbitMqExchangeEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         reference: EmitterReferenceKind::Client(ConnectorKind::RabbitMq),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: RabbitMqExchangePublishingMode::KINDS,
@@ -394,8 +513,8 @@ impl EmitterDeclaration for RabbitMqExchangeEmitter {
                 example: "ROUTING KEY input.category",
             },
         }],
-        envelope: &[EnvelopeClauseKind::Mandatory],
-        properties: &[],
+        envelope: RABBITMQ_EMITTER_ENVELOPE,
+        properties: RABBITMQ_EMITTER_PROPERTIES,
         bounds: RABBITMQ_EXCHANGE_EMITTER_BOUNDS,
     };
 }
@@ -417,16 +536,97 @@ impl EmitterEntityBody for RabbitMqExchangeEmitter {
     }
 }
 
+/// One change an `ALTER RABBITMQ QUEUE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RabbitMqQueueEmitterChange {
+    /// `SET QUEUE '<name>'`.
+    Queue(RabbitMqQueueName),
+    /// `SET MODE <mode>`.
+    Mode(RabbitMqQueuePublishingMode),
+}
+
+impl crate::EmitterEntityChange for RabbitMqQueueEmitterChange {
+    type Entity = RabbitMqQueueEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut RabbitMqQueueEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Queue(name) => entity.queue = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Queue(name) => format!("SET QUEUE {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER RABBITMQ EXCHANGE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RabbitMqExchangeEmitterChange {
+    /// `SET EXCHANGE '<name>'`.
+    Exchange(RabbitMqExchangeName),
+    /// `SET ROUTING KEY <expression>`.
+    RoutingKey(Expression),
+    /// `SET MODE <mode>`.
+    Mode(RabbitMqExchangePublishingMode),
+}
+
+impl crate::EmitterEntityChange for RabbitMqExchangeEmitterChange {
+    type Entity = RabbitMqExchangeEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut RabbitMqExchangeEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Exchange(name) => entity.exchange = name.clone(),
+            Self::RoutingKey(routing_key) => entity.routing_key = routing_key.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Exchange(name) => {
+                format!("SET EXCHANGE {}", crate::string_literal(name.as_str()))
+            }
+            Self::RoutingKey(routing_key) => {
+                format!(
+                    "SET ROUTING KEY {}",
+                    crate::expression_to_plexus(routing_key)?
+                )
+            }
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector RabbitMq = "RABBITMQ";
     /// What a RabbitMQ emitter writes.
     pub enum RabbitMqEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum RabbitMqEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum RabbitMqEmitterChange;
     /// The entities a RabbitMQ emitter writes.
     pub enum RabbitMqEmitterEntity {
-        Queue(RabbitMqQueueEmitter, RabbitMqQueuePublishingMode) = "QUEUE";
-        Exchange(RabbitMqExchangeEmitter, RabbitMqExchangePublishingMode) = "EXCHANGE";
+        Queue(RabbitMqQueueEmitter, RabbitMqQueuePublishingMode, RabbitMqQueueEmitterChange) = "QUEUE";
+        Exchange(RabbitMqExchangeEmitter, RabbitMqExchangePublishingMode, RabbitMqExchangeEmitterChange) = "EXCHANGE";
     }
 }
 

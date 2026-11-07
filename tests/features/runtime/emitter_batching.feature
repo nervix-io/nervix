@@ -17,8 +17,8 @@ Feature: Emitter batching configuration
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC sentry_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC sentry_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{message: "event", extra: {seq: .seq}}'
           ON EMITTING BATCH '{message: "batched events", extra: {records: .}}';
@@ -124,14 +124,14 @@ Feature: Emitter batching configuration
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_batched FROM outgoing
         TO mqtt_main TOPIC 'mqtt_batched'
-          MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
+          QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 256KB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE NATS SUBJECT EMITTER nats_batched FROM outgoing
-        TO nats_main SUBJECT 'nats_batched'
-          MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE NATS STREAM EMITTER nats_batched FROM outgoing
+        TO nats_main STREAM 'nats_batched' SUBJECT 'nats_batched'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 1MiB
@@ -216,8 +216,9 @@ Feature: Emitter batching configuration
       """
     Then the last command output contains
       """
-      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_batched
+      CREATE KAFKA TOPIC EMITTER kafka_batched
         FROM outgoing
+        ATTACHED
         TO kafka_main TOPIC 'kafka_batched'
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
@@ -248,6 +249,7 @@ Feature: Emitter batching configuration
       quiesce: none
       envelope: none
       batch: MAX MESSAGES 250 MAX SIZE 4MiB
+      batch container: binary-array insert
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       """
@@ -279,7 +281,7 @@ Feature: Emitter batching configuration
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
@@ -305,8 +307,9 @@ Feature: Emitter batching configuration
       """
     Then the last command output contains
       """
-      CREATE ATTACHED ZEROMQ PUSH EMITTER event_emitter
+      CREATE ZEROMQ PUSH EMITTER event_emitter
         FROM outgoing
+        ATTACHED
         TO emitter
           MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
@@ -369,7 +372,7 @@ Feature: Emitter batching configuration
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = 'http://127.0.0.1:4317',
@@ -380,17 +383,17 @@ Feature: Emitter batching configuration
         'addr' = 'mongodb://127.0.0.1:27017',
         'database' = 'nervix'
       };
-      CREATE MONGODB COLLECTION EMITTER row_sink FROM outgoing
+      CREATE MONGODB COLLECTION EMITTER row_emitter FROM outgoing
         TO mongodb_main COLLECTION 'batching_rows'
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE OTEL LOGS EMITTER record_sink FROM outgoing
+      CREATE OTEL LOGS EMITTER record_emitter FROM outgoing
         TO otel_main
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'time' = NOW(), 'body' = 'record' } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "MONGODB COLLECTION emitters require BATCH MAX MESSAGES"
       """
-      ALTER MONGODB COLLECTION EMITTER row_sink DROP BATCH;
+      ALTER MONGODB COLLECTION EMITTER row_emitter DROP BATCH;
       """
     When these Plexus commands fail with "BATCH"
       """
@@ -401,10 +404,10 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER MONGODB COLLECTION EMITTER row_sink SET BATCH MAX MESSAGES 10 MAX SIZE 2MiB;
+      ALTER MONGODB COLLECTION EMITTER row_emitter SET BATCH MAX MESSAGES 10 MAX SIZE 2MiB;
       BEGIN;
-      DROP EMITTER record_sink;
-      CREATE MONGODB COLLECTION EMITTER record_sink FROM outgoing
+      DROP EMITTER record_emitter;
+      CREATE MONGODB COLLECTION EMITTER record_emitter FROM outgoing
         TO mongodb_main COLLECTION 'records'
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'seq' = input.seq }
         BATCH MAX MESSAGES 25 MAX SIZE 4MiB
@@ -412,9 +415,9 @@ Feature: Emitter batching configuration
       COMMIT;
       """
     Then SHOW CREATE EMITTER on the leader node renders these clauses
-      | emitter     | clause                              |
-      | row_sink    | BATCH MAX MESSAGES 10 MAX SIZE 2MiB |
-      | record_sink | BATCH MAX MESSAGES 25 MAX SIZE 4MiB |
+      | emitter        | clause                              |
+      | row_emitter    | BATCH MAX MESSAGES 10 MAX SIZE 2MiB |
+      | record_emitter | BATCH MAX MESSAGES 25 MAX SIZE 4MiB |
 
     Examples:
       | cluster_size |
@@ -432,8 +435,8 @@ Feature: Emitter batching configuration
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC sentry_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC sentry_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '{message: "event"}';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
@@ -459,15 +462,15 @@ Feature: Emitter batching configuration
 
     Examples:
       | cluster_size | connector_body                                                                                                    | batch                                      | diagnostic                                                                 | emitter_kind       |
-      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    | KAFKA TOPIC        |
-      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 65537 MAX SIZE 1MiB     | BATCH MAX MESSAGES must be between 1 and 65536, found 65537                | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 4294967295, found 0               | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 65537 MAX SIZE 1MiB     | max-batch-messages                                                         | KAFKA TOPIC        |
       | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 10 MAX SIZE 0MiB        | BATCH MAX SIZE must be greater than zero                                   | KAFKA TOPIC        |
       | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 10 MAX SIZE 1.5MiB      | must be a whole number followed by B, KB, KiB, MB, MiB, GB, GiB, TB or TiB | KAFKA TOPIC        |
       | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 10 MAX SIZE 16777216TiB | exceeds the largest size a 64-bit byte count can hold                      | KAFKA TOPIC        |
       | 1            | sqs_main QUEUE 'events' SEND BATCH MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 2MiB        | SQS QUEUE emitters accept BATCH MAX SIZE up to 1MiB                        | SQS QUEUE          |
       | 1            | sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                       | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              | SENTRY EVENT       |
       | 1            | mongodb_main COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq }           |                                            | BATCH MAX MESSAGES                                                         | MONGODB COLLECTION |
-      | 3            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    | KAFKA TOPIC        |
+      | 3            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL       | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 4294967295, found 0               | KAFKA TOPIC        |
       | 3            | sqs_main QUEUE 'events' SEND BATCH MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 2MiB        | SQS QUEUE emitters accept BATCH MAX SIZE up to 1MiB                        | SQS QUEUE          |
       | 3            | sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                       | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              | SENTRY EVENT       |
       | 3            | mongodb_main COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq }           |                                            | BATCH MAX MESSAGES                                                         | MONGODB COLLECTION |
@@ -482,7 +485,7 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands fail with "expected string_literal, found BATCH"
       """
-      CREATE CODEC batch_only FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC batch_only TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING BATCH '{records: .}';
       """
 
@@ -507,11 +510,11 @@ Feature: Emitter batching configuration
         operation STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

@@ -4,7 +4,7 @@
 //! - **Owns.** Reingestor input evaluation, branch construction and route-local buffering.
 //! - **Depends on.** Decision-layer reingestor plans, their bound programs, Arrow batches,
 //!   materialized state and bound clocks.
-//! - **Must not know.** Plexus parsing, placement selection or source transport lifecycle.
+//! - **Must not know.** Plexus parsing, placement selection or ingestor transport lifecycle.
 
 #![cfg_attr(
     nervix_lint,
@@ -255,6 +255,7 @@ impl Runtime {
                 let templates = relays.route_templates(
                     ModelKind::Reingestor,
                     &ModelName::from(&plan.name),
+                    Unit::SINGLE,
                     &plan.routes,
                 )?;
                 templates_by_reingestor.insert(plan.name.clone(), templates);
@@ -1254,20 +1255,28 @@ mod tests {
             0,
             Vec::new(),
             None,
-            Arc::new(BranchPresence::new()),
+            RelayBranchPresences::single(Arc::new(BranchPresence::new())),
             nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
-        let owner_task = runtime.spawn_relay_owner_task(
-            &domain,
-            &root_relay,
-            services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &root_relay,
+                Unit::SINGLE,
+                services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            entity_kind: ModelKind::Reingestor,
-            source: named("tenant_partition"),
+            owner: NodeUnitRef::new(
+                NodeRef::new(
+                    ModelKind::Reingestor,
+                    named::<ModelName>("tenant_partition"),
+                ),
+                Unit::SINGLE,
+            ),
             root_relay: root_relay.clone(),
             branch: None,
             branch_ttl: None,
@@ -1412,20 +1421,28 @@ mod tests {
             0,
             Vec::new(),
             None,
-            Arc::new(BranchPresence::new()),
+            RelayBranchPresences::single(Arc::new(BranchPresence::new())),
             nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
-        let owner_task = runtime.spawn_relay_owner_task(
-            &domain,
-            &root_relay,
-            services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &root_relay,
+                Unit::SINGLE,
+                services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            entity_kind: ModelKind::Reingestor,
-            source: named("tenant_partition"),
+            owner: NodeUnitRef::new(
+                NodeRef::new(
+                    ModelKind::Reingestor,
+                    named::<ModelName>("tenant_partition"),
+                ),
+                Unit::SINGLE,
+            ),
             root_relay: root_relay.clone(),
             branch: None,
             branch_ttl: None,
@@ -1536,12 +1553,15 @@ mod tests {
             .expect("the fixture installs its controlled domain clock");
         let relay = named("tenant_orders");
         let output_services = test_relay_boundary_services();
-        let owner_task = runtime.spawn_relay_owner_task(
-            &domain,
-            &relay,
-            output_services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &relay,
+                Unit::SINGLE,
+                output_services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let mut output_subscription = output_services.subscription_receiver();
         let schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -1552,6 +1572,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: domain_clock.clone(),
@@ -1582,8 +1603,8 @@ mod tests {
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
                 placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
-                relay_owner_tasks: HashMap::default(),
+                relay_state_tasks: BTreeMap::default(),
+                relay_owner_tasks: BTreeMap::default(),
                 tasks: Vec::new(),
             },
         );
@@ -1594,8 +1615,13 @@ mod tests {
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    entity_kind: ModelKind::Reingestor,
-                    source: named("tenant_partition"),
+                    owner: NodeUnitRef::new(
+                        NodeRef::new(
+                            ModelKind::Reingestor,
+                            named::<ModelName>("tenant_partition"),
+                        ),
+                        Unit::SINGLE,
+                    ),
                     root_relay: relay.clone(),
                     branch: None,
                     branch_ttl: Some(Duration::from_secs(30)),
@@ -1884,6 +1910,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: clock_lifecycle
@@ -1916,8 +1943,8 @@ mod tests {
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
                 placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
-                relay_owner_tasks: HashMap::default(),
+                relay_state_tasks: BTreeMap::default(),
+                relay_owner_tasks: BTreeMap::default(),
                 tasks: Vec::new(),
             },
         );
@@ -2148,6 +2175,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
@@ -2177,8 +2205,8 @@ mod tests {
                 generator_tasks: HashMap::default(),
                 reingestor_tasks: HashMap::default(),
                 placement_tasks: HashMap::default(),
-                relay_state_tasks: HashMap::default(),
-                relay_owner_tasks: HashMap::default(),
+                relay_state_tasks: BTreeMap::default(),
+                relay_owner_tasks: BTreeMap::default(),
                 tasks: Vec::new(),
             },
         );

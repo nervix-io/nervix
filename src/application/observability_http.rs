@@ -13,7 +13,6 @@
 
 use std::convert::Infallible;
 
-use error_stack::{Report, ResultExt};
 use http_body_util::Full;
 use hyper::{
     Method, Request as HyperRequest, Response as HyperResponse, StatusCode,
@@ -23,10 +22,16 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use nervix_consensus::Observer;
-use nervix_primitives::{net::TcpListener, sync::CancellationToken, task::JoinSet};
+use nervix_primitives::{
+    sync::{Arc, CancellationToken},
+    task::JoinSet,
+};
 use tracing::warn;
 
-use super::{AppError, http_endpoint::text_response};
+use super::{
+    http_endpoint::text_response, node_initialization::NodeInitialization,
+    public_listener::PublicListener,
+};
 
 const OBSERVABILITY_LIVEZ_PATH: &str = "/livez";
 
@@ -36,13 +41,19 @@ const OBSERVABILITY_METRICS_PATH: &str = "/metrics";
 
 async fn handle_observability_request(
     consensus: Observer,
+    initialization: Arc<NodeInitialization>,
     runtime: crate::runtime::Runtime,
     request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
     let response = match (request.method(), request.uri().path()) {
         (&Method::GET, OBSERVABILITY_LIVEZ_PATH) => text_response(StatusCode::OK, "live\n"),
         (&Method::GET, OBSERVABILITY_READYZ_PATH) => {
-            if consensus.current_leader().await.is_some() {
+            if !initialization.is_ready() {
+                text_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "waiting for live cluster parameters\n",
+                )
+            } else if consensus.current_leader().await.is_some() {
                 text_response(StatusCode::OK, "ready\n")
             } else {
                 text_response(StatusCode::SERVICE_UNAVAILABLE, "leader unknown\n")
@@ -60,27 +71,23 @@ async fn handle_observability_request(
 
 pub(in crate::application) async fn serve_observability_http(
     consensus: Observer,
+    initialization: Arc<NodeInitialization>,
     runtime: crate::runtime::Runtime,
-    listener: TcpListener,
+    mut listener: PublicListener,
     shutdown: CancellationToken,
-) -> Result<(), Report<AppError>> {
+) {
     let mut connection_tasks = JoinSet::new();
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        let accepted = nervix_primitives::select! {
+        let (stream, _) = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
-            accepted = listener.accept() => {
-                accepted.change_context(AppError::ServeObservability)
-            }
+            accepted = listener.accept() => accepted,
         };
-        let (stream, _) = accepted?;
-        stream
-            .set_nodelay(true)
-            .change_context(AppError::ServeObservability)?;
         let consensus = consensus.clone();
+        let initialization = initialization.clone();
         let runtime = runtime.clone();
         connection_tasks.spawn(async move {
             let io = TokioIo::new(stream);
@@ -88,7 +95,12 @@ pub(in crate::application) async fn serve_observability_http(
                 .serve_connection(
                     io,
                     service_fn(move |request| {
-                        handle_observability_request(consensus.clone(), runtime.clone(), request)
+                        handle_observability_request(
+                            consensus.clone(),
+                            initialization.clone(),
+                            runtime.clone(),
+                            request,
+                        )
                     }),
                 )
                 .await
@@ -99,5 +111,4 @@ pub(in crate::application) async fn serve_observability_http(
     }
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
-    Ok(())
 }

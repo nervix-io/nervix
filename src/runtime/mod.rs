@@ -64,22 +64,23 @@ use nervix_interconnect::{
     Transport, WasmStateResetTarget,
 };
 use nervix_models::{
-    AckMode, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
+    AckMode, BranchKeyFingerprint, BranchName, BranchPartitions, ClientConfigEntry, ClientName,
     ClientProducerEndReason, ClientResourceMount, ClusterNodeIdentity, ClusterNodeIncarnation,
     ClusterNodeName, CodecName, CommandExecutionReference, CoordinationIdentity,
     CorrelationTimeoutAction, CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig,
     DomainName, DomainNodeRef, DomainNodeUnitRef, DomainState, EmitterName, EndpointName,
-    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
-    GeneratorName, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestTimestampSource, IngestorName, KafkaPartitionSchedule,
-    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
-    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, ParseAsType, RelayName, RemoteAckOutcome, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName,
-    RetryPolicy, RouteConstruction, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
-    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    EndpointType, EntityGateTargets, ErrorPolicies, FieldName, FieldPath, FlushPolicy,
+    GeneralErrorPolicy, GeneratorName, InferencerExecutionMode, InferencerTensorDeclaration,
+    IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource, IngestorName,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
+    NodeUnitRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    OwnershipStateResetCause, ParseAsType, PartitionSeed, RelayName, RemoteAckOutcome,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId,
+    ResourceName, RetryPolicy, RouteConstruction, SchemaFingerprint, SignalingProtocolName,
+    SignalingWireFormat, StructuredMessageError, SubscriptionName, Timestamp, Unit,
+    WasmCheckpointInspection, WasmRejectedStatePolicy, WasmSavedStateRejection,
+    WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 #[cfg_attr(
@@ -163,7 +164,8 @@ use crate::{
     emitter_execution_plan::{EmitterExecutionPlan, EmitterOrderingGroupPlan, EmitterRoutePlan},
     emitter_start_plan::*,
     metrics::{
-        BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries, IngestorQuiesceMetrics,
+        BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries, EmitterAttemptOperation,
+        EmitterAttemptOutcome, EmitterInteractionMetrics, IngestorQuiesceMetrics,
         MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
         RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
     },
@@ -179,14 +181,14 @@ use crate::{
         KafkaTopicIngestorStartPlan, LookupResourcePlan, LoweredConstruction,
         MessageErrorCompileSchemas, MessageErrorRouteKey, MessageErrorRouteSpecs,
         MqttIngestorStartPlan, MqttTopicIngestorStartPlan, NatsIngestorStartPlan,
-        NatsSubjectIngestorStartPlan, PlannedClusterRevision, PlannedCodec, PlannedCodecWireFormat,
-        PlannedEntryRoute, PlannedRouteBranch, PlannedSignalingProtocol,
-        PrometheusIngestorStartPlan, PrometheusQueryIngestorStartPlan, PulsarIngestorStartPlan,
-        PulsarTopicIngestorStartPlan, RabbitMqIngestorStartPlan, RabbitMqQueueIngestorStartPlan,
-        RedisIngestorStartPlan, RedisPubSubIngestorStartPlan, ReingestorInputPlan, ReingestorPlan,
-        SqsIngestorStartPlan, SqsQueueIngestorStartPlan, SyslogIngestorStartPlan,
-        SyslogListenerIngestorStartPlan, TransportInputPlan, WasmModulePlan,
-        WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
+        NatsStreamIngestorStartPlan, NatsSubjectIngestorStartPlan, PlannedClusterRevision,
+        PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch,
+        PlannedSignalingProtocol, PrometheusIngestorStartPlan, PrometheusQueryIngestorStartPlan,
+        PulsarIngestorStartPlan, PulsarTopicIngestorStartPlan, RabbitMqIngestorStartPlan,
+        RabbitMqQueueIngestorStartPlan, RedisIngestorStartPlan, RedisPubSubIngestorStartPlan,
+        ReingestorInputPlan, ReingestorPlan, SqsIngestorStartPlan, SqsQueueIngestorStartPlan,
+        SyslogIngestorStartPlan, SyslogListenerIngestorStartPlan, TransportInputPlan,
+        WasmModulePlan, WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
         WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan, ZeroMqPullIngestorStartPlan,
     },
     resource::ResourceStore,
@@ -262,6 +264,7 @@ mod ingestor_start;
 mod ingestors;
 mod kafka_offset_state;
 mod kafka_offset_transfer;
+mod kafka_start;
 mod local_drain;
 mod lookup_hash_map;
 mod lsm_sequence;
@@ -316,6 +319,10 @@ mod remote_ack_watch_charge;
 mod remote_dispatch;
 mod reorderer;
 mod resources;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod revision_index_inspection;
+mod stateful_inferencer;
 pub(crate) use resources::RuntimeResourceError;
 mod runtime_lifecycle;
 mod runtime_settings;
@@ -405,9 +412,10 @@ pub(crate) use domain_execution::{
     CommittedClockInstallation, DomainRoutingCache, SharedDomainRouting,
 };
 use domain_execution::{
-    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick,
+    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick, RelayUnitRef,
     RuntimeDomainState,
 };
+#[cfg(test)]
 use domain_rebuild::branch_relays_from_plans;
 use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
@@ -477,8 +485,8 @@ use force_flush::{
 };
 use generator::GeneratorTaskSpec;
 use http_request_fields::{
-    AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestFields,
-    HttpRequestInput, HttpRequestSchemas, SourceRecords,
+    AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestEvaluation,
+    HttpRequestFields, HttpRequestInput, HttpRequestSchemas, SourceRecords,
 };
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
@@ -497,7 +505,7 @@ pub(in crate::runtime) use ingestor_quiesce::{
     IngestorQuiesceIntake, MemoryPressurePause,
 };
 use ingestor_quiesce::{
-    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, IngestorStatus,
+    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorInstanceReadiness, IngestorStatus,
     RuntimeReconnectStatus,
 };
 use ingestor_start::IngestorRuntime;
@@ -521,7 +529,7 @@ use materialized_snapshot::{
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
     MaterializedRelayStateOriginator, MaterializedRelayStatePersistence,
-    ReplicatedMaterializedRelayState,
+    MaterializedRelayStateRead, ReplicatedMaterializedRelayState,
 };
 use message_error::{
     InvalidOutputRows, MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
@@ -571,23 +579,26 @@ use processors::{
     InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError,
     PlannedGeneralFailure, PlannedGeneralResult, PlannedMessageError, PlannedSidecar,
     ProcessorCompileError, ProcessorLiveStateError, ProcessorMaterializedError,
-    ProcessorPlanRevision, ProgramName, PublishedProcessorPlan, RelayProcessorNode,
-    RelayProcessorOperationNode, RelayProcessorOperationTemplate, RelayProcessorOutputNode,
-    RelayProcessorOutputTemplate, RelayProcessorOutputsNode, RelayProcessorOutputsTemplate,
-    RelayProcessorRelayTemplate, RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer,
-    ReordererRowOrder, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext,
-    WindowBounds, WindowFlushContext,
+    ProcessorPlanRevision, ProcessorUnitRevision, ProgramName, PublishedProcessorPlan,
+    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
+    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
+    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
+    ReorderKeyPart, ReordererOutputBuffer, ReordererRowOrder, WasmAckContext, WasmAckMap,
+    WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
 };
 pub(in crate::runtime) use reconnect_backoff::{AcknowledgementKeepalive, RuntimeReconnectBackoff};
 use record_metadata::RecordMetadataColumns;
 use reingestor::{PlannedReingestorInput, ReingestorInputConsumer, ReingestorRuntimes};
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
 use relay_batch::build_stream_record_batch_preserving_acks;
+#[cfg(test)]
+use relay_boundary::RelayRetention;
 use relay_boundary::{
     BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild,
     RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices,
-    RelayBranchPresence, RelayOutboundSlot, RelayOwnerTask, RelayRetention, RelayRuntimeFanIn,
-    RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer, addressable_count,
+    RelayBranchPresence, RelayBranchPresences, RelayOutboundSlot, RelayOwnerRoutes, RelayOwnerTask,
+    RelayRuntimeFanIn, RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer,
+    addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
     OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
@@ -616,9 +627,8 @@ pub(crate) use snapshot_staging::{
 };
 use state_replication::{
     ActivatedRuntimeStateHandoff, CheckpointWriter, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-    DEFAULT_STATE_SNAPSHOT_INTERVAL, PreparedForcedRuntimeStateRecovery,
-    PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
-    RestorableBranchLifecycle,
+    PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot,
+    PublishedBranchState, RestorableBranchLifecycle,
 };
 pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryAuthorization, ForcedRuntimeStateRecoveryIdentity,
@@ -755,7 +765,7 @@ mod window_state;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;
-pub(crate) use branch_key::BranchKeyShapeError;
+pub(crate) use branch_key::{BranchKeyShapeError, RelayPartitionError, RelayPartitioning};
 pub(crate) use domain_clock::{
     DomainClock, DomainClockAccessError, DomainClockLifecycle, DomainClockObserver,
     DomainExecutionSnapshot,
@@ -968,7 +978,7 @@ pub mod subscription_predicate_capability_compile_tests {
 /// What the data plane exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::runtime)` or narrower, so the layers above reach the runtime only through the
 /// names below.
-pub use entity_gate::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, branch_task_stop_timeout};
+pub use entity_gate::branch_task_stop_timeout;
 pub(crate) use entity_gate::{
     EmitterPublishingDrainState, EmitterPublishingDrainStatus, EntityGateLease,
 };
@@ -981,6 +991,7 @@ use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::IngestorStartError;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
+pub(crate) use materialized_read::MaterializedReadError;
 pub(crate) use materialized_state::MaterializedRecordReport;
 use message_error_decode::DecodeRejections;
 pub(crate) use message_error_decode::{DecodeRejection, TransportPosition};

@@ -18,14 +18,10 @@ pub(super) fn sqs_fifo_group_expression<'src>()
     embedded_expression("fifo_group_expression")
 }
 pub(super) fn sqs_fifo_group_clause<'src>()
--> impl Parser<'src, &'src [Token], SqsFifoGroup, extra::Err<ParseError<'src>>> + Clone {
-    // The expression is tried first: an embedded rejection raised at the token where `FROM BRANCH`
-    // had already failed would take that failure's span.
+-> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
+{
     kw_phrase2(Identifier::Fifo, Identifier::Group)
-        .ignore_then(choice((
-            sqs_fifo_group_expression().map(SqsFifoGroup::Expression),
-            kw_phrase2(Identifier::From, Identifier::Branch).to(SqsFifoGroup::FromBranch),
-        )))
+        .ignore_then(sqs_fifo_group_expression())
         .boxed()
 }
 pub(super) fn mode<'src>()
@@ -67,11 +63,29 @@ pub(super) fn queue_body<'src>(
     )
 }
 
+/// `SET QUEUE '<queue>'`, `SET FIFO GROUP …`, `DROP FIFO GROUP`, `SET SEND SINGLE|BATCH` or
+/// `SET MODE <mode>`: one part of an `SQS QUEUE` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], SqsQueueEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    let queue = kw(Identifier::Queue)
+        .ignore_then(external_name::<SqsQueueName>())
+        .map(SqsQueueEmitterChange::Queue);
+    let fifo_group = sqs_fifo_group_clause().map(SqsQueueEmitterChange::FifoGroup);
+    let send = send_clause().map(SqsQueueEmitterChange::Send);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(SqsQueueEmitterChange::Mode);
+    let set = kw(Identifier::Set).ignore_then(choice((queue, fifo_group, send, publishing)));
+    let drop_fifo_group = kw(Identifier::Drop)
+        .ignore_then(kw_phrase2(Identifier::Fifo, Identifier::Group))
+        .to(SqsQueueEmitterChange::DropFifoGroup);
+    choice((set, drop_fifo_group)).boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        CreateEmitter, EmitterEntity, Model, SqsEmitter, SqsFifoGroup, SqsQueuePublishingMode,
-        SqsSend,
+        CreateEmitter, EmitterEntity, Model, SqsEmitter, SqsQueuePublishingMode, SqsSend,
     };
     use rstest::rstest;
 
@@ -125,13 +139,13 @@ mod tests {
     fn a_fifo_queue_literal_reaches_the_emitter_model_with_its_group_and_request_shape() {
         let destination = created_emitter(&statement(
             "Orders-EU_1.fifo",
-            "FIFO GROUP FROM BRANCH",
+            "FIFO GROUP branch.tenant",
             "SEND BATCH MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
             "",
         ));
 
         assert_eq!(destination.queue.as_str(), "Orders-EU_1.fifo");
-        assert_eq!(destination.fifo_group, Some(SqsFifoGroup::FromBranch));
+        assert!(destination.fifo_group.is_some());
         assert_eq!(destination.send, SqsSend::Batch);
     }
 

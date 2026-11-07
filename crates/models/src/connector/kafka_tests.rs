@@ -23,8 +23,9 @@ use crate::{
 };
 
 /// The keys Nervix sets on every Kafka consumer or producer it runs.
-const NERVIX_OWNED: [&str; 5] = [
+const NERVIX_OWNED: [&str; 6] = [
     "allow.auto.create.topics",
+    "auto.offset.reset",
     "delivery.report.only.error",
     "enable.auto.commit",
     "enable.partition.eof",
@@ -64,7 +65,7 @@ fn topic_declarations_match_the_replayable_log_and_its_producer() {
         assert_eq!(ingest.declared_quiesce(undeclared), None);
     }
     assert_eq!(
-        emit.publishing_modes,
+        emit.publishing_kinds(),
         &[
             EmitterPublishingModeKind::NoAck,
             EmitterPublishingModeKind::BrokerAck
@@ -121,7 +122,14 @@ fn records_carry_ordered_repeated_headers_and_their_log_position() {
         ]
     );
     assert!(emit.options.is_empty());
-    assert_eq!(emit.envelope, [EnvelopeClauseKind::Timestamp]);
+    assert_eq!(
+        emit.envelope,
+        [
+            EnvelopeClauseKind::Key,
+            EnvelopeClauseKind::PartitionFromBranch,
+            EnvelopeClauseKind::Timestamp,
+        ]
+    );
     assert!(emit.properties.is_empty());
 }
 
@@ -135,16 +143,19 @@ fn offsets_belong_to_the_domain_or_to_a_named_consumer_group() {
     assert_eq!(*instances, OptionDeclaration::INSTANCES);
     assert_eq!(offsets.keywords, "OFFSET BY");
     assert_eq!(offsets.presence, OptionPresence::Required);
-    let OptionForm::Choice([domain, group]) = offsets.form else {
-        panic!("OFFSET BY chooses between the domain and a consumer group");
+    let OptionForm::Choice([domain, earliest, latest]) = offsets.form else {
+        panic!("OFFSET BY chooses the domain or a consumer group with its start position");
     };
     assert_eq!(domain.name, "DOMAIN");
     assert_eq!(domain.value, None);
-    assert_eq!(group.name, "CONSUMER GROUP");
-    assert_eq!(
-        group.value,
-        Some(OptionValue::Name(KafkaConsumerGroupName::DECLARATION))
-    );
+    assert_eq!(earliest.name, "CONSUMER GROUP START AT EARLIEST");
+    assert_eq!(latest.name, "CONSUMER GROUP START AT LATEST");
+    for group in [earliest, latest] {
+        assert_eq!(
+            group.value,
+            Some(OptionValue::Name(KafkaConsumerGroupName::DECLARATION))
+        );
+    }
 }
 
 #[test]
@@ -239,10 +250,41 @@ fn client_schema_refuses_every_key_nervix_sets() {
                 config_entry(key, "value"),
             ])
             .expect_err("Nervix sets this key on every Kafka consumer or producer it runs");
-        assert!(
-            matches!(refusal.current_context(), ClientConfigSchemaError::Reserved { key: refused } if refused == key)
-        );
+        let statement_key = key == "auto.offset.reset";
+        match refusal.current_context() {
+            ClientConfigSchemaError::SetByStatement { key: refused, .. } if statement_key => {
+                assert_eq!(refused, key);
+            }
+            ClientConfigSchemaError::Reserved { key: refused } if !statement_key => {
+                assert_eq!(refused, key);
+            }
+            refusal => panic!("'{key}' is refused for the wrong reason: {refusal}"),
+        }
     }
+}
+
+#[test]
+fn client_schema_refuses_auto_offset_reset_and_names_the_clause_that_sets_it() {
+    let refusal = CreateClientKafka::<u64>::DECLARATION
+        .config
+        .validate(&[
+            config_entry("bootstrap.servers", "127.0.0.1:9092"),
+            config_entry("auto.offset.reset", "earliest"),
+        ])
+        .expect_err("START AT sets where a consumer group starts");
+
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::SetByStatement {
+            key: "auto.offset.reset".to_string(),
+            clause: "START AT on the consumer group of the KAFKA TOPIC ingestor",
+        }
+    );
+    assert_eq!(
+        refusal.current_context().to_string(),
+        "client config key 'auto.offset.reset' is set by a statement; write START AT on the \
+         consumer group of the KAFKA TOPIC ingestor"
+    );
 }
 
 #[test]

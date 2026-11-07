@@ -123,6 +123,46 @@ class ArchiveTests(unittest.TestCase):
             archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/cli"),
         ])
 
+    def test_a_restored_jvm_test_reads_its_packaged_java_inputs(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        package = build.root / "crates/client-jvm"
+        package.mkdir(parents=True)
+        java = Path("target/client-conformance/java")
+        inputs = {
+            java / "nervix-client.jar": b"packaged JNI library",
+            java / "tests/io/nervix/client/Properties.class": b"property fixture",
+            java / "tests/io/nervix/client/BoundaryTests.class": b"boundary fixture",
+            java / "tests/io/nervix/client/Properties$Input.class": b"nested fixture",
+        }
+        for path, content in inputs.items():
+            write(build.root / path, content)
+        program = archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/client-jvm")
+        write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
+        build.pack_tests(self.directory / "unit-tests.tar.zst")
+        (build.root / "target").rename(self.directory / "saved")
+        tools = fake_ldd(self.directory / "tools", "nothing")
+        with (
+            mock.patch.dict(os.environ, {"PATH": f"{tools}:{os.environ['PATH']}"}),
+            mock.patch.object(archive, "library_path", return_value="/toolchain"),
+            redirect_stdout(io.StringIO()),
+        ):
+            archive.unpack(build.root.resolve(), self.directory / "unit-tests.tar.zst")
+        for path, content in inputs.items():
+            self.assertEqual((build.root / path).read_bytes(), content)
+
+    def test_packing_jvm_tests_requires_their_jar_and_fixture_entry_classes(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        program = archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/client-jvm")
+        write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
+        java = Path("target/client-conformance/java")
+        for path in (java / "nervix-client.jar", java / "tests/io/nervix/client/Properties.class",
+                     java / "tests/io/nervix/client/BoundaryTests.class"):
+            with self.assertRaisesRegex(shards.ShardError, "just build-client-jvm-tests") as failure:
+                build.pack_tests(self.directory / "unit-tests.tar.zst")
+            self.assertIn(path.as_posix(), str(failure.exception))
+            write(build.root / path, b"prepared input")
+
+
 
     def test_a_restore_resolves_libraries_where_a_run_finds_them(self) -> None:
         build = Recorded(self.directory / "checkout")
@@ -240,23 +280,29 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("compression-level: 0", upload)
         self.assertIn("retention: transfer", upload)
 
+    def runner_provider(self, name: str) -> str:
+        return re.search(r"\n    runs-on: ([a-z]+)-", self.job(name))[1]
+
     def test_the_build_publishes_the_checkout_its_archives_restore_at(self) -> None:
         self.assertIn("checkout: ${{ github.workspace }}\n", self.job("scenarios-build"))
 
-    def test_the_jobs_on_another_provider_restore_and_run_at_the_builds_checkout(self) -> None:
+    def test_the_tests_job_restores_and_runs_at_the_builds_checkout(self) -> None:
         directory = "working-directory: ${{ needs.scenarios-build.outputs.checkout }}\n"
-        for name, restore, run in (
-            ("tests", "just test-coverage-unpack", "just test-coverage-run"),
-            ("scenarios", "just test-scenarios-coverage-unpack", "just test-scenarios-coverage-shard"),
-        ):
-            with self.subTest(job=name):
-                job = self.job(name)
-                self.assertIn("needs: [scenarios-build]", job)
-                self.assertLess(job.index('sudo mount --bind "${GITHUB_WORKSPACE}" "${BUILD_CHECKOUT}"'), job.index(restore))
-                self.assertEqual(job.count(directory), 2)
-                for command in (restore, run):
-                    step = job[job.rindex("- name:", 0, job.index(command)):job.index(command)]
-                    self.assertIn(directory, step)
+        job = self.job("tests")
+        restore, run = "just test-coverage-unpack", "just test-coverage-run"
+        self.assertIn("needs: [scenarios-build]", job)
+        self.assertLess(job.index('sudo mount --bind "${GITHUB_WORKSPACE}" "${BUILD_CHECKOUT}"'), job.index(restore))
+        self.assertEqual(job.count(directory), 2)
+        for command in (restore, run):
+            step = job[job.rindex("- name:", 0, job.index(command)):job.index(command)]
+            self.assertIn(directory, step)
+
+    def test_the_shards_restore_and_run_at_their_own_checkout_on_the_builds_provider(self) -> None:
+        self.assertEqual(self.runner_provider("scenarios"), self.runner_provider("scenarios-build"))
+        shards = self.job("scenarios")
+        self.assertIn("needs: [scenarios-build]", shards)
+        self.assertNotIn("mount --bind", shards)
+        self.assertNotIn("working-directory:", shards)
 
     def test_the_tests_job_restores_the_build_and_runs_it_without_compiling(self) -> None:
         tests = self.job("tests")
@@ -269,6 +315,13 @@ class WorkflowTests(unittest.TestCase):
         for setup in ("kunobi-ninja/kache-action", "kache_remote.py start", "kache_remote.py publish",
                       "test-coverage-build", "toolchains-install"):
             self.assertNotIn(setup, tests)
+
+    def test_both_unit_test_jobs_provision_java_at_the_binding_floor(self) -> None:
+        for name in ("scenarios-build", "tests"):
+            job = self.job(name)
+            self.assertIn("name: Setup Java for embedded JVM tests", job)
+            self.assertIn("uses: actions/setup-java@v4", job)
+            self.assertIn('java-version: "21"', job)
 
 
 class RecipeTests(unittest.TestCase):
@@ -289,6 +342,10 @@ class RecipeTests(unittest.TestCase):
 
     def test_the_messages_lie_where_the_plan_reads_them(self) -> None:
         self.assertIn(archive.MESSAGES.as_posix(), self.recipe("test-coverage-binaries:"))
+
+    def test_workspace_tests_prepare_the_embedded_jvm_inputs_before_running(self) -> None:
+        for name in ("test:", "test-coverage-binaries:"):
+            self.assertIn("build-client-jvm-tests", self.recipe(name).splitlines()[0])
 
 
 if __name__ == "__main__":

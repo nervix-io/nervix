@@ -16,7 +16,7 @@ backup_fail() {
 backup_graph_fixture() {
     local baseline_graph="$1"
     # The baseline fixture quotes the group, as Plexus spells every consumer-group name.
-    local consumer_group_clause="OFFSET BY CONSUMER GROUP 'chaos_baseline'"
+    local consumer_group_clause="OFFSET BY CONSUMER GROUP 'chaos_baseline' START AT EARLIEST"
     local after_first_clause="${baseline_graph#*"${consumer_group_clause}"}"
     if [[ "${after_first_clause}" == "${baseline_graph}" ]]; then
         return 1
@@ -169,7 +169,7 @@ backup_output_settled() {
 }
 
 # Generates the run's baseline fixture, starts the load and the listener observer, and waits until
-# the source and the sink have each passed their first ten records.
+# the ingestor and the emitter have each passed their first ten records.
 backup_traffic_start() {
     jq -nc --arg run_id "${run_id}" --argjson count "${record_count}" \
         -f "${fixture_generator}" >"${artifact_dir}/fixtures/input.ndjson"
@@ -178,7 +178,7 @@ backup_traffic_start() {
     compose up --detach --no-deps load observer
     wait_for 'independent load and observer' 30 check_support_containers
     wait_for 'source baseline' 40 topic_progressed chaos_input 9
-    wait_for 'acknowledged sink baseline' 60 topic_progressed chaos_output 9
+    wait_for 'acknowledged emitter baseline' 60 topic_progressed chaos_output 9
 }
 
 # Stops the load and reconstructs the accepted-input ledger from the source topic.
@@ -311,7 +311,7 @@ run_backup_cycles() {
     output_after_cycles="$(topic_end_offset chaos_output)"
     wait_for 'Kafka source advanced past the last cycle' 30 \
         topic_progressed chaos_input "${source_after_cycles}"
-    wait_for 'Kafka sink advanced past the last cycle' 60 \
+    wait_for 'Kafka emitter advanced past the last cycle' 60 \
         topic_progressed chaos_output "${output_after_cycles}"
     jq -s '{cycles: ., freeze_duration_ms: ([.[].freeze_duration_ms] | {min: min, max: max,
               median: (sort | .[(length / 2 | floor)])}),
@@ -358,7 +358,7 @@ run_backup_scenario() {
     check_support_containers
     wait_for 'Kafka source advanced through the cut' 30 \
         topic_progressed chaos_input "${source_before}"
-    wait_for 'Kafka sink advanced through the cut' 60 \
+    wait_for 'Kafka emitter advanced through the cut' 60 \
         topic_progressed chaos_output "${output_before}"
     local source_after output_after
     source_after="$(topic_end_offset chaos_input)"

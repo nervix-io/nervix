@@ -395,34 +395,6 @@ fn derive_peer_addr_returns_none_on_port_overflow() {
 }
 
 #[test]
-fn runtime_revision_readiness_advances_monotonically() {
-    let mut state = NodeState::for_test();
-
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 12);
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 11);
-    assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("12"));
-
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 13);
-    assert_eq!(state.get(KEY_RUNTIME_REVISION_READY), Some("13"));
-}
-
-#[test]
-fn runtime_preparation_and_completion_advance_independently() {
-    let mut state = NodeState::for_test();
-
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_PREPARED, 8);
-    assert!(revision_is_at_least(
-        &state,
-        KEY_RUNTIME_REVISION_PREPARED,
-        8
-    ));
-    assert!(!revision_is_at_least(&state, KEY_RUNTIME_REVISION_READY, 8));
-
-    advance_revision(&mut state, KEY_RUNTIME_REVISION_READY, 8);
-    assert!(revision_is_at_least(&state, KEY_RUNTIME_REVISION_READY, 8));
-}
-
-#[test]
 fn subscription_interest_index_tracks_live_advertisements_and_withdrawals() {
     let (node_one_id, node_one_state) =
         subscription_state("node-1", 7, 7101, &[("sales", "events")]);
@@ -800,11 +772,12 @@ async fn a_live_set_subscription_waits_for_a_change_made_after_it() {
     live_set.send_replace(BTreeMap::new());
     let (_peer_health_state, peer_health_state_receiver) =
         watch::channel(PeerHealthStateSnapshot::default());
+    let observation_freshness = ArcSwap::from_pointee(Duration::from_secs(10));
     let mut watcher = ClusterStateWatcher {
         live_node_states: ClusterHandle::live_node_changes_after(chitchat_receiver.clone()),
         peer_health_state: PeerHealthStateWatcher::new(
             peer_health_state_receiver,
-            Duration::from_secs(10),
+            &observation_freshness,
         ),
     };
     let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
@@ -827,11 +800,12 @@ async fn cluster_state_watcher_observes_a_health_target_change_before_wait_prepa
         nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
     let (peer_health_state, peer_health_state_receiver) =
         watch::channel(PeerHealthStateSnapshot::default());
+    let freshness_policy = ArcSwap::from_pointee(observation_freshness);
     let mut watcher = ClusterStateWatcher {
         live_node_states: live_state_receiver,
         peer_health_state: PeerHealthStateWatcher::new(
             peer_health_state_receiver,
-            observation_freshness,
+            &freshness_policy,
         ),
     };
     peer_health_state.send_modify(|snapshot| {
@@ -859,11 +833,12 @@ async fn cluster_state_watcher_observes_a_health_target_change_after_wait_prepar
         nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
     let (peer_health_state, peer_health_state_receiver) =
         watch::channel(PeerHealthStateSnapshot::default());
+    let freshness_policy = ArcSwap::from_pointee(observation_freshness);
     let mut watcher = ClusterStateWatcher {
         live_node_states: live_state_receiver,
         peer_health_state: PeerHealthStateWatcher::new(
             peer_health_state_receiver,
-            observation_freshness,
+            &freshness_policy,
         ),
     };
     let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());

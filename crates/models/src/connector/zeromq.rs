@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The ZeroMQ client Model, the pull source and push emitter Models with their delivery
+//! - **Owns.** The ZeroMQ client Model, the pull ingestor and push emitter Models with their delivery
 //!   mode, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The ZeroMQ driver, or how a socket is bound,
 //!   connected, read or written.
 
@@ -111,6 +111,7 @@ const ZEROMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for ZeroMqPullIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
@@ -132,6 +133,10 @@ impl IngestorDeclaration for ZeroMqPullIngestor {
 impl IngestorEntityBody for ZeroMqPullIngestor {
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -162,15 +167,47 @@ impl ZeroMqIngestMode {
     }
 }
 
+/// One change an `ALTER ZEROMQ PULL INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum ZeroMqPullIngestorChange {
+    /// `SET MODE <mode>`.
+    Mode(ZeroMqIngestMode),
+}
+
+impl crate::IngestorEntityChange for ZeroMqPullIngestorChange {
+    type Entity = ZeroMqPullIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut ZeroMqPullIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector ZeroMq = "ZEROMQ";
-    /// What a ZeroMQ source reads.
+    /// What a ZeroMQ ingestor reads.
     pub enum ZeroMqIngestor;
     /// The alterations of the ingestors that read a ZeroMQ entity.
     pub enum ZeroMqPullIngestorAlteration;
-    /// The entities a ZeroMQ source reads.
+    /// The entities a ZeroMQ ingestor reads.
     pub enum ZeroMqIngestorEntity {
-        Pull(ZeroMqPullIngestor) = "PULL", "ZeroMQ";
+        Pull(ZeroMqPullIngestor => ZeroMqPullIngestorChange) = "PULL", "ZeroMQ";
     }
 }
 
@@ -188,6 +225,7 @@ impl EmitterDeclaration for ZeroMqPushEmitter {
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::ZeroMq),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: ZeroMqPushPublishingMode::KINDS,
@@ -212,15 +250,47 @@ impl EmitterEntityBody for ZeroMqPushEmitter {
     }
 }
 
+/// One change an `ALTER ZEROMQ PUSH EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum ZeroMqPushEmitterChange {
+    /// `SET MODE <mode>`.
+    Mode(ZeroMqPushPublishingMode),
+}
+
+impl crate::EmitterEntityChange for ZeroMqPushEmitterChange {
+    type Entity = ZeroMqPushEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut ZeroMqPushEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector ZeroMq = "ZEROMQ";
     /// What a ZeroMQ emitter writes.
     pub enum ZeroMqEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum ZeroMqPushEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum ZeroMqEmitterChange;
     /// The entities a ZeroMQ emitter writes.
     pub enum ZeroMqEmitterEntity {
-        Push(ZeroMqPushEmitter, ZeroMqPushPublishingMode) = "PUSH";
+        Push(ZeroMqPushEmitter, ZeroMqPushPublishingMode, ZeroMqPushEmitterChange) = "PUSH";
     }
 }
 

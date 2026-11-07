@@ -64,23 +64,22 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
-    CloseEmitterRequest, CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
-    DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
-    DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
-    MAX_IN_FLIGHT_REQUESTS, OpenEmitterRequest, OpenIngestorRequest, ReadEmitterBatchRequest,
-    Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId, RequestRejected,
-    RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding,
-    SessionLimits, SettleEmitterBatchRequest, SubscribeDisposition, SubscribeOutcome,
-    SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
-    UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
+    CloseEmitterRequest, CommandDisposition, CommandRequest, DetachDomainClockRequest,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachRefusal,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList, DomainSelection,
+    EncodedFrame, InspectTransactionRequest, InspectionOutcome, MAX_IN_FLIGHT_REQUESTS,
+    OpenEmitterRequest, OpenIngestorRequest, ReadEmitterBatchRequest, Reply, ReplyBody,
+    ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
+    SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
+    SettleEmitterBatchRequest, SubscribeDisposition, SubscribeOutcome, SubscribeRequest,
+    SubscriptionRefusal, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
+    UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,
 };
-use nervix_plexus::client_statement::{
-    ClientStatement, ParsedClientStatement, parse_client_statement_sources,
-};
+use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -100,15 +99,21 @@ use self::{
     producers::SessionProducers,
 };
 use super::{
+    client_traffic::{ClientTraffic, ReplyEnding},
     command_result::CommandResult,
     model_mutation::command_error,
     session_service::{SessionServiceImpl, rejected_source_response},
-    subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
+    statement_grammar::with_statement_grammar,
+    subscription::{
+        OpenedSubscription, RefusedSubscription, SessionDelivery, SessionSubscriptions, SessionView,
+    },
     transaction::TransactionInspectionOutcome,
 };
 
-/// The transport a session arrived on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The client listener a session, or any other call a client makes, arrived on. Its `snake_case`
+/// name labels the node's client traffic series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
 pub(in crate::application) enum SessionTransport {
     /// A native client over gRPC, served by any node.
     Grpc,
@@ -285,6 +290,10 @@ impl SessionShared {
         &self.delivery.limits
     }
 
+    fn traffic(&self) -> &ClientTraffic {
+        &self.service.inner.traffic
+    }
+
     /// Queues one control frame for the client. An error means the session ended or its
     /// transport stopped taking frames.
     async fn send_frame(&self, frame: EncodedFrame<ServerFrame>) -> Result<(), LaneClosed> {
@@ -314,9 +323,13 @@ impl SessionShared {
     /// Encodes and queues one reply, splitting it into transfer parts when it is larger than a
     /// frame. A reply that cannot be encoded is replaced by a typed rejection, never truncated.
     async fn reply(&self, request_id: RequestId, body: ReplyBody) -> QueuedReply {
+        let ending = ReplyEnding::of(&body);
         let reply = Reply { request_id, body };
         let (delivery, queued) = match self.encode_reply(reply).await {
-            Ok(delivery) => (delivery, QueuedReply::Reply),
+            Ok(delivery) => {
+                self.traffic().reply(self.transport, ending);
+                (delivery, QueuedReply::Reply)
+            }
             Err(failure) => {
                 let rejection = failure.rejection();
                 debug!(
@@ -324,6 +337,8 @@ impl SessionShared {
                     message = rejection.message,
                     "a session reply was replaced by a rejection"
                 );
+                self.traffic()
+                    .reply(self.transport, ReplyEnding::Rejected(rejection.rejection));
                 let rejected = Reply {
                     request_id,
                     body: ReplyBody::Rejected(rejection),
@@ -331,7 +346,7 @@ impl SessionShared {
                 match rejected.encode(self.limits()) {
                     Ok(delivery) => (delivery, QueuedReply::Rejection),
                     Err(error) => {
-                        warn!(%request_id, error = %error, "a session rejection does not fit a frame");
+                        warn!(%request_id, error = %format_args!("{error:#}"), "a session rejection does not fit a frame");
                         return QueuedReply::Nothing;
                     }
                 }
@@ -351,6 +366,7 @@ impl SessionShared {
                         debug!(%request_id, "the session ended during a reply transfer");
                         return QueuedReply::Nothing;
                     }
+                    self.traffic().transfer_part(self.transport);
                 }
             }
         }
@@ -405,7 +421,7 @@ impl SessionShared {
         let ending = match (SessionEnding { reason }).encode(self.limits()) {
             Ok(frame) => Some(frame),
             Err(error) => {
-                warn!(error = %error, "a session ending does not fit a frame");
+                warn!(error = %format_args!("{error:#}"), "a session ending does not fit a frame");
                 None
             }
         };
@@ -585,7 +601,8 @@ impl SessionServiceImpl {
     /// The transport hands its frames in through `inbound` and receives every frame the session
     /// sends through `outbound`. When this returns, the session's subscriptions are stopped, its
     /// transaction binding is released or cleanly closed, and nothing sends on `outbound` any
-    /// more that matters to the client.
+    /// more that matters to the client. A session the stopping node ends lets go of `inbound` at
+    /// once, so its transport ends the call right after the ending rather than when this returns.
     pub(in crate::application) async fn run_session<S>(
         &self,
         user: UserName,
@@ -596,6 +613,13 @@ impl SessionServiceImpl {
     ) where
         S: Stream<Item = InboundFrame> + Unpin + Send,
     {
+        #[cfg(feature = "testing")]
+        let acceptance_observer = self
+            .inner
+            .runtime
+            .fault_injection()
+            .session_acceptance_observer_on(self.inner.consensus.local_node_id());
+        let _served = self.inner.traffic.serve_session(transport);
         let subscriptions = SessionSubscriptions::for_user(user);
         let (selection, _) = watch::channel(None);
         let shared = Arc::new(SessionShared {
@@ -622,6 +646,7 @@ impl SessionServiceImpl {
             .spawn(events::run_session_events(shared.clone()));
 
         let mut closed_cleanly = false;
+        let mut node_stopping = false;
         loop {
             nervix_primitives::task::consume_budget().await;
             let item = nervix_primitives::select! {
@@ -629,6 +654,7 @@ impl SessionServiceImpl {
                 _ = shared.ended() => break,
                 _ = self.inner.admission_shutdown.cancelled() => {
                     shared.end(SessionEndReason::ServerShuttingDown);
+                    node_stopping = true;
                     break;
                 }
                 item = inbound.next() => item,
@@ -638,14 +664,33 @@ impl SessionServiceImpl {
                     // Taking a frame can wait for room to answer it, which a client that reads
                     // nothing never makes. Neither the node stopping nor the session ending waits
                     // on that client.
+                    #[cfg(feature = "testing")]
+                    let request_id = frame.request_id();
+                    let accepting = accept_frame(&shared, &ordered_tx, frame);
+                    #[cfg(feature = "testing")]
+                    let accepting = async {
+                        match &acceptance_observer {
+                            Some(observer) => {
+                                observer
+                                    .observe(
+                                        request_id,
+                                        || shared.delivery.outbound.control_has_no_room(),
+                                        accepting,
+                                    )
+                                    .await
+                            }
+                            None => accepting.await,
+                        }
+                    };
                     let accepted = nervix_primitives::select! {
                         biased;
                         _ = shared.ended() => break,
                         _ = self.inner.admission_shutdown.cancelled() => {
                             shared.end(SessionEndReason::ServerShuttingDown);
+                            node_stopping = true;
                             break;
                         }
-                        accepted = accept_frame(&shared, &ordered_tx, frame) => accepted,
+                        accepted = accepting => accepted,
                     };
                     if !accepted {
                         break;
@@ -659,6 +704,12 @@ impl SessionServiceImpl {
             }
         }
 
+        if node_stopping {
+            // A stopping node reads nothing more from its clients. Letting go of the client's half
+            // now ends the transport's call or connection right after the ending, instead of once
+            // the work this session stopped waiting for has finished.
+            drop(inbound);
+        }
         shared.delivery.outbound.end(None);
         shared.abandon_in_flight();
         drop(ordered_tx);
@@ -709,6 +760,10 @@ async fn accept_frame(
         request_id,
         request,
     } = message;
+    shared.traffic().request(
+        shared.transport,
+        nervix_client_wire::ClientRequestKind::from(&request),
+    );
     let routed = match request {
         ClientRequest::Cancel(cancel) => {
             shared.cancel(request_id, cancel).await;
@@ -905,11 +960,29 @@ async fn run_ordered_lane(
         }
         let request_id = item.request_id;
         let request: &'static str = (&item.request).into();
+        let execution_reference = if tracing::enabled!(tracing::Level::DEBUG) {
+            match &item.request {
+                OrderedRequest::Command(command) => Some(command.execution_reference.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut answered_disposition = None;
         let started = nervix_primitives::time::Instant::now();
-        serve_ordered(&shared, item, &mut subscriptions, &mut clock_attachments).await;
+        serve_ordered(
+            &shared,
+            item,
+            &mut subscriptions,
+            &mut clock_attachments,
+            &mut answered_disposition,
+        )
+        .await;
         debug!(
             %request_id,
             request,
+            execution_reference = ?execution_reference,
+            disposition = ?answered_disposition,
             elapsed = ?started.elapsed(),
             "served an ordered session request"
         );
@@ -924,6 +997,7 @@ async fn serve_ordered(
     item: OrderedWork,
     subscriptions: &mut SessionSubscriptions,
     clock_attachments: &mut ClockAttachments,
+    answered_disposition: &mut Option<CommandDisposition>,
 ) {
     let OrderedWork {
         request_id,
@@ -932,7 +1006,8 @@ async fn serve_ordered(
     } = item;
     match request {
         OrderedRequest::Command(command) => {
-            serve_command(shared, request_id, &admission, command, subscriptions).await;
+            *answered_disposition =
+                serve_command(shared, request_id, &admission, command, subscriptions).await;
         }
         OrderedRequest::Attach(attach) => {
             if admission.admit().is_err() {
@@ -988,7 +1063,9 @@ async fn serve_ordered(
             }
             if subscriptions.transaction_active() {
                 let outcome = DomainClockAttachOutcome {
-                    disposition: DomainClockAttachDisposition::Failed,
+                    disposition: DomainClockAttachDisposition::Refused(
+                        DomainClockAttachRefusal::InTransaction,
+                    ),
                     message: SESSION_LOCAL_IN_TRANSACTION.to_string(),
                 };
                 shared
@@ -1048,8 +1125,10 @@ async fn serve_command(
     admission: &RequestAdmission,
     command: CommandRequest,
     subscriptions: &mut SessionSubscriptions,
-) {
+) -> Option<CommandDisposition> {
     let execution_reference = command.execution_reference.clone();
+    #[cfg(feature = "testing")]
+    let reply_script_request = command.clone();
     let processing = shared
         .service
         .process_command(command, subscriptions, admission);
@@ -1059,12 +1138,33 @@ async fn serve_command(
         _ = admission.cancelled_before_admission() => Err(CancelledBeforeAdmission),
     };
     let Ok(response) = processed else {
-        return;
+        return None;
     };
     let outcome = command_outcome(execution_reference, response);
-    shared
-        .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
-        .await;
+    #[cfg(not(feature = "testing"))]
+    let body = ReplyBody::Command(Box::new(outcome));
+    #[cfg(feature = "testing")]
+    let body = shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .script_command_reply(&reply_script_request, outcome);
+    // Only a testing script answers a command with a reply of another kind, which has no
+    // command disposition.
+    let disposition = if tracing::enabled!(tracing::Level::DEBUG)
+        && let ReplyBody::Command(outcome) = &body
+    {
+        Some(outcome.disposition.clone())
+    } else {
+        None
+    };
+    let queued = shared.finish_with(request_id, body).await;
+    if queued == QueuedReply::Reply {
+        disposition
+    } else {
+        None
+    }
 }
 
 async fn serve_subscribe(
@@ -1073,6 +1173,23 @@ async fn serve_subscribe(
     subscribe: SubscribeRequest,
     subscriptions: &mut SessionSubscriptions,
 ) {
+    #[cfg(feature = "testing")]
+    if shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .take_subscription_opening_refusal(shared.service.inner.consensus.local_node_id())
+    {
+        let refused = RefusedSubscription::new(
+            SubscriptionRefusal::Unavailable,
+            "the serving node could not open the subscription now".to_string(),
+        );
+        shared
+            .finish_with(request_id, ReplyBody::Subscribe(refused_outcome(*refused)))
+            .await;
+        return;
+    }
     let opened = open_subscription(shared, subscribe, subscriptions).await;
     let OpenedSubscription {
         opened,
@@ -1080,14 +1197,9 @@ async fn serve_subscribe(
         pending,
     } = match opened {
         Ok(opened) => opened,
-        Err(result) => {
-            let outcome = SubscribeOutcome {
-                disposition: SubscribeDisposition::Failed,
-                message: result.message,
-                diagnostics: wire_diagnostics(result.diagnostics),
-            };
+        Err(refused) => {
             shared
-                .finish_with(request_id, ReplyBody::Subscribe(outcome))
+                .finish_with(request_id, ReplyBody::Subscribe(refused_outcome(*refused)))
                 .await;
             return;
         }
@@ -1097,6 +1209,16 @@ async fn serve_subscribe(
         message,
         diagnostics: Vec::new(),
     };
+    #[cfg(feature = "testing")]
+    shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .pause_subscription_response_delivery_if_armed(
+            shared.service.inner.consensus.local_node_id(),
+        )
+        .await;
     // The rows follow the reply that announces their schema. A subscription whose reply was not
     // queued, because the request was cancelled, the session ended or the reply could not be
     // encoded, was never announced, so it is abandoned before it delivers anything.
@@ -1109,44 +1231,68 @@ async fn serve_subscribe(
     }
 }
 
+/// The reply to a subscribe request the session refused.
+fn refused_outcome(refused: RefusedSubscription) -> SubscribeOutcome {
+    SubscribeOutcome {
+        disposition: SubscribeDisposition::Refused(refused.refusal),
+        message: refused.message,
+        diagnostics: wire_diagnostics(refused.diagnostics),
+    }
+}
+
 /// Opens the subscription a subscribe request describes: exactly one `CREATE SUBSCRIPTION`
 /// statement in an existing domain, delivering typed rows.
 async fn open_subscription(
     shared: &SessionShared,
     subscribe: SubscribeRequest,
     subscriptions: &mut SessionSubscriptions,
-) -> Result<OpenedSubscription, Box<CommandResult>> {
+) -> Result<OpenedSubscription, Box<RefusedSubscription>> {
     let SubscribeRequest {
         domain,
         statement,
         subscription_type,
+        expected_schema,
     } = subscribe;
     // Rows are the only subscription type a session delivers.
     let SubscriptionType::Row = subscription_type;
     if subscriptions.transaction_active() {
-        return Err(Box::new(subscription_in_transaction()));
+        return Err(RefusedSubscription::from_result(
+            SubscriptionRefusal::InTransaction,
+            subscription_in_transaction(),
+        ));
     }
-    let statements = match parse_client_statement_sources(&statement) {
+    let parsed = with_statement_grammar(|grammar| grammar.parse_sources(&statement));
+    let statements = match parsed {
         Ok(statements) => statements,
         Err(report) => {
-            return Err(Box::new(rejected_source_response(report.current_context())));
+            return Err(RefusedSubscription::from_result(
+                SubscriptionRefusal::InvalidStatement,
+                rejected_source_response(report.current_context()),
+            ));
         }
     };
     let Some(subscription) = single_create_subscription(statements) else {
-        return Err(Box::new(command_error(
+        return Err(RefusedSubscription::new(
+            SubscriptionRefusal::InvalidStatement,
             "a subscribe request carries exactly one CREATE SUBSCRIPTION statement".to_string(),
-        )));
+        ));
     };
     let existing = shared.service.inner.consensus.current_domain(&domain).await;
     if existing.is_none() {
-        return Err(Box::new(command_error(format!(
-            "domain '{}' does not exist",
-            domain.as_str()
-        ))));
+        return Err(shared.service.committed_state_refusal(
+            SubscriptionRefusal::DomainNotFound,
+            format!("domain '{}' does not exist", domain.as_str()),
+        ));
     }
     shared
         .service
-        .create_subscription(&domain, subscription, &shared.delivery, subscriptions)
+        .create_subscription(
+            &domain,
+            subscription,
+            expected_schema.as_ref(),
+            &shared.delivery,
+            subscriptions,
+        )
         .await
 }
 

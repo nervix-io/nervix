@@ -18,7 +18,9 @@ One live branch instance can hold the following at each graph node that belongs 
 
 - branch-local task and runtime-node state;
 - route buffers until the route's flush boundary;
-- the relay owner's shared buffer, bounded by `CAPACITY` across all concrete branches;
+- the relay owner's shared buffer, bounded by `CAPACITY` across all concrete branches of the
+  relay, or across the concrete branches of one partition on each partition owner of a partitioned
+  relay;
 - pending flush timers;
 - deduplication entries retained within `MAX TIME`;
 - open window state retained by `WIDTH` and advanced by `STEP`;
@@ -73,9 +75,9 @@ Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that
 the work that submitted it reports the refusal as its own failure. The one exception is work the
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
-paced ingestor handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
-acknowledgement, and an Iceberg commit's read of the staged files its emitter already accepted.
-Holding one of those source loops pushes back into its transport, so a node whose
+paced ingestor handed over, and of a payload a NATS SUBJECT, ZeroMQ or Syslog ingestor read without
+an acknowledgement, and an Iceberg commit's read of the staged rows its emitter already accepted.
+Holding one of those ingestor loops pushes back into its transport, so a node whose
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
@@ -88,10 +90,10 @@ window for as long as it is open, so sixteen bulk streams run at once and a seve
 a window within its own request deadline. One relay operation may hold at most 32 MiB of encoded
 body, 32 MiB of decoded data and 16 MiB of conversion scratch, and the relay budget is sized to hold
 two such operations at once so one blocked channel cannot exhaust the capacity another needs.
-An Iceberg commit charges the bulk budget for the staged files it reads back, only when the budget
-has room for them now, so a commit whose staged files exceed the budget reads them in groups, a
-single staged file larger than the budget waits until the whole budget is free and is charged all
-of it, and a commit refused for room is retried by its emitter.
+An Iceberg commit charges the bulk budget for the staged batches it reads back, only when the
+budget has room for them now, so a commit whose staged batches exceed the budget reads them in
+groups, a single staged batch larger than the budget waits until the whole budget is free and is
+charged all of it, and a commit refused for room is retried by its emitter.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
@@ -99,7 +101,7 @@ beside the 56 MiB its grant reserves for its body and decoding until the body is
 keeps only its body and decoded columns. When rows arrive faster than the owner reports
 them, their watches fill the budget and the owner holds further deliveries back until reported
 rows return their share. Sustained remote delivery with acknowledgements is then bounded by how
-fast acknowledgements return to the sending node, not by the budget's size, and a source that sends
+fast acknowledgements return to the sending node, not by the budget's size, and an ingestor that sends
 there waits instead of failing. A grant reserves the largest decoded batch and the scratch room
 whatever the body's size, so the budget grants about three deliveries at once; a sender whose grant
 is refused for that room, and a sender whose own budget has no room to store the acknowledgements
@@ -115,11 +117,12 @@ count in the startup memory total.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
 Consensus storage operations that need that working set queue at the store rather than in the
-budget, so the rest of it stays with command and replication traffic and with source control calls
+budget, so the rest of it stays with command and replication traffic and with ingestor control calls
 while they wait; see
 [Storage Working Sets](./consensus-storage-and-replication.md#storage-working-sets).
 The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
-hash at a time and a burst of login attempts waits there without touching any other class. A stored
+hash at a time and a burst of login attempts waits there without touching any other class. An
+attempt for a name that names no user costs one such hash too. A stored
 hash whose parameters need more memory than that never verifies.
 
 These budgets cover transient work: data in flight between nodes and the working memory of the
@@ -156,8 +159,10 @@ cannot hold it:
   `--resource-max-archive-bytes` and `--resource-max-extracted-bytes`, keep their 4 GiB and 16 GiB
   defaults whatever the volume, so a node on a smaller volume needs them set below its size: a
   5 GiB volume might take `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES=1GiB` and
-  `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB`. They are cluster parameters, so give every node the
-  same values. Each quota is compared with the volume's total size on its own, and what the volume
+  `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB` as seeds on the new cluster's bootstrapping node.
+  Later node starts omit those seed variables and use the committed values. Change an existing
+  cluster's quotas through `ALTER CLUSTER SET` before joining a node with a smaller volume;
+  [Node Settings](node-settings.md#committed-parameter-changes) defines that contract. Each quota is compared with the volume's total size on its own, and what the volume
   already holds is not subtracted, so size the volume for the log, snapshots and state the node
   keeps beside them.
 
@@ -174,11 +179,20 @@ memory limit, its budgets, the size of its volumes and the restore-staging quota
   population reflects the TTL plus that scan latency. See [TTL](relay.md#ttl).
 - `MAX INSTANCES <n> EVICT LRU` trades branch coverage against a hard branch-population ceiling.
   Eviction drops the least recently used branch and its suspended or buffered branch-local work.
-- Relay `CAPACITY` trades burst absorption against Arrow batches in the single owner buffer.
-  Smaller capacity applies backpressure sooner. In addition to that buffer, each producer cluster
-  node can hold one batch on its dispatch to the owner and the owner can hold one batch on its
-  dispatch to each remote consumer cluster node. Those fixed slots do not resize with `CAPACITY`
-  and do not multiply with consumers or subscriptions on the same node.
+  A partitioned relay applies the ceiling in each partition owner, so its relay keeps up to `n`
+  branches per partition.
+- Branch `PARTITIONS <n>` trades relay-owner throughput against per-partition overhead. Each
+  partition of a relay has its own owner, buffer, dispatch slots and metric series, and the
+  scheduler spreads the partitions over the cluster, so a relay's records stop funnelling through
+  one node. Every node keeps routing state for each partition of a relay it produces into or
+  observes, so choose a count near the number of cluster nodes or a small multiple of it rather
+  than the largest the language accepts. See [Relay Partitions](relay.md#relay-partitions).
+- Relay `CAPACITY` trades burst absorption against Arrow batches in the owner buffer, which a
+  partitioned relay has once per partition. Smaller capacity applies backpressure sooner. In
+  addition to that buffer, each producer cluster node can hold one batch on its dispatch to the
+  owner and the owner can hold one batch on its dispatch to each remote consumer cluster node. Those
+  fixed slots do not resize with `CAPACITY` and do not multiply with consumers or subscriptions on
+  the same node; a partitioned relay has them for each partition.
 - Route `FLUSH EACH` interval and `MAX BATCH SIZE` bound how long rows wait and how much a route
   buffers. `MAX BATCH SIZE` only clamps a batch and never grows one: the batch a route emits is
   roughly arrival rate × interval, up to the byte cap. Larger batches reduce per-batch cost only
@@ -192,7 +206,7 @@ memory limit, its budgets, the size of its volumes and the restore-staging quota
   Branches that end and return open new channels, so size branch turnover between two nodes
   against that budget: beyond it the least recently used watermarks are forgotten first rather
   than new channels refused. A branch whose channel was forgotten while it was still in use fails
-  its next delivery as indeterminate and opens a new channel; a source that waits for
+  its next delivery as indeterminate and opens a new channel; an ingestor that waits for
   acknowledgements redelivers the batch, and one in `NO ACK` mode loses it as it loses any failed
   delivery. Keep the branches that are active at once between two nodes below the budget, and read
   `nervix_interconnect_relay_channel_watermarks_evicted_total` to see when turnover exceeds it. Management subquotas independently reserve streams for discovery, liveness,
@@ -214,7 +228,7 @@ memory limit, its budgets, the size of its volumes and the restore-staging quota
   series to size against.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained
   entries, open windows, and buffered rows.
-- Source `INSTANCES` trades source parallelism against concurrent admission pressure. It does not
+- Ingestor `INSTANCES` trades ingestor parallelism against concurrent admission pressure. It does not
   reduce the cost of any branch instance that becomes live.
 
 See the existing [FLUSH tuning guidance](plexus-overview.md) instead of treating example values as
@@ -228,7 +242,7 @@ defaults.
   declaration, and physical node.
 - `nervix_branch_evictions_total` shows LRU pressure and TTL churn through its `reason` label.
 - Sustained high `nervix_relay_buffer_len` percentiles show downstream backpressure at the relay
-  owner buffer.
+  owner buffer; its `partition` label names the partition of a partitioned relay.
 - High `nervix_delivery_latency_seconds` percentiles show downstream lag between graph nodes.
 - `DESCRIBE RELAY <relay> WHERE (...)` confirms whether one concrete branch-local relay exists and
   reports its buffer metrics when available.

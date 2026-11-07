@@ -10,13 +10,13 @@ Feature: Integrated client wire qualification
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA wire_record (tenant STRING, sequence I64);
       CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (tenant string, sequence integer);
-      CREATE CODEC wire_record_codec FROM WIRE JSON SCHEMA wire_record_json TO SCHEMA wire_record;
+      CREATE WIRE JSON CODEC wire_record_codec FROM WIRE SCHEMA wire_record_json TO SCHEMA wire_record;
       CREATE SCHEMA tenant_key (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge qualified-{{test_id}}.example.com;
-      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
+      CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records INHERIT ALL

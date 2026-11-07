@@ -54,7 +54,10 @@ use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
-use nervix_client_wire::{RowsSkippedCause, SessionLimits, SubscriptionHandle, SubscriptionOpened};
+use nervix_client_wire::{
+    RowSchema, RowsSkippedCause, SessionLimits, SubscriptionHandle, SubscriptionOpened,
+    SubscriptionRefusal,
+};
 use nervix_consensus::{
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionTarget, ReplicatedTransaction,
@@ -64,7 +67,7 @@ use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscrip
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
     DomainName, FieldName, ParseAsType, RelayName, ScheduledModel, SchemaName, SubscriptionBinding,
-    SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, UserName,
+    SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, Unit, UserName,
 };
 use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
@@ -351,6 +354,49 @@ impl PendingSubscription {
         } = self;
         drop(announce);
         subscription.withdraw().await;
+    }
+}
+
+/// A subscribe request the session refused: the typed refusal its reply carries, and the message
+/// and diagnostics that describe it.
+pub(in crate::application) struct RefusedSubscription {
+    pub(in crate::application) refusal: SubscriptionRefusal,
+    pub(in crate::application) message: String,
+    pub(in crate::application) diagnostics: Vec<CommandDiagnostic>,
+}
+
+impl RefusedSubscription {
+    pub(in crate::application) fn new(refusal: SubscriptionRefusal, message: String) -> Box<Self> {
+        Box::new(Self {
+            refusal,
+            message,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    /// A refusal that says what a failed command `result` says.
+    pub(in crate::application) fn from_result(
+        refusal: SubscriptionRefusal,
+        result: CommandResult,
+    ) -> Box<Self> {
+        Box::new(Self {
+            refusal,
+            message: result.message,
+            diagnostics: result.diagnostics,
+        })
+    }
+
+    /// A refusal whose one diagnostic is `diagnostic`.
+    fn with_diagnostic(
+        refusal: SubscriptionRefusal,
+        message: String,
+        diagnostic: CommandDiagnostic,
+    ) -> Box<Self> {
+        Box::new(Self {
+            refusal,
+            message,
+            diagnostics: vec![diagnostic],
+        })
     }
 }
 
@@ -1118,21 +1164,17 @@ impl SessionServiceImpl {
         })
     }
 
-    pub(in crate::application) async fn scheduled_stream_owner_nodes(
+    /// The node the committed schedule places the owner of `unit` of `relay` on, if it places one.
+    pub(in crate::application) async fn scheduled_stream_unit_owner(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Vec<ClusterNodeName> {
+        unit: Unit,
+    ) -> Option<ClusterNodeName> {
         let schedule = self.inner.consensus.current_schedule().await;
-        let Some(domain_schedule) = schedule.domain(domain) else {
-            return Vec::new();
-        };
-        domain_schedule
-            .scheduled::<CreateRelay>(relay.clone())
-            .and_then(|scheduled| scheduled.node.execution_node())
-            .cloned()
-            .into_iter()
-            .collect()
+        let domain_schedule = schedule.domain(domain)?;
+        let scheduled = domain_schedule.scheduled::<CreateRelay>(relay.clone())?;
+        scheduled.node.unit_execution_node(unit).cloned()
     }
 
     async fn process_pending_session_commands(
@@ -1249,35 +1291,64 @@ impl SessionServiceImpl {
         }))
     }
 
+    /// The refusal of a subscription by what the committed state this node applied lacks: its
+    /// domain, its relay, or the schema a restoration expects. A client restoring the subscription
+    /// ends it on any of them, so a node that has not yet proved since it started that it caught up
+    /// with the committed state, and so cannot tell what the cluster lacks from what it has not
+    /// applied yet, refuses for now instead, as it refuses a producer or consumer open.
+    pub(in crate::application) fn committed_state_refusal(
+        &self,
+        refusal: SubscriptionRefusal,
+        message: String,
+    ) -> Box<RefusedSubscription> {
+        if !self.inner.runtime_admission.is_admitted() {
+            return RefusedSubscription::new(
+                SubscriptionRefusal::Unavailable,
+                "the serving node is catching up with committed domain state".to_string(),
+            );
+        }
+        RefusedSubscription::new(refusal, message)
+    }
+
     /// Creates a subscription generation for `subscription`, attached and holding its interest
     /// lease but delivering nothing until the reply that announces it is queued. A refusal leaves
-    /// nothing behind.
+    /// nothing behind, and says why with its typed refusal.
+    ///
+    /// A restoration names the schema its replaced generation announced as `expected_schema`, and
+    /// is refused as `RelayChanged` unless the relay announces exactly that schema, before its
+    /// predicate is compiled against a definition it never described.
     pub(in crate::application) async fn create_subscription(
         &self,
         domain: &DomainName,
         subscription: nervix_models::CreateSubscription,
+        expected_schema: Option<&RowSchema>,
         delivery: &SessionDelivery,
         subscriptions: &mut SessionSubscriptions,
-    ) -> Result<OpenedSubscription, Box<CommandResult>> {
+    ) -> Result<OpenedSubscription, Box<RefusedSubscription>> {
         if subscriptions.contains_name(&subscription.name) {
-            return Err(Box::new(command_error(format!(
-                "session subscription '{}' already exists",
-                subscription.name
-            ))));
+            return Err(RefusedSubscription::new(
+                SubscriptionRefusal::NameInUse,
+                format!(
+                    "session subscription '{}' already exists",
+                    subscription.name
+                ),
+            ));
         }
 
         let batch_sample_rate =
             match parse_subscription_batch_sample_rate(subscription.batch_sample_rate.as_deref()) {
                 Ok(rate) => rate,
                 Err(err) => {
-                    let diagnostic = CommandDiagnostic::unlocated(err.to_string());
-                    return Err(Box::new(CommandResult {
-                        diagnostics: vec![diagnostic],
-                        ..CommandResult::new(
-                            CommandDisposition::Failed,
-                            format!("failed to subscribe session '{}': {err}", subscription.name),
-                        )
-                    }));
+                    let cause = format!("{err:#}");
+                    let diagnostic = CommandDiagnostic::unlocated(cause.clone());
+                    return Err(RefusedSubscription::with_diagnostic(
+                        SubscriptionRefusal::InvalidStatement,
+                        format!(
+                            "failed to subscribe session '{}': {cause}",
+                            subscription.name
+                        ),
+                        diagnostic,
+                    ));
                 }
             };
 
@@ -1298,15 +1369,18 @@ impl SessionServiceImpl {
                     subscription.relay.as_str(),
                     domain.as_str()
                 );
-                return Err(Box::new(CommandResult {
-                    diagnostics: vec![diagnostic],
-                    ..CommandResult::new(CommandDisposition::Failed, message)
-                }));
+                let mut refused =
+                    self.committed_state_refusal(SubscriptionRefusal::RelayNotFound, message);
+                if let SubscriptionRefusal::RelayNotFound = refused.refusal {
+                    refused.diagnostics.push(diagnostic);
+                }
+                return Err(refused);
             }
             Err(err) => {
-                return Err(Box::new(command_error(format!(
-                    "failed to resolve relay for subscription: {err}"
-                ))));
+                return Err(RefusedSubscription::new(
+                    SubscriptionRefusal::Unavailable,
+                    format!("failed to resolve relay for subscription: {err:#}"),
+                ));
             }
         };
         let SubscriptionTarget {
@@ -1315,6 +1389,45 @@ impl SessionServiceImpl {
             branching,
         } = target;
         let compiled_schema = Arc::new(runtime_schema::compile_schema(&payload_schema));
+
+        let branch_fields = branching.field_names().cloned().collect::<Vec<_>>();
+        let branch = match &branching {
+            nervix_models::ResolvedBranching::Unbranched => None,
+            nervix_models::ResolvedBranching::Branched { branch, schema, .. } => {
+                Some(SubscriptionBranchSchema {
+                    name: branch,
+                    schema,
+                    fields: &branch_fields,
+                })
+            }
+        };
+        let row_schema = match subscription_row_schema(&payload_schema, branch) {
+            Ok(schema) => schema,
+            Err(error) => {
+                return Err(RefusedSubscription::new(
+                    SubscriptionRefusal::Unavailable,
+                    format!(
+                        "failed to describe the rows of relay '{}': {error:#}",
+                        subscription.relay.as_str(),
+                    ),
+                ));
+            }
+        };
+        if let Some(expected) = expected_schema
+            && *expected != row_schema
+        {
+            return Err(self.committed_state_refusal(
+                SubscriptionRefusal::RelayChanged,
+                format!(
+                    "relay '{}' in domain '{}' was redefined, so it no longer announces the \
+                     schema session subscription '{}' expects; subscribe again to receive its \
+                     rows under the current schema",
+                    subscription.relay.as_str(),
+                    domain.as_str(),
+                    subscription.name,
+                ),
+            ));
+        }
         let predicate = match subscription.where_clause.as_ref() {
             Some(expression) => {
                 let udfs = self.inner.runtime.udf_executor(domain);
@@ -1330,35 +1443,17 @@ impl SessionServiceImpl {
                 match compiled_predicate {
                     Ok(predicate) => Some(predicate),
                     Err(err) => {
-                        return Err(Box::new(command_error(format!(
-                            "failed to compile session subscription '{}': {err:#}",
-                            subscription.name
-                        ))));
+                        return Err(RefusedSubscription::new(
+                            SubscriptionRefusal::InvalidFilter,
+                            format!(
+                                "failed to compile session subscription '{}': {err:#}",
+                                subscription.name
+                            ),
+                        ));
                     }
                 }
             }
             None => None,
-        };
-
-        let branch_fields = branching.field_names().cloned().collect::<Vec<_>>();
-        let branch = match &branching {
-            nervix_models::ResolvedBranching::Unbranched => None,
-            nervix_models::ResolvedBranching::Branched { branch, schema } => {
-                Some(SubscriptionBranchSchema {
-                    name: branch,
-                    schema,
-                    fields: &branch_fields,
-                })
-            }
-        };
-        let row_schema = match subscription_row_schema(&payload_schema, branch) {
-            Ok(schema) => schema,
-            Err(error) => {
-                return Err(Box::new(command_error(format!(
-                    "failed to describe the rows of relay '{}': {error}",
-                    subscription.relay.as_str(),
-                ))));
-            }
         };
         let handle = subscriptions.next_handle(subscription.name.clone());
         let opening = SubscriptionRowOpening::new(
@@ -1370,20 +1465,23 @@ impl SessionServiceImpl {
         let opening = match opening {
             Ok(opening) => opening,
             Err(error) => {
-                return Err(Box::new(command_error(format!(
-                    "failed to describe the rows of relay '{}': {error}",
-                    subscription.relay.as_str(),
-                ))));
+                return Err(RefusedSubscription::new(
+                    SubscriptionRefusal::Unavailable,
+                    format!(
+                        "failed to describe the rows of relay '{}': {error:#}",
+                        subscription.relay.as_str(),
+                    ),
+                ));
             }
         };
 
         let relay = subscription.relay.clone();
         let runtime_revision = self.inner.consensus.current_runtime_state().await.revision;
         if let Err(err) = self.wait_for_runtime_revision(runtime_revision).await {
-            return Err(Box::new(command_error(format!(
-                "failed to subscribe to relay '{}': {err}",
-                relay.as_str()
-            ))));
+            return Err(RefusedSubscription::new(
+                SubscriptionRefusal::Unavailable,
+                format!("failed to subscribe to relay '{}': {err:#}", relay.as_str()),
+            ));
         }
         let lease = self
             .inner
@@ -1396,11 +1494,15 @@ impl SessionServiceImpl {
             .await
         {
             lease.release().await;
-            return Err(Box::new(command_error(format!(
-                "failed to register subscription interest for relay '{}' in domain '{}': {error}",
-                relay.as_str(),
-                domain.as_str(),
-            ))));
+            return Err(RefusedSubscription::new(
+                SubscriptionRefusal::Unavailable,
+                format!(
+                    "failed to register subscription interest for relay '{}' in domain '{}': \
+                     {error:#}",
+                    relay.as_str(),
+                    domain.as_str(),
+                ),
+            ));
         }
         let definition = RelaySubscriptionDefinition::new(compiled_schema, branching);
         let attached = self
@@ -1414,18 +1516,21 @@ impl SessionServiceImpl {
                 if matches!(error.current_context(), RuntimeError::RelayRedefined { .. }) =>
             {
                 lease.release().await;
-                return Err(Box::new(command_error(format!(
-                    "failed to subscribe to relay '{}': it was redefined while the subscription \
-                     was being created; subscribe again",
-                    relay.as_str()
-                ))));
+                return Err(RefusedSubscription::new(
+                    SubscriptionRefusal::Unavailable,
+                    format!(
+                        "failed to subscribe to relay '{}': it was redefined while the \
+                         subscription was being created; subscribe again",
+                        relay.as_str()
+                    ),
+                ));
             }
             Err(err) => {
                 lease.release().await;
-                return Err(Box::new(command_error(format!(
-                    "failed to subscribe to relay '{}': {err:#}",
-                    relay.as_str()
-                ))));
+                return Err(RefusedSubscription::new(
+                    SubscriptionRefusal::Unavailable,
+                    format!("failed to subscribe to relay '{}': {err:#}", relay.as_str()),
+                ));
             }
         };
 
@@ -1632,7 +1737,13 @@ impl SessionServiceImpl {
                             match self
                                 .inner
                                 .consensus
-                                .open_transaction(transaction, self.inner.transaction_max_open)
+                                .open_transaction(
+                                    transaction,
+                                    usize::try_from(
+                                        self.cluster_parameters().transaction_max_open(),
+                                    )
+                                    .assured("the committed count fits a supported target"),
+                                )
                                 .await
                             {
                                 Ok(transaction) => {
@@ -1946,6 +2057,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
+            nervix_models::BranchPartitions::ONE,
         );
         let binding = SubscriptionBinding {
             field: field.clone(),

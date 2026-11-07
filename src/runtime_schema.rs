@@ -63,10 +63,10 @@ use nervix_bounded_write::{BoundedWrite, BoundedWriter};
 use nervix_columnar_json::{FieldNulls, JsonColumnSpec, JsonColumns, NestedNulls};
 use nervix_jaq::{CompiledJaqProgram, JaqFormatError, JaqNativeFormat, JaqProgramError};
 use nervix_models::{
-    AvroType, CodecEncodingRule, CodecJaqTransformations, CodecName, CreateCodec, CreateSchema,
-    CreateWireSchema, JsonType, ModelName, ParseAsType, PayloadSizeLimit,
-    RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
-    ResolvedCodecWireFormat, Timestamp, WireSchemaField, WireSchemaStrictness,
+    AvroType, CborType, CodecEncodingRule, CodecJaqTransformations, CodecName,
+    CreateAvroWireSchema, CreateCodec, CreateSchema, CreateWireSchema, JsonType, ModelName,
+    ParseAsType, PayloadSizeLimit, RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata,
+    RemoteRuntimeValue, ResolvedCodecWireFormat, Timestamp, WireSchemaStrictness,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
@@ -90,6 +90,7 @@ mod arrow_body_properties;
 mod batch_container;
 #[cfg(test)]
 mod bounded_encoding_properties;
+mod cbor;
 mod client_batch;
 #[cfg(test)]
 pub(crate) mod codec_properties;
@@ -107,6 +108,7 @@ pub(crate) use arrow_body::ArrowBodyError;
 pub(crate) use batch_container::{
     BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
 };
+pub use cbor::CborValueKind;
 pub use client_batch::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
 pub use ipc_stream::UnsupportedFieldKind;
 pub(crate) use ipc_stream::{IpcMessages, IpcStreamError, StreamEnding};
@@ -142,8 +144,8 @@ pub(crate) struct CompiledCodecBatchEncoder<'a> {
 
 #[derive(Debug, Clone)]
 enum CompiledWireSchema {
-    Json(CompiledJsonWireSchema),
-    Cbor(CompiledJsonWireSchema),
+    Json(CompiledJsonWireSchema<JsonType>),
+    Cbor(cbor::CompiledCborWireSchema),
     Avro(CompiledAvroWireSchema),
     JaqNative(CompiledJaqNativeCodec),
     Protobuf(CompiledProtobufCodec),
@@ -165,17 +167,17 @@ impl CompiledWireSchema {
 }
 
 #[derive(Debug, Clone)]
-struct CompiledJsonWireSchema {
+struct CompiledJsonWireSchema<T> {
     strictness: WireSchemaStrictness,
-    fields: HashMap<String, CompiledJsonWireField>,
-    decode_fields: Vec<CompiledJsonDecodeField>,
+    fields: HashMap<String, CompiledJsonWireField<T>>,
+    decode_fields: Vec<CompiledJsonDecodeField<T>>,
     encode_fields: Vec<JsonColumnSpec>,
 }
 
 #[derive(Debug, Clone)]
-struct CompiledJsonDecodeField {
+struct CompiledJsonDecodeField<T> {
     key: KnownKey<'static>,
-    wire: Option<CompiledJsonWireField>,
+    wire: Option<CompiledJsonWireField<T>>,
 }
 
 /// Reusable storage for schemaful JSON ingestion.
@@ -311,12 +313,12 @@ impl ProtobufDescriptorPool {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CompiledJsonWireField {
-    ty: JsonType,
+struct CompiledJsonWireField<T> {
+    ty: T,
     optional: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CompiledAvroWireField {
     ty: AvroType,
     optional: bool,
@@ -437,6 +439,19 @@ enum SerializableRuntimeValue {
     Vec(Vec<SerializableRuntimeValue>),
 }
 
+/// Why CBOR's header inspection could not finish before value decoding.
+#[derive(Debug, Error)]
+pub enum CborHeaderScanError {
+    #[error("CBOR header read failed")]
+    Read(#[source] io::Error),
+    #[error("invalid CBOR header at offset {0}")]
+    Syntax(usize),
+    #[error("CBOR header nesting exceeds the scanner limit")]
+    Depth,
+    #[error("unexpected CBOR break at offset {0}")]
+    Break(usize),
+}
+
 /// Why a codec could not be compiled, or could not decode or encode one payload.
 ///
 /// A variant that names only the codec, or the codec and a field, is a context: the report carries
@@ -466,6 +481,8 @@ pub enum CodecError {
         #[source]
         source: ciborium::de::Error<io::Error>,
     },
+    #[error("failed to inspect cbor headers for codec '{codec}'")]
+    CborHeaderScan { codec: String },
     #[error("failed to encode cbor payload for codec '{codec}'")]
     CborEncode {
         codec: String,
@@ -585,6 +602,7 @@ impl CodecError {
             | Self::JsonEncode { .. }
             | Self::ColumnarJsonEncode { .. }
             | Self::CborDecode { .. }
+            | Self::CborHeaderScan { .. }
             | Self::CborEncode { .. }
             | Self::AvroDecode { .. }
             | Self::AvroEncode { .. }
@@ -668,6 +686,17 @@ pub(crate) enum FieldDecodeError {
         expected: JsonType,
         found: JsonValueKind,
     },
+    #[error("expected {expected:?}, found a CBOR {found}")]
+    CborWireType {
+        expected: CborType,
+        found: CborValueKind,
+    },
+    #[error("CBOR tag is not a schemaful value")]
+    CborTag,
+    #[error("CBOR map key must be text")]
+    CborNonTextKey,
+    #[error("CBOR map has duplicate key '{key}'")]
+    CborDuplicateKey { key: String },
 }
 
 /// Why a field's value cannot be written in its wire type. It is the cause beneath
@@ -680,12 +709,8 @@ pub(crate) enum FieldEncodeError {
     ExpectedBool,
     #[error("expected int-compatible value")]
     ExpectedInt,
-    #[error("U32 value does not fit Avro INT")]
-    U32OutsideInt,
     #[error("expected long-compatible value")]
     ExpectedLong,
-    #[error("U64 value does not fit Avro LONG")]
-    U64OutsideLong,
     #[error("expected f32")]
     ExpectedF32,
     #[error("expected float-compatible value")]
@@ -694,8 +719,6 @@ pub(crate) enum FieldEncodeError {
     ExpectedString,
     #[error("list contains null at index {index}")]
     NullListElement { index: usize },
-    #[error("unsupported avro type {ty:?}")]
-    UnsupportedAvroType { ty: AvroType },
     #[error("value must be at most {maximum}")]
     AboveMaximum { maximum: u8 },
     #[error("text contains trailing content after the SD elements")]
@@ -1158,12 +1181,7 @@ impl CompiledCodecBatchEncoder<'_> {
                 )?;
             }
             CompiledWireSchema::Cbor(_) => {
-                ciborium::into_writer(&row, &mut *output).map_err(|source| {
-                    Report::new(CodecError::CborEncode {
-                        codec: codec.to_string(),
-                        source,
-                    })
-                })?;
+                cbor::write_row(self.codec, &row, output)?;
             }
             CompiledWireSchema::Avro(wire_schema) => {
                 let value = row.to_avro_record(wire_schema)?;
@@ -1853,11 +1871,6 @@ impl RuntimeRow {
         }
     }
 
-    /// This row's columns rendered as one JSON object, for reports that show a record to a user.
-    pub(crate) fn to_json_string(&self) -> error_stack::Result<String, RuntimeSchemaError> {
-        self.to_json_string_masking(&nervix_vm::SchemaSensitivity::default())
-    }
-
     pub(crate) fn to_json_string_masking(
         &self,
         sensitivity: &nervix_vm::SchemaSensitivity,
@@ -1927,6 +1940,25 @@ impl RuntimeRecordBatchBuilder {
         let expected = self.schema.field(index).data_type();
         let location = RuntimeValueLocationRef::CodecField { field: &field.name };
         append_json_value_to_arrow(
+            self.builders[index].as_mut(),
+            &field.ty,
+            expected,
+            value,
+            &location,
+        )?;
+        self.next_column += 1;
+        Ok(())
+    }
+
+    fn append_cbor_value(
+        &mut self,
+        value: &ciborium::value::Value,
+    ) -> error_stack::Result<(), RuntimeSchemaError> {
+        let index = self.next_field_index()?;
+        let field = &self.fields[index];
+        let expected = self.schema.field(index).data_type();
+        let location = RuntimeValueLocationRef::CodecField { field: &field.name };
+        cbor::append_to_arrow(
             self.builders[index].as_mut(),
             &field.ty,
             expected,
@@ -2512,6 +2544,12 @@ pub enum RuntimeSchemaError {
         expected: ParseAsType,
         found: JsonValueKind,
     },
+    #[error("{location} holds a CBOR {found}, which is incompatible with {expected:?}")]
+    CborValueTypeMismatch {
+        location: RuntimeValueLocation,
+        expected: ParseAsType,
+        found: CborValueKind,
+    },
     #[error("{location} holds invalid base64 for BYTES")]
     InvalidBytesEncoding { location: RuntimeValueLocation },
     #[error("{location} holds an Avro {found:?}, which is incompatible with {expected:?}")]
@@ -3076,32 +3114,10 @@ pub(crate) fn compile_codec_spec_with_protobuf(
             CompiledWireSchema::Json(compile_json_wire_schema(schema_def, &schema))
         }
         ResolvedCodecWireFormat::Cbor(schema_def) => {
-            CompiledWireSchema::Cbor(compile_json_wire_schema(schema_def, &schema))
+            CompiledWireSchema::Cbor(cbor::CompiledCborWireSchema::compile(schema_def))
         }
         ResolvedCodecWireFormat::Avro(schema_def) => {
-            let schema_json = avro_schema_json(schema_def, schema.fields());
-            let parsed = AvroSchema::parse_str(&schema_json).map_err(|source| {
-                Report::new(source).change_context(CodecError::invalid_codec(name.as_str()))
-            })?;
-            let fields = schema_def
-                .fields
-                .iter()
-                .enumerate()
-                .map(|(position, field)| {
-                    (
-                        field.name.as_str().to_string(),
-                        CompiledAvroWireField {
-                            ty: field.ty,
-                            optional: field.optional,
-                            position,
-                        },
-                    )
-                })
-                .collect();
-            CompiledWireSchema::Avro(CompiledAvroWireSchema {
-                fields,
-                schema: parsed,
-            })
+            CompiledWireSchema::Avro(CompiledAvroWireSchema::compile(name, schema_def)?)
         }
         ResolvedCodecWireFormat::JaqNative {
             format,
@@ -3152,10 +3168,10 @@ pub(crate) fn compile_codec_spec_with_protobuf(
     }))
 }
 
-fn compile_json_wire_schema(
-    schema_def: &CreateWireSchema<JsonType>,
+fn compile_json_wire_schema<T: Copy>(
+    schema_def: &CreateWireSchema<T>,
     schema: &CompiledSchema,
-) -> CompiledJsonWireSchema {
+) -> CompiledJsonWireSchema<T> {
     let fields = schema_def
         .fields
         .iter()
@@ -3217,7 +3233,7 @@ pub(crate) fn decode_with_codec(
         CompiledWireSchema::Json(wire_schema) => {
             decode_json(codec, wire_schema, payload, decoder, builder)
         }
-        CompiledWireSchema::Cbor(wire_schema) => decode_cbor(codec, wire_schema, payload, builder),
+        CompiledWireSchema::Cbor(wire_schema) => cbor::decode(codec, wire_schema, payload, builder),
         CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, payload, builder),
         CompiledWireSchema::Syslog(syslog) => syslog.decode(codec, payload, builder),
         CompiledWireSchema::JaqNative(_) | CompiledWireSchema::Protobuf(_) => {
@@ -3301,7 +3317,7 @@ impl<'a> ArrowCodecRow<'a> {
             fields.push((
                 field.name.clone(),
                 self.value(field_index)
-                    .to_avro_wire_value(wire_field.ty, wire_field.optional)?,
+                    .to_avro_wire_value(&wire_field.ty, wire_field.optional)?,
             ));
         }
         Ok(AvroValue::Record(fields))
@@ -3450,7 +3466,7 @@ impl<'a> ArrowCodecValue<'a> {
 
     fn to_avro_wire_value(
         &self,
-        wire_ty: AvroType,
+        wire_ty: &AvroType,
         optional: bool,
     ) -> error_stack::Result<AvroValue, CodecError> {
         if self.is_null() {
@@ -3462,28 +3478,31 @@ impl<'a> ArrowCodecValue<'a> {
             }));
         }
 
-        let value = match wire_ty {
-            AvroType::Boolean => self.to_avro_boolean()?,
-            AvroType::Int => self.to_avro_int()?,
-            AvroType::Long => self.to_avro_long()?,
-            AvroType::Float => self.to_avro_float()?,
-            AvroType::Double => self.to_avro_double()?,
-            AvroType::String => self.to_avro_string()?,
-            AvroType::Bytes => {
-                let array = self.encoded_array::<BinaryArray>()?;
-                AvroValue::Bytes(array.value(self.row_index).to_vec())
-            }
-            AvroType::Array => self.to_avro_array()?,
-            unsupported => {
-                return Err(
-                    self.encode_failure(FieldEncodeError::UnsupportedAvroType { ty: unsupported })
-                );
-            }
-        };
+        let value = self.to_avro_present_value(wire_ty)?;
         if optional {
             Ok(AvroValue::Union(1, Box::new(value)))
         } else {
             Ok(value)
+        }
+    }
+
+    /// This present value as the Avro type its field or enclosing array declares.
+    fn to_avro_present_value(
+        &self,
+        wire_ty: &AvroType,
+    ) -> error_stack::Result<AvroValue, CodecError> {
+        match wire_ty {
+            AvroType::Boolean => self.to_avro_boolean(),
+            AvroType::Int => self.to_avro_int(),
+            AvroType::Long => self.to_avro_long(),
+            AvroType::Float => self.to_avro_float(),
+            AvroType::Double => self.to_avro_double(),
+            AvroType::String => self.to_avro_string(),
+            AvroType::Bytes => {
+                let array = self.encoded_array::<BinaryArray>()?;
+                Ok(AvroValue::Bytes(array.value(self.row_index).to_vec()))
+            }
+            AvroType::Array(item) => self.to_avro_array(item),
         }
     }
 
@@ -3496,55 +3515,19 @@ impl<'a> ArrowCodecValue<'a> {
     }
 
     fn to_avro_int(&self) -> error_stack::Result<AvroValue, CodecError> {
-        let value = match self.ty {
-            ParseAsType::I8 => i32::from(self.encoded_array::<Int8Array>()?.value(self.row_index)),
-            ParseAsType::I16 => {
-                i32::from(self.encoded_array::<Int16Array>()?.value(self.row_index))
-            }
-            ParseAsType::I32 => self.encoded_array::<Int32Array>()?.value(self.row_index),
-            ParseAsType::U8 => i32::from(self.encoded_array::<UInt8Array>()?.value(self.row_index)),
-            ParseAsType::U16 => {
-                i32::from(self.encoded_array::<UInt16Array>()?.value(self.row_index))
-            }
-            ParseAsType::U32 => {
-                let value = self.encoded_array::<UInt32Array>()?.value(self.row_index);
-                let Ok(value) = i32::try_from(value) else {
-                    return Err(self.encode_failure(FieldEncodeError::U32OutsideInt));
-                };
-                value
-            }
-            _ => return Err(self.encode_failure(FieldEncodeError::ExpectedInt)),
-        };
-        Ok(AvroValue::Int(value))
+        if let ParseAsType::I32 = self.ty {
+            let array = self.encoded_array::<Int32Array>()?;
+            return Ok(AvroValue::Int(array.value(self.row_index)));
+        }
+        Err(self.encode_failure(FieldEncodeError::ExpectedInt))
     }
 
     fn to_avro_long(&self) -> error_stack::Result<AvroValue, CodecError> {
-        let value = match self.ty {
-            ParseAsType::I8 => i64::from(self.encoded_array::<Int8Array>()?.value(self.row_index)),
-            ParseAsType::I16 => {
-                i64::from(self.encoded_array::<Int16Array>()?.value(self.row_index))
-            }
-            ParseAsType::I32 => {
-                i64::from(self.encoded_array::<Int32Array>()?.value(self.row_index))
-            }
-            ParseAsType::I64 => self.encoded_array::<Int64Array>()?.value(self.row_index),
-            ParseAsType::U8 => i64::from(self.encoded_array::<UInt8Array>()?.value(self.row_index)),
-            ParseAsType::U16 => {
-                i64::from(self.encoded_array::<UInt16Array>()?.value(self.row_index))
-            }
-            ParseAsType::U32 => {
-                i64::from(self.encoded_array::<UInt32Array>()?.value(self.row_index))
-            }
-            ParseAsType::U64 => {
-                let value = self.encoded_array::<UInt64Array>()?.value(self.row_index);
-                let Ok(value) = i64::try_from(value) else {
-                    return Err(self.encode_failure(FieldEncodeError::U64OutsideLong));
-                };
-                value
-            }
-            _ => return Err(self.encode_failure(FieldEncodeError::ExpectedLong)),
-        };
-        Ok(AvroValue::Long(value))
+        if let ParseAsType::I64 = self.ty {
+            let array = self.encoded_array::<Int64Array>()?;
+            return Ok(AvroValue::Long(array.value(self.row_index)));
+        }
+        Err(self.encode_failure(FieldEncodeError::ExpectedLong))
     }
 
     fn to_avro_float(&self) -> error_stack::Result<AvroValue, CodecError> {
@@ -3556,17 +3539,11 @@ impl<'a> ArrowCodecValue<'a> {
     }
 
     fn to_avro_double(&self) -> error_stack::Result<AvroValue, CodecError> {
-        match self.ty {
-            ParseAsType::F32 => {
-                let array = self.encoded_array::<Float32Array>()?;
-                Ok(AvroValue::Double(f64::from(array.value(self.row_index))))
-            }
-            ParseAsType::F64 => {
-                let array = self.encoded_array::<Float64Array>()?;
-                Ok(AvroValue::Double(array.value(self.row_index)))
-            }
-            _ => Err(self.encode_failure(FieldEncodeError::ExpectedFloat)),
+        if let ParseAsType::F64 = self.ty {
+            let array = self.encoded_array::<Float64Array>()?;
+            return Ok(AvroValue::Double(array.value(self.row_index)));
         }
+        Err(self.encode_failure(FieldEncodeError::ExpectedFloat))
     }
 
     fn to_avro_string(&self) -> error_stack::Result<AvroValue, CodecError> {
@@ -3574,6 +3551,12 @@ impl<'a> ArrowCodecValue<'a> {
             ParseAsType::String => {
                 let array = self.encoded_array::<StringArray>()?;
                 Ok(AvroValue::String(array.value(self.row_index).to_string()))
+            }
+            ParseAsType::Bytes => {
+                let array = self.encoded_array::<BinaryArray>()?;
+                Ok(AvroValue::String(
+                    base64_simd::STANDARD.encode_to_string(array.value(self.row_index)),
+                ))
             }
             ParseAsType::Datetime => {
                 let array = self.encoded_array::<TimestampNanosecondArray>()?;
@@ -3584,38 +3567,21 @@ impl<'a> ArrowCodecValue<'a> {
         }
     }
 
-    fn to_avro_array(&self) -> error_stack::Result<AvroValue, CodecError> {
+    /// This list as an Avro array whose every element is written as the declared `item`.
+    fn to_avro_array(&self, item: &AvroType) -> error_stack::Result<AvroValue, CodecError> {
         let sequence = self
             .sequence()
             .change_context_lazy(|| self.encode_context())?;
-        Ok(AvroValue::Array(sequence.to_avro_values()?))
+        Ok(AvroValue::Array(sequence.to_avro_values(item)?))
     }
 
-    fn to_avro_array_item(&self) -> error_stack::Result<AvroValue, CodecError> {
+    fn to_avro_array_item(&self, item: &AvroType) -> error_stack::Result<AvroValue, CodecError> {
         if self.is_null() {
             return Err(self.encode_failure(FieldEncodeError::NullListElement {
                 index: self.row_index,
             }));
         }
-        match self.ty {
-            ParseAsType::Bool => self.to_avro_boolean(),
-            ParseAsType::U8
-            | ParseAsType::I8
-            | ParseAsType::U16
-            | ParseAsType::I16
-            | ParseAsType::U32
-            | ParseAsType::I32
-            | ParseAsType::U64
-            | ParseAsType::I64 => self.to_avro_long(),
-            ParseAsType::F32 => self.to_avro_float(),
-            ParseAsType::F64 => self.to_avro_double(),
-            ParseAsType::String | ParseAsType::Datetime => self.to_avro_string(),
-            ParseAsType::Bytes => {
-                let array = self.encoded_array::<BinaryArray>()?;
-                Ok(AvroValue::Bytes(array.value(self.row_index).to_vec()))
-            }
-            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => self.to_avro_array(),
-        }
+        self.to_avro_present_value(item)
     }
 }
 
@@ -3691,7 +3657,7 @@ struct ArrowCodecSequence<'a> {
 }
 
 impl ArrowCodecSequence<'_> {
-    fn to_avro_values(&self) -> error_stack::Result<Vec<AvroValue>, CodecError> {
+    fn to_avro_values(&self, item: &AvroType) -> error_stack::Result<Vec<AvroValue>, CodecError> {
         self.rows
             .clone()
             .map(|row_index| {
@@ -3702,7 +3668,7 @@ impl ArrowCodecSequence<'_> {
                     field: self.field,
                     row_index,
                 }
-                .to_avro_array_item()
+                .to_avro_array_item(item)
             })
             .collect()
     }
@@ -3729,7 +3695,7 @@ impl Serialize for ArrowCodecSequence<'_> {
 
 fn decode_json(
     codec: &CompiledCodec,
-    wire_schema: &CompiledJsonWireSchema,
+    wire_schema: &CompiledJsonWireSchema<JsonType>,
     payload: &[u8],
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
@@ -3806,21 +3772,6 @@ fn decode_json(
             .change_context_lazy(|| codec.parse_field(&field.name))?;
     }
     Ok(())
-}
-
-fn decode_cbor(
-    codec: &CompiledCodec,
-    wire_schema: &CompiledJsonWireSchema,
-    payload: &[u8],
-    builder: &mut RuntimeRecordBatchBuilder,
-) -> error_stack::Result<(), CodecError> {
-    let value = ciborium::from_reader::<JsonValue, _>(Cursor::new(payload)).map_err(|source| {
-        Report::new(CodecError::CborDecode {
-            codec: codec.name.as_str().to_string(),
-            source,
-        })
-    })?;
-    decode_json_value(codec, &value, Some(wire_schema), builder)
 }
 
 /// Decode protobuf bytes as `message` into the JSON value jaq programs operate on.
@@ -3909,7 +3860,6 @@ fn protobuf_message_to_json(
 fn decode_json_value(
     codec: &CompiledCodec,
     value: &JsonValue,
-    wire_schema: Option<&CompiledJsonWireSchema>,
     builder: &mut RuntimeRecordBatchBuilder,
 ) -> error_stack::Result<(), CodecError> {
     let JsonValue::Object(object) = value else {
@@ -3917,32 +3867,9 @@ fn decode_json_value(
             codec: codec.name.as_str().to_string(),
         }));
     };
-
-    if let Some(wire_schema) = wire_schema
-        && !wire_schema.strictness.allows_unknown_fields()
-    {
-        for field in object.keys() {
-            if !wire_schema.fields.contains_key(field) {
-                return Err(Report::new(CodecError::UnexpectedField {
-                    codec: codec.name.as_str().to_string(),
-                    field: field.clone(),
-                }));
-            }
-        }
-    }
-
     for field in codec.schema.fields() {
-        let wire_field =
-            wire_schema.and_then(|wire_schema| wire_schema.fields.get(&field.name).copied());
-        if wire_schema.is_some() && wire_field.is_none() {
-            return Err(
-                codec.contract_violation(CodecContractError::MissingWireField {
-                    field: field.name.clone(),
-                }),
-            );
-        }
         let Some(value) = object.get(&field.name) else {
-            if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
+            if field.optional {
                 builder
                     .append_null()
                     .change_context_lazy(|| codec.invalid())?;
@@ -3954,24 +3881,13 @@ fn decode_json_value(
             }));
         };
         if value.is_null() {
-            if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
+            if field.optional {
                 builder
                     .append_null()
                     .change_context_lazy(|| codec.invalid())?;
                 continue;
             }
             return Err(codec.field_decode_failure(&field.name, FieldDecodeError::RequiredNull));
-        }
-        if let Some(wire_field) = wire_field
-            && !json_value_matches_wire_type(value, wire_field.ty)
-        {
-            return Err(codec.field_decode_failure(
-                &field.name,
-                FieldDecodeError::WireType {
-                    expected: wire_field.ty,
-                    found: json_value_kind(value),
-                },
-            ));
         }
         builder
             .append_json_value(value)
@@ -4438,32 +4354,29 @@ fn append_avro_value_to_arrow(
     }
 
     match ty {
-        ParseAsType::U8 => append_primitive!(
-            UInt8Builder,
-            avro_to_u64(value).and_then(|value| u8::try_from(value).ok())
-        ),
-        ParseAsType::I8 => append_primitive!(
-            Int8Builder,
-            avro_to_i64(value).and_then(|value| i8::try_from(value).ok())
-        ),
-        ParseAsType::U16 => append_primitive!(
-            UInt16Builder,
-            avro_to_u64(value).and_then(|value| u16::try_from(value).ok())
-        ),
-        ParseAsType::I16 => append_primitive!(
-            Int16Builder,
-            avro_to_i64(value).and_then(|value| i16::try_from(value).ok())
-        ),
-        ParseAsType::U32 => append_primitive!(
-            UInt32Builder,
-            avro_to_u64(value).and_then(|value| u32::try_from(value).ok())
-        ),
+        // No Avro type binds a narrow or unsigned integer, at the top level or inside an array.
+        ParseAsType::U8
+        | ParseAsType::I8
+        | ParseAsType::U16
+        | ParseAsType::I16
+        | ParseAsType::U32
+        | ParseAsType::U64 => Err(incompatible()),
         ParseAsType::I32 => append_primitive!(
             Int32Builder,
-            avro_to_i64(value).and_then(|value| i32::try_from(value).ok())
+            if let AvroValue::Int(value) = value {
+                Some(*value)
+            } else {
+                None
+            }
         ),
-        ParseAsType::U64 => append_primitive!(UInt64Builder, avro_to_u64(value)),
-        ParseAsType::I64 => append_primitive!(Int64Builder, avro_to_i64(value)),
+        ParseAsType::I64 => append_primitive!(
+            Int64Builder,
+            if let AvroValue::Long(value) = value {
+                Some(*value)
+            } else {
+                None
+            }
+        ),
         ParseAsType::Bool => append_primitive!(
             BooleanBuilder,
             if let AvroValue::Boolean(value) = value {
@@ -4480,14 +4393,18 @@ fn append_avro_value_to_arrow(
                 None
             }
         ),
-        ParseAsType::Bytes => append_primitive!(
-            BinaryBuilder,
-            if let AvroValue::Bytes(value) = value {
-                Some(value.as_slice())
-            } else {
-                None
+        ParseAsType::Bytes => {
+            let binary =
+                typed_arrow_builder::<BinaryBuilder>(builder, &ty.arrow_data_type(), location)?;
+            match value {
+                AvroValue::Bytes(value) => binary.append_value(value),
+                AvroValue::String(encoded) => {
+                    append_base64_to_binary_builder(binary, encoded.as_bytes(), location)?
+                }
+                _ => return Err(incompatible()),
             }
-        ),
+            Ok(())
+        }
         ParseAsType::Datetime => append_primitive!(
             TimestampNanosecondBuilder,
             if let AvroValue::String(value) = value {
@@ -4510,10 +4427,10 @@ fn append_avro_value_to_arrow(
         ),
         ParseAsType::F64 => append_primitive!(
             Float64Builder,
-            match value {
-                AvroValue::Float(value) => Some(f64::from(*value)),
-                AvroValue::Double(value) => Some(*value),
-                _ => None,
+            if let AvroValue::Double(value) = value {
+                Some(*value)
+            } else {
+                None
             }
         ),
         ParseAsType::Array { element, len } => {
@@ -5102,165 +5019,76 @@ fn borrowed_json_value_kind(value: &BorrowedValue<'_>) -> JsonValueKind {
 
 fn borrowed_json_value_matches_wire_type(value: &BorrowedValue<'_>, ty: JsonType) -> bool {
     match ty {
-        JsonType::String | JsonType::Bytes | JsonType::Datetime => value.as_str().is_some(),
-        JsonType::Number | JsonType::F32 | JsonType::F64 => value.cast_f64().is_some(),
+        JsonType::String => value.as_str().is_some(),
+        JsonType::Number => value.cast_f64().is_some(),
         JsonType::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
-        JsonType::Object => value.as_object().is_some(),
         JsonType::Array => value.as_array().is_some(),
         JsonType::Boolean => value.as_bool().is_some(),
-        JsonType::Null => value.is_null(),
-        JsonType::U8 => value
-            .as_u64()
-            .and_then(|value| u8::try_from(value).ok())
-            .is_some(),
-        JsonType::I8 => value
-            .as_i64()
-            .and_then(|value| i8::try_from(value).ok())
-            .is_some(),
-        JsonType::U16 => value
-            .as_u64()
-            .and_then(|value| u16::try_from(value).ok())
-            .is_some(),
-        JsonType::I16 => value
-            .as_i64()
-            .and_then(|value| i16::try_from(value).ok())
-            .is_some(),
-        JsonType::U32 => value
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .is_some(),
-        JsonType::I32 => value
-            .as_i64()
-            .and_then(|value| i32::try_from(value).ok())
-            .is_some(),
-        JsonType::U64 => value.as_u64().is_some(),
-        JsonType::I64 => value.as_i64().is_some(),
     }
 }
 
-fn json_value_matches_wire_type(value: &JsonValue, ty: JsonType) -> bool {
-    match ty {
-        JsonType::String | JsonType::Bytes => value.is_string(),
-        JsonType::Number => value.is_number(),
-        JsonType::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
-        JsonType::Object => value.is_object(),
-        JsonType::Array => value.is_array(),
-        JsonType::Boolean => value.is_boolean(),
-        JsonType::Null => value.is_null(),
-        JsonType::U8 => value.as_u64().and_then(|v| u8::try_from(v).ok()).is_some(),
-        JsonType::I8 => value.as_i64().and_then(|v| i8::try_from(v).ok()).is_some(),
-        JsonType::U16 => value.as_u64().and_then(|v| u16::try_from(v).ok()).is_some(),
-        JsonType::I16 => value.as_i64().and_then(|v| i16::try_from(v).ok()).is_some(),
-        JsonType::U32 => value.as_u64().and_then(|v| u32::try_from(v).ok()).is_some(),
-        JsonType::I32 => value.as_i64().and_then(|v| i32::try_from(v).ok()).is_some(),
-        JsonType::U64 => value.as_u64().is_some(),
-        JsonType::I64 => value.as_i64().is_some(),
-        JsonType::Datetime => value
-            .as_str()
-            .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
-            .is_some(),
-        JsonType::F32 | JsonType::F64 => value.is_number(),
-    }
-}
-
-fn avro_to_i64(value: &AvroValue) -> Option<i64> {
-    match value {
-        AvroValue::Int(v) => Some(i64::from(*v)),
-        AvroValue::Long(v) => Some(*v),
-        _ => None,
-    }
-}
-
-fn avro_to_u64(value: &AvroValue) -> Option<u64> {
-    avro_to_i64(value).and_then(|v| u64::try_from(v).ok())
-}
-
-fn avro_schema_json(
-    schema: &CreateWireSchema<AvroType>,
-    internal_fields: &[CompiledSchemaField],
-) -> String {
-    let fields = schema
-        .fields
-        .iter()
-        .map(|field| avro_wire_field_json(field, internal_fields))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    format!(
-        r#"{{"type":"record","name":"{}","fields":[{}]}}"#,
-        schema.name.as_str(),
-        fields
-    )
-}
-
-fn avro_wire_field_json(
-    field: &WireSchemaField<AvroType>,
-    internal_fields: &[CompiledSchemaField],
-) -> String {
-    let ty = avro_type_json(field, internal_fields);
-    if field.optional {
-        format!(
-            r#"{{"name":"{}","type":["null",{}],"default":null}}"#,
-            field.name.as_str(),
-            ty
-        )
-    } else {
-        format!(r#"{{"name":"{}","type":{}}}"#, field.name.as_str(), ty)
-    }
-}
-
-fn avro_type_json(
-    field: &WireSchemaField<AvroType>,
-    internal_fields: &[CompiledSchemaField],
-) -> String {
-    if let AvroType::Array = field.ty
-        && let Some(internal) = internal_fields
+impl CompiledAvroWireSchema {
+    /// The Avro record schema `schema_def` declares, every field's type exactly as its wire
+    /// schema names it, items included, and the position each field is written at.
+    fn compile(
+        name: &CodecName,
+        schema_def: &CreateAvroWireSchema,
+    ) -> error_stack::Result<Self, CodecError> {
+        let schema =
+            AvroSchema::parse(&Self::record_declaration(schema_def)).map_err(|source| {
+                Report::new(source).change_context(CodecError::invalid_codec(name.as_str()))
+            })?;
+        let fields = schema_def
+            .fields
             .iter()
-            .find(|internal| internal.name == field.name.as_str())
-        && let ParseAsType::Array { .. } | ParseAsType::Vec { .. } = &internal.ty
-    {
-        return parse_as_avro_type_json(&internal.ty);
+            .enumerate()
+            .map(|(position, field)| {
+                (
+                    field.name.as_str().to_string(),
+                    CompiledAvroWireField {
+                        ty: field.ty.clone(),
+                        optional: field.optional,
+                        position,
+                    },
+                )
+            })
+            .collect();
+        Ok(Self { fields, schema })
     }
-    format!(r#""{}""#, avro_type_name(field.ty))
-}
 
-fn parse_as_avro_type_json(ty: &ParseAsType) -> String {
-    match ty {
-        ParseAsType::Bool => r#""boolean""#.to_string(),
-        ParseAsType::U8
-        | ParseAsType::I8
-        | ParseAsType::U16
-        | ParseAsType::I16
-        | ParseAsType::U32
-        | ParseAsType::I32
-        | ParseAsType::U64
-        | ParseAsType::I64 => r#""long""#.to_string(),
-        ParseAsType::F32 => r#""float""#.to_string(),
-        ParseAsType::F64 => r#""double""#.to_string(),
-        ParseAsType::String | ParseAsType::Datetime => r#""string""#.to_string(),
-        ParseAsType::Bytes => r#""bytes""#.to_string(),
-        ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => format!(
-            r#"{{"type":"array","items":{}}}"#,
-            parse_as_avro_type_json(element)
-        ),
+    /// The record schema in the JSON form the Avro specification declares, an optional field as
+    /// the union of `null` and its type with a `null` default.
+    fn record_declaration(schema_def: &CreateAvroWireSchema) -> JsonValue {
+        let mut fields = Vec::with_capacity(schema_def.fields.len());
+        for field in &schema_def.fields {
+            let ty = Self::type_declaration(&field.ty);
+            let declaration = if field.optional {
+                serde_json::json!({
+                    "name": field.name.as_str(),
+                    "type": ["null", ty],
+                    "default": null,
+                })
+            } else {
+                serde_json::json!({ "name": field.name.as_str(), "type": ty })
+            };
+            fields.push(declaration);
+        }
+        serde_json::json!({
+            "type": "record",
+            "name": schema_def.name.as_str(),
+            "fields": fields,
+        })
     }
-}
 
-fn avro_type_name(ty: AvroType) -> &'static str {
-    match ty {
-        AvroType::Null => "null",
-        AvroType::Boolean => "boolean",
-        AvroType::Int => "int",
-        AvroType::Long => "long",
-        AvroType::Float => "float",
-        AvroType::Double => "double",
-        AvroType::Bytes => "bytes",
-        AvroType::String => "string",
-        AvroType::Record => "record",
-        AvroType::Enum => "enum",
-        AvroType::Array => "array",
-        AvroType::Map => "map",
-        AvroType::Fixed => "fixed",
+    /// One field type's schema: a primitive type's name, or an array of its declared items.
+    fn type_declaration(ty: &AvroType) -> JsonValue {
+        match ty {
+            AvroType::Array(item) => serde_json::json!({
+                "type": "array",
+                "items": Self::type_declaration(item),
+            }),
+            primitive => JsonValue::String(primitive.to_string()),
+        }
     }
 }
 
@@ -5270,10 +5098,10 @@ mod tests {
 
     use chrono::{DateTime, Datelike, Utc};
     use nervix_models::{
-        ByteSizeUnit, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+        ByteSizeUnit, CodecEncoding, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
         CodecWireFormat, CreateAvroWireSchema, CreateCborWireSchema, CreateCodec,
-        CreateJsonWireSchema, CreateSchema, CreateWireSchema, SchemaField, WireSchemaLookup,
-        WireSchemaName,
+        CreateJsonWireSchema, CreateSchema, CreateWireSchema, SchemaField, WireSchemaField,
+        WireSchemaLookup, WireSchemaName,
     };
     use nonzero_ext::nonzero;
     use rstest::{fixture, rstest};
@@ -5350,7 +5178,7 @@ mod tests {
             fields: vec![
                 SchemaField {
                     name: named("user_id"),
-                    ty: ParseAsType::U32,
+                    ty: ParseAsType::I64,
                     optional: false,
                     sensitive: false,
                 },
@@ -5429,27 +5257,27 @@ mod tests {
             fields: vec![
                 WireSchemaField {
                     name: named("user_id"),
-                    ty: JsonType::Integer,
+                    ty: CborType::Integer,
                     optional: false,
                 },
                 WireSchemaField {
                     name: named("tenant"),
-                    ty: JsonType::String,
+                    ty: CborType::Text,
                     optional: false,
                 },
                 WireSchemaField {
                     name: named("created_at"),
-                    ty: JsonType::String,
+                    ty: CborType::Text,
                     optional: false,
                 },
                 WireSchemaField {
                     name: named("latency"),
-                    ty: JsonType::Number,
+                    ty: CborType::Float,
                     optional: false,
                 },
                 WireSchemaField {
                     name: named("active"),
-                    ty: JsonType::Boolean,
+                    ty: CborType::Boolean,
                     optional: false,
                 },
             ],
@@ -5529,6 +5357,12 @@ mod tests {
         }
     }
 
+    fn optional_avro_schema() -> CreateSchema {
+        let mut schema = optional_schema();
+        schema.fields[0].ty = ParseAsType::I64;
+        schema
+    }
+
     fn optional_avro_wire_schema() -> CreateAvroWireSchema {
         CreateWireSchema {
             name: named("optional_notification_avro"),
@@ -5599,12 +5433,12 @@ mod tests {
             fields: vec![
                 WireSchemaField {
                     name: named("cpu_last_64"),
-                    ty: AvroType::Array,
+                    ty: AvroType::array_of(AvroType::Float),
                     optional: false,
                 },
                 WireSchemaField {
                     name: named("labels"),
-                    ty: AvroType::Array,
+                    ty: AvroType::array_of(AvroType::String),
                     optional: true,
                 },
             ],
@@ -5708,7 +5542,7 @@ mod tests {
                 .into_iter()
                 .map(|name| WireSchemaField {
                     name: named(name),
-                    ty: AvroType::Array,
+                    ty: AvroType::array_of(AvroType::array_of(AvroType::Float)),
                     optional: false,
                 })
                 .collect(),
@@ -5873,19 +5707,44 @@ mod tests {
         }
     }
 
+    /// The AVRO item an element of `ty` travels as, for the element types an Avro type binds.
+    fn avro_primitive_item(ty: &ParseAsType) -> Option<AvroType> {
+        match ty {
+            ParseAsType::Bool => Some(AvroType::Boolean),
+            ParseAsType::I32 => Some(AvroType::Int),
+            ParseAsType::I64 => Some(AvroType::Long),
+            ParseAsType::F32 => Some(AvroType::Float),
+            ParseAsType::F64 => Some(AvroType::Double),
+            ParseAsType::String | ParseAsType::Datetime => Some(AvroType::String),
+            ParseAsType::Bytes => Some(AvroType::Bytes),
+            _ => None,
+        }
+    }
+
+    /// The primitive array schema restricted to the element types an Avro item binds.
+    fn avro_primitive_arrays_schema() -> CreateSchema {
+        let mut schema = primitive_arrays_schema();
+        schema
+            .fields
+            .retain(|field| avro_primitive_item(field.ty.innermost_element()).is_some());
+        schema
+    }
+
     fn primitive_arrays_avro_wire_schema() -> CreateAvroWireSchema {
+        let mut fields = Vec::new();
+        for field in avro_primitive_arrays_schema().fields {
+            let item = avro_primitive_item(field.ty.innermost_element())
+                .assured("the AVRO primitive array schema keeps only bound element types");
+            fields.push(WireSchemaField {
+                name: field.name,
+                ty: AvroType::array_of(item),
+                optional: false,
+            });
+        }
         CreateWireSchema {
             name: named("primitive_arrays_wire"),
             strictness: Default::default(),
-            fields: primitive_arrays_schema()
-                .fields
-                .iter()
-                .map(|field| WireSchemaField {
-                    name: field.name.clone(),
-                    ty: AvroType::Array,
-                    optional: false,
-                })
-                .collect(),
+            fields,
         }
     }
 
@@ -6215,7 +6074,7 @@ mod tests {
 
     fn record_with(user_id: u32, tenant: &str) -> RuntimeRow {
         test_runtime_row([
-            ("user_id".to_string(), RuntimeValue::U32(user_id)),
+            ("user_id".to_string(), RuntimeValue::I64(i64::from(user_id))),
             (
                 "tenant".to_string(),
                 RuntimeValue::String(tenant.to_string()),
@@ -6376,6 +6235,27 @@ mod tests {
     }
 
     impl PrimitiveArrayCodecCase {
+        /// The primitive array schema this codec carries: every primitive element, except that an
+        /// AVRO array holds only the elements an Avro item binds.
+        fn schema(&self) -> CreateSchema {
+            match self {
+                Self::Avro => avro_primitive_arrays_schema(),
+                Self::Cbor | Self::Toml => primitive_arrays_schema(),
+            }
+        }
+
+        /// The primitive array record holding exactly the fields of [`Self::schema`].
+        fn record(&self) -> RuntimeRow {
+            let schema = self.schema();
+            let mut fields = Vec::new();
+            for field in &schema.fields {
+                let value = row_value(&primitive_arrays_record(), field.name.as_str())
+                    .assured("the primitive array record holds every primitive array field");
+                fields.push((field.name.as_str().to_string(), value));
+            }
+            test_runtime_row(fields)
+        }
+
         fn compile(&self, schema: Arc<CompiledSchema>) -> Arc<CompiledCodec> {
             match self {
                 Self::Avro => compile_codec(
@@ -6426,23 +6306,13 @@ mod tests {
         array_record()
     }
 
-    #[fixture]
-    fn compiled_primitive_array_schema() -> Arc<CompiledSchema> {
-        Arc::new(compile_schema(&primitive_arrays_schema()))
-    }
-
-    #[fixture]
-    fn primitive_array_record_fixture() -> RuntimeRow {
-        primitive_arrays_record()
-    }
-
     #[test]
     fn compiled_schema_exposes_arrow_schema() {
         let compiled = compile_schema(&schema());
         let arrow_schema = compiled.arrow_schema();
         assert_eq!(arrow_schema.fields().len(), 5);
         assert_eq!(arrow_schema.field(0).name(), "user_id");
-        assert_eq!(arrow_schema.field(0).data_type(), &ArrowDataType::UInt32);
+        assert_eq!(arrow_schema.field(0).data_type(), &ArrowDataType::Int64);
         assert_eq!(
             arrow_schema.field(2).data_type(),
             &ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into()))
@@ -6454,7 +6324,7 @@ mod tests {
         let records = vec![
             record(),
             test_runtime_row([
-                ("user_id".to_string(), RuntimeValue::U32(7)),
+                ("user_id".to_string(), RuntimeValue::I64(7)),
                 (
                     "tenant".to_string(),
                     RuntimeValue::String("beta".to_string()),
@@ -6475,7 +6345,7 @@ mod tests {
         assert_eq!(batch.batch().num_rows(), 2);
         assert_eq!(
             batch.value(0, "user_id").expect("readable value"),
-            Some(RuntimeValue::U32(42))
+            Some(RuntimeValue::I64(42))
         );
         assert_eq!(
             batch.value(1, "tenant").expect("readable value"),
@@ -6524,7 +6394,7 @@ mod tests {
     fn runtime_arrow_batches_can_be_concatenated() {
         let left = record().one_row_batch();
         let right_record = test_runtime_row([
-            ("user_id".to_string(), RuntimeValue::U32(7)),
+            ("user_id".to_string(), RuntimeValue::I64(7)),
             (
                 "tenant".to_string(),
                 RuntimeValue::String("beta".to_string()),
@@ -6547,11 +6417,11 @@ mod tests {
         assert_eq!(concatenated.batch().num_rows(), 2);
         assert_eq!(
             concatenated.value(0, "user_id").expect("readable value"),
-            Some(RuntimeValue::U32(42))
+            Some(RuntimeValue::I64(42))
         );
         assert_eq!(
             concatenated.value(1, "user_id").expect("readable value"),
-            Some(RuntimeValue::U32(7))
+            Some(RuntimeValue::I64(7))
         );
     }
 
@@ -6899,16 +6769,8 @@ mod tests {
                 "expected int-compatible value",
             ),
             (
-                FieldEncodeError::U32OutsideInt,
-                "U32 value does not fit Avro INT",
-            ),
-            (
                 FieldEncodeError::ExpectedLong,
                 "expected long-compatible value",
-            ),
-            (
-                FieldEncodeError::U64OutsideLong,
-                "U64 value does not fit Avro LONG",
             ),
             (FieldEncodeError::ExpectedF32, "expected f32"),
             (
@@ -6922,10 +6784,6 @@ mod tests {
             (
                 FieldEncodeError::NullListElement { index: 2 },
                 "list contains null at index 2",
-            ),
-            (
-                FieldEncodeError::UnsupportedAvroType { ty: AvroType::Map },
-                "unsupported avro type Map",
             ),
             (
                 FieldEncodeError::ColumnType {
@@ -6992,10 +6850,10 @@ mod tests {
                 optional: field.optional,
                 sensitive: false,
             });
-            if let Some(wire) = field.wire {
+            if let Some(wire) = &field.wire {
                 wire_fields.push(WireSchemaField {
                     name: named(field.name),
-                    ty: wire,
+                    ty: wire.clone(),
                     optional: field.wire_optional,
                 });
             }
@@ -7035,32 +6893,20 @@ mod tests {
     }
 
     #[test]
-    fn avro_codec_writes_every_narrow_integer_and_float_in_its_declared_wire_type() {
+    fn avro_codec_writes_its_exact_scalar_types() {
         let codec = avro_fixture_codec(&[
-            avro_value_case(ParseAsType::I8, AvroType::Int),
+            avro_value_case(ParseAsType::I32, AvroType::Int),
             AvroFieldCase {
-                name: "i16",
-                ..avro_value_case(ParseAsType::I16, AvroType::Int)
-            },
-            AvroFieldCase {
-                name: "i32",
-                ..avro_value_case(ParseAsType::I32, AvroType::Int)
-            },
-            AvroFieldCase {
-                name: "u8",
-                ..avro_value_case(ParseAsType::U8, AvroType::Int)
-            },
-            AvroFieldCase {
-                name: "u16",
-                ..avro_value_case(ParseAsType::U16, AvroType::Int)
-            },
-            AvroFieldCase {
-                name: "u32",
-                ..avro_value_case(ParseAsType::U32, AvroType::Int)
+                name: "i64",
+                ..avro_value_case(ParseAsType::I64, AvroType::Long)
             },
             AvroFieldCase {
                 name: "f32",
                 ..avro_value_case(ParseAsType::F32, AvroType::Float)
+            },
+            AvroFieldCase {
+                name: "f64",
+                ..avro_value_case(ParseAsType::F64, AvroType::Double)
             },
             AvroFieldCase {
                 name: "note",
@@ -7070,26 +6916,21 @@ mod tests {
                 wire_optional: true,
             },
         ])
-        .expect("every narrow integer fits an Avro INT");
+        .assured("each scalar has its declared Avro representation");
         let values = [
-            ("value", RuntimeValue::I8(-8)),
-            ("i16", RuntimeValue::I16(-1_600)),
-            ("i32", RuntimeValue::I32(-320_000)),
-            ("u8", RuntimeValue::U8(8)),
-            ("u16", RuntimeValue::U16(1_600)),
-            ("u32", RuntimeValue::U32(320_000)),
+            ("value", RuntimeValue::I32(i32::MIN)),
+            ("i64", RuntimeValue::I64(i64::MAX)),
             ("f32", RuntimeValue::F32(OrderedFloat(1.5))),
+            ("f64", RuntimeValue::F64(OrderedFloat(-2.5))),
         ];
-
         let payload = encode_test_fields(
             &codec,
             values
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.clone())),
         )
-        .expect("every value fits its wire type");
-        let decoded = decode_one(&codec, &payload).expect("the encoding decodes back");
-
+        .assured("the values have the codec's exact scalar types");
+        let decoded = decode_one(&codec, &payload).assured("each encoded scalar decodes exactly");
         for (name, value) in values {
             assert_eq!(single_batch_value(&decoded, name), Some(value), "{name}");
         }
@@ -7097,16 +6938,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::u32_outside_int(
-        avro_value_case(ParseAsType::U32, AvroType::Int),
-        Some(RuntimeValue::U32(u32::MAX)),
-        "U32 value does not fit Avro INT"
-    )]
-    #[case::u64_outside_long(
-        avro_value_case(ParseAsType::U64, AvroType::Long),
-        Some(RuntimeValue::U64(u64::MAX)),
-        "U64 value does not fit Avro LONG"
-    )]
     #[case::bool(
         avro_value_case(ParseAsType::String, AvroType::Boolean),
         Some(RuntimeValue::String("yes".to_string())),
@@ -7136,11 +6967,6 @@ mod tests {
         avro_value_case(ParseAsType::U8, AvroType::String),
         Some(RuntimeValue::U8(1)),
         "expected string-compatible value"
-    )]
-    #[case::unsupported(
-        avro_value_case(ParseAsType::String, AvroType::Null),
-        Some(RuntimeValue::String("x".to_string())),
-        "unsupported avro type Null"
     )]
     #[case::required_null(
         AvroFieldCase {
@@ -7174,22 +7000,6 @@ mod tests {
         assert_eq!(
             format!("{error:#}"),
             format!("codec 'avro_value_codec' failed to encode field 'value': {reason}")
-        );
-    }
-
-    #[test]
-    fn avro_codec_keeps_a_schema_the_avro_parser_refuses_beneath_the_codec() {
-        let error = avro_fixture_codec(&[avro_value_case(ParseAsType::String, AvroType::Map)])
-            .expect_err("an Avro map needs the type of its values");
-
-        assert!(matches!(
-            error.current_context(),
-            CodecError::InvalidCodec { codec } if codec == "avro_value_codec"
-        ));
-        assert!(error.contains::<apache_avro::Error>(), "{error:?}");
-        assert!(
-            format!("{error:#}").starts_with("codec 'avro_value_codec' is incompatible: "),
-            "{error:#}"
         );
     }
 
@@ -7789,7 +7599,7 @@ mod tests {
                 decode_one(&compiled_codec, payload).expect("columnar JSON payload should decode");
             assert_eq!(
                 single_batch_value(&decoded, "user_id"),
-                Some(RuntimeValue::U32(expected_user_id))
+                Some(RuntimeValue::I64(expected_user_id))
             );
         }
 
@@ -7844,12 +7654,14 @@ mod tests {
 
     #[test]
     fn codec_batch_encoder_does_not_eagerly_encode_arrow_rows() {
+        // The internal field is optional and the wire field required, so only a row holding a
+        // null fails to encode, and only once that row is requested.
         let schema_model = CreateSchema {
             name: named("counter"),
             fields: vec![SchemaField {
                 name: named("value"),
-                ty: ParseAsType::U64,
-                optional: false,
+                ty: ParseAsType::I64,
+                optional: true,
                 sensitive: false,
             }],
         };
@@ -7879,10 +7691,10 @@ mod tests {
         .expect("codec should compile");
         let batch = compiled_schema
             .batch_from_test_rows([
-                [("value".to_string(), RuntimeValue::U64(1))],
-                [("value".to_string(), RuntimeValue::U64(u64::MAX))],
+                vec![("value".to_string(), RuntimeValue::I64(1))],
+                Vec::new(),
             ])
-            .expect("values should build an Arrow batch");
+            .expect("an absent optional value is a typed null");
 
         let encoder = compiled_codec
             .batch_encoder(&batch)
@@ -7893,7 +7705,7 @@ mod tests {
             .expect("the first row should encode independently");
         let error = encoder
             .encode_row_into(1, &mut payload)
-            .expect_err("the overflowing second row should fail only when requested");
+            .expect_err("the second row's null should fail only when requested");
 
         assert!(matches!(
             error.current_context(),
@@ -7920,7 +7732,7 @@ mod tests {
         assert_eq!(decoded.batch().schema().field(1).name(), "tenant");
         assert_eq!(
             single_batch_value(&decoded, "user_id"),
-            Some(RuntimeValue::U32(42))
+            Some(RuntimeValue::I64(42))
         );
         assert_eq!(
             single_batch_value(&decoded, "tenant"),
@@ -7945,7 +7757,7 @@ mod tests {
             strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: named("payload"),
-                ty: JsonType::Bytes,
+                ty: JsonType::String,
                 optional: false,
             }],
         };
@@ -7955,14 +7767,17 @@ mod tests {
                 wire_schema: json_wire.name.clone(),
             },
             schema: schema.name.clone(),
-            encoding_rules: Vec::new(),
+            encoding_rules: vec![CodecEncodingRule {
+                field: named("payload"),
+                encoding: CodecEncoding::Base64,
+            }],
         };
         let json_codec = compile_codec(
             &json_model,
             compiled_schema.clone(),
             ResolvedCodecWireFormat::Json(&json_wire),
         )
-        .assured("the BYTES wire field matches the internal BYTES field");
+        .assured("the string wire field declares BASE64 for the internal BYTES field");
         let decoded =
             decode_one(&json_codec, br#"{"payload":"AP8="}"#).assured("padded base64 decodes");
         let bytes = decoded
@@ -7987,49 +7802,58 @@ mod tests {
             .assured("the binary row has a canonical base64 encoding");
         assert_eq!(payload, br#"{"payload":"AP8="}"#);
 
-        let avro_wire = CreateWireSchema {
-            name: named("binary_avro_wire"),
-            strictness: Default::default(),
-            fields: vec![WireSchemaField {
-                name: named("payload"),
-                ty: AvroType::Bytes,
-                optional: false,
-            }],
-        };
-        let avro_model = CreateCodec {
-            name: named("binary_avro"),
-            wire_format: CodecWireFormat::Avro {
-                wire_schema: avro_wire.name.clone(),
-            },
-            schema: schema.name,
-            encoding_rules: Vec::new(),
-        };
-        let avro_codec = compile_codec(
-            &avro_model,
-            compiled_schema,
-            ResolvedCodecWireFormat::Avro(&avro_wire),
-        )
-        .assured("the AVRO BYTES field matches the internal BYTES field");
-        let avro_output = avro_codec
-            .batch_encoder(&decoded)
-            .assured("the decoded binary batch follows the Avro codec schema");
-        payload.clear();
-        avro_output
-            .encode_row_into(0, &mut payload)
-            .assured("the Avro encoder writes native bytes");
-        let avro_decoded = decode_one(&avro_codec, &payload)
-            .verified("the payload was just encoded from the same Avro schema");
-        let bytes = avro_decoded
-            .batch()
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .verified("the compiled BYTES schema owns a Binary Arrow column");
-        assert_eq!(bytes.value(0), &[0, 255]);
+        for avro_type in [AvroType::Bytes, AvroType::String] {
+            let avro_wire = CreateWireSchema {
+                name: named("binary_avro_wire"),
+                strictness: Default::default(),
+                fields: vec![WireSchemaField {
+                    name: named("payload"),
+                    ty: avro_type.clone(),
+                    optional: false,
+                }],
+            };
+            let avro_model = CreateCodec {
+                name: named("binary_avro"),
+                wire_format: CodecWireFormat::Avro {
+                    wire_schema: avro_wire.name.clone(),
+                },
+                schema: schema.name.clone(),
+                encoding_rules: if avro_type == AvroType::String {
+                    vec![CodecEncodingRule {
+                        field: named("payload"),
+                        encoding: CodecEncoding::Base64,
+                    }]
+                } else {
+                    Vec::new()
+                },
+            };
+            let avro_codec = compile_codec(
+                &avro_model,
+                compiled_schema.clone(),
+                ResolvedCodecWireFormat::Avro(&avro_wire),
+            )
+            .assured("the AVRO BYTES field matches the internal BYTES field");
+            let avro_output = avro_codec
+                .batch_encoder(&decoded)
+                .assured("the decoded binary batch follows the Avro codec schema");
+            payload.clear();
+            avro_output
+                .encode_row_into(0, &mut payload)
+                .assured("the Avro encoder writes native bytes");
+            let avro_decoded = decode_one(&avro_codec, &payload)
+                .verified("the payload was just encoded from the same Avro schema");
+            let bytes = avro_decoded
+                .batch()
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .verified("the compiled BYTES schema owns a Binary Arrow column");
+            assert_eq!(bytes.value(0), &[0, 255]);
+        }
     }
 
     #[test]
-    fn json_bytes_reject_malformed_base64_without_exposing_payload() {
+    fn json_and_avro_bytes_reject_malformed_base64_without_exposing_payload() {
         let schema = CreateSchema {
             name: named("binary_payload"),
             fields: vec![SchemaField {
@@ -8044,7 +7868,7 @@ mod tests {
             strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: named("payload"),
-                ty: JsonType::Bytes,
+                ty: JsonType::String,
                 optional: false,
             }],
         };
@@ -8054,7 +7878,10 @@ mod tests {
                 wire_schema: wire.name.clone(),
             },
             schema: schema.name.clone(),
-            encoding_rules: Vec::new(),
+            encoding_rules: vec![CodecEncodingRule {
+                field: named("payload"),
+                encoding: CodecEncoding::Base64,
+            }],
         };
         let codec = compile_codec(
             &model,
@@ -8062,12 +7889,50 @@ mod tests {
             ResolvedCodecWireFormat::Json(&wire),
         )
         .assured("the BYTES schemas are compatible");
-        let Err(error) = decode_one(&codec, br#"{"payload":"AP8!"}"#) else {
-            panic!("invalid base64 must fail decoding");
+        let avro_wire = CreateWireSchema {
+            name: named("binary_avro_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("payload"),
+                ty: AvroType::String,
+                optional: false,
+            }],
         };
-        let display = error.to_string();
-        assert!(display.contains("payload"));
-        assert!(!display.contains("AP8!"));
+        let avro_model = CreateCodec {
+            name: named("binary_avro"),
+            wire_format: CodecWireFormat::Avro {
+                wire_schema: avro_wire.name.clone(),
+            },
+            ..model
+        };
+        let avro_codec = compile_codec(
+            &avro_model,
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Avro(&avro_wire),
+        )
+        .assured("Avro text declares BASE64 for the BYTES field");
+        let avro_schema = AvroSchema::parse_str(
+            r#"{"type":"record","name":"binary","fields":[{"name":"payload","type":"string"}]}"#,
+        )
+        .assured("the fixture independently declares one Avro string");
+        for encoded in ["AP8!", "AP8", "AB==", "AP-=", "AP_=", "A==="] {
+            let json_payload = serde_json::to_vec(&serde_json::json!({"payload": encoded}))
+                .assured("the bounded fixture contains only a JSON string");
+            let avro_value = AvroValue::Record(vec![(
+                "payload".to_string(),
+                AvroValue::String(encoded.to_string()),
+            )]);
+            let avro_payload = to_avro_datum(&avro_schema, avro_value)
+                .assured("the invalid base64 is a valid Avro string datum");
+            for (codec, payload) in [(&codec, json_payload), (&avro_codec, avro_payload)] {
+                let error = decode_one(codec, &payload)
+                    .err()
+                    .assured("noncanonical base64 must fail decoding");
+                let display = format!("{error:#}");
+                assert!(display.contains("payload"));
+                assert!(!display.contains(encoded));
+            }
+        }
     }
 
     #[test]
@@ -8086,7 +7951,7 @@ mod tests {
             strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: named("payload"),
-                ty: JsonType::Bytes,
+                ty: JsonType::String,
                 optional: false,
             }],
         };
@@ -8096,7 +7961,10 @@ mod tests {
                 wire_schema: wire.name.clone(),
             },
             schema: schema.name.clone(),
-            encoding_rules: Vec::new(),
+            encoding_rules: vec![CodecEncodingRule {
+                field: named("payload"),
+                encoding: CodecEncoding::Base64,
+            }],
         };
         let codec = compile_codec(
             &model,
@@ -8139,7 +8007,7 @@ mod tests {
             strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: named("payload"),
-                ty: JsonType::Array,
+                ty: CborType::Array,
                 optional: false,
             }],
         };
@@ -8158,10 +8026,17 @@ mod tests {
         )
         .assured("the CBOR array wire field matches a VEC of BYTES");
         let mut payload = Vec::new();
-        ciborium::into_writer(&serde_json::json!({"payload": ["AP8=", ""]}), &mut payload)
+        let value = ciborium::value::Value::Map(vec![(
+            ciborium::value::Value::Text("payload".to_string()),
+            ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Bytes(vec![0, 255]),
+                ciborium::value::Value::Bytes(Vec::new()),
+            ]),
+        )]);
+        ciborium::into_writer(&value, &mut payload)
             .assured("the constructed CBOR value is encodable");
         let decoded =
-            decode_one(&codec, &payload).assured("each CBOR list element is canonical base64 text");
+            decode_one(&codec, &payload).assured("each CBOR list element is a byte string");
         let list = decoded
             .batch()
             .column(0)
@@ -8188,7 +8063,10 @@ mod tests {
         let mut output = Vec::new();
         encoder
             .encode_row_into(0, &mut output)
-            .assured("the byte elements have CBOR base64 representations");
+            .assured("the byte elements have native CBOR representations");
+        let emitted: ciborium::value::Value =
+            ciborium::from_reader(output.as_slice()).assured("the output is a CBOR value");
+        assert_eq!(emitted, value);
         let restored = decode_one(&codec, &output)
             .verified("the CBOR output was just encoded from this schema");
         assert_eq!(restored.batch(), decoded.batch());
@@ -8562,19 +8440,18 @@ mod tests {
     #[case::cbor(PrimitiveArrayCodecCase::Cbor)]
     #[case::toml(PrimitiveArrayCodecCase::Toml)]
     fn codec_roundtrips_arrays_and_vectors_for_all_primitive_types(
-        compiled_primitive_array_schema: Arc<CompiledSchema>,
-        primitive_array_record_fixture: RuntimeRow,
         #[case] codec_case: PrimitiveArrayCodecCase,
     ) {
-        let compiled_codec = codec_case.compile(compiled_primitive_array_schema.clone());
-        let payload = encode_arrow_record(&compiled_codec, &primitive_array_record_fixture)
-            .expect("must encode");
+        let compiled_schema = Arc::new(compile_schema(&codec_case.schema()));
+        let record = codec_case.record();
+        let compiled_codec = codec_case.compile(compiled_schema.clone());
+        let payload = encode_arrow_record(&compiled_codec, &record).expect("must encode");
         let decoded = decode_one(&compiled_codec, &payload).expect("must decode");
 
-        for field in compiled_primitive_array_schema.fields() {
+        for field in compiled_schema.fields() {
             assert_eq!(
                 single_batch_value(&decoded, &field.name),
-                row_value(&primitive_array_record_fixture, &field.name),
+                row_value(&record, &field.name),
                 "field {} should roundtrip through {codec_case:?}",
                 field.name
             );
@@ -8683,53 +8560,53 @@ mod tests {
     }
 
     #[test]
-    fn schemaful_json_honors_every_typed_integer_wire_bound() {
+    fn schemaful_json_honors_every_internal_integer_bound() {
         let cases = [
             (
                 ParseAsType::U8,
-                JsonType::U8,
+                JsonType::Integer,
                 "255",
                 RuntimeValue::U8(u8::MAX),
             ),
             (
                 ParseAsType::I8,
-                JsonType::I8,
+                JsonType::Integer,
                 "-128",
                 RuntimeValue::I8(i8::MIN),
             ),
             (
                 ParseAsType::U16,
-                JsonType::U16,
+                JsonType::Integer,
                 "65535",
                 RuntimeValue::U16(u16::MAX),
             ),
             (
                 ParseAsType::I16,
-                JsonType::I16,
+                JsonType::Integer,
                 "-32768",
                 RuntimeValue::I16(i16::MIN),
             ),
             (
                 ParseAsType::U32,
-                JsonType::U32,
+                JsonType::Integer,
                 "4294967295",
                 RuntimeValue::U32(u32::MAX),
             ),
             (
                 ParseAsType::I32,
-                JsonType::I32,
+                JsonType::Integer,
                 "-2147483648",
                 RuntimeValue::I32(i32::MIN),
             ),
             (
                 ParseAsType::U64,
-                JsonType::U64,
+                JsonType::Integer,
                 "18446744073709551615",
                 RuntimeValue::U64(u64::MAX),
             ),
             (
                 ParseAsType::I64,
-                JsonType::I64,
+                JsonType::Integer,
                 "-9223372036854775808",
                 RuntimeValue::I64(i64::MIN),
             ),
@@ -8812,7 +8689,7 @@ mod tests {
         assert_eq!(single_batch_value(&decoded, "ignored"), None);
         assert_eq!(
             single_batch_value(&decoded, "user_id"),
-            Some(RuntimeValue::U32(42))
+            Some(RuntimeValue::I64(42))
         );
     }
 
@@ -8911,10 +8788,314 @@ mod tests {
         .expect("codec should compile")
     }
 
+    fn one_field_cbor_codec(ty: ParseAsType, wire_type: CborType) -> Arc<CompiledCodec> {
+        let schema = CreateSchema {
+            name: named("one_value"),
+            fields: vec![SchemaField {
+                name: named("value"),
+                ty,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let wire = CreateWireSchema {
+            name: named("one_value_wire"),
+            strictness: WireSchemaStrictness::Strict,
+            fields: vec![WireSchemaField {
+                name: named("value"),
+                ty: wire_type,
+                optional: false,
+            }],
+        };
+        let model = CreateCodec {
+            name: named("one_value_codec"),
+            wire_format: CodecWireFormat::Cbor {
+                wire_schema: wire.name.clone(),
+            },
+            schema: schema.name.clone(),
+            encoding_rules: if matches!(schema.fields[0].ty, ParseAsType::Datetime) {
+                vec![CodecEncodingRule {
+                    field: named("value"),
+                    encoding: CodecEncoding::Rfc3339,
+                }]
+            } else {
+                Vec::new()
+            },
+        };
+        compile_codec(
+            &model,
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Cbor(&wire),
+        )
+        .expect("the CBOR type binds the internal field")
+    }
+
+    #[test]
+    fn cbor_major_types_round_trip_through_each_bound_internal_type() {
+        use ciborium::value::Value as CborValue;
+
+        let integer = |value: i64| CborValue::Integer(value.into());
+        let cases = vec![
+            (ParseAsType::U8, CborType::Integer, integer(255)),
+            (ParseAsType::I8, CborType::Integer, integer(-128)),
+            (ParseAsType::U16, CborType::Integer, integer(65_535)),
+            (ParseAsType::I16, CborType::Integer, integer(-32_768)),
+            (ParseAsType::U32, CborType::Integer, integer(4_294_967_295)),
+            (ParseAsType::I32, CborType::Integer, integer(-2_147_483_648)),
+            (
+                ParseAsType::U64,
+                CborType::Integer,
+                CborValue::Integer(u64::MAX.into()),
+            ),
+            (ParseAsType::I64, CborType::Integer, integer(i64::MIN)),
+            (ParseAsType::F32, CborType::Float, CborValue::Float(1.25)),
+            (ParseAsType::F64, CborType::Float, CborValue::Float(-2.5)),
+            (ParseAsType::Bool, CborType::Boolean, CborValue::Bool(true)),
+            (
+                ParseAsType::String,
+                CborType::Text,
+                CborValue::Text("café".into()),
+            ),
+            (
+                ParseAsType::Bytes,
+                CborType::Bytes,
+                CborValue::Bytes(vec![0, 0xc2, 0xc3, 255]),
+            ),
+            (
+                ParseAsType::Datetime,
+                CborType::Text,
+                CborValue::Text("2024-02-29T12:34:56+00:00".into()),
+            ),
+            (
+                ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Bytes),
+                },
+                CborType::Array,
+                CborValue::Array(vec![CborValue::Bytes(vec![0, 255])]),
+            ),
+            (
+                ParseAsType::Array {
+                    element: Box::new(ParseAsType::I16),
+                    len: nonzero!(2u32),
+                },
+                CborType::Array,
+                CborValue::Array(vec![integer(-1), integer(2)]),
+            ),
+        ];
+        for (ty, wire_type, value) in cases {
+            let codec = one_field_cbor_codec(ty.clone(), wire_type);
+            let input = CborValue::Map(vec![(CborValue::Text("value".into()), value)]);
+            let mut payload = Vec::new();
+            ciborium::into_writer(&input, &mut payload).expect("fixture encodes");
+            let decoded = decode_one(&codec, &payload)
+                .unwrap_or_else(|error| panic!("{ty:?} must decode: {error:#}"));
+            let mut emitted = Vec::new();
+            codec
+                .batch_encoder(&decoded)
+                .expect("the decoded row matches the codec")
+                .encode_row_into(0, &mut emitted)
+                .expect("the row encodes back to CBOR");
+            assert_eq!(emitted[0], 0xbf, "the emitted map keeps its CBOR framing");
+            let output: CborValue =
+                ciborium::from_reader(emitted.as_slice()).expect("encoded row is a CBOR value");
+            assert_eq!(output, input, "{ty:?} retains its CBOR representation");
+            let restored = decode_one(&codec, &emitted).expect("the emitted row decodes");
+            assert_eq!(
+                restored.batch(),
+                decoded.batch(),
+                "{ty:?} retains its Arrow value"
+            );
+
+            let foreign_values = [
+                (CborType::Integer, CborValue::Integer(1.into())),
+                (CborType::Float, CborValue::Float(1.25)),
+                (CborType::Boolean, CborValue::Bool(true)),
+                (CborType::Text, CborValue::Text("text".into())),
+                (CborType::Bytes, CborValue::Bytes(vec![0, 255])),
+                (CborType::Array, CborValue::Array(Vec::new())),
+            ];
+            for (foreign_type, foreign_value) in foreign_values {
+                if foreign_type == wire_type {
+                    continue;
+                }
+                let mut foreign_payload = Vec::new();
+                ciborium::into_writer(
+                    &CborValue::Map(vec![(CborValue::Text("value".into()), foreign_value)]),
+                    &mut foreign_payload,
+                )
+                .expect("a foreign major type is CBOR");
+                let refused = decode_one(&codec, &foreign_payload)
+                    .expect_err("a field must have its declared CBOR major type");
+                assert!(
+                    format!("{refused:#}")
+                        .contains("codec 'one_value_codec' failed to parse field 'value'"),
+                    "{ty:?} declared {wire_type:?} and received {foreign_type:?}: {refused:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cbor_f32_signaling_nan_is_read_as_a_quiet_nan_with_its_payload() {
+        let codec = one_field_cbor_codec(ParseAsType::F32, CborType::Float);
+        let payload = [
+            0xa1, 0x65, b'v', b'a', b'l', b'u', b'e', 0xfa, 0x7f, 0xa0, 0x00, 0x01,
+        ];
+        let decoded = decode_one(&codec, &payload).expect("the CBOR float is accepted");
+        let column = decoded
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("the field is an F32 Arrow column");
+        assert_eq!(column.value(0).to_bits(), 0x7fe0_0001);
+    }
+
+    #[test]
+    fn cbor_integers_are_range_checked_at_every_internal_width() {
+        use ciborium::value::Value as CborValue;
+
+        let cases = [
+            (ParseAsType::U8, CborValue::Integer(256.into())),
+            (ParseAsType::I8, CborValue::Integer((-129).into())),
+            (ParseAsType::U16, CborValue::Integer(65_536.into())),
+            (ParseAsType::I16, CborValue::Integer((-32_769).into())),
+            (
+                ParseAsType::U32,
+                CborValue::Integer(4_294_967_296_u64.into()),
+            ),
+            (
+                ParseAsType::I32,
+                CborValue::Integer(2_147_483_648_u64.into()),
+            ),
+            (ParseAsType::U64, CborValue::Integer((-1).into())),
+            (ParseAsType::I64, CborValue::Integer(u64::MAX.into())),
+            (
+                ParseAsType::I64,
+                CborValue::Integer(
+                    ciborium::value::Integer::try_from(-18_446_744_073_709_551_616_i128)
+                        .expect("the smallest CBOR integer fits its 64-bit major type"),
+                ),
+            ),
+        ];
+        for (ty, value) in cases {
+            let codec = one_field_cbor_codec(ty.clone(), CborType::Integer);
+            let mut payload = Vec::new();
+            ciborium::into_writer(
+                &CborValue::Map(vec![(CborValue::Text("value".into()), value)]),
+                &mut payload,
+            )
+            .expect("the out-of-range integer is CBOR");
+            let error = decode_one(&codec, &payload).expect_err("integer exceeds internal type");
+            assert!(
+                format!("{error:#}")
+                    .contains("codec 'one_value_codec' failed to parse field 'value'"),
+                "{ty:?}: {error:#}"
+            );
+        }
+    }
+
     fn cbor_payload(value: &JsonValue) -> Vec<u8> {
         let mut payload = Vec::new();
         ciborium::into_writer(value, &mut payload).expect("a JSON value writes as CBOR");
         payload
+    }
+
+    #[test]
+    fn schemaful_cbor_rejects_tags_and_ambiguous_map_keys_with_field_context() {
+        use ciborium::value::Value as CborValue;
+
+        let cases = [
+            (
+                CborValue::Tag(42, Box::new(CborValue::Map(Vec::new()))),
+                "<root>",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("created_at".to_string()),
+                    CborValue::Tag(
+                        0,
+                        Box::new(CborValue::Text("2024-02-29T12:34:56Z".to_string())),
+                    ),
+                )]),
+                "created_at",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("created_at".to_string()),
+                    CborValue::Tag(1, Box::new(CborValue::Integer(7.into()))),
+                )]),
+                "created_at",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("user_id".to_string()),
+                    CborValue::Tag(2, Box::new(CborValue::Bytes(vec![7]))),
+                )]),
+                "user_id",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("user_id".to_string()),
+                    CborValue::Tag(3, Box::new(CborValue::Bytes(vec![7]))),
+                )]),
+                "user_id",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(CborValue::Integer(7.into()), CborValue::Bool(true))]),
+                "<map key>",
+                "CBOR map key must be text",
+            ),
+            (
+                CborValue::Map(vec![
+                    (CborValue::Text("active".to_string()), CborValue::Bool(true)),
+                    (
+                        CborValue::Text("active".to_string()),
+                        CborValue::Bool(false),
+                    ),
+                ]),
+                "active",
+                "CBOR map has duplicate key 'active'",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("active".to_string()),
+                    CborValue::Tag(42, Box::new(CborValue::Bool(true))),
+                )]),
+                "active",
+                "CBOR tag is not a schemaful value",
+            ),
+        ];
+        let codec = strict_cbor_codec();
+        for (value, field, cause) in cases {
+            let mut payload = Vec::new();
+            ciborium::into_writer(&value, &mut payload).expect("the case is a CBOR value");
+            let error =
+                decode_one(&codec, &payload).expect_err("the case breaks the CBOR contract");
+            assert_eq!(
+                format!("{error:#}"),
+                format!("codec 'schemaful_cbor_codec' failed to parse field '{field}': {cause}")
+            );
+        }
+    }
+
+    #[test]
+    fn schemaful_cbor_rejects_a_multibyte_bignum_tag_header() {
+        let payload = [
+            0xa1, 0x67, b'u', b's', b'e', b'r', b'_', b'i', b'd', 0xd8, 0x02, 0x41, 0x07,
+        ];
+        let error = decode_one(&strict_cbor_codec(), &payload)
+            .expect_err("a bignum tag cannot satisfy an integer wire field");
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'schemaful_cbor_codec' failed to parse field 'user_id': CBOR tag is not a \
+             schemaful value"
+        );
     }
 
     #[rstest]
@@ -8950,7 +9131,7 @@ mod tests {
             "latency": 12.5, "active": "yes"
         }),
         "codec 'schemaful_cbor_codec' failed to parse field 'active': expected Boolean, found a \
-         JSON string"
+         CBOR text"
     )]
     #[case::value(
         serde_json::json!({
@@ -8958,7 +9139,7 @@ mod tests {
             "latency": 12.5, "active": true
         }),
         "codec 'schemaful_cbor_codec' failed to parse field 'created_at': field 'created_at' \
-         holds a JSON string, which is incompatible with Datetime"
+         holds a CBOR text, which is incompatible with Datetime"
     )]
     fn strict_cbor_wire_schema_rejects_a_value_outside_it(
         #[case] value: JsonValue,
@@ -8982,9 +9163,10 @@ mod tests {
     #[test]
     fn a_malformed_cbor_payload_names_its_parser_error_once() {
         let malformed = [0xff_u8];
-        let parser_error = ciborium::from_reader::<JsonValue, _>(Cursor::new(&malformed[..]))
-            .expect_err("a lone break byte is not a CBOR item")
-            .to_string();
+        let parser_error =
+            ciborium::from_reader::<ciborium::value::Value, _>(Cursor::new(&malformed[..]))
+                .expect_err("a lone break byte is not a CBOR item")
+                .to_string();
 
         let error =
             decode_one(&strict_cbor_codec(), &malformed).expect_err("the payload is not CBOR");
@@ -9016,7 +9198,43 @@ mod tests {
         assert_eq!(single_batch_value(&decoded, "ignored"), None);
         assert_eq!(
             single_batch_value(&decoded, "user_id"),
-            Some(RuntimeValue::U32(42))
+            Some(RuntimeValue::I64(42))
+        );
+    }
+
+    #[test]
+    fn loose_cbor_wire_schema_rejects_tagged_unknown_fields() {
+        use ciborium::value::Value as CborValue;
+
+        let codec = compile_codec(
+            &schemaful_cbor_codec("schemaful_cbor_codec"),
+            Arc::new(compile_schema(&schema())),
+            ResolvedCodecWireFormat::Cbor(&cbor_wire_schema(WireSchemaStrictness::Loose)),
+        )
+        .expect("the loose codec compiles");
+        let mut value = CborValue::serialized(&serde_json::json!({
+            "user_id": 42,
+            "tenant": "acme",
+            "created_at": "2025-01-02T03:04:05+00:00",
+            "latency": 12.5,
+            "active": true
+        }))
+        .expect("the fixture has a CBOR value");
+        let CborValue::Map(fields) = &mut value else {
+            panic!("the fixture is a CBOR map");
+        };
+        fields.push((
+            CborValue::Text("ignored".to_string()),
+            CborValue::Tag(42, Box::new(CborValue::Bool(true))),
+        ));
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&value, &mut bytes).expect("the fixture encodes");
+
+        let error = decode_one(&codec, &bytes).expect_err("loose mode still rejects tags");
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'schemaful_cbor_codec' failed to parse field 'ignored': CBOR tag is not a \
+             schemaful value"
         );
     }
 
@@ -9048,6 +9266,68 @@ mod tests {
     }
 
     #[test]
+    fn cbor_codec_accepts_missing_and_null_optional_fields() {
+        use ciborium::value::Value as CborValue;
+
+        let schema = optional_schema();
+        let wire_schema = CreateCborWireSchema {
+            name: named("optional_notification_wire"),
+            strictness: Default::default(),
+            fields: vec![
+                WireSchemaField {
+                    name: named("user_id"),
+                    ty: CborType::Integer,
+                    optional: false,
+                },
+                WireSchemaField {
+                    name: named("nickname"),
+                    ty: CborType::Text,
+                    optional: true,
+                },
+            ],
+        };
+        let codec = CreateCodec {
+            name: named("cbor_optional_codec"),
+            wire_format: CodecWireFormat::Cbor {
+                wire_schema: wire_schema.name.clone(),
+            },
+            schema: schema.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let compiled_codec = compile_codec(
+            &codec,
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Cbor(&wire_schema),
+        )
+        .expect("codec should compile");
+
+        for entries in [
+            vec![(
+                CborValue::Text("user_id".into()),
+                CborValue::Integer(7.into()),
+            )],
+            vec![
+                (
+                    CborValue::Text("user_id".into()),
+                    CborValue::Integer(7.into()),
+                ),
+                (CborValue::Text("nickname".into()), CborValue::Null),
+            ],
+        ] {
+            let mut payload = Vec::new();
+            ciborium::into_writer(&CborValue::Map(entries), &mut payload)
+                .expect("optional fixture should encode");
+            let decoded = decode_one(&compiled_codec, &payload)
+                .expect("missing and null optional fields should decode");
+            assert_eq!(
+                single_batch_value(&decoded, "user_id"),
+                Some(RuntimeValue::U32(7))
+            );
+            assert_eq!(single_batch_value(&decoded, "nickname"), None);
+        }
+    }
+
+    #[test]
     fn json_codec_omits_missing_optional_fields_on_encode() {
         let compiled_schema = Arc::new(compile_schema(&optional_schema()));
         let compiled_codec = compile_codec(
@@ -9070,7 +9350,7 @@ mod tests {
 
     #[test]
     fn avro_codec_roundtrips_missing_optional_fields_as_null() {
-        let compiled_schema = Arc::new(compile_schema(&optional_schema()));
+        let compiled_schema = Arc::new(compile_schema(&optional_avro_schema()));
         let compiled_codec = compile_codec(
             &optional_codec("avro_optional_codec"),
             compiled_schema,
@@ -9080,14 +9360,14 @@ mod tests {
 
         let payload = encode_test_fields(
             &compiled_codec,
-            [("user_id".to_string(), RuntimeValue::U32(42))],
+            [("user_id".to_string(), RuntimeValue::I64(42))],
         )
         .expect("must encode");
         let decoded = decode_one(&compiled_codec, &payload).expect("must decode");
 
         assert_eq!(
             single_batch_value(&decoded, "user_id"),
-            Some(RuntimeValue::U32(42))
+            Some(RuntimeValue::I64(42))
         );
         assert_eq!(single_batch_value(&decoded, "nickname"), None);
     }
@@ -9097,7 +9377,7 @@ mod tests {
         let compiled_schema = Arc::new(compile_schema(&schema()));
         let err = compiled_schema
             .batch_from_test_rows([[
-                ("user_id".to_string(), RuntimeValue::U32(42)),
+                ("user_id".to_string(), RuntimeValue::I64(42)),
                 (
                     "tenant".to_string(),
                     RuntimeValue::String("acme".to_string()),
@@ -9227,7 +9507,7 @@ mod tests {
         let compiled_schema = Arc::new(compile_schema(&schema()));
         let error = compiled_schema
             .batch_from_test_rows([[
-                ("user_id".to_string(), RuntimeValue::U32(42)),
+                ("user_id".to_string(), RuntimeValue::I64(42)),
                 (
                     "tenant".to_string(),
                     RuntimeValue::String("acme".to_string()),
@@ -9264,7 +9544,7 @@ mod tests {
 
         assert_eq!(
             single_batch_value(&decoded, "user_id"),
-            Some(RuntimeValue::U32(42))
+            Some(RuntimeValue::I64(42))
         );
         assert_eq!(
             single_batch_value(&decoded, "tenant"),
@@ -9870,16 +10150,13 @@ mod tests {
 
     #[test]
     fn nested_arrays_and_nulls_are_measured_exactly() {
-        let arrays = Arc::new(compile_schema(&primitive_arrays_schema()));
         for case in [
             PrimitiveArrayCodecCase::Avro,
             PrimitiveArrayCodecCase::Cbor,
             PrimitiveArrayCodecCase::Toml,
         ] {
-            assert_bounded_encoding_is_exact(
-                &case.compile(arrays.clone()),
-                &primitive_arrays_record(),
-            );
+            let arrays = Arc::new(compile_schema(&case.schema()));
+            assert_bounded_encoding_is_exact(&case.compile(arrays), &case.record());
         }
         let nested = Arc::new(compile_schema(&multidimensional_array_schema()));
         let nested_codec = compile_codec(
@@ -9890,21 +10167,28 @@ mod tests {
         .expect("codec should compile");
         assert_bounded_encoding_is_exact(&nested_codec, &multidimensional_array_record());
 
-        let optional = Arc::new(compile_schema(&optional_schema()));
-        for (name, wire_format) in [
+        for (name, schema, user_id, wire_format) in [
             (
                 "json_optional",
+                optional_schema(),
+                RuntimeValue::U32(7),
                 ResolvedCodecWireFormat::Json(&optional_json_wire_schema()),
             ),
             (
                 "avro_optional",
+                optional_avro_schema(),
+                RuntimeValue::I64(7),
                 ResolvedCodecWireFormat::Avro(&optional_avro_wire_schema()),
             ),
         ] {
-            let codec = compile_codec(&optional_codec(name), optional.clone(), wire_format)
-                .expect("codec should compile");
+            let codec = compile_codec(
+                &optional_codec(name),
+                Arc::new(compile_schema(&schema)),
+                wire_format,
+            )
+            .expect("codec should compile");
             for nickname in [None, Some("nick")] {
-                let mut fields = vec![("user_id".to_string(), RuntimeValue::U32(7))];
+                let mut fields = vec![("user_id".to_string(), user_id.clone())];
                 if let Some(nickname) = nickname {
                     fields.push((
                         "nickname".to_string(),
@@ -9948,7 +10232,10 @@ mod tests {
                 wire_schema: named("blob_wire"),
             },
             schema: named("blob_event"),
-            encoding_rules: Vec::new(),
+            encoding_rules: vec![CodecEncodingRule {
+                field: named("blob"),
+                encoding: CodecEncoding::Base64,
+            }],
         };
         let compiled = compile_codec(
             &codec,

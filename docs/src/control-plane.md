@@ -107,7 +107,8 @@ that domain as its selected domain. An unclean transport loss or leadership chan
 transaction available for attach. Binding is leader-local soft state, so a leader that does not
 hold it reports the session as detached; clients treat that as a routing condition, attach the
 transaction again, and replay the command. A session that its client closes cleanly, with no
-request in flight, reverts the open transaction bound to it on the leader.
+request in flight, reverts the open transaction bound to it on the leader; a revert the leader
+cannot record leaves the transaction open until it expires.
 
 Only the bound domain's replicated configuration effects may be queued:
 
@@ -229,7 +230,7 @@ exposing an invalid intermediate graph.
 
 Other eligible statements apply individually. `COMMIT` records authoritative effect progress and
 completed application separately and stops at the first definitive failure. A transaction remains
-`COMMITTING` after a step's authoritative state is durable while runtime activation, source
+`COMMITTING` after a step's authoritative state is durable while runtime activation, ingestor
 readiness, remote stopping, ownership handoff, or gate release is outstanding. It becomes
 `COMMITTED` only after the final step is usable on the current live-node set and its outcome is
 authoritatively visible. Its successful output is only the highest quiesce level actually executed
@@ -383,7 +384,11 @@ The current leader owns membership changes and serializes them one at a time. Le
 catch-up and voting-membership changes each have a ten-second wait deadline. When that deadline
 expires, Nervix stops waiting and observes effective committed membership again before a later
 retry. It does not infer that the change was rolled back: an admitted learner may continue catching
-up after the timed wait ends.
+up after the timed wait ends, and an applied joint configuration may still need its uniform step.
+Reconciliation completes that recorded transition before calculating another change. A voter union
+alone never establishes convergence; the expected uniform configuration must be committed. See
+[Follower Catch-Up And Learner Promotion](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion)
+for the quorum and status contract.
 
 An automatic schedule candidate carries the leader identity and term under which it was computed,
 plus the full applied control-plane revision of its inputs. Publication succeeds only during the
@@ -401,7 +406,7 @@ and leaves the prior models and schedule active.
 
 Schedule publication preserves the existing primary and replicas of every single-owner ingestor,
 client ingestors included, while all cluster nodes in that assignment are live.
-`WEBSOCKETS CONNECTION` ingestors follow this rule along with the other client sources, so
+`WEBSOCKETS CONNECTION` ingestors follow this rule along with the other client ingestors, so
 unrelated graph changes, cluster-node joins or uncordons, and soft placement changes do not restart
 their external sessions. `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors
 are the only ingestors whose assignments follow live membership, because their listeners execute
@@ -434,7 +439,7 @@ that produced it. The batch uses the highest level contributed by any changed en
 
 Quiesce level and ingestor quiesce mode are separate contracts. `DYNAMIC`, `ENTITY_PAUSE`, and
 `DOMAIN_PAUSE` determine which graph work must pause before a change commits. The required `ON
-QUIESCE` clause on each ingestor determines what that ingestor's external source experiences while
+QUIESCE` clause on each ingestor determines what that ingestor's external system experiences while
 an entity or domain pause is active. Memory-pressure shedding consults the same mode. There is no
 operator `PAUSE` or `RESUME` statement.
 
@@ -457,10 +462,11 @@ operator `PAUSE` or `RESUME` statement.
   also purge the old keyspace before the replacement starts; reorderer ordering changes flush the
   old ordering buffers before swapping. Relay materialized-state changes update membership in
   place. Emitter source-predicate, emitter, publishing-mode (including any confirmation window,
-  timeout, or retry-policy variable), client, codec, input-collection, and attachment changes
-  drain and replace only the affected emitter task. Every ingestor alteration quiesces and drains
-  only the affected ingestor instances under their declared source mode, then starts their desired
-  source configuration from the published schedule. A `SET QUIESCE` operation still uses this
+  timeout, or retry-policy variable), client, codec, envelope, construction, input-collection,
+  attachment and general error policy changes drain and replace only the affected emitter task,
+  whether `SET TO` restates the destination or an operation changes one part of it in place. Every ingestor alteration quiesces and drains
+  only the affected ingestor instances under their declared ingestor mode, then starts their desired
+  ingestor configuration from the published schedule. A `SET QUIESCE` operation still uses this
   level; the mode active when the hold began governs that hold. A client ingestor suspends
   admission for the hold, and its producers stay attached across the swap unless the alteration
   changed their endpoint contract; see [Client Ingestors](./ingestors.md#client-ingestors).
@@ -648,9 +654,12 @@ recorded stay applied.
 
 Node drain, the ownership move of a graceful-shutdown drain, placement consolidation, and `RELOCATE`
 are planned ownership handoffs.
-The schedule names each moved execution by its logical node and `Unit`; current graphs use one
-`Single` unit per node. Capture, preparation, activation, freeze and forced-recovery records carry
-that unit, so a sibling unit's checkpoint or prepared transition cannot satisfy the move.
+The schedule names each moved execution by its logical node and `Unit`: one `Partition` unit per
+partition for a relay of a partitioned branch, each moving on its own, and one `Single` unit for
+every other node. Capture, preparation, activation, freeze and forced-recovery records carry that
+unit, so a sibling unit's checkpoint or prepared transition cannot satisfy the move. A gate freezes
+every unit of the entities it holds, and a handoff that checks its gate reads the freeze of the unit
+it moves.
 Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
 the affected subgraph boundary on every live node that runs part of it, stops new intake for each
 moved ingestor, and drains work already admitted to the moved unit. Ownership-handoff intake does
@@ -783,7 +792,7 @@ their `FLUSH EACH` cadence, until no relay batch, node work item, emitter buffer
 admitted acknowledgement root remains. One more force flush then confirms that nothing is still
 moving, so work an upstream flush publishes after a downstream node finished its own flush is not
 left behind.
-Source acknowledgements and commits, such as Kafka consumer-group offsets, complete before the source
+Ingestor acknowledgements and commits, such as Kafka consumer-group offsets, complete before the ingestor
 session stops.
 
 Terminal teardown stops the node's tasks only after that drain completes or its timeout passes. It
@@ -791,8 +800,8 @@ gives each background task at most two seconds to stop, waits for work that sess
 started until the shutdown deadline and cancels whatever still runs then, and finally stops the
 runtime, consensus, cluster membership, and the interconnect and releases the node's storage. A
 timeout reports the drain as abandoned, and teardown negatively acknowledges the remaining work: a
-source with external acknowledgements redelivers it after restart, and a `MODE NO ACK` source loses
-it. A emitter that stays unavailable therefore holds the drain until its timeout. Pending
+ingestor with external acknowledgements redelivers it after restart, and a `MODE NO ACK` ingestor loses
+it. An emitter that stays unavailable therefore holds the drain until its timeout. Pending
 `REQUIRED WAIT` records do not hold the drain open; every force flush retries them against the
 state that is present, and teardown negatively acknowledges whatever still waits. Payloads that
 other live nodes publish into this node's relays are admitted work as well, so an owner that keeps
@@ -888,3 +897,17 @@ one Raft operation. The leader rolls back an unpublished local registry candidat
 every node synchronizes its registry cache from the committed schedule across leadership changes.
 
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.
+
+## Cluster Policy Administration
+
+`ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
+changes Nervix cluster policy without a selected domain. It runs outside domain transactions.
+Assignments are structured Plexus Models, validated together against the current parameter record,
+every committed model and completed resource metadata. Publication compares those captured inputs
+again in the replicated apply step. Domain plans carry their parameter record and obtain their
+Models from that same consensus snapshot, so a concurrent cap change invalidates their basis.
+
+The command's authoritative effect and applied parameter revision are recorded atomically.
+Recovery of an earlier execution observes that progress and never reapplies its values over a
+later command. Success waits for the existing runtime readiness barrier.
+[Node Settings](node-settings.md#committed-parameter-changes) owns the values and bootstrap contract.

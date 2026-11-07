@@ -296,10 +296,10 @@ fn branch_state_directory(
 }
 
 fn unit_segment(unit: Unit) -> String {
-    match unit {
-        Unit::Single => "single".to_string(),
-        Unit::Partition(partition) => format!("partition/{partition}"),
-        Unit::Instance(instance) => format!("instance/{instance}"),
+    match unit.kind() {
+        nervix_models::UnitKind::Single => "single".to_string(),
+        nervix_models::UnitKind::Partition(partition) => format!("partition/{partition}"),
+        nervix_models::UnitKind::Instance(instance) => format!("instance/{instance}"),
     }
 }
 
@@ -374,10 +374,10 @@ mod tests {
         let entity = ModelName::parse("orders").assured("the test entity is valid");
         let mut paths = std::collections::BTreeSet::new();
         for unit in [
-            Unit::Single,
-            Unit::Partition(0),
-            Unit::Partition(1),
-            Unit::Instance(0),
+            Unit::SINGLE,
+            Unit::partition(0),
+            Unit::partition(1),
+            Unit::FIRST_INSTANCE,
         ] {
             let path = SectionPath::kafka_offsets(&domain, &entity, unit);
             SectionPath::parse(path.as_str()).assured("a current section path is valid");

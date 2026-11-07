@@ -19,12 +19,12 @@ Feature: State snapshots written while a node stops
       CREATE SCHEMA reading ( value I64 );
       CREATE SCHEMA reading_summary ( samples I64, total I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( value integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE RELAY reading_summaries SCHEMA reading_summary UNBRANCHED;
       CREATE VHOST edge stop-snapshot-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings INHERIT ALL UNBRANCHED

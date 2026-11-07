@@ -3,9 +3,9 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The client's closed configuration schema and signaling reference, the connection's
-//!   literal upgrade fields and frame kind, the endpoint source Model, and their declarations.
+//!   literal upgrade fields and frame kind, the endpoint ingestor Model, and their declarations.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** Shared source/client declarations, HTTP field rules and referenced names.
+//! - **Depends on.** Shared ingestor/client declarations, HTTP field rules and referenced names.
 //! - **Must not know.** Drivers, sockets, TLS file contents, signaling execution, or how endpoints
 //!   are published, routed to or served.
 
@@ -100,7 +100,7 @@ pub struct WebsocketsConnectionIngestor {
 const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
-            holds: "accepted signaling frames retained for source reads",
+            holds: "accepted signaling frames retained for ingestor reads",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(
                     "handshake_buffer_capacity messages (default 16), each at most \
@@ -202,6 +202,7 @@ const WEBSOCKETS_CONNECTION_METADATA: IngestorMetadataDeclaration =
 
 impl IngestorDeclaration for WebsocketsConnectionIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: WEBSOCKETS_CONNECTION_METADATA,
         executes_on_every_cluster_node: false,
@@ -227,6 +228,10 @@ impl IngestorDeclaration for WebsocketsConnectionIngestor {
 impl IngestorEntityBody for WebsocketsConnectionIngestor {
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -257,7 +262,7 @@ impl WebsocketsIngestMode {
     }
 }
 
-/// One endpoint of `TYPE WEBSOCKETS` this cluster serves, whose messages are the payloads. Every
+/// One `WEBSOCKETS ENDPOINT` this cluster serves, whose messages are the payloads. Every
 /// node of the cluster serves it.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -279,6 +284,7 @@ const WEBSOCKETS_ENDPOINT_METADATA: IngestorMetadataDeclaration =
 
 impl IngestorDeclaration for WebsocketsEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         // The opening HTTP upgrade request's fields, as the server's header map keeps them: names in
         // lowercase, every value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
@@ -313,15 +319,103 @@ impl IngestorEntityBody for WebsocketsEndpointIngestor {
     }
 }
 
+/// One change an `ALTER WEBSOCKETS CONNECTION INGESTOR` writes to the body of the ingestor it
+/// changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum WebsocketsConnectionIngestorChange {
+    /// `SET HEADERS { … }`.
+    Headers(Vec<WebsocketsUpgradeHeader>),
+    /// `DROP HEADERS`: the upgrade request sends no header of its own.
+    DropHeaders,
+    /// `SET MODE <mode>`.
+    Mode(WebsocketsIngestMode),
+}
+
+impl crate::IngestorEntityChange for WebsocketsConnectionIngestorChange {
+    type Entity = WebsocketsConnectionIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut WebsocketsConnectionIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Headers(headers) => entity.headers = headers.clone(),
+            Self::DropHeaders => {
+                if entity.headers.is_empty() {
+                    return Err(error_stack::Report::new(
+                        crate::AlterIngestorError::OptionNotWritten {
+                            kind:
+                                <WebsocketsConnectionIngestor as crate::IngestorEntityModel>::KIND,
+                            option: "HEADERS",
+                        },
+                    ));
+                }
+                entity.headers.clear();
+            }
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Headers(headers) => format!(
+                "SET HEADERS {}",
+                crate::canonical::upgrade_headers_to_plexus(headers)
+            ),
+            Self::DropHeaders => "DROP HEADERS".to_owned(),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER WEBSOCKETS ENDPOINT INGESTOR` writes to the body of the ingestor it
+/// changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum WebsocketsEndpointIngestorChange {
+    /// `SET MODE <mode>`.
+    Mode(EndpointIngestMode),
+}
+
+impl crate::IngestorEntityChange for WebsocketsEndpointIngestorChange {
+    type Entity = WebsocketsEndpointIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut WebsocketsEndpointIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Websockets = "WEBSOCKETS";
-    /// What a WebSockets source reads.
+    /// What a WebSockets ingestor reads.
     pub enum WebsocketsIngestor;
     /// The alterations of the ingestors that read a WebSockets entity.
     pub enum WebsocketsIngestorAlteration;
-    /// The entities a WebSockets source reads.
+    /// The entities a WebSockets ingestor reads.
     pub enum WebsocketsIngestorEntity {
-        Connection(WebsocketsConnectionIngestor) = "CONNECTION", "WebSocket client";
-        Endpoint(WebsocketsEndpointIngestor) = "ENDPOINT", "WebSocket endpoint";
+        Connection(WebsocketsConnectionIngestor => WebsocketsConnectionIngestorChange) = "CONNECTION", "WebSocket client";
+        Endpoint(WebsocketsEndpointIngestor => WebsocketsEndpointIngestorChange) = "ENDPOINT", "WebSocket endpoint";
     }
 }

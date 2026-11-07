@@ -18,6 +18,8 @@ use crate::{
     frame::{ClientFrame, EncodedFrame, VerifiedFrame},
     limits::SessionLimits,
     producer::{CloseIngestorRequest, OpenIngestorRequest, SubmitBatchRequest},
+    row::RowSchema,
+    server::ReplyBodyKind,
     subscription::SubscriptionType,
     transaction::{
         decode_inspection_target, decode_operation_number, decode_preview_identity,
@@ -138,7 +140,24 @@ pub struct SubscribeRequest {
     /// Exactly one CREATE SUBSCRIPTION statement.
     pub statement: String,
     pub subscription_type: SubscriptionType,
+    /// The schema the generation a restoration replaces announced, or `None` for a first
+    /// subscribe. The server opens a restoration only while the relay announces exactly this
+    /// schema, and refuses it as [`SubscriptionRefusal::RelayChanged`](crate::SubscriptionRefusal)
+    /// otherwise.
+    pub expected_schema: Option<RowSchema>,
 }
+
+/// The depth of a subscribe request's expected schema table in its frame: the client message, the
+/// subscribe request, and the schema.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "session.fbs nests a subscribe request's expected schema in the client message \
+                  and the subscribe request, so the schema table sits at this depth"
+    )
+)]
+const EXPECTED_SCHEMA_DEPTH: usize = 3;
 
 /// Closes a subscription of the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,7 +183,14 @@ pub struct DetachDomainClockRequest {
     pub domain: DomainName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One request of a session. [`ClientRequestKind`] names which request it is, without its
+/// fields; its `snake_case` name labels the node's request series.
+#[derive(Debug, Clone, PartialEq, Eq, strum::EnumDiscriminants)]
+#[strum_discriminants(
+    name(ClientRequestKind),
+    derive(Hash, strum::IntoStaticStr, strum::EnumIter),
+    strum(serialize_all = "snake_case")
+)]
 pub enum ClientRequest {
     Command(CommandRequest),
     Suggest(SuggestRequest),
@@ -185,6 +211,71 @@ pub enum ClientRequest {
     ReadEmitterBatch(ReadEmitterBatchRequest),
     SettleEmitterBatch(SettleEmitterBatchRequest),
     CloseEmitter(CloseEmitterRequest),
+}
+
+impl ClientRequestKind {
+    /// Whether a reply of kind `reply` answers a request of this kind: the request's own
+    /// outcome, a rejection, which can refuse any request, or a cancellation, which ends a request
+    /// a cancellation can reach. Every other reply under the request's identity breaks the
+    /// session contract.
+    pub fn is_answered_by(self, reply: ReplyBodyKind) -> bool {
+        match reply {
+            ReplyBodyKind::Rejected => true,
+            ReplyBodyKind::Cancelled => self.is_cancellable(),
+            outcome => outcome == self.outcome(),
+        }
+    }
+
+    /// The kind of the outcome a request of this kind is answered with once it is served.
+    pub fn outcome(self) -> ReplyBodyKind {
+        match self {
+            Self::Command => ReplyBodyKind::Command,
+            Self::Suggest => ReplyBodyKind::Suggest,
+            Self::Choice => ReplyBodyKind::Choice,
+            Self::ListDomains => ReplyBodyKind::DomainList,
+            Self::SelectDomain => ReplyBodyKind::DomainSelection,
+            Self::AttachTransaction => ReplyBodyKind::Attach,
+            Self::InspectTransaction => ReplyBodyKind::Inspection,
+            Self::Subscribe => ReplyBodyKind::Subscribe,
+            Self::Unsubscribe => ReplyBodyKind::Unsubscribe,
+            Self::Cancel => ReplyBodyKind::Cancel,
+            Self::AttachDomainClock => ReplyBodyKind::DomainClockAttach,
+            Self::DetachDomainClock => ReplyBodyKind::DomainClockDetach,
+            Self::OpenIngestor => ReplyBodyKind::OpenIngestor,
+            Self::SubmitBatch => ReplyBodyKind::Submission,
+            Self::CloseIngestor => ReplyBodyKind::CloseIngestor,
+            Self::OpenEmitter => ReplyBodyKind::OpenEmitter,
+            Self::ReadEmitterBatch => ReplyBodyKind::ReadEmitterBatch,
+            Self::SettleEmitterBatch => ReplyBodyKind::SettleEmitterBatch,
+            Self::CloseEmitter => ReplyBodyKind::CloseEmitter,
+        }
+    }
+
+    /// Whether a cancellation can end a request of this kind with `RequestCancelled`. A
+    /// cancellation is answered at once, so nothing cancels it, and a submitted batch cannot be
+    /// withdrawn: a cancellation naming it is refused and the batch's outcome always follows.
+    pub fn is_cancellable(self) -> bool {
+        match self {
+            Self::Cancel | Self::SubmitBatch => false,
+            Self::Command
+            | Self::Suggest
+            | Self::Choice
+            | Self::ListDomains
+            | Self::SelectDomain
+            | Self::AttachTransaction
+            | Self::InspectTransaction
+            | Self::Subscribe
+            | Self::Unsubscribe
+            | Self::AttachDomainClock
+            | Self::DetachDomainClock
+            | Self::OpenIngestor
+            | Self::CloseIngestor
+            | Self::OpenEmitter
+            | Self::ReadEmitterBatch
+            | Self::SettleEmitterBatch
+            | Self::CloseEmitter => true,
+        }
+    }
 }
 
 /// One request of a session.
@@ -320,12 +411,17 @@ impl ClientRequest {
             Self::Subscribe(subscribe) => {
                 let domain = encoder.text("SubscribeRequest.domain", subscribe.domain.as_str())?;
                 let statement = encoder.text("SubscribeRequest.statement", &subscribe.statement)?;
+                let expected_schema = match &subscribe.expected_schema {
+                    Some(schema) => Some(schema.encode(encoder, EXPECTED_SCHEMA_DEPTH)?),
+                    None => None,
+                };
                 let request = wire::SubscribeRequest::create(
                     encoder.fbb(),
                     &wire::SubscribeRequestArgs {
                         domain: Some(domain),
                         statement: Some(statement),
                         subscription_type: Some(subscribe.subscription_type.into()),
+                        expected_schema,
                     },
                 );
                 EncodedUnion::new(wire::ClientRequest::SubscribeRequest, request)
@@ -474,6 +570,10 @@ impl ClientRequest {
             }
             wire::ClientRequest::SubscribeRequest => {
                 let subscribe = request_member(message.request_as_subscribe_request());
+                let expected_schema = match subscribe.expected_schema() {
+                    Some(schema) => Some(RowSchema::decode(decoder, schema)?),
+                    None => None,
+                };
                 Self::Subscribe(SubscribeRequest {
                     domain: decoder.name("SubscribeRequest.domain", subscribe.domain())?,
                     statement: decoder.text("SubscribeRequest.statement", subscribe.statement())?,
@@ -481,6 +581,7 @@ impl ClientRequest {
                         "SubscribeRequest.subscription_type",
                         subscribe.subscription_type(),
                     )?,
+                    expected_schema,
                 })
             }
             wire::ClientRequest::UnsubscribeRequest => {

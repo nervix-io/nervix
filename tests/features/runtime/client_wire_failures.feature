@@ -27,6 +27,33 @@ Feature: Client wire failure regressions
       );
       """
 
+  # The forwarder stays stopped for twice the client's retry budget while the backup holds its
+  # cut, so the client reaches its server again only after that budget has passed. The backup's
+  # own wait covers every reconnect it makes, and the cut's budget covers the outage the cut waits
+  # through at its gate on a loaded runner.
+  @client_wire_backup_outage @deloxide_stress_restore
+  Scenario Outline: A native backup waits through an outage longer than its retry budget on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And the backup cut for domain "{{domain}}" will pause before its capture
+    When a native client with a 20 second retry budget and a 300 second backup wait begins backing up the cluster with a 240 second cut budget through "{{forwarded_grpc}}" into "outage.nvxb"
+    Then the backup cut for domain "{{domain}}" has reached its pause
+    When the TCP forwarder at "127.0.0.1" stays stopped for 40 seconds and then restarts
+    And the backup cut pause for domain "{{domain}}" is released
+    Then the native backup completes under its original execution reference
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire_durable_admission
   Scenario: A command lost after durable admission is recovered by its request identity
     Given a 1 node nervix cluster is started
@@ -100,6 +127,120 @@ Feature: Client wire failure regressions
       | cluster_size |
       | 1            |
       | 3            |
+
+  @client_wire_held_recovery @command_reference_recovery
+  Scenario: A held BEGIN recovers its transaction binding after leadership moves during admission
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA held_record (value I64);
+      CREATE WIRE JSON SCHEMA held_wire MODE STRICT (value integer);
+      CREATE WIRE JSON CODEC held_codec FROM WIRE SCHEMA held_wire TO SCHEMA held_record;
+      CREATE RELAY held_records SCHEMA held_record UNBRANCHED;
+      CREATE VHOST held_edge held-binding-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT held_ingress ON held_edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR held_ingestor
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_codec
+        TO held_records INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "held_leader"
+    And a node other than placeholder "held_leader" is saved as placeholder "held_successor"
+    When these Plexus commands are executed on the active session
+      """
+      CREATE SUBSCRIPTION held_seen TO held_records;
+      """
+    And http payload is posted to node "{{held_leader}}" with host "held-binding-{{test_id}}.example.com" path "/records"
+      """
+      {"value":1}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"value":1}
+      """
+    Given leadership moves from node "{{held_leader}}" to node "{{held_successor}}" under its next durably admitted command
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      """
+    Then the leadership move under the durably admitted command completed
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only open transaction id is saved as placeholder "held_transaction"
+    When these Plexus commands are executed on the active session
+      """
+      CREATE RESOURCE held_binding_resource;
+      COMMIT;
+      """
+    Then transaction "{{held_transaction}}" eventually has state "COMMITTED"
+    When this Plexus command request is executed on the leader node
+      """
+      DESCRIBE RESOURCE held_binding_resource;
+      """
+    Then the last command output contains
+      """
+      resource: held_binding_resource
+      """
+    When http payload is posted to node "{{held_successor}}" with host "held-binding-{{test_id}}.example.com" path "/records"
+      """
+      {"value":2}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"value":2}
+      """
+
+  @client_wire_held_recovery @command_reference_recovery
+  Scenario: A held REVERT recovers its original transaction after leadership moves during admission
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      CREATE RESOURCE reverted_binding_resource;
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only transaction id is saved as placeholder "reverted_transaction"
+    Then the current leader node is saved as placeholder "held_leader"
+    And a node other than placeholder "held_leader" is saved as placeholder "held_successor"
+    Given leadership moves from node "{{held_leader}}" to node "{{held_successor}}" under its next durably admitted command
+    When these Plexus commands are executed on the active session
+      """
+      REVERT;
+      """
+    Then the leadership move under the durably admitted command completed
+    And transaction "{{reverted_transaction}}" eventually has state "REVERTED"
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      CREATE RESOURCE subsequent_binding_resource;
+      COMMIT;
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      DESCRIBE RESOURCE subsequent_binding_resource;
+      """
+    Then the last command output contains
+      """
+      resource: subsequent_binding_resource
+      """
+    When these Plexus commands fail with "resource 'reverted_binding_resource' does not exist"
+      """
+      DESCRIBE RESOURCE reverted_binding_resource;
+      """
 
   @client_wire_lost_begin
   Scenario Outline: Replaying a BEGIN whose response was lost returns the original transaction
@@ -191,6 +332,57 @@ Feature: Client wire failure regressions
       | 3            | resource     | CREATE RESOURCE replayed_resource; |
       | 3            | domain start | START;                             |
 
+  @client_wire_duplicate_append @slots_2
+  Scenario: A replay session that reaches a former leader attaches the transaction where the redirect leads
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "successor"
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      """
+    And this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only transaction id is saved as placeholder "transaction_id"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    When the active session sends this Plexus command request with execution reference "append-{{test_id}}" without reading its response
+      """
+      CREATE RESOURCE replayed_resource;
+      """
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the command response delivery pause on node "{{leader}}" is released
+    And leadership is transferred from node "{{leader}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports a leader other than "{{leader}}"
+    And node "{{leader}}" eventually reports a leader other than "{{leader}}"
+    When a new session on node "{{leader}}" attaches to transaction "{{transaction_id}}" and executes this Plexus command with execution reference "append-{{test_id}}" at transaction position 0
+      """
+      CREATE RESOURCE replayed_resource;
+      """
+    Then the last command request succeeded
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      id={{transaction_id}}
+      """
+    And the last command output contains
+      """
+      pending=1
+      """
+    When these Plexus commands are executed on the active session
+      """
+      REVERT;
+      """
+
   @client_wire_transaction_batch_leader_recovery
   Scenario: An exact transaction batch retry survives a leader change without repeating effects
     Given a 3 node nervix cluster is started
@@ -231,7 +423,7 @@ Feature: Client wire failure regressions
       resource: leader_batch_resource
       """
 
-  @client_wire_transaction_batch_finalization_recovery
+  @client_wire_transaction_batch_finalization_recovery @client_wire_probe_recovery @command_reference_recovery
   Scenario: A committed transaction batch keeps its one outcome when leadership moves while each attempt records it
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -243,6 +435,8 @@ Feature: Client wire failure regressions
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given command finalization on node "{{old_leader}}" pauses before its outcome is recorded
     And command finalization on node "{{new_leader}}" pauses before its outcome is recorded
+    And command reconciliation of execution reference "finalized-batch-{{test_id}}" pauses on node "{{old_leader}}"
+    And the leader refuses the admission of execution reference "finalized-batch-{{test_id}}" as a leader whose lease lapsed
     When the active session begins this Plexus command request with execution reference "finalized-batch-{{test_id}}" in the background
       """
       BEGIN;
@@ -251,11 +445,15 @@ Feature: Client wire failure regressions
       COMMIT;
       """
     Then the command finalization pause on node "{{old_leader}}" is reached
+    And the leader refused the admission of execution reference "finalized-batch-{{test_id}}" as a leader whose lease lapsed
+    And the transaction targeted by execution reference "finalized-batch-{{test_id}}" is saved as placeholder "batch_transaction"
+    And transaction "{{batch_transaction}}" eventually has state "COMMITTED"
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
     When the command finalization pause on node "{{old_leader}}" is released
     Then the background command request reports an unknown outcome because leadership moved
-    And the command finalization pause on node "{{new_leader}}" is reached
+    When the command reconciliation pause for execution reference "finalized-batch-{{test_id}}" on node "{{old_leader}}" is released
+    Then the command finalization pause on node "{{new_leader}}" is reached
     When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{old_leader}}"
     When the command finalization pause on node "{{new_leader}}" is released
@@ -287,10 +485,89 @@ Feature: Client wire failure regressions
       """
       SHOW TRANSACTIONS;
       """
-    Then the only transaction id is saved as placeholder "batch_transaction"
+    Then the only transaction id is saved as placeholder "completed_batch_transaction"
+    And placeholder "completed_batch_transaction" equals placeholder "batch_transaction"
     And the last command output contains
       """
       state=COMMITTED
+      """
+
+  @client_wire_applying_probe_recovery
+  Scenario: A committed transaction batch reaches its finalization gates after an applying lease refusal
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA applying_event (key I64);
+      CREATE RELAY applying_input SCHEMA applying_event UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "applying_leader"
+    And a node other than placeholder "applying_leader" is saved as placeholder "applying_successor"
+    Given command finalization on node "{{applying_leader}}" pauses before its outcome is recorded
+    And command finalization on node "{{applying_successor}}" pauses before its outcome is recorded
+    And command reconciliation of execution reference "applying-batch-{{test_id}}" pauses on node "{{applying_leader}}"
+    And the leader refuses the next model publication in domain "{{domain}}" and the pause release after it with "a lapsed leader lease"
+    When the active session begins this Plexus command request with execution reference "applying-batch-{{test_id}}" in the background
+      """
+      BEGIN;
+      ALTER SCHEMA applying_event ADD FIELD note STRING OPTIONAL;
+      CREATE RESOURCE applying_batch_resource;
+      COMMIT;
+      """
+    Then the command finalization pause on node "{{applying_leader}}" is reached
+    And the refusal of the model publication in domain "{{domain}}" and of its pause release was delivered
+    And the transaction targeted by execution reference "applying-batch-{{test_id}}" is saved as placeholder "applying_transaction"
+    When leadership is transferred from node "{{applying_leader}}" to node "{{applying_successor}}"
+    Then node "{{applying_successor}}" eventually reports leader "{{applying_successor}}"
+    When the command finalization pause on node "{{applying_leader}}" is released
+    Then the background command request reports an unknown outcome because leadership moved
+    When the command reconciliation pause for execution reference "applying-batch-{{test_id}}" on node "{{applying_leader}}" is released
+    Then the command finalization pause on node "{{applying_successor}}" is reached
+    When leadership is transferred from node "{{applying_successor}}" to node "{{applying_leader}}"
+    Then node "{{applying_leader}}" eventually reports leader "{{applying_leader}}"
+    When the command finalization pause on node "{{applying_successor}}" is released
+    And this Plexus command request with execution reference "applying-batch-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      ALTER SCHEMA applying_event ADD FIELD note STRING OPTIONAL;
+      CREATE RESOURCE applying_batch_resource;
+      COMMIT;
+      """
+    Then the last command request succeeded
+    When this Plexus command request with execution reference "applying-batch-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      ALTER SCHEMA applying_event ADD FIELD note STRING OPTIONAL;
+      CREATE RESOURCE applying_batch_resource;
+      COMMIT;
+      """
+    Then the last command request succeeded
+    And transaction "{{applying_transaction}}" eventually has state "COMMITTED"
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA applying_event;
+      """
+    Then the last command output contains
+      """
+      note STRING OPTIONAL
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      DESCRIBE RESOURCE applying_batch_resource;
+      """
+    Then the last command output contains
+      """
+      resource: applying_batch_resource
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      id={{applying_transaction}}
       """
 
   @client_wire_transaction_batch_restart
@@ -669,8 +946,8 @@ Feature: Client wire failure regressions
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA relocation_record ( sequence I64 );
       CREATE WIRE JSON SCHEMA relocation_wire MODE STRICT ( sequence integer );
-      CREATE CODEC relocation_codec
-        FROM WIRE JSON SCHEMA relocation_wire
+      CREATE WIRE JSON CODEC relocation_codec
+        FROM WIRE SCHEMA relocation_wire
         TO SCHEMA relocation_record;
       CREATE SCHEMA relocation_tenant ( tenant STRING );
       CREATE BRANCH relocation_by_tenant SCHEMA relocation_tenant TTL 5m;
@@ -678,10 +955,9 @@ Feature: Client wire failure regressions
       CREATE RELAY relocation_output SCHEMA relocation_record UNBRANCHED;
       CREATE RELAY relocation_offsets SCHEMA relocation_record BRANCHED BY relocation_by_tenant;
       CREATE KAFKA CLIENT relocation_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR relocation_offset_source
+      CREATE KAFKA TOPIC INGESTOR relocation_offset_ingestor
         FROM relocation_kafka TOPIC 'relocation_offsets_{{test_id}}'
           OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 200ms MAX 5s
@@ -695,7 +971,7 @@ Feature: Client wire failure regressions
       ON GENERAL ERROR LOG;
       START;
       """
-    Then within "5s" DESCRIBE INGESTOR "relocation_offset_source" on the leader node contains
+    Then within "5s" DESCRIBE INGESTOR "relocation_offset_ingestor" on the leader node contains
       """
       kafka observed partitions: 0
       """
@@ -715,7 +991,7 @@ Feature: Client wire failure regressions
       """
     Then the relocation publication pause for domain "{{domain}}" is reached
     When Kafka topic "relocation_offsets_{{test_id}}" partition count is changed to 2
-    Then within "5s" DESCRIBE INGESTOR "relocation_offset_source" on the leader node contains
+    Then within "5s" DESCRIBE INGESTOR "relocation_offset_ingestor" on the leader node contains
       """
       kafka observed partitions: 0,1
       """
@@ -723,7 +999,7 @@ Feature: Client wire failure regressions
     Then the background Plexus execution fails with "schedule changed"
     When these Plexus commands are executed on the leader node
       """
-      DESCRIBE INGESTOR relocation_offset_source;
+      DESCRIBE INGESTOR relocation_offset_ingestor;
       """
     Then the last command output contains
       """
@@ -746,17 +1022,17 @@ Feature: Client wire failure regressions
         tenant string,
         sequence integer
       );
-      CREATE CODEC wire_record_codec
-        FROM WIRE JSON SCHEMA wire_record_json
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
-      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
-        FROM wire_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+      CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
+        FROM wire_ingress MODE ACK MAX 8 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wire_record_codec
         TO wire_records INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -769,7 +1045,7 @@ Feature: Client wire failure regressions
       """
       CREATE SUBSCRIPTION wire_seen TO wire_records;
       """
-    And http payload is posted to node "{{old_leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+    And one http payload is posted with a completed graph acknowledgement to node "{{old_leader}}" host "client-wire-{{test_id}}.example.com" path "/records"
       """
       {"tenant":"acme","sequence":1}
       """
@@ -790,7 +1066,7 @@ Feature: Client wire failure regressions
       DESCRIBE DOMAIN;
       """
     Then client "subscriber" subscription "wire_seen" is active
-    When within "30s" client "subscriber" receives a subscription payload from repeated http posts to node "{{new_leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+    When within "30s" client "subscriber" receives one subscription row from one acknowledged http post to node "{{new_leader}}" host "client-wire-{{test_id}}.example.com" path "/records"
       """
       {"tenant":"beta","sequence":2}
       """
@@ -799,6 +1075,74 @@ Feature: Client wire failure regressions
       key={"tenant":"beta"}
       payload={"sequence":2,"tenant":"beta"}
       """
+
+  @client_wire_subscription_restore
+  @client_wire_subscription_timeout @deloxide_stress
+  Scenario Outline: An unanswered subscription reopening lets a waiting native reader open another session
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wire_record (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
+        TO SCHEMA wire_record;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
+      CREATE VHOST edge client-wire-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
+        FROM wire_ingress MODE ACK MAX 8 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wire_record_codec
+        TO wire_records INHERIT ALL
+        BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with request timeout "5s"
+    When client "subscriber" executes these Plexus commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    And one http payload is posted with a completed graph acknowledgement to node "{{leader}}" host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"acme","sequence":1}
+      """
+    Then within "10s" client "subscriber" receives a subscription payload
+      """
+      key={"tenant":"acme"} payload={"sequence":1,"tenant":"acme"}
+      """
+    Given the next subscription opening reply on node "{{leader}}" is held
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" client "subscriber" observes subscription "wire_seen" interrupted
+    When client "subscriber" waits through the held reopening of subscription "wire_seen" on node "{{leader}}" then receives one http payload with host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then the last relay subscription payload contains
+      """
+      key={"tenant":"beta"}
+      payload={"sequence":2,"tenant":"beta"}
+      """
+    And client "subscriber" subscription "wire_seen" is active
+    And the subscription opening reply on node "{{leader}}" is held
+    When the subscription opening reply on node "{{leader}}" is released
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @client_wire_subscription_restore
   Scenario Outline: A native client deletes a subscription its lost session held and opens the name again
@@ -815,13 +1159,13 @@ Feature: Client wire failure regressions
         tenant string,
         sequence integer
       );
-      CREATE CODEC wire_record_codec
-        FROM WIRE JSON SCHEMA wire_record_json
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
-      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
+      CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records INHERIT ALL UNBRANCHED
@@ -862,7 +1206,7 @@ Feature: Client wire failure regressions
       | 3            |
 
   @client_wire_subscription_restore
-  Scenario Outline: A native client reports a refused subscription restoration and deletes the subscription without the server
+  Scenario Outline: A native client ends the restoration of a subscription whose relay was <change> while it was disconnected
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these Plexus commands
@@ -870,6 +1214,9 @@ Feature: Client wire failure regressions
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA watched_record (
         value STRING
+      );
+      CREATE SCHEMA masked_watched_record (
+        value STRING SENSITIVE
       );
       CREATE RELAY watched SCHEMA watched_record UNBRANCHED;
       START;
@@ -885,22 +1232,88 @@ Feature: Client wire failure regressions
     Then within "30s" client "subscriber" observes subscription "watching" interrupted
     When these Plexus commands are executed on the leader node
       """
-      DROP RELAY watched;
+      <statement>
       """
     And client "subscriber" executes these Plexus commands
       """
       DESCRIBE DOMAIN;
       """
-    Then within "30s" client "subscriber" observes a failed restoration of subscription "watching"
-      """
-      stream 'watched' does not exist in domain '{{domain}}'
-      """
-    And client "subscriber" subscription "watching" is interrupted
+    Then within "30s" client "subscriber" observes subscription "watching" ended with reason "<reason>"
+    And client "subscriber" subscription "watching" is ended
+    And client "subscriber" reports no event of subscription "watching" within "5s"
     When client "subscriber" executes these Plexus commands
       """
       DELETE SUBSCRIPTION watching;
       """
-    Then client "subscriber" no longer holds subscription "watching"
+    Then the last command output contains
+      """
+      subscription 'watching' deleted; the server had already ended it
+      """
+    And client "subscriber" no longer holds subscription "watching"
+
+    @client_wire_restoration_end @deloxide_stress
+    Examples:
+      | cluster_size | change  | statement           | reason       |
+      | 1            | dropped | DROP RELAY watched; | RelayRemoved |
+      | 3            | dropped | DROP RELAY watched; | RelayRemoved |
+
+    Examples:
+      | cluster_size | change    | statement                                             | reason       |
+      | 1            | redefined | ALTER RELAY watched SET SCHEMA masked_watched_record; | RelayChanged |
+      | 3            | redefined | ALTER RELAY watched SET SCHEMA masked_watched_record; | RelayChanged |
+
+  @client_wire_subscription_restore
+  Scenario Outline: A native client opens again a subscription whose restoration the server refused for now
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wire_record (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
+        TO SCHEMA wire_record;
+      CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
+      CREATE VHOST edge client-wire-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR wire_source
+        FROM wire_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        TO wire_records INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with cluster seeds
+    When client "subscriber" executes these Plexus commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    And every node refuses the next subscription it is asked to open as unavailable
+    And the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" client "subscriber" observes subscription "wire_seen" interrupted
+    When client "subscriber" executes these Plexus commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then within "30s" client "subscriber" observes a restoration of subscription "wire_seen" refused as "Unavailable"
+    When within "30s" client "subscriber" receives a subscription payload from repeated http posts to node "{{leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"acme","sequence":1}
+      """
+    Then the last relay subscription payload contains
+      """
+      {"sequence":1,"tenant":"acme"}
+      """
+    And client "subscriber" subscription "wire_seen" is active
 
     Examples:
       | cluster_size |
@@ -926,13 +1339,13 @@ Feature: Client wire failure regressions
         tenant string,
         sequence integer
       );
-      CREATE CODEC wire_record_codec
-        FROM WIRE JSON SCHEMA wire_record_json
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
-      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wire_source
+      CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records
@@ -977,7 +1390,7 @@ Feature: Client wire failure regressions
     And the last relay subscription payload masks field "sequence"
     When these Plexus commands are executed on the leader node
       """
-      DROP INGESTOR wire_source;
+      DROP INGESTOR wire_ingestor;
       DROP RELAY wire_records;
       """
     Then within "30s" client "subscriber" observes subscription "wire_seen" ended with reason "RelayRemoved"
@@ -1012,15 +1425,15 @@ Feature: Client wire failure regressions
         sequence integer,
         note string
       );
-      CREATE CODEC wide_record_codec
-        FROM WIRE JSON SCHEMA wide_record_json
+      CREATE WIRE JSON CODEC wide_record_codec
+        FROM WIRE SCHEMA wide_record_json
         TO SCHEMA wide_record;
       CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
-      CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR wide_source
-        FROM wide_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING wide_record_codec
+      CREATE HTTP ENDPOINT wide_ingress ON edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR wide_ingestor
+        FROM wide_ingress MODE ACK MAX 1 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wide_record_codec
         TO wide_records
         SET sequence = message.sequence, note = message.note
         UNBRANCHED
@@ -1032,7 +1445,7 @@ Feature: Client wire failure regressions
       """
       CREATE SUBSCRIPTION wide_seen TO wide_records;
       """
-    And http payload is posted to node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
+    And http payload is acknowledged within "30s" by node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
       """
       {"sequence":1,"note":"{{wide_note}}"}
       """
@@ -1041,6 +1454,66 @@ Feature: Client wire failure regressions
       {"note":"{{wide_note}}","sequence":1}
       """
     And client "subscriber" subscription "wide_seen" is active
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_foreign_execution @deloxide_stress
+  Scenario Outline: A native command recovers its own execution after a foreign command reply on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "recovering" is connected to node "{{leader}}"
+    And the next successful reply to native command "CREATE SCHEMA recovered_identity (value STRING);" names another execution
+    When client "recovering" executes these Plexus commands
+      """
+      CREATE SCHEMA recovered_identity (value STRING);
+      """
+    Then the native command recovered only its own execution reference
+    When client "recovering" executes these Plexus commands
+      """
+      SHOW CREATE SCHEMA recovered_identity;
+      """
+    Then the last command output contains
+      """
+      recovered_identity
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_reply_kind @deloxide_stress
+  Scenario Outline: A native command recovers its own execution after a reply of another kind on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "recovering" is connected to node "{{leader}}"
+    And the next successful reply to native command "CREATE SCHEMA reply_kind_identity (value STRING);" is a reply of another kind
+    When client "recovering" executes these Plexus commands
+      """
+      CREATE SCHEMA reply_kind_identity (value STRING);
+      """
+    Then the native command recovered its own execution reference after a reply of another kind
+    When client "recovering" executes these Plexus commands
+      """
+      SHOW CREATE SCHEMA reply_kind_identity;
+      """
+    Then the last command output contains
+      """
+      reply_kind_identity
+      """
 
     Examples:
       | cluster_size |

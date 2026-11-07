@@ -294,7 +294,7 @@ declare_names! {
     SchemaName => Allowed,
     /// A wire schema declared with `CREATE JSON`, `CBOR`, or `AVRO WIRE SCHEMA`.
     WireSchemaName => Allowed,
-    /// A codec declared with `CREATE CODEC`.
+    /// A codec declared with its family and format in the Plexus statement head.
     CodecName => Allowed,
     /// A connector client declared with a Plexus `<CONNECTOR> CLIENT` head.
     ClientName => Allowed,
@@ -302,7 +302,7 @@ declare_names! {
     VhostName => Allowed,
     /// A branch declared with `CREATE BRANCH`.
     BranchName => Allowed,
-    /// A listening endpoint declared with `CREATE ENDPOINT`.
+    /// A listening endpoint declared with `CREATE HTTP ENDPOINT` or `CREATE WEBSOCKETS ENDPOINT`.
     EndpointName => Allowed,
     /// A signaling protocol declared with `CREATE SIGNALING PROTOCOL`.
     SignalingProtocolName => Allowed,

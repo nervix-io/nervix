@@ -40,6 +40,8 @@ mod materialized;
 pub(crate) mod memory;
 mod native_metadata;
 pub(crate) mod restore;
+pub(crate) mod restore_codec;
+pub(crate) mod restore_reply_validation;
 mod snapshot_receive;
 mod staging;
 mod wait;
@@ -49,6 +51,19 @@ mod wait;
 pub(crate) struct TestBackup {
     reference: CommandExecutionReference,
     summary: BackupArchiveSummary,
+}
+
+/// A backup a native client runs in the background while the scenario interrupts its session.
+pub(crate) struct BackgroundNativeBackup {
+    /// The execution reference the client prepared before it sent the backup.
+    reference: CommandExecutionReference,
+    /// The file the client writes the archive to.
+    archive: PathBuf,
+    /// How long the client waits for the backup's outcome, every reconnect included.
+    wait: Duration,
+    task: AbortOnDropHandle<
+        error_stack::Result<nervix_client_core::CommandOutcome, nervix_client_core::ClientError>,
+    >,
 }
 
 /// The slowest three-node restore the CLI completed in the scenarios jobs of Check runs
@@ -187,6 +202,14 @@ async fn when_cli_backs_up(world: &mut ScenarioWorld, scope: String, node: Strin
         "json".to_string(),
     ]);
     run_cli(world, &node, arguments).await;
+}
+
+#[then(expr = "the path of backup archive {string} is saved as placeholder {string}")]
+fn then_backup_archive_path_is_saved(world: &mut ScenarioWorld, file: String, placeholder: String) {
+    let path = archive_path(world, &file);
+    world
+        .placeholders
+        .insert(placeholder, path.display().to_string());
 }
 
 /// Every cut of the domain that reaches its capture waits there, a cut of a backup that runs again
@@ -952,15 +975,13 @@ async fn backup_command_outcome(
     command: &str,
     reference: &str,
 ) -> std::io::Result<nervix_client_wire::CommandOutcome> {
-    let outcome = session
-        .run_command_result_with_reference(command, reference)
-        .await?;
-    if !outcome_awaits_leader(&outcome) {
+    let prepared = session.prepare_command(command, reference);
+    let outcome = prepared.run(session).await?;
+    if !prepared.awaits_recovery(&outcome) {
         return Ok(outcome);
     }
     let routes = world.cluster().leader_routes();
-    let scope = session.scope();
-    let learned = learn_command_outcome(&routes, &scope, command, reference, outcome).await;
+    let learned = learn_command_outcome(&routes, &prepared, outcome, None).await;
     Ok(learned.outcome)
 }
 

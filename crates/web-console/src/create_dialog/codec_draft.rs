@@ -71,16 +71,16 @@ impl CodecFormatKind {
 
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::WireJson => "Wire JSON",
-            Self::WireCbor => "Wire CBOR",
-            Self::WireAvro => "Wire AVRO",
-            Self::Syslog => "SYSLOG",
-            Self::JaqJson => "JSON + jaq",
-            Self::JaqYaml => "YAML + jaq",
-            Self::JaqToml => "TOML + jaq",
-            Self::JaqXml => "XML + jaq",
-            Self::JaqCbor => "CBOR + jaq",
-            Self::Protobuf => "Protobuf + jaq",
+            Self::WireJson => "WIRE JSON CODEC",
+            Self::WireCbor => "WIRE CBOR CODEC",
+            Self::WireAvro => "WIRE AVRO CODEC",
+            Self::Syslog => "SYSLOG CODEC",
+            Self::JaqJson => "JAQ JSON CODEC",
+            Self::JaqYaml => "JAQ YAML CODEC",
+            Self::JaqToml => "JAQ TOML CODEC",
+            Self::JaqXml => "JAQ XML CODEC",
+            Self::JaqCbor => "JAQ CBOR CODEC",
+            Self::Protobuf => "PROTOBUF CODEC",
         }
     }
 
@@ -246,9 +246,19 @@ impl CodecFormatDraft {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct EncodingRuleDraft {
     pub(super) field: String,
+    pub(super) encoding: CodecEncoding,
+}
+
+impl Default for EncodingRuleDraft {
+    fn default() -> Self {
+        Self {
+            field: String::new(),
+            encoding: CodecEncoding::Rfc3339,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -393,7 +403,7 @@ impl CodecDraft {
             }
             encoding_rules.push(CodecEncodingRule {
                 field,
-                encoding: CodecEncoding::Rfc3339,
+                encoding: rule.encoding,
             });
         }
         Ok(CreateCodec {
@@ -413,7 +423,7 @@ pub(super) enum CodecDraftError {
     SchemaRequired,
     #[error("The selected internal schema belongs to a changed context; select it again")]
     SchemaChanged,
-    #[error("Choose a wire format")]
+    #[error("Choose a codec family and format")]
     FormatRequired,
     #[error("Choose a wire schema of the selected format")]
     WireSchemaRequired,
@@ -446,8 +456,10 @@ pub(super) enum CodecDraftError {
 )]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{
-        CreateStatement, Model, ModelKind, ModelName, NodeRef, RequestedResourceVersion, Statement,
+        CodecEncoding, CodecName, CreateStatement, Model, ModelKind, ModelName, NodeRef,
+        RequestedResourceVersion, ResourceName, SchemaName, Statement, WireSchemaName,
     };
     use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
@@ -489,6 +501,77 @@ mod tests {
     }
 
     #[test]
+    fn bolero_codec_drafts_preserve_complete_models_and_family_heads() {
+        bolero::check!()
+            .with_iterations(128)
+            .with_max_len(1024)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
+                for kind in CodecFormatKind::ALL {
+                    let mut draft = draft(kind);
+                    draft.name = arbitrary.name::<CodecName>().as_str().to_string();
+                    draft.if_not_exists = arbitrary.entropy().flag();
+                    let schema = arbitrary.name::<SchemaName>();
+                    draft.select_schema(&node(ModelKind::Schema, schema.as_str()));
+                    if let Some(wire_kind) = kind.wire_schema_kind() {
+                        let wire = arbitrary.name::<WireSchemaName>();
+                        draft.select_wire_schema(&node(wire_kind, wire.as_str()));
+                    }
+                    if let Some(binding) = draft.binding_mut() {
+                        binding.select_resource(arbitrary.name::<ResourceName>());
+                        binding.select_version(arbitrary.requested_version());
+                        binding.file = format!("{}.proto", arbitrary.name::<CodecName>());
+                        binding.include = arbitrary.string();
+                    }
+                    if let Some(CodecFormatDraft::Protobuf {
+                        message,
+                        batch_message,
+                        ..
+                    }) = &mut draft.format
+                    {
+                        *message = format!("pkg.{}", arbitrary.name::<CodecName>());
+                        *batch_message = "pkg.Batch".to_string();
+                    }
+                    if let Some(transformations) = draft.transformations_mut() {
+                        if arbitrary.entropy().flag() {
+                            transformations.ingestion = Some(format!(". # {}", arbitrary.string()));
+                        }
+                        if transformations.ingestion.is_none() || arbitrary.entropy().flag() {
+                            transformations.emitting = Some(format!(". # {}", arbitrary.string()));
+                            if arbitrary.entropy().flag() {
+                                transformations.emitting_batch =
+                                    Some(format!(". # {}", arbitrary.string()));
+                            }
+                        }
+                    }
+                    if kind != CodecFormatKind::Syslog {
+                        for index in 0..arbitrary.entropy().count(3) {
+                            let encoding = if arbitrary.entropy().flag() {
+                                CodecEncoding::Rfc3339
+                            } else {
+                                CodecEncoding::Base64
+                            };
+                            draft.encoding_rules.push(EncodingRuleDraft {
+                                field: format!("field_{index}"),
+                                encoding,
+                            });
+                        }
+                        if arbitrary.entropy().flag() {
+                            draft.encoding_rules.reverse();
+                        }
+                    }
+                    let source = round_trip(&draft);
+                    let prefix = if draft.if_not_exists {
+                        "CREATE IF NOT EXISTS"
+                    } else {
+                        "CREATE"
+                    };
+                    assert!(source.starts_with(&format!("{prefix} {} ", kind.label())));
+                }
+            });
+    }
+
+    #[test]
     fn every_schemaful_and_fixed_codec_format_round_trips_with_its_exact_wire_kind() {
         for (kind, model_kind, clause) in [
             (
@@ -519,10 +602,11 @@ mod tests {
             draft.select_wire_schema(&node(model_kind, "wire_payload"));
             draft.if_not_exists = true;
             let source = round_trip(&draft);
-            assert!(source.contains(&format!("FROM {clause} SCHEMA wire_payload")));
+            assert!(source.contains(&format!("{clause} CODEC visual_codec")));
+            assert!(source.contains("FROM WIRE SCHEMA wire_payload"));
         }
         let source = round_trip(&draft(CodecFormatKind::Syslog));
-        assert!(source.contains("FROM SYSLOG"));
+        assert!(source.contains("SYSLOG CODEC visual_codec"));
     }
 
     #[test]
@@ -582,11 +666,28 @@ mod tests {
             binding.select_version(RequestedResourceVersion::Number(7));
         }
         draft.encoding_rules.push(EncodingRuleDraft {
+            encoding: CodecEncoding::Rfc3339,
             field: "created_at".to_string(),
         });
         let numbered = round_trip(&draft);
         assert!(numbered.contains("USING RESOURCE proto_bundle VERSION 7"));
         assert!(numbered.contains("created_at AS RFC3339"));
+    }
+
+    #[test]
+    fn byte_text_encodings_retain_the_selected_kind() {
+        for kind in [CodecFormatKind::WireJson, CodecFormatKind::WireAvro] {
+            let mut draft = draft(kind);
+            let wire = kind
+                .wire_schema_kind()
+                .assured("both schemaful formats name a wire schema");
+            draft.select_wire_schema(&node(wire, "binary_wire"));
+            draft.encoding_rules.push(EncodingRuleDraft {
+                field: "payload".to_string(),
+                encoding: CodecEncoding::Base64,
+            });
+            assert!(round_trip(&draft).contains("ENCODE payload AS BASE64"));
+        }
     }
 
     #[test]

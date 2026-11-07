@@ -106,15 +106,15 @@ Feature: Drain node
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA drain_event ( seq I64 );
       CREATE WIRE JSON SCHEMA drain_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC drain_event_codec
-        FROM WIRE JSON SCHEMA drain_event_wire
+      CREATE WIRE JSON CODEC drain_event_codec
+        FROM WIRE SCHEMA drain_event_wire
         TO SCHEMA drain_event;
       CREATE RELAY stalled_output SCHEMA drain_event UNBRANCHED CAPACITY 1;
       CREATE RELAY control_input SCHEMA drain_event UNBRANCHED;
       CREATE RELAY control_output SCHEMA drain_event UNBRANCHED;
       CREATE VHOST edge drain-{{test_id}}.example.com;
-      CREATE ENDPOINT drain_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR drain_source
+      CREATE HTTP ENDPOINT drain_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR drain_ingestor
         FROM drain_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING drain_event_codec
         TO stalled_output INHERIT ALL UNBRANCHED
@@ -203,8 +203,8 @@ Feature: Drain node
         amount integer
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
@@ -219,12 +219,11 @@ Feature: Drain node
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
 
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
@@ -295,8 +294,8 @@ Feature: Drain node
         id integer,
         source string
       );
-      CREATE CODEC wait_event_codec
-        FROM WIRE JSON SCHEMA wait_event_wire
+      CREATE WIRE JSON CODEC wait_event_codec
+        FROM WIRE SCHEMA wait_event_wire
         TO SCHEMA wait_event;
       CREATE RELAY event_state SCHEMA wait_event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -304,12 +303,11 @@ Feature: Drain node
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
       CREATE KAFKA CLIENT wait_kafka
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR event_source
+      CREATE KAFKA TOPIC INGESTOR event_ingestor
         FROM wait_kafka TOPIC 'wait_events_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_events_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_events_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 500ms
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
@@ -319,9 +317,9 @@ Feature: Drain node
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR state_source
+      CREATE KAFKA TOPIC INGESTOR state_ingestor
         FROM wait_kafka TOPIC 'wait_state_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_state_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_state_{{test_id}}' START AT EARLIEST
           MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
         TO event_state
@@ -338,11 +336,11 @@ Feature: Drain node
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_waiting_ack_local
-        FROM event_source
+        FROM event_ingestor
         TO wait_for_state
         REQUIRE COLOCATION;
       CREATE PLACEMENT keep_waiting_state_local
-        FROM state_source
+        FROM state_ingestor
         TO wait_for_state
         REQUIRE COLOCATION;
       START;
@@ -355,7 +353,7 @@ Feature: Drain node
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=event_source owner=node-1
+      - domain={{domain}} kind=ingestor name=event_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -390,7 +388,7 @@ Feature: Drain node
       """
     And the last command output contains
       """
-      - kind=ingestor name=event_source from=node-1 to=
+      - kind=ingestor name=event_ingestor unit=instance:0 from=node-1 to=
       """
     And the last command output contains
       """
@@ -422,20 +420,19 @@ Feature: Drain node
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE KAFKA TOPIC INGESTOR kafka_a
-        FROM kafka_main TOPIC 'notifications_a_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_a_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_a_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_a_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -445,7 +442,7 @@ Feature: Drain node
         ON GENERAL ERROR LOG;
 
       CREATE KAFKA TOPIC INGESTOR kafka_b
-        FROM kafka_main TOPIC 'notifications_b_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_b_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_b_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_b_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -455,7 +452,7 @@ Feature: Drain node
         ON GENERAL ERROR LOG;
 
       CREATE KAFKA TOPIC INGESTOR kafka_c
-        FROM kafka_main TOPIC 'notifications_c_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_c_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_c_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_c_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

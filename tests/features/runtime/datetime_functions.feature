@@ -41,16 +41,16 @@ Feature: Datetime functions
         delay_ms integer,
         epoch_ms integer
       );
-      CREATE CODEC reading_codec
-        FROM WIRE JSON SCHEMA reading_wire
+      CREATE WIRE JSON CODEC reading_codec
+        FROM WIRE SCHEMA reading_wire
         TO SCHEMA reading
         ENCODE occurred_at AS RFC3339,
                origin AS RFC3339;
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE RELAY reading_times SCHEMA reading_time UNBRANCHED;
       CREATE VHOST edge datetime-functions-{{test_id}}.example.com;
-      CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TIMESTAMP NOW
@@ -149,16 +149,15 @@ Feature: Datetime functions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC boundary_event_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC boundary_event_batch_codec
         TO SCHEMA boundary_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY boundary_events SCHEMA boundary_event UNBRANCHED;
       CREATE RELAY boundary_results SCHEMA boundary_result UNBRANCHED;
       CREATE RELAY datetime_errors SCHEMA datetime_error UNBRANCHED;
       CREATE VHOST edge datetime-boundaries-{{test_id}}.example.com;
-      CREATE ENDPOINT boundary_ingress ON edge PATH '/boundaries' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR boundary_source
+      CREATE HTTP ENDPOINT boundary_ingress ON edge PATH '/boundaries';
+      CREATE HTTP ENDPOINT INGESTOR boundary_ingestor
         FROM boundary_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING boundary_event_batch_codec
         TO boundary_events

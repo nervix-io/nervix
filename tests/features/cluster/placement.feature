@@ -535,15 +535,15 @@ Feature: Placement policies
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA placement_event ( id I64 );
       CREATE WIRE JSON SCHEMA placement_event_wire MODE STRICT ( id integer );
-      CREATE CODEC placement_event_codec
-        FROM WIRE JSON SCHEMA placement_event_wire
+      CREATE WIRE JSON CODEC placement_event_codec
+        FROM WIRE SCHEMA placement_event_wire
         TO SCHEMA placement_event;
       CREATE RELAY placement_input SCHEMA placement_event UNBRANCHED;
       CREATE RELAY placement_stage SCHEMA placement_event UNBRANCHED;
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE VHOST edge placement-{{test_id}}.example.com;
-      CREATE ENDPOINT placement_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR endpoint_source
+      CREATE HTTP ENDPOINT placement_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR endpoint_ingestor
         FROM placement_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING placement_event_codec
         TO placement_input INHERIT ALL UNBRANCHED
@@ -579,13 +579,13 @@ Feature: Placement policies
     When these Plexus commands fail
       """
       CREATE PLACEMENT endpoint_member
-        FROM endpoint_source
+        FROM endpoint_ingestor
         TO corridor_emitter
         REQUIRE COLOCATION;
       """
     Then the last command error contains
       """
-      endpoint_source
+      endpoint_ingestor
       """
     And the last command error contains
       """
@@ -786,14 +786,14 @@ Feature: Placement policies
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       CREATE SCHEMA placement_timeout_event ( seq I64 );
       CREATE WIRE JSON SCHEMA placement_timeout_wire MODE STRICT ( seq integer );
-      CREATE CODEC placement_timeout_codec
-        FROM WIRE JSON SCHEMA placement_timeout_wire
+      CREATE WIRE JSON CODEC placement_timeout_codec
+        FROM WIRE SCHEMA placement_timeout_wire
         TO SCHEMA placement_timeout_event;
       CREATE RELAY placement_timeout_input SCHEMA placement_timeout_event UNBRANCHED;
       CREATE RELAY placement_timeout_output SCHEMA placement_timeout_event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge placement-timeout-{{test_id}}.example.com;
-      CREATE ENDPOINT placement_timeout_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR placement_timeout_source
+      CREATE HTTP ENDPOINT placement_timeout_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR placement_timeout_ingestor
         FROM placement_timeout_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING placement_timeout_codec
         TO placement_timeout_input INHERIT ALL UNBRANCHED

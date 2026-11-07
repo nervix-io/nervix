@@ -14,16 +14,16 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         id integer
       );
-      CREATE CODEC state_event_codec
-        FROM WIRE JSON SCHEMA state_event_wire
+      CREATE WIRE JSON CODEC state_event_codec
+        FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge state-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR state_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
+      CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
         TO moving_state INHERIT ALL BRANCHED BY by_tenant
@@ -65,16 +65,16 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         id integer
       );
-      CREATE CODEC state_event_codec
-        FROM WIRE JSON SCHEMA state_event_wire
+      CREATE WIRE JSON CODEC state_event_codec
+        FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge state-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR state_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
+      CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
         TO moving_state INHERIT ALL BRANCHED BY by_tenant
@@ -119,16 +119,16 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         transaction_id string
       );
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge stopped-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/stopped' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/stopped';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
@@ -206,16 +206,16 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         transaction_id string
       );
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge empty-stopped-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/empty-stopped' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/empty-stopped';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
@@ -274,12 +274,12 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA event ( value I32 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY raw_events SCHEMA event UNBRANCHED;
       CREATE RELAY restored_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge rejecting-wasm-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/rejecting-wasm' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/rejecting-wasm';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO raw_events INHERIT ALL UNBRANCHED
@@ -545,16 +545,16 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         id integer
       );
-      CREATE CODEC state_event_codec
-        FROM WIRE JSON SCHEMA state_event_wire
+      CREATE WIRE JSON CODEC state_event_codec
+        FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge forced-state-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/forced-state' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR state_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/forced-state';
+      CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
         TO moving_state INHERIT ALL BRANCHED BY by_tenant
@@ -650,16 +650,16 @@ Feature: Relocating runtime nodes onto a named cluster node
         transaction_id string,
         amount integer
       );
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/relocate' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/relocate';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
@@ -1198,14 +1198,14 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA reject_event ( id I64 );
       CREATE WIRE JSON SCHEMA reject_event_wire MODE STRICT ( id integer );
-      CREATE CODEC reject_event_codec
-        FROM WIRE JSON SCHEMA reject_event_wire
+      CREATE WIRE JSON CODEC reject_event_codec
+        FROM WIRE SCHEMA reject_event_wire
         TO SCHEMA reject_event;
       CREATE RELAY reject_input SCHEMA reject_event UNBRANCHED;
       CREATE RELAY reject_output SCHEMA reject_event UNBRANCHED;
       CREATE VHOST edge reject-{{test_id}}.example.com;
-      CREATE ENDPOINT reject_ingress ON edge PATH '/reject' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR listener_source
+      CREATE HTTP ENDPOINT reject_ingress ON edge PATH '/reject';
+      CREATE HTTP ENDPOINT INGESTOR listener_ingestor
         FROM reject_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reject_event_codec
         TO reject_input INHERIT ALL UNBRANCHED
@@ -1218,9 +1218,9 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       RELOCATE JUNCTION missing_route ONTO NODE node-2 FOLLOW PREFERENCES;
       """
-    And these Plexus commands fail with "ingestor 'listener_source' cannot be relocated: server-listener ingestors execute on every cluster node"
+    And these Plexus commands fail with "ingestor 'listener_ingestor' cannot be relocated: server-listener ingestors execute on every cluster node"
       """
-      RELOCATE INGESTOR listener_source ONTO NODE node-2 FOLLOW PREFERENCES;
+      RELOCATE INGESTOR listener_ingestor ONTO NODE node-2 FOLLOW PREFERENCES;
       """
     And these Plexus commands fail with "node 'node-9' is not a raft member"
       """
@@ -1286,14 +1286,14 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA failover_event ( id I64 );
       CREATE WIRE JSON SCHEMA failover_event_wire MODE STRICT ( id integer );
-      CREATE CODEC failover_event_codec
-        FROM WIRE JSON SCHEMA failover_event_wire
+      CREATE WIRE JSON CODEC failover_event_codec
+        FROM WIRE SCHEMA failover_event_wire
         TO SCHEMA failover_event;
       CREATE RELAY failover_input SCHEMA failover_event UNBRANCHED;
       CREATE RELAY failover_output SCHEMA failover_event UNBRANCHED;
       CREATE VHOST edge failover-{{test_id}}.example.com;
-      CREATE ENDPOINT failover_ingress ON edge PATH '/failover' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR failover_source
+      CREATE HTTP ENDPOINT failover_ingress ON edge PATH '/failover';
+      CREATE HTTP ENDPOINT INGESTOR failover_ingestor
         FROM failover_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING failover_event_codec
         TO failover_input INHERIT ALL UNBRANCHED
@@ -1357,17 +1357,16 @@ Feature: Relocating runtime nodes onto a named cluster node
         id integer,
         source string
       );
-      CREATE CODEC promote_event_codec
-        FROM WIRE JSON SCHEMA promote_event_wire
+      CREATE WIRE JSON CODEC promote_event_codec
+        FROM WIRE SCHEMA promote_event_wire
         TO SCHEMA promote_event;
       CREATE SCHEMA promote_tenant ( tenant STRING );
       CREATE BRANCH promote_by_tenant SCHEMA promote_tenant TTL 5m;
       CREATE RELAY promote_output SCHEMA promote_event BRANCHED BY promote_by_tenant;
       CREATE KAFKA CLIENT promote_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR promote_source
+      CREATE KAFKA TOPIC INGESTOR promote_ingestor
         FROM promote_kafka TOPIC 'promote_events_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 500ms
@@ -1380,8 +1379,8 @@ Feature: Relocating runtime nodes onto a named cluster node
       START;
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "ingestor" "promote_source" is saved as placeholder "promote_owner"
-    And the first replica for scheduled "ingestor" "promote_source" in the last cluster status is saved as placeholder "promote_replica"
+    Then the last cluster status owner for scheduled "ingestor" "promote_ingestor" is saved as placeholder "promote_owner"
+    And the first replica for scheduled "ingestor" "promote_ingestor" in the last cluster status is saved as placeholder "promote_replica"
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION promote_seen TO promote_output;
@@ -1401,13 +1400,13 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     When these Plexus commands are executed on the active session
       """
-      RELOCATE INGESTOR promote_source ONTO NODE {{promote_replica}} IGNORE PREFERENCES;
+      RELOCATE INGESTOR promote_ingestor ONTO NODE {{promote_replica}} IGNORE PREFERENCES;
       """
     Then the last command output contains
       """
-      - kind=ingestor name=promote_source group=1 strategy=ignore reason=selected owner={{promote_owner}} moves=yes replicas={{promote_owner}} promoted_replica=yes
+      - kind=ingestor name=promote_ingestor group=1 strategy=ignore reason=selected owner={{promote_owner}} moves=yes replicas={{promote_owner}} promoted_replica=yes
       """
-    Then within "20s" node "node-1" eventually reports scheduled "ingestor" "promote_source" owner equals placeholder "promote_replica"
+    Then within "20s" node "node-1" eventually reports scheduled "ingestor" "promote_ingestor" owner equals placeholder "promote_replica"
     When Kafka message is published to topic "promote_events_{{test_id}}"
       """
       {"tenant":"beta","id":3,"source":"after-beta"}
@@ -1537,14 +1536,14 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA abort_event ( seq I64 );
       CREATE WIRE JSON SCHEMA abort_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC abort_event_codec
-        FROM WIRE JSON SCHEMA abort_event_wire
+      CREATE WIRE JSON CODEC abort_event_codec
+        FROM WIRE SCHEMA abort_event_wire
         TO SCHEMA abort_event;
       CREATE RELAY abort_input SCHEMA abort_event UNBRANCHED;
       CREATE RELAY abort_staged SCHEMA abort_event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge abort-{{test_id}}.example.com;
-      CREATE ENDPOINT abort_ingress ON edge PATH '/abort' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR abort_source
+      CREATE HTTP ENDPOINT abort_ingress ON edge PATH '/abort';
+      CREATE HTTP ENDPOINT INGESTOR abort_ingestor
         FROM abort_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING abort_event_codec
         TO abort_input INHERIT ALL UNBRANCHED
@@ -1640,8 +1639,8 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA wait_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
-      CREATE CODEC wait_event_codec
-        FROM WIRE JSON SCHEMA wait_event_wire
+      CREATE WIRE JSON CODEC wait_event_codec
+        FROM WIRE SCHEMA wait_event_wire
         TO SCHEMA wait_event;
       CREATE RELAY untouched_state SCHEMA wait_event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -1650,20 +1649,19 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY moved_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY moved_output SCHEMA wait_event UNBRANCHED;
       CREATE KAFKA CLIENT wait_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR event_source
+      CREATE KAFKA TOPIC INGESTOR event_ingestor
         FROM wait_kafka TOPIC 'untouched_events_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_untouched_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_untouched_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 500ms
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
         TO untouched_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR state_source
+      CREATE KAFKA TOPIC INGESTOR state_ingestor
         FROM wait_kafka TOPIC 'untouched_state_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_untouched_state_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_untouched_state_{{test_id}}' START AT EARLIEST
           MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
         TO untouched_state INHERIT ALL UNBRANCHED
@@ -1787,8 +1785,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         id integer,
         source string
       );
-      CREATE CODEC state_event_codec
-        FROM WIRE JSON SCHEMA state_event_wire
+      CREATE WIRE JSON CODEC state_event_codec
+        FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA state_tenant ( tenant STRING );
       CREATE BRANCH state_by_tenant SCHEMA state_tenant TTL 5m;
@@ -1797,21 +1795,20 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY reader_input SCHEMA state_event BRANCHED BY state_by_tenant;
       CREATE RELAY reader_output SCHEMA state_event BRANCHED BY state_by_tenant;
       CREATE KAFKA CLIENT state_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR state_source
+      CREATE KAFKA TOPIC INGESTOR state_ingestor
         FROM state_kafka TOPIC 'relay_state_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_relay_state_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_relay_state_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 500ms
         ON QUIESCE SUSPEND DECODE USING state_event_codec
         TO moving_state INHERIT ALL BRANCHED BY state_by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR reader_source
+      CREATE KAFKA TOPIC INGESTOR reader_ingestor
         FROM state_kafka TOPIC 'relay_reader_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_relay_reader_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_relay_reader_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 500ms
         ON QUIESCE SUSPEND DECODE USING state_event_codec

@@ -53,10 +53,11 @@ arch-into = { workspace = true }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
-async-nats = { workspace = true }
+async-nats = { workspace = true, features = ["nkeys"] }
 aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-sqs = { workspace = true }
+nervix-crypto = { workspace = true }
 # The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 base64 = { workspace = true }
@@ -72,7 +73,6 @@ flatbuffers = { workspace = true }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
 h2 = { workspace = true }
-hdrhistogram = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 httparse = { workspace = true }
@@ -97,6 +97,7 @@ nervix-approx-into = { workspace = true }
 nervix-backup = { workspace = true }
 nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-client-ffi = { workspace = true }
+nervix-client-host = { workspace = true }
 nervix-client-wire = { workspace = true, features = ["grpc"] }
 nervix-connector-kafka = { workspace = true }
 nervix-consensus = { workspace = true }
@@ -134,6 +135,7 @@ ort = { workspace = true, features = [
 ] }
 otel-prost = { workspace = true }
 playwright-rs = { workspace = true }
+prost = { workspace = true }
 pulsar = { workspace = true }
 rcgen = { workspace = true }
 redis = { workspace = true }
@@ -160,6 +162,7 @@ tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
 tokio-util = { workspace = true, features = ["codec"] }
+toml = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 ubyte = { workspace = true }

@@ -17,8 +17,8 @@ Feature: RabbitMQ emission
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -91,19 +91,18 @@ Feature: RabbitMQ emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'rabbitmq_boundary_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'rabbitmq_boundary_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'rabbitmq_boundary_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -117,7 +116,8 @@ Feature: RabbitMQ emission
       CREATE RABBITMQ CLIENT rabbitmq_sink CONFIG {
         'addr' = '{{rabbitmq_stallable_addr}}'
       };
-      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbitmq_boundary FROM notifications
+      CREATE RABBITMQ QUEUE EMITTER rabbitmq_boundary FROM notifications
+        ATTACHED
         TO rabbitmq_sink QUEUE 'rabbitmq_boundary_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -168,13 +168,13 @@ Feature: RabbitMQ emission
       """
       CREATE SCHEMA returned_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA returned_event_wire MODE STRICT ( sequence integer );
-      CREATE CODEC returned_event_codec
-        FROM WIRE JSON SCHEMA returned_event_wire
+      CREATE WIRE JSON CODEC returned_event_codec
+        FROM WIRE SCHEMA returned_event_wire
         TO SCHEMA returned_event;
       CREATE RELAY returned_events SCHEMA returned_event UNBRANCHED;
       CREATE VHOST edge returned-{{test_id}}.example.com;
-      CREATE ENDPOINT returned_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR returned_source
+      CREATE HTTP ENDPOINT returned_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR returned_ingestor
         FROM returned_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING returned_event_codec
         TIMESTAMP NOW

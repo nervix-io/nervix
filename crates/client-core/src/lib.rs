@@ -25,6 +25,7 @@
 )]
 
 mod backup;
+mod cancellation;
 mod client;
 mod connection;
 mod consumer;
@@ -45,7 +46,7 @@ pub use connection::{ConnectDns, ConnectOptions, TlsRequirement};
 pub use consumer::{ConsumerConnection, ConsumerReopenReason, EmitterConsumer, EmitterDelivery};
 pub use domain_clock::{
     AttachedDomainClock, DomainClockEvent, DomainClockInterruption, DomainClockReadError,
-    DomainClockRestorationFailure,
+    DomainClockRestorationCause, DomainClockRestorationFailure,
 };
 pub use error::{ClientError, EventStreamKind, RequestKind};
 use error_stack::ResultExt as _;
@@ -57,14 +58,15 @@ pub use nervix_client_wire as wire;
 pub use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
     ChoiceTarget, ChoiceValue, CommandDisposition, Diagnostic, DomainClockAttachDisposition,
-    DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
-    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
-    DomainInfo, DomainPaceChoice, EmitterSettlement, ExecutionReferenceConflict, LeaderRedirect,
-    Leadership, NodeEndpoints, NoticeLevel, OutcomeOrigin, ProducerId, RestoreUploadFailure,
-    RowConformanceError, RowSchema, SourceSpan, StatementDisposition, StatementOutcome,
-    SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
-    SubscriptionRows, SubscriptionRowsSkipped, SuggestionKind, SuggestionStatus, TextEdit,
-    UnknownOutcomeCause, UploadFailure,
+    DomainClockAttachOutcome, DomainClockAttachRefusal, DomainClockAttachmentEndReason,
+    DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
+    DomainClockObserved, DomainClockTicked, DomainInfo, DomainPaceChoice, EmitterSettlement,
+    ExecutionReferenceConflict, LeaderRedirect, Leadership, NodeEndpoints, NoticeKind, NoticeLevel,
+    OutcomeOrigin, ProducerId, RestoreUploadFailure, RowConformanceError, RowSchema, SourceSpan,
+    StatementDisposition, StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionRefusal, SubscriptionRows,
+    SubscriptionRowsSkipped, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause,
+    UploadFailure,
 };
 pub use nervix_models::{
     AckWindow, ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,
@@ -87,7 +89,8 @@ pub use producer::{
     ProducerOutcome, ProducerReopenReason, SubmissionId, SubmissionUncertainty,
 };
 pub use subscriptions::{
-    SubscriptionInterruption, SubscriptionLifecycle, SubscriptionRestorationFailure,
+    SubscriptionInterruption, SubscriptionLifecycle, SubscriptionRestorationCause,
+    SubscriptionRestorationFailure,
 };
 use thiserror::Error;
 
@@ -98,7 +101,7 @@ pub struct QuerySplitError;
 
 /// Splits a batch into the exact Plexus source slices that should be submitted separately.
 pub fn split_query_statements(query: &str) -> error_stack::Result<Vec<&str>, QuerySplitError> {
-    let statements = nervix_plexus::client_statement::parse_client_statement_sources(query)
+    let statements = client::with_statement_grammar(|grammar| grammar.parse_sources(query))
         .change_context(QuerySplitError)?;
     Ok(statements
         .iter()

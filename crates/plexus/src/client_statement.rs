@@ -1,6 +1,11 @@
+mod expression_completion;
+
 use std::ops::Range;
 
-use chumsky::prelude::*;
+use chumsky::{
+    cache::{Cache, Cached},
+    prelude::*,
+};
 use meticulous::OptionExt as _;
 use nervix_models::{
     Backup, BuiltinFunctionScope, CanonicalPlexusError, CreateSubscription, DeleteSubscription,
@@ -12,10 +17,10 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_mode, completion_context,
-        completion_tokens, domain_ref, filter_by_prefix, if_not_exists_clause, into_parse_error,
-        junction_name, kw, kw_phrase3, lex_input, relay_ref, schema_name, suggestions_from_errors,
-        tok, wire_schema_name,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
+        domain_ref, filter_by_prefix, if_not_exists_clause, into_parse_error, junction_name, kw,
+        kw_phrase3, lex_input, relay_ref, schema_name, suggestions_from_errors, tok,
+        wire_schema_name,
     },
 };
 
@@ -290,141 +295,15 @@ impl CompletionExpectation {
     }
 }
 
+/// The completion expectations at `cursor` in `input`, with a grammar built for this call; see
+/// [`ClientStatementGrammar::suggest_expectations`].
 pub fn suggest_client_expectations(input: &str, cursor: usize) -> Vec<CompletionExpectation> {
-    let (labels, tokens) = client_completion(input, cursor);
-    let schema = alter_schema_context(&tokens);
-    let route_references = route_expression_references(&tokens);
-    if !route_references.is_empty() {
-        return route_references
-            .into_iter()
-            .map(CompletionExpectation::Semantic)
-            .collect();
-    }
-    let source = ingestor_source_kind(&tokens).map(|kind| kind.capabilities().reference);
-    let mut expectations = Vec::new();
-    for label in labels {
-        if let Some(expectation) = CompletionExpectation::from_label(label, schema.as_ref(), source)
-        {
-            expectations.push(expectation);
-        }
-    }
-    expectations
-}
-
-fn route_expression_references(tokens: &[Token]) -> Vec<SemanticReference> {
-    let output_route_start = tokens.iter().rposition(|token| {
-        matches!(
-            token,
-            Token::Word(Word::KnownWord {
-                iden: Keyword::To,
-                ..
-            })
-        )
-    });
-    let Some(output_route_start) = output_route_start else {
-        return Vec::new();
-    };
-    let has_construction = tokens[output_route_start..].iter().any(|token| {
-        matches!(
-            token,
-            Token::Word(Word::KnownWord {
-                iden: Keyword::Set | Keyword::Where | Keyword::Invoke | Keyword::Inherit,
-                ..
-            })
-        )
-    });
-    if !has_construction {
-        return Vec::new();
-    }
-    match tokens.last() {
-        Some(Token::Word(Word::KnownWord {
-            iden: Keyword::Set, ..
-        })) if junction_input_relay(tokens).is_some() => junction_output_relay(tokens)
-            .map(SemanticReference::RelayField)
-            .into_iter()
-            .collect(),
-        Some(Token::Dot) => {
-            let Some(previous_index) = tokens.len().checked_sub(2) else {
-                return Vec::new();
-            };
-            if matches!(
-                tokens.get(previous_index),
-                Some(Token::Word(crate::lexer::Word::KnownWord {
-                    iden: Keyword::Input,
-                    ..
-                }))
-            ) {
-                junction_input_relay(tokens)
-                    .map(SemanticReference::RelayField)
-                    .into_iter()
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        }
-        Some(Token::DoubleColon) => {
-            let Some(previous_index) = tokens.len().checked_sub(2) else {
-                return Vec::new();
-            };
-            if matches!(
-                tokens.get(previous_index),
-                Some(Token::Word(crate::lexer::Word::KnownWord {
-                    iden: Keyword::Udf,
-                    ..
-                }))
-            ) {
-                vec![SemanticReference::Model(ModelKind::Udf)]
-            } else {
-                Vec::new()
-            }
-        }
-        Some(Token::Word(Word::KnownWord {
-            iden: Keyword::Invoke,
-            ..
-        })) => {
-            let scope = match emitter_connector_kind(tokens) {
-                Some(kind) => BuiltinFunctionScope::EmitterInvocation(kind),
-                None => BuiltinFunctionScope::Ordinary,
-            };
-            vec![SemanticReference::BuiltinFunction(scope)]
-        }
-        Some(Token::Eq | Token::LParen | Token::Comma | Token::Plus | Token::Star) => {
-            let invocation =
-                tokens[output_route_start..]
-                    .iter()
-                    .rev()
-                    .find_map(|token| match token {
-                        Token::Word(Word::KnownWord {
-                            iden: Keyword::Set | Keyword::Where,
-                            ..
-                        }) => Some(false),
-                        Token::Word(Word::KnownWord {
-                            iden: Keyword::Invoke,
-                            ..
-                        }) => Some(true),
-                        _ => None,
-                    });
-            let scope = if invocation == Some(true) {
-                match emitter_connector_kind(tokens) {
-                    Some(kind) => BuiltinFunctionScope::EmitterInvocation(kind),
-                    None => BuiltinFunctionScope::Ordinary,
-                }
-            } else {
-                match ingestor_source_kind(tokens) {
-                    Some(kind) => BuiltinFunctionScope::IngestorEntity(kind),
-                    None => BuiltinFunctionScope::Ordinary,
-                }
-            };
-            vec![SemanticReference::BuiltinFunction(scope)]
-        }
-        _ => Vec::new(),
-    }
+    ClientStatementGrammar::new().suggest_expectations(input, cursor)
 }
 
 fn junction_input_relay(tokens: &[Token]) -> Option<RelayName> {
     kw(Keyword::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Keyword::Junction))
         .then_ignore(junction_name())
         .then_ignore(kw(Keyword::From))
@@ -470,7 +349,6 @@ fn ingestor_source_kind(tokens: &[Token]) -> Option<IngestorEntityKind> {
 fn emitter_connector_kind(tokens: &[Token]) -> Option<EmitterEntityKind> {
     let create = kw(Keyword::Create)
         .ignore_then(if_not_exists_clause())
-        .ignore_then(ack_mode().or_not())
         .ignore_then(crate::emitter::head_kind());
     let alter = kw(Keyword::Alter).ignore_then(crate::emitter::head_kind());
     choice((create, alter))
@@ -535,40 +413,264 @@ pub fn parse_upload_resource_query(
     crate::upload_resource::parse_upload_resource(input)
 }
 
+/// The client statement grammar, built once and reused for every statement parsed and every
+/// completion read with it.
+///
+/// Building the grammar constructs the parser of every statement Plexus defines, which costs far
+/// more than parsing a short statement with it. A caller that parses or completes repeatedly holds
+/// one grammar and reads with it; [`parse_client_statement`], [`parse_client_statement_sources`],
+/// [`suggest_client_expectations`], [`suggest_client_statement`] and [`local_path_fragment`] build a
+/// grammar for each call instead.
+///
+/// A grammar is not `Send`: its parsers share their parts through non-atomic reference counts, so
+/// a caller that parses on several threads holds one grammar on each of them.
+pub struct ClientStatementGrammar {
+    parser: Cache<ClientStatementParser>,
+}
+
+impl ClientStatementGrammar {
+    pub fn new() -> Self {
+        Self {
+            parser: Cache::new(ClientStatementParser),
+        }
+    }
+
+    /// Parses `input` as exactly one statement.
+    pub fn parse_statement(
+        &self,
+        input: &str,
+    ) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
+        let lexed = lex_input(input)?;
+        let tokens = 0..lexed.tokens.len();
+        self.parse_lexed_statement(&lexed, tokens, input.len())
+    }
+
+    /// Parses a batch of semicolon-separated statements, keeping where each one sits in `input`.
+    ///
+    /// The batch is lexed once and every statement is parsed from its own run of those tokens. A
+    /// rejected statement is therefore reported against the whole batch: its diagnostics index
+    /// `input`, wherever in the batch that statement starts.
+    pub fn parse_sources(
+        &self,
+        input: &str,
+    ) -> error_stack::Result<Vec<ParsedClientStatement>, ParseFromSourceError> {
+        /// The statement being read: where its first token sits among the batch's tokens and in
+        /// the batch's source.
+        struct OpenStatement {
+            first_token: usize,
+            start: usize,
+        }
+
+        let lexed = lex_input(input)?;
+        let mut statements = Vec::new();
+        let mut open: Option<OpenStatement> = None;
+
+        for (index, token) in lexed.spanned_tokens.iter().enumerate() {
+            if token.token == Token::Semicolon {
+                // A segment is a statement only when it actually contains tokens, so a stray
+                // semicolon or a trailing comment does not become an empty statement.
+                if let Some(statement) = open.take() {
+                    let tokens = statement.first_token..index;
+                    let parsed = self.parse_lexed_statement(&lexed, tokens, token.span.start)?;
+                    statements.push(ParsedClientStatement {
+                        span: statement.start..token.span.end,
+                        statement: parsed,
+                    });
+                }
+            } else if open.is_none() {
+                open = Some(OpenStatement {
+                    first_token: index,
+                    start: token.span.start,
+                });
+            }
+        }
+
+        if let Some(statement) = open {
+            let end = match lexed.spanned_tokens.last() {
+                Some(token) => token.span.end,
+                None => input.len(),
+            };
+            let tokens = statement.first_token..lexed.spanned_tokens.len();
+            let parsed = self.parse_lexed_statement(&lexed, tokens, input.len())?;
+            statements.push(ParsedClientStatement {
+                span: statement.start..end,
+                statement: parsed,
+            });
+        }
+
+        Ok(statements)
+    }
+
+    /// What completion expects at `cursor` in `input`: the literal words the grammar can continue
+    /// with, and the semantic references a caller resolves against what it knows.
+    ///
+    /// Completion parses the statement up to the cursor with this grammar and reads what it expected
+    /// where that statement ends. Only the few parsers that read the statement's head, for the scope
+    /// of its expressions and fields, are built for each completion.
+    pub fn suggest_expectations(&self, input: &str, cursor: usize) -> Vec<CompletionExpectation> {
+        let (labels, tokens) = self.completion(input, cursor);
+        let schema = alter_schema_context(&tokens);
+        let expression = expression_completion::ExpressionCompletion::new(&tokens);
+        let source = expression.ingestor_reference();
+        let mut expectations = Vec::new();
+        for label in labels {
+            if let Some(offers) = expression.expectations(&label) {
+                expectations.extend(offers);
+                continue;
+            }
+            if let Some(expectation) =
+                CompletionExpectation::from_label(label, schema.as_ref(), source)
+            {
+                expectations.push(expectation);
+            }
+        }
+        expectations
+    }
+
+    /// The grammar labels completion offers at `cursor` in `input`.
+    pub fn suggest_statement(&self, input: &str, cursor: usize) -> Vec<String> {
+        self.completion(input, cursor).0
+    }
+
+    /// Finds the local path being written at `cursor`, if this grammar expects one there.
+    ///
+    /// A client-local statement names a file it reads or writes as a quoted `local_path`. Inside an
+    /// unterminated quote the source no longer lexes, so the grammar is asked what it expects where
+    /// the quote opens; outside a quote it is asked at the cursor itself. Only a position that
+    /// expects a `local_path` answers, which is what keeps a path lookup out of every other string
+    /// literal.
+    pub fn local_path_fragment<'input>(
+        &self,
+        input: &'input str,
+        cursor: usize,
+    ) -> Option<LocalPathFragment<'input>> {
+        let cursor = input.floor_char_boundary(cursor.min(input.len()));
+        let head = &input[..cursor];
+        let opening = head
+            .char_indices()
+            .rev()
+            .find(|(_, character)| matches!(character, '\'' | '"'));
+        if let Some((quote_at, quote)) = opening {
+            let fragment_start = quote_at
+                .checked_add(quote.len_utf8())
+                .verified("a quote found in the head is followed by at least the cursor");
+            let fragment = &head[fragment_start..];
+            if !fragment.contains('\n') && self.expects_local_path(&head[..quote_at]) {
+                let rest = &input[cursor..];
+                let line_end = rest.find('\n').unwrap_or(rest.len());
+                let closing = rest[..line_end].find(quote).unwrap_or(line_end);
+                let end = cursor
+                    .checked_add(closing)
+                    .verified("the closing quote is found within the input after the cursor");
+                return Some(LocalPathFragment {
+                    fragment,
+                    range: fragment_start..end,
+                });
+            }
+        }
+        if self.expects_local_path(head) {
+            return Some(LocalPathFragment {
+                fragment: "",
+                range: cursor..cursor,
+            });
+        }
+        None
+    }
+
+    /// Parses the one statement that `tokens` of `lexed` hold.
+    ///
+    /// The tokens keep the spans they have in the lexed source, so a rejection is located in that
+    /// whole source rather than in the statement alone, and its diagnostics index the text it
+    /// names. `source_end` is where the statement's source ends, at its terminating semicolon or at
+    /// the end of the source; a rejection that expected another token points there.
+    fn parse_lexed_statement(
+        &self,
+        lexed: &LexedInput,
+        tokens: Range<usize>,
+        source_end: usize,
+    ) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
+        let spanned_tokens = &lexed.spanned_tokens[tokens.clone()];
+        let out = self.parser.get().parse(&lexed.tokens[tokens]);
+        if out.has_errors() {
+            return Err(into_parse_error(
+                lexed.source.clone(),
+                spanned_tokens,
+                source_end,
+                out.into_errors(),
+            ));
+        }
+        Ok(out
+            .into_output()
+            .verified("has_errors returned false above, so this parse produced output"))
+    }
+
+    /// The labels completion offers at `cursor` in `input`, with the tokens of the statement up to
+    /// the cursor that they were read from.
+    fn completion(&self, input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
+        let (source, prefix) = completion_context(input, cursor);
+
+        let Some(tokens) = completion_tokens(&source) else {
+            return (Vec::new(), Vec::new());
+        };
+
+        let out = self.parser.get().parse(tokens.as_slice());
+        let labels = if out.has_errors() {
+            suggestions_from_errors(out.into_errors(), &prefix)
+        } else {
+            match out.into_output() {
+                Some(ClientStatement::Server(Statement::Backup(backup))) => {
+                    backup_tail(&backup, &source, &prefix)
+                }
+                Some(ClientStatement::Server(Statement::Restore(restore))) => {
+                    restore_tail(&restore, &tokens, &source, &prefix)
+                }
+                Some(ClientStatement::Server(statement)) => {
+                    crate::statement::statement_tail(&statement, &tokens, &source, &prefix)
+                }
+                Some(ClientStatement::DescribeBackup(describe)) => {
+                    describe_backup_tail(&describe, &tokens, &source, &prefix)
+                }
+                _ => Vec::new(),
+            }
+        };
+        (labels, tokens)
+    }
+
+    /// Whether this grammar expects a `local_path` right after `head`.
+    fn expects_local_path(&self, head: &str) -> bool {
+        self.suggest_statement(head, head.len())
+            .iter()
+            .any(|label| label == "local_path")
+    }
+}
+
+impl Default for ClientStatementGrammar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Builds the parser a [`ClientStatementGrammar`] holds: one whole client statement, ending where
+/// the statement's tokens end.
+///
+/// The cache lets the one parser it builds read inputs of any lifetime. That holds because the
+/// parser captures nothing borrowed: `make_parser` builds it for a lifetime it cannot name.
+struct ClientStatementParser;
+
+impl Cached for ClientStatementParser {
+    type Parser<'src> =
+        Boxed<'src, 'src, &'src [Token], ClientStatement, extra::Err<ParseError<'src>>>;
+
+    fn make_parser<'src>(self) -> Self::Parser<'src> {
+        client_statement_parser().then_ignore(end()).boxed()
+    }
+}
+
+/// Parses `input` as exactly one statement, with a grammar built for this call.
 pub fn parse_client_statement(
     input: &str,
 ) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
-    let lexed = lex_input(input)?;
-    let tokens = 0..lexed.tokens.len();
-    parse_lexed_client_statement(&lexed, tokens, input.len())
-}
-
-/// Parses the one statement that `tokens` of `lexed` hold.
-///
-/// The tokens keep the spans they have in the lexed source, so a rejection is located in that whole
-/// source rather than in the statement alone, and its diagnostics index the text it names.
-/// `source_end` is where the statement's source ends, at its terminating semicolon or at the end of
-/// the source; a rejection that expected another token points there.
-fn parse_lexed_client_statement(
-    lexed: &LexedInput,
-    tokens: Range<usize>,
-    source_end: usize,
-) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
-    let spanned_tokens = &lexed.spanned_tokens[tokens.clone()];
-    let out = client_statement_parser()
-        .then_ignore(end())
-        .parse(&lexed.tokens[tokens]);
-    if out.has_errors() {
-        return Err(into_parse_error(
-            lexed.source.clone(),
-            spanned_tokens,
-            source_end,
-            out.into_errors(),
-        ));
-    }
-    Ok(out
-        .into_output()
-        .verified("has_errors returned false above, so this parse produced output"))
+    ClientStatementGrammar::new().parse_statement(input)
 }
 
 pub fn parse_client_statements(
@@ -582,93 +684,18 @@ pub fn parse_client_statements(
     })
 }
 
-/// Parses a batch of semicolon-separated statements, keeping where each one sits in `input`.
-///
-/// The batch is lexed once and every statement is parsed from its own run of those tokens. A
-/// rejected statement is therefore reported against the whole batch: its diagnostics index `input`,
-/// wherever in the batch that statement starts.
+/// Parses a batch of semicolon-separated statements, keeping where each one sits in `input`, with
+/// one grammar built for this call; see [`ClientStatementGrammar::parse_sources`].
 pub fn parse_client_statement_sources(
     input: &str,
 ) -> error_stack::Result<Vec<ParsedClientStatement>, ParseFromSourceError> {
-    /// The statement being read: where its first token sits among the batch's tokens and in the
-    /// batch's source.
-    struct OpenStatement {
-        first_token: usize,
-        start: usize,
-    }
-
-    let lexed = lex_input(input)?;
-    let mut statements = Vec::new();
-    let mut open: Option<OpenStatement> = None;
-
-    for (index, token) in lexed.spanned_tokens.iter().enumerate() {
-        if token.token == Token::Semicolon {
-            // A segment is a statement only when it actually contains tokens, so a stray
-            // semicolon or a trailing comment does not become an empty statement.
-            if let Some(statement) = open.take() {
-                let tokens = statement.first_token..index;
-                statements.push(ParsedClientStatement {
-                    span: statement.start..token.span.end,
-                    statement: parse_lexed_client_statement(&lexed, tokens, token.span.start)?,
-                });
-            }
-        } else if open.is_none() {
-            open = Some(OpenStatement {
-                first_token: index,
-                start: token.span.start,
-            });
-        }
-    }
-
-    if let Some(statement) = open {
-        let end = match lexed.spanned_tokens.last() {
-            Some(token) => token.span.end,
-            None => input.len(),
-        };
-        let tokens = statement.first_token..lexed.spanned_tokens.len();
-        statements.push(ParsedClientStatement {
-            span: statement.start..end,
-            statement: parse_lexed_client_statement(&lexed, tokens, input.len())?,
-        });
-    }
-
-    Ok(statements)
+    ClientStatementGrammar::new().parse_sources(input)
 }
 
+/// The grammar labels completion offers at `cursor` in `input`, with a grammar built for this call;
+/// see [`ClientStatementGrammar::suggest_statement`].
 pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
-    client_completion(input, cursor).0
-}
-
-fn client_completion(input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
-    let (source, prefix) = completion_context(input, cursor);
-
-    let Some(tokens) = completion_tokens(&source) else {
-        return (Vec::new(), Vec::new());
-    };
-
-    let out = client_statement_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    let labels = if out.has_errors() {
-        suggestions_from_errors(out.into_errors(), &prefix)
-    } else {
-        match out.into_output() {
-            Some(ClientStatement::Server(Statement::Backup(backup))) => {
-                backup_tail(&backup, &source, &prefix)
-            }
-            Some(ClientStatement::Server(Statement::Restore(restore))) => {
-                restore_tail(&restore, &tokens, &source, &prefix)
-            }
-            Some(ClientStatement::Server(statement)) => {
-                crate::statement::statement_tail(&statement, &tokens, &source, &prefix)
-            }
-            Some(ClientStatement::DescribeBackup(describe)) => {
-                describe_backup_tail(&describe, &tokens, &source, &prefix)
-            }
-            _ => Vec::new(),
-        }
-    };
-    (labels, tokens)
+    ClientStatementGrammar::new().suggest_statement(input, cursor)
 }
 
 /// The optional clause completion offers after a complete `BACKUP`.
@@ -729,52 +756,14 @@ pub struct LocalPathFragment<'input> {
     pub range: Range<usize>,
 }
 
-/// Finds the local path being written at `cursor`, if the grammar expects one there.
-///
-/// A client-local statement names a file it reads or writes as a quoted `local_path`. Inside an
-/// unterminated quote the source no longer lexes, so the grammar is asked what it expects where the
-/// quote opens; outside a quote it is asked at the cursor itself. Only a position that expects a
-/// `local_path` answers, which is what keeps a path lookup out of every other string literal.
+/// Finds the local path being written at `cursor`, if the grammar expects one there, with a grammar
+/// built for this call; see [`ClientStatementGrammar::local_path_fragment`].
 pub fn local_path_fragment(input: &str, cursor: usize) -> Option<LocalPathFragment<'_>> {
-    let cursor = input.floor_char_boundary(cursor.min(input.len()));
-    let head = &input[..cursor];
-    let opening = head
-        .char_indices()
-        .rev()
-        .find(|(_, character)| matches!(character, '\'' | '"'));
-    if let Some((quote_at, quote)) = opening {
-        let fragment_start = quote_at
-            .checked_add(quote.len_utf8())
-            .verified("a quote found in the head is followed by at least the cursor");
-        let fragment = &head[fragment_start..];
-        if !fragment.contains('\n') && expects_local_path(&head[..quote_at]) {
-            let rest = &input[cursor..];
-            let line_end = rest.find('\n').unwrap_or(rest.len());
-            let closing = rest[..line_end].find(quote).unwrap_or(line_end);
-            let end = cursor
-                .checked_add(closing)
-                .verified("the closing quote is found within the input after the cursor");
-            return Some(LocalPathFragment {
-                fragment,
-                range: fragment_start..end,
-            });
-        }
-    }
-    if expects_local_path(head) {
-        return Some(LocalPathFragment {
-            fragment: "",
-            range: cursor..cursor,
-        });
-    }
-    None
+    ClientStatementGrammar::new().local_path_fragment(input, cursor)
 }
 
-/// Whether the client grammar expects a `local_path` right after `head`.
-fn expects_local_path(head: &str) -> bool {
-    suggest_client_statement(head, head.len())
-        .iter()
-        .any(|label| label == "local_path")
-}
+#[cfg(test)]
+mod connector_completion_tests;
 
 #[cfg(test)]
 mod tests {
@@ -871,7 +860,7 @@ mod tests {
     #[test]
     fn header_function_expectations_carry_the_transport_kind() {
         let endpoint = "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE \
-                        SUSPEND DECODE USING codec TO outgoing SET value = read_";
+                        BUFFER MAX SIZE 1MiB DECODE USING codec TO outgoing SET value = read_";
         assert!(
             suggest_client_expectations(endpoint, endpoint.len()).contains(
                 &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
@@ -1171,6 +1160,98 @@ mod tests {
                 .iter()
                 .all(|statement| matches!(statement, ClientStatement::Server(_)))
         );
+    }
+
+    /// A held grammar parses every input as a grammar built for that input does, after statements
+    /// of other kinds and after rejected ones, so a parse leaves nothing behind for the next.
+    #[test]
+    fn held_grammar_parses_as_a_grammar_built_for_each_input() {
+        let inputs = [
+            "DESCRIBE DOMAIN;",
+            "CREATE SCHEMA event ( seq I64 ); CREATE RELAY events SCHEMA event UNBRANCHED;",
+            "CREATE RELAY;",
+            "SHOW CLUSTER STATUS;",
+            "CREATE SCHEMA broken ( value BOGUS );",
+            "USE analytics; LIST DOMAINS;",
+            "-- a comment and no statement",
+            "CREATE DOMAIN 'never closed",
+            "BEGIN; COMMIT;",
+            "DESCRIBE DOMAIN;",
+        ];
+        let held = ClientStatementGrammar::new();
+        for input in inputs {
+            let reused = held.parse_sources(input);
+            let built = ClientStatementGrammar::new().parse_sources(input);
+            match (reused, built) {
+                (Ok(reused), Ok(built)) => assert_eq!(reused, built, "{input}"),
+                (Err(reused), Err(built)) => {
+                    assert_eq!(reused.current_context(), built.current_context(), "{input}");
+                }
+                (reused, built) => {
+                    panic!("{input}: a held grammar gave {reused:?} and a built one {built:?}")
+                }
+            }
+        }
+    }
+
+    /// A held grammar completes every input as a grammar built for that input does: after
+    /// completions read from rejections, from the tail of a complete statement and from a local
+    /// path, and between parses, so a completion leaves nothing behind for the next read.
+    #[test]
+    fn held_grammar_completes_as_a_grammar_built_for_each_input() {
+        let inputs = [
+            "",
+            "CREATE SCHE",
+            "CREATE JUNCTION normalizer FROM incoming UNBRANCHED TO outgoing SET value = co",
+            "ALTER SCHEMA event ADD ",
+            "CREATE RELAY events SCHEMA event UNBRANCHED ",
+            "BACKUP DOMAIN TO '/tmp/c.nvxb' WI",
+            "RESTORE DOMAIN prod FROM 'p.nvxb' ",
+            "DESCRIBE BACKUP '/tmp/c.nvxb' ",
+            "UPLOAD RESOURCE proto VERSION '/tmp/pro",
+            "UPLOAD RESOURCE proto VERSION ",
+            "CREATE DOMAIN 'never closed",
+            "CREATE SCHEMA broken ( id STRING @",
+            "USE analytics; CREATE RE",
+        ];
+        let held = ClientStatementGrammar::new();
+        for input in inputs {
+            for cursor in [input.len(), input.floor_char_boundary(input.len() / 2)] {
+                let built = ClientStatementGrammar::new();
+                assert_eq!(
+                    held.suggest_expectations(input, cursor),
+                    built.suggest_expectations(input, cursor),
+                    "{input:?} at {cursor}"
+                );
+                assert_eq!(
+                    held.suggest_statement(input, cursor),
+                    built.suggest_statement(input, cursor),
+                    "{input:?} at {cursor}"
+                );
+                assert_eq!(
+                    held.local_path_fragment(input, cursor),
+                    built.local_path_fragment(input, cursor),
+                    "{input:?} at {cursor}"
+                );
+                assert_eq!(
+                    held.parse_sources(input).ok(),
+                    built.parse_sources(input).ok(),
+                    "{input:?}"
+                );
+            }
+        }
+        let relay = "CREATE RELAY events SCHEMA ";
+        assert!(
+            held.suggest_expectations(relay, relay.len()).contains(
+                &CompletionExpectation::Semantic(SemanticReference::Model(ModelKind::Schema))
+            ),
+            "{relay:?} expects a schema"
+        );
+        let upload = "UPLOAD RESOURCE proto VERSION '/tmp/pro";
+        let Some(local_path) = held.local_path_fragment(upload, upload.len()) else {
+            panic!("{upload:?} writes a local path");
+        };
+        assert_eq!(local_path.fragment, "/tmp/pro");
     }
 
     #[test]

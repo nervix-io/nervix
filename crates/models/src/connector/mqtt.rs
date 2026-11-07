@@ -2,11 +2,13 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The MQTT client Model, the topic source and emitter Models with their session,
-//!   quality-of-service and delivery modes, the topic filter a source subscribes to with the rules
+//! - **Owns.** The MQTT client Model, the topic ingestor and emitter Models with their session,
+//!   quality-of-service and delivery modes, the topic filter an ingestor subscribes to with the rules
 //!   MQTT holds it to, and what each entity declares.
-//!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//!   Client declarations also own public configuration keys, types and confidentiality, and the
+//!   typed values of a configuration that satisfies them.
+//! - **Depends on.** The shared ingestor and emitter declarations, the shared client configuration
+//!   schema and the names a body references.
 //! - **Must not know.** The MQTT driver, or how a topic filter is
 //!   subscribed or published to.
 
@@ -31,35 +33,73 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ChoiceRequirement, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
-    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
-    EmitterReferenceKind, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
+    AcknowledgementConfirmation, ChoiceRequirement, ClientConfigKey, ClientConfigSchema,
+    ClientConfigValue, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
+    EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, PositionClass, RetryPolicy,
+    OptionForm, OptionPresence, PositionClass, PropertyDeclaration, PropertyType, RetryPolicy,
+};
+
+mod config;
+#[cfg(test)]
+mod config_tests;
+
+pub use config::{
+    MqttBroker, MqttClientConfig, MqttClientConfigError, MqttPassword, MqttTlsFiles,
+    MqttTlsIdentity, MqttTransport,
 };
 
 configured_client!(Mqtt: unpooled, config CLIENT_CONFIG, CreateClientMqtt => MqttConfigEntry);
 
+/// The broker every connection dials. A connection reads only its scheme, host and port.
+const ADDR: ClientConfigKey =
+    ClientConfigKey::required("addr", ClientConfigValue::HostPortUrl(&["mqtt", "mqtts"]));
+/// The identity template every connection renders: its `{{instance}}` placeholder renders the
+/// index of the ingestor instance that connects, and an emitter connects as instance 0.
+const CLIENT_ID: ClientConfigKey =
+    ClientConfigKey::optional("client_id", ClientConfigValue::String);
+/// The keep-alive every `CONNECT` asks for, in whole seconds written as milliseconds: 60 seconds
+/// where omitted.
+const KEEP_ALIVE: ClientConfigKey =
+    ClientConfigKey::defaulted("keep_alive_ms", ClientConfigValue::Milliseconds, "60000");
+/// The largest complete publish an ingestor admits, its topic, properties and framing included:
+/// 10,240 bytes where omitted. Emitters receive no publish.
+const MAX_PACKET_SIZE: ClientConfigKey = ClientConfigKey::defaulted(
+    "max_packet_size",
+    ClientConfigValue::PositiveInteger,
+    "10240",
+)
+.read_by_ingestors();
+/// The password every `CONNECT` carries, which public inspection redacts.
+const PASSWORD: ClientConfigKey =
+    ClientConfigKey::optional("password", ClientConfigValue::String).secret();
+/// The username every `CONNECT` carries.
+const USERNAME: ClientConfigKey = ClientConfigKey::optional("username", ClientConfigValue::String);
+
 /// The current keys this connector reads, shared by validation, completion and inspection.
 ///
 /// A connection reads only the scheme, host and port of `addr`, and reads the TLS files only for
-/// `mqtts`, where its trust has no other root than `tls_ca_file`.
-const CLIENT_CONFIG: crate::ClientConfigSchema = {
-    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
-    ClientConfigSchema::new(
-        &[
-            K::required("addr", V::HostPortUrl(&["mqtt", "mqtts"])),
-            K::optional("client_id", V::String),
-            K::TLS_CA.exactly_for_scheme("addr", "mqtts"),
-            K::TLS_CERT.only_for_scheme("addr", "mqtts"),
-            K::TLS_KEY.only_for_scheme("addr", "mqtts"),
-        ],
-        &[],
-        &[],
-    )
-};
+/// `mqtts`, where its trust has no other root than `tls_ca_file`. Credentials, the keep-alive and
+/// the admission bound are keys of their own.
+const CLIENT_CONFIG: ClientConfigSchema = ClientConfigSchema::new(
+    &[
+        ADDR,
+        CLIENT_ID,
+        KEEP_ALIVE,
+        MAX_PACKET_SIZE,
+        PASSWORD,
+        ClientConfigKey::TLS_CA.exactly_for_scheme(ADDR.name, "mqtts"),
+        ClientConfigKey::TLS_CERT.only_for_scheme(ADDR.name, "mqtts"),
+        ClientConfigKey::TLS_KEY.only_for_scheme(ADDR.name, "mqtts"),
+        USERNAME,
+    ],
+    &[],
+    &[],
+);
 
 /// The longest topic filter MQTT carries, in bytes.
 const MQTT_TOPIC_FILTER_MAX: usize = 65_535;
@@ -72,7 +112,7 @@ external_names! {
     /// An MQTT topic filter: 1 to 65,535 bytes without the NUL character, whose levels are joined by
     /// `/` and may be empty. `+` stands for one level and `#` for every remaining level, each only as
     /// a whole level, and `#` only as the last one, as MQTT itself requires. Its first level is not
-    /// `$share`: the source subscribes through a shared subscription Nervix forms around the filter,
+    /// `$share`: the ingestor subscribes through a shared subscription Nervix forms around the filter,
     /// within which a filter naming its own would match nothing. It is subscribed to exactly as
     /// written, letter case included.
     pub struct MqttTopicFilter => mqtt_topic_filter_rule, label "mqtt_topic_filter",
@@ -105,8 +145,32 @@ fn mqtt_topic_filter_rule(text: &str) -> Result<(), ExternalNameError> {
 
 /// The keywords of the option that chooses a subscriber's session.
 const SESSION_OPTION: &str = "SESSION";
-/// The keywords of the option that chooses the quality of service a subscriber receives at.
+/// The keywords of the option that chooses the quality of service a subscriber receives at or a
+/// publisher sends at.
 const QOS_OPTION: &str = "QOS";
+
+/// `QOS 0 | QOS 1 | QOS 2`, which every statement of either side writes.
+const MQTT_QOS: OptionDeclaration = OptionDeclaration {
+    keywords: QOS_OPTION,
+    presence: OptionPresence::Required,
+    form: OptionForm::Choice(&[
+        OptionChoice {
+            name: MqttQos::Qos0.spelling(),
+            value: None,
+            example: "QOS 0",
+        },
+        OptionChoice {
+            name: MqttQos::Qos1.spelling(),
+            value: None,
+            example: "QOS 1",
+        },
+        OptionChoice {
+            name: MqttQos::Qos2.spelling(),
+            value: None,
+            example: "QOS 2",
+        },
+    ]),
+};
 
 /// The session a broker keeps a subscriber's messages for while the subscriber is away: a
 /// persistent one, at a quality of service whose messages the broker holds until they are
@@ -123,6 +187,19 @@ const BROKER_KEPT_SESSION: &[ChoiceRequirement] = &[
     },
 ];
 
+/// The publish no broker answers, QoS 0, which only `NO ACK` can complete.
+const UNANSWERED_PUBLISH: &[ChoiceRequirement] = &[ChoiceRequirement {
+    option: QOS_OPTION,
+    choices: &[MqttQos::Qos0.spelling()],
+}];
+
+/// The publish a broker answers, QoS 1 with `PUBACK` and QoS 2 with `PUBCOMP`, whose answer `ACK`
+/// waits for.
+const ANSWERED_PUBLISH: &[ChoiceRequirement] = &[ChoiceRequirement {
+    option: QOS_OPTION,
+    choices: &[MqttQos::Qos1.spelling(), MqttQos::Qos2.spelling()],
+}];
+
 /// One topic filter an MQTT client subscribes to, kept exactly as written: MQTT topics are
 /// case-sensitive and routinely hold `/`, `.`, `+` or `#`.
 #[derive(
@@ -131,16 +208,12 @@ const BROKER_KEPT_SESSION: &[ChoiceRequirement] = &[
 pub struct MqttTopicIngestor {
     pub client: ClientName,
     pub topic: MqttTopicFilter,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub session: MqttSession,
     pub qos: MqttQos,
     pub mode: MqttIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
-
-/// The largest publish an MQTT TOPIC ingestor admits, including its MQTT packet headers.
-/// Larger publishes are acknowledged and counted as oversized before decoding their payloads.
-pub const MQTT_SOURCE_MAXIMUM_PACKET_BYTES: u64 = 10 * 1024;
 
 /// Extra acknowledged publishes advertised to the broker and the separate QoS 0 read-ahead quota.
 /// Automatic acknowledgement uses this quota alone, with backpressure instead of overflow drops.
@@ -161,11 +234,24 @@ pub const MQTT_MAXIMUM_PACKET_BYTES: u64 = (1 << 28) + 4;
 const MQTT_FOUR_BYTE_INTEGER_MAX: u64 = 0xFFFF_FFFF;
 
 const _: () = assert!(
-    MQTT_SOURCE_MAXIMUM_PACKET_BYTES > 0
-        && MQTT_SOURCE_MAXIMUM_PACKET_BYTES <= MQTT_MAXIMUM_PACKET_BYTES
-        && MQTT_MAXIMUM_PACKET_BYTES <= MQTT_FOUR_BYTE_INTEGER_MAX,
-    "MQTT forbids a Maximum Packet Size of zero, and carries it as a Four Byte Integer"
+    MQTT_MAXIMUM_PACKET_BYTES <= MQTT_FOUR_BYTE_INTEGER_MAX,
+    "MQTT carries the Maximum Packet Size as a Four Byte Integer, so every admission bound up to \
+     its largest packet fits thirty-two bits"
 );
+
+/// One interval of the keep-alive a connection keeps to, which bounds a wait for a write.
+const KEEP_ALIVE_INTERVAL: WaitBound = WaitBound::ClientKey {
+    key: KEEP_ALIVE.name,
+    rule: "one interval of it, or of the broker's Server Keep Alive; 60 s when omitted",
+};
+
+/// How long a connection that hears nothing from its broker lasts: it pings after one interval
+/// without traffic and ends when the following interval passes without an answer.
+const SILENT_CONNECTION: WaitBound = WaitBound::ClientKey {
+    key: KEEP_ALIVE.name,
+    rule: "two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 \
+           s when omitted",
+};
 
 /// What the connector of a MQTT TOPIC ingestor holds and how long it waits.
 const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
@@ -181,7 +267,7 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         DeclaredBuffer {
             holds: "each admitted publish including its packet headers, copied out of raw framing",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Bytes(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+                capacity: BufferCapacity::Setting("max_packet_size, 10240 bytes when omitted"),
                 overflow: BufferOverflow::DropAndCount,
             },
         },
@@ -254,12 +340,16 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
+            wait: "retire a refused or downgraded subscription before retrying",
+            bound: WaitBound::Driver("5 s"),
+        },
+        DeclaredWait {
             wait: "ordinary and oversized-discard acknowledgements written to the connection",
-            bound: WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
+            bound: KEEP_ALIVE_INTERVAL,
         },
         DeclaredWait {
             wait: "a silent connection",
-            bound: WaitBound::Driver("keep-alive of 60 s, or the broker's"),
+            bound: SILENT_CONNECTION,
         },
     ],
     driver_limits: &[
@@ -277,7 +367,9 @@ const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "publishes queued for the driver",
         bound: BufferBound::Bounded {
-            capacity: BufferCapacity::Setting("1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2"),
+            capacity: BufferCapacity::Setting(
+                "1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL",
+            ),
             overflow: BufferOverflow::FailPublish,
         },
     }],
@@ -294,16 +386,40 @@ const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
             wait: "writes to the connection",
             bound: WaitBound::Unbounded,
         },
+        DeclaredWait {
+            wait: "a silent connection",
+            bound: SILENT_CONNECTION,
+        },
     ],
-    driver_limits: &["Packets above the broker's maximum packet size are rejected."],
+    driver_limits: &[
+        "Packets above the broker's maximum packet size are rejected.",
+        "QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum \
+         Session Expiry Interval, and SESSION is not an emitter option: a publisher without \
+         acknowledgement needs no session, and an acknowledged one always keeps it.",
+        "The client resumes its own session across reconnects, and a new client is refused while \
+         the broker keeps a session under its identity, since it holds no state to resume it with.",
+    ],
 };
+
+/// A delivered publish's topic and flags, then its MQTT 5 properties.
+const MQTT_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("topic", IngestorMetadataType::String),
+    IngestorMetadataField::new("retain", IngestorMetadataType::Bool),
+    IngestorMetadataField::new("qos", IngestorMetadataType::U8),
+    IngestorMetadataField::new("duplicate", IngestorMetadataType::Bool),
+    IngestorMetadataField::new("content_type", IngestorMetadataType::String),
+    IngestorMetadataField::new("response_topic", IngestorMetadataType::String),
+    IngestorMetadataField::new("correlation_data", IngestorMetadataType::Bytes),
+    IngestorMetadataField::new("message_expiry", IngestorMetadataType::U32),
+]);
 
 impl IngestorDeclaration for MqttTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
-        // An MQTT packet carries no transport header map, and the source reads no MQTT 5 user
-        // property as one.
-        headers: None,
-        metadata: IngestorMetadataDeclaration::NONE,
+        instancing: crate::IngestorInstancingCapability::PerPartition,
+        // MQTT 5 user properties: a broker keeps their order and repeats from the publisher, and
+        // their names compare exactly.
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        metadata: MQTT_TOPIC_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         // A persistent session's broker delivers again every publish a lost connection did not
@@ -346,27 +462,7 @@ impl IngestorDeclaration for MqttTopicIngestor {
                     },
                 ]),
             },
-            OptionDeclaration {
-                keywords: QOS_OPTION,
-                presence: OptionPresence::Required,
-                form: OptionForm::Choice(&[
-                    OptionChoice {
-                        name: MqttQos::Qos0.spelling(),
-                        value: None,
-                        example: "QOS 0",
-                    },
-                    OptionChoice {
-                        name: MqttQos::Qos1.spelling(),
-                        value: None,
-                        example: "QOS 1",
-                    },
-                    OptionChoice {
-                        name: MqttQos::Qos2.spelling(),
-                        value: None,
-                        example: "QOS 2",
-                    },
-                ]),
-            },
+            MQTT_QOS,
         ],
         bounds: MQTT_INGESTOR_BOUNDS,
     };
@@ -389,8 +485,16 @@ impl MqttTopicIngestor {
 }
 
 impl IngestorEntityBody for MqttTopicIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -405,10 +509,13 @@ impl IngestorEntityBody for MqttTopicIngestor {
         self.mode.acknowledgement()
     }
 
-    /// The session and the quality of service this source subscribes with, which suspending it
+    /// The session and the quality of service this ingestor subscribes with, which suspending it
     /// and acknowledging its messages require.
     fn chosen(&self, option: &str) -> Option<&'static str> {
-        Self::subscription_choice(self.session, self.qos, option)
+        match option {
+            "INSTANCES" => Some(self.instances.choice()),
+            _ => Self::subscription_choice(self.session, self.qos, option),
+        }
     }
 }
 
@@ -442,8 +549,8 @@ impl MqttSession {
     }
 }
 
-/// The quality of service an MQTT TOPIC ingestor subscribes with, named by its level as a statement
-/// writes it after `QOS`.
+/// The quality of service an MQTT TOPIC ingestor subscribes with or an MQTT TOPIC emitter publishes
+/// at, named by its level as a statement writes it after `QOS`.
 #[derive(
     Debug,
     Clone,
@@ -458,12 +565,12 @@ impl MqttSession {
     strum::EnumIter,
 )]
 pub enum MqttQos {
-    /// QoS 0: the broker delivers each message at most once.
+    /// QoS 0: each message is delivered at most once, and nothing answers it.
     Qos0,
-    /// QoS 1: the broker delivers each message at least once, until the subscriber's `PUBACK`.
+    /// QoS 1: each message is delivered at least once, until its receiver's `PUBACK`.
     Qos1,
-    /// QoS 2: the broker delivers each message exactly once, through the subscriber's `PUBREC` and
-    /// the `PUBREL` and `PUBCOMP` that complete it.
+    /// QoS 2: each message is delivered exactly once, through its receiver's `PUBREC` and the
+    /// `PUBREL` and `PUBCOMP` that complete it.
     Qos2,
 }
 
@@ -546,19 +653,64 @@ impl MqttIngestMode {
     }
 }
 
-connector_ingestors! {
-    connector Mqtt = "MQTT";
-    /// What an MQTT source reads.
-    pub enum MqttIngestor;
-    /// The alterations of the ingestors that read an MQTT entity.
-    pub enum MqttTopicIngestorAlteration;
-    /// The entities an MQTT source reads.
-    pub enum MqttIngestorEntity {
-        Topic(MqttTopicIngestor) = "TOPIC", "MQTT";
+/// One change an `ALTER MQTT TOPIC INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum MqttTopicIngestorChange {
+    /// `SET TOPIC '<filter>'`.
+    Topic(MqttTopicFilter),
+    /// `SET SESSION CLEAN|PERSISTENT`.
+    Session(MqttSession),
+    /// `SET QOS 0|1|2`.
+    Qos(MqttQos),
+    /// `SET MODE <mode>`.
+    Mode(MqttIngestMode),
+}
+
+impl crate::IngestorEntityChange for MqttTopicIngestorChange {
+    type Entity = MqttTopicIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut MqttTopicIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Topic(topic) => entity.topic = topic.clone(),
+            Self::Session(session) => entity.session = *session,
+            Self::Qos(qos) => entity.qos = *qos,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(topic) => format!("SET TOPIC {}", crate::string_literal(topic.as_str())),
+            Self::Session(session) => format!("SET SESSION {}", session.keyword()),
+            Self::Qos(qos) => format!("SET QOS {}", qos.spelling()),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
     }
 }
 
-/// One topic an MQTT client publishes to.
+connector_ingestors! {
+    connector Mqtt = "MQTT";
+    /// What an MQTT ingestor reads.
+    pub enum MqttIngestor;
+    /// The alterations of the ingestors that read an MQTT entity.
+    pub enum MqttTopicIngestorAlteration;
+    /// The entities an MQTT ingestor reads.
+    pub enum MqttIngestorEntity {
+        Topic(MqttTopicIngestor => MqttTopicIngestorChange) = "TOPIC", "MQTT";
+    }
+}
+
+/// One topic an MQTT client publishes to, at the quality of service its statement writes beside its
+/// publishing mode.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -566,13 +718,15 @@ pub struct MqttTopicEmitter {
     pub mode: MqttTopicPublishingMode,
     pub client: ClientName,
     pub topic: MqttTopicName,
+    pub qos: MqttQos,
 }
 
 impl EmitterDeclaration for MqttTopicEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
-        headers: None,
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         // Each broker declares its Maximum Packet Size when the client connects, and the emitter
         // rejects a larger publish before handing it to the client.
         batch: EmitterBatchLegality::Optional { maximum: None },
@@ -582,13 +736,39 @@ impl EmitterDeclaration for MqttTopicEmitter {
             keywords: "TOPIC",
             name: LocatorName::External(MqttTopicName::DECLARATION),
         }),
-        // A publish carries its topic and payload; the emitter sets no retain flag and no MQTT 5
-        // property of its own.
-        options: &[],
-        envelope: &[],
-        properties: &[],
+        options: &[MQTT_QOS],
+        envelope: &[EnvelopeClauseKind::Retain],
+        properties: &[
+            PropertyDeclaration {
+                name: "content_type",
+                ty: PropertyType::String,
+            },
+            PropertyDeclaration {
+                name: "message_expiry",
+                ty: PropertyType::U32,
+            },
+            PropertyDeclaration {
+                name: "response_topic",
+                ty: PropertyType::String,
+            },
+            PropertyDeclaration {
+                name: "correlation_data",
+                ty: PropertyType::Bytes,
+            },
+        ],
         bounds: MQTT_EMITTER_BOUNDS,
     };
+}
+
+impl MqttTopicEmitter {
+    /// The choice a statement that publishes at `qos` makes for the declared option opened by
+    /// `option`: the one option a requirement of this entity names.
+    pub fn publication_choice(qos: MqttQos, option: &str) -> Option<&'static str> {
+        match option {
+            QOS_OPTION => Some(qos.spelling()),
+            _ => None,
+        }
+    }
 }
 
 impl EmitterEntityBody for MqttTopicEmitter {
@@ -602,6 +782,49 @@ impl EmitterEntityBody for MqttTopicEmitter {
     fn client_mut(&mut self) -> Option<&mut ClientName> {
         Some(&mut self.client)
     }
+
+    /// The quality of service this emitter publishes at, which its publishing mode requires.
+    fn chosen(&self, option: &str) -> Option<&'static str> {
+        Self::publication_choice(self.qos, option)
+    }
+}
+
+/// One change an `ALTER MQTT TOPIC EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum MqttTopicEmitterChange {
+    /// `SET TOPIC '<name>'`.
+    Topic(MqttTopicName),
+    /// `SET QOS 0|1|2`.
+    Qos(MqttQos),
+    /// `SET MODE <mode>`.
+    Mode(MqttTopicPublishingMode),
+}
+
+impl crate::EmitterEntityChange for MqttTopicEmitterChange {
+    type Entity = MqttTopicEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut MqttTopicEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Topic(name) => entity.topic = name.clone(),
+            Self::Qos(qos) => entity.qos = *qos,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(name) => format!("SET TOPIC {}", crate::string_literal(name.as_str())),
+            Self::Qos(qos) => format!("SET QOS {}", qos.spelling()),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
 }
 
 connector_emitters! {
@@ -610,17 +833,18 @@ connector_emitters! {
     pub enum MqttEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum MqttTopicEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum MqttEmitterChange;
     /// The entities an MQTT emitter writes.
     pub enum MqttEmitterEntity {
-        Topic(MqttTopicEmitter, MqttTopicPublishingMode) = "TOPIC";
+        Topic(MqttTopicEmitter, MqttTopicPublishingMode, MqttTopicEmitterChange) = "TOPIC";
     }
 }
 
 super::publishing::emitter_modes! {
     pub enum MqttTopicPublishingMode {
-        Qos0 { retry_policy: crate::RetryPolicy } => MqttQos0,
-        Qos1 { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => MqttQos1,
-        Qos2 { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => MqttQos2,
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck requires UNANSWERED_PUBLISH,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck requires ANSWERED_PUBLISH,
     }
 }
 
@@ -637,6 +861,13 @@ fn mqtt_publication_topic(text: &str) -> Result<(), ExternalNameError> {
         return Err(ExternalNameError::InvalidChar { ch });
     }
     Ok(())
+}
+
+/// Move a validated publication topic into an external wire field without copying its text.
+impl From<MqttTopicName> for String {
+    fn from(topic: MqttTopicName) -> Self {
+        topic.0
+    }
 }
 
 #[cfg(test)]

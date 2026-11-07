@@ -16,21 +16,21 @@ Feature: Interconnect relay admission
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE VHOST edge blocked-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP NOW
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+      CREATE ZEROMQ PUSH EMITTER emitter_output FROM input
         TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -41,21 +41,21 @@ Feature: Interconnect relay admission
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE VHOST edge runnable-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP NOW
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+      CREATE ZEROMQ PUSH EMITTER emitter_output FROM input
         TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -110,30 +110,30 @@ Feature: Interconnect relay admission
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event BRANCHED BY by_tenant;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE VHOST edge branches-{{test_id}}.example.com;
-      CREATE ENDPOINT blocked_ingress ON edge PATH '/blocked' TYPE HTTP;
-      CREATE ENDPOINT runnable_ingress ON edge PATH '/runnable' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR blocked_source
+      CREATE HTTP ENDPOINT blocked_ingress ON edge PATH '/blocked';
+      CREATE HTTP ENDPOINT runnable_ingress ON edge PATH '/runnable';
+      CREATE HTTP ENDPOINT INGESTOR blocked_ingestor
         FROM blocked_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO input INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR runnable_source
+      CREATE HTTP ENDPOINT INGESTOR runnable_ingestor
         FROM runnable_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO input INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+      CREATE ZEROMQ PUSH EMITTER emitter_output FROM input
         TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -188,22 +188,22 @@ Feature: Interconnect relay admission
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event BRANCHED BY by_tenant;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE VHOST edge cancellation-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO input INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+      CREATE ZEROMQ PUSH EMITTER emitter_output FROM input
         TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -265,7 +265,7 @@ Feature: Interconnect relay admission
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY active_events SCHEMA event BRANCHED BY by_active_tenant;
       CREATE RELAY idle_events SCHEMA event BRANCHED BY by_idle_tenant;
       CREATE ZEROMQ CLIENT emitter CONFIG {
@@ -273,16 +273,16 @@ Feature: Interconnect relay admission
         'bind' = 'false'
       };
       CREATE VHOST edge expiry-{{test_id}}.example.com;
-      CREATE ENDPOINT active_ingress ON edge PATH '/active' TYPE HTTP;
-      CREATE ENDPOINT idle_ingress ON edge PATH '/idle' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR active_source
+      CREATE HTTP ENDPOINT active_ingress ON edge PATH '/active';
+      CREATE HTTP ENDPOINT idle_ingress ON edge PATH '/idle';
+      CREATE HTTP ENDPOINT INGESTOR active_ingestor
         FROM active_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO active_events INHERIT ALL BRANCHED BY by_active_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR idle_source
+      CREATE HTTP ENDPOINT INGESTOR idle_ingestor
         FROM idle_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO idle_events INHERIT ALL BRANCHED BY by_idle_tenant
@@ -363,15 +363,15 @@ Feature: Interconnect relay admission
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE VHOST edge turnover-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant
@@ -429,17 +429,16 @@ Feature: Interconnect relay admission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'held_admission_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'held_admission_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'held_admission_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -458,7 +457,7 @@ Feature: Interconnect relay admission
       RELOCATE RELAY notifications ONTO NODE <relay_owner> IGNORE PREFERENCES;
       RELOCATE EMITTER kafka_forward ONTO NODE node-2 IGNORE PREFERENCES;
       """
-    Then node "node-1" eventually reports status containing "kind=ingestor name=kafka_notifications owner=node-1"
+    Then node "node-1" eventually reports status containing "kind=ingestor name=kafka_notifications unit=instance:0 owner=node-1"
     And node "node-1" eventually reports status containing "kind=relay name=notifications owner=<relay_owner>"
     And node "node-1" eventually reports status containing "kind=emitter name=kafka_forward owner=node-2"
     Given remote relay admission for domain "{{domain}}" is paused

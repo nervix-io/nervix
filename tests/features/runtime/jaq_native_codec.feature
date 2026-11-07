@@ -12,8 +12,7 @@ Feature: JAQ native codec
         payload STRING
       );
 
-      CREATE CODEC notification_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATION '.';
       """
@@ -31,18 +30,16 @@ Feature: JAQ native codec
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM <format>
+        CREATE JAQ <format> CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '<transformation>';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -95,11 +92,10 @@ Feature: JAQ native codec
         user_id integer,
         payload string
       );
-        CREATE CODEC json_notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC json_notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
-        CREATE CODEC xml_notification_codec
-        FROM XML
+        CREATE JAQ XML CODEC xml_notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{t: "notification", c: [{t: "user_id", c: [(.user_id | tostring)]}, {t: "payload", c: [.payload]}]}';
@@ -107,10 +103,9 @@ Feature: JAQ native codec
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_notification_codec
@@ -123,8 +118,7 @@ Feature: JAQ native codec
         ON GENERAL ERROR LOG;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING xml_notification_codec
         INHERIT ALL
@@ -169,8 +163,7 @@ Feature: JAQ native codec
         payload STRING
       );
 
-      CREATE CODEC xml_notification_codec
-        FROM XML
+      CREATE JAQ XML CODEC xml_notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{t: "notification", c: [{t: "user_id", c: [(.user_id | tostring)]}, {t: "payload", c: [.payload]}]}';
@@ -179,10 +172,9 @@ Feature: JAQ native codec
 
       CREATE VHOST edge http-invalid-{{test_id}}.example.com;
 
-      CREATE ENDPOINT http_notifications_endpoint
+      CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
@@ -215,8 +207,7 @@ Feature: JAQ native codec
         payload STRING
       );
 
-      CREATE CODEC json_notification_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC json_notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
 
@@ -224,8 +215,7 @@ Feature: JAQ native codec
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING json_notification_codec
@@ -253,13 +243,13 @@ Feature: JAQ native codec
       """
       CREATE SCHEMA reading ( sensor I64, level F64, levels <levels_type> );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( sensor integer, level number, levels array );
-      CREATE CODEC exact_reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
-      CREATE CODEC transforming_reading_codec FROM <format> TO SCHEMA reading
+      CREATE WIRE JSON CODEC exact_reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
+      CREATE JAQ <format> CODEC transforming_reading_codec TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '.';
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE RELAY echoed_readings SCHEMA reading UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT readings_endpoint ON edge PATH '/readings' TYPE HTTP;
+      CREATE HTTP ENDPOINT readings_endpoint ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR http_readings
         FROM readings_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_reading_codec
@@ -270,8 +260,7 @@ Feature: JAQ native codec
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC EMITTER emitted_readings FROM readings
         TO kafka_main TOPIC 'readings_{{test_id}}'
@@ -281,7 +270,7 @@ Feature: JAQ native codec
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR kafka_readings
         FROM kafka_main TOPIC 'readings_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_readings_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_readings_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING transforming_reading_codec
         TO echoed_readings

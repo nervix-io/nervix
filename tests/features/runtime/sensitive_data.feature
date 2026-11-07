@@ -20,18 +20,17 @@ Feature: Sensitive data
         action string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT sensitive_notifications_endpoint
+      CREATE HTTP ENDPOINT sensitive_notifications_endpoint
         ON edge
-        PATH '/sensitive'
-        TYPE HTTP;
+        PATH '/sensitive';
 
       CREATE HTTP ENDPOINT INGESTOR sensitive_notifications
         FROM sensitive_notifications_endpoint MODE NO ACK
@@ -94,8 +93,8 @@ Feature: Sensitive data
         action string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
@@ -103,10 +102,9 @@ Feature: Sensitive data
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT sensitive_notifications_endpoint
+      CREATE HTTP ENDPOINT sensitive_notifications_endpoint
         ON edge
-        PATH '/sensitive'
-        TYPE HTTP;
+        PATH '/sensitive';
 
       CREATE HTTP ENDPOINT INGESTOR sensitive_notifications
         FROM sensitive_notifications_endpoint MODE NO ACK
@@ -212,22 +210,21 @@ Feature: Sensitive data
         action string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE CODEC emitted_notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC emitted_notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA emitted_notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT sensitive_notifications_endpoint
+      CREATE HTTP ENDPOINT sensitive_notifications_endpoint
         ON edge
-        PATH '/sensitive'
-        TYPE HTTP;
+        PATH '/sensitive';
 
       CREATE HTTP ENDPOINT INGESTOR sensitive_notifications
         FROM sensitive_notifications_endpoint MODE NO ACK

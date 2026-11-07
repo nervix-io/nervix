@@ -8,11 +8,12 @@
 //! whatever order replies arrive in. Each exchange owns its identities and waiters, so a reply of
 //! an earlier exchange can never complete a request of a later one.
 //!
-//! - **Owns.** Request identities, the waiters of an exchange, the reassembly of replies too large
-//!   for one frame, the subscriptions an exchange holds, and the delivery of unsolicited messages
-//!   and domain clock replies to the client's event emitters.
+//! - **Owns.** Request correlation, including the reply kind each request accepts and the execution
+//!   a command's outcome must name, the waiters of an exchange, the reassembly of replies too large
+//!   for one frame, the subscriptions an exchange holds, and unsolicited messages and domain clock
+//!   replies to the client's event emitters.
 //! - **Depends on.** The wire contract's frames and tonic's gRPC client.
-//! - **Must not know.** What a request means, how its outcome is routed, or how a lost exchange is
+//! - **Must not know.** Query semantics, how an outcome is routed, or how a lost exchange is
 //!   recovered.
 
 #![cfg_attr(
@@ -26,13 +27,14 @@ use ahash::{HashMap, HashSet};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, OpenIngestorDisposition,
-    ProducerId, Reply, ReplyBody, RequestId, RowSchema, ServerFrame, ServerMessage, SessionLimits,
+    self as wire, CancelRequest, ClientFrame, ClientMessage, ClientRequest, ClientRequestKind,
+    DomainInfo, EncodedFrame, Leadership, OpenIngestorDisposition, ProducerId, Reply, ReplyBody,
+    ReplyBodyKind, RequestId, RowSchema, ServerFrame, ServerMessage, SessionLimits,
     SubscribeDisposition, SubscriptionHandle, SubscriptionOpened, TransferAssembly, TransferPart,
     UnsubscribeDisposition, VerifiedFrame,
     grpc::{ClientExchangeCodec, EXCHANGE_PATH},
 };
-use nervix_models::RelayName;
+use nervix_models::{CommandExecutionReference, RelayName};
 use nervix_primitives::{
     stream::{Stream, StreamExt as _, wrappers::ReceiverStream},
     sync::{Arc, Mutex, blocking::Mutex as SyncMutex, mpsc, oneshot, watch},
@@ -44,7 +46,7 @@ use tonic::{Request, Status, codegen::http::uri::PathAndQuery, transport::Channe
 use crate::{
     connection::GrpcConnector,
     domain_clock::DomainClockAttachments,
-    error::ClientError,
+    error::{ClientError, RequestKind},
     events::{ServerEvent, SubscriptionEvent, SubscriptionRowsEvent},
     producer::ProducerRegistry,
     subscriptions::DesiredSubscriptions,
@@ -514,11 +516,11 @@ impl SessionEvents {
     }
 }
 
-/// One open exchange with a server.
+/// One exchange with a server and its reader's lifetime.
 pub(crate) struct Exchange {
     pub(crate) requests: Arc<ExchangeRequests>,
-    /// The task routing the exchange's frames. Dropping the exchange aborts it.
-    pub(crate) reader: JoinHandle<()>,
+    /// The reader still to join. It is cleared after joining; dropping the exchange aborts it.
+    pub(crate) reader: Option<JoinHandle<()>>,
     pub(crate) emitters: EventTargets,
     pub(crate) generation: Arc<()>,
     /// The channel the exchange runs on, which resource uploads share.
@@ -534,14 +536,37 @@ pub(crate) struct ExchangeRequests {
 }
 
 impl ExchangeRequests {
-    /// Registers a request whose waiter is removed if its awaiting future is cancelled.
-    pub(crate) fn register(&self) -> Option<PendingRequest> {
-        let registered = self.pending.lock().register()?;
+    /// Registers the waiter of `request`, with what its reply must be to answer it. The waiter is
+    /// removed if its awaiting future is cancelled.
+    pub(crate) fn register_for(&self, request: &ClientRequest) -> Option<PendingRequest> {
+        let registered = self.pending.lock().register(ExpectedReply::of(request))?;
         Some(PendingRequest {
             request_id: registered.request_id,
             reply: registered.reply,
             pending: self.pending.clone(),
         })
+    }
+
+    /// Asks the server to cancel `target`, a request of this exchange that waits for its reply,
+    /// under an identity of the cancellation's own. The server answers the cancellation and ends
+    /// `target` with a terminal reply of its own, which alone decides what became of it, so the
+    /// cancellation's outcome is only given a waiter to arrive at. `None` when the exchange has
+    /// ended, which ends `target`'s wait as well.
+    pub(crate) async fn cancel(&self, target: RequestId) -> Option<PendingRequest> {
+        let request = ClientRequest::Cancel(CancelRequest { target });
+        let cancellation = self.register_for(&request)?;
+        let message = ClientMessage {
+            request_id: cancellation.request_id,
+            request,
+        };
+        let frame = message
+            .encode(&SESSION_LIMITS)
+            .assured("a cancellation names one request identity, far within the frame limit");
+        if self.frames.send(frame).await.is_err() {
+            self.pending.lock().close();
+            return None;
+        }
+        Some(cancellation)
     }
 }
 
@@ -601,7 +626,7 @@ impl Exchange {
         let reader = nervix_primitives::task::spawn(reader.run(response.into_inner()));
         Ok(Self {
             requests: Arc::new(ExchangeRequests { frames, pending }),
-            reader,
+            reader: Some(reader),
             emitters,
             generation,
             channel,
@@ -619,13 +644,22 @@ impl Exchange {
     /// attach reply or an acknowledgement it applied is interrupted with the rest of the exchange
     /// rather than left looking held by an exchange that is gone.
     pub(crate) async fn close(mut self) {
-        self.requests.pending.lock().close();
-        self.reader.abort();
-        (&mut self.reader).await.discarded(
+        self.interrupt(ExchangeEnd::Closed).await;
+    }
+
+    /// Stops this exact reader and waits for its lifetime cleanup, retaining the exchange handle.
+    pub(crate) async fn interrupt(&mut self, end: ExchangeEnd) {
+        self.requests.pending.lock().end(end);
+        let Some(reader) = &mut self.reader else {
+            return;
+        };
+        reader.abort();
+        let joined = reader.await;
+        self.reader = None;
+        joined.discarded(
             "an aborted reader ends cancelled, and one that ended first already closed its \
              requests",
         );
-        self.emitters.close_generation(&self.generation);
     }
 }
 
@@ -634,7 +668,9 @@ impl Drop for Exchange {
         // Nothing reads an exchange's replies once it is gone, and stopping its reader releases
         // the server's session. Its waiters observe the closed session instead of waiting out
         // their deadlines.
-        self.reader.abort();
+        if let Some(reader) = &self.reader {
+            reader.abort();
+        }
         self.requests.pending.lock().close();
     }
 }
@@ -645,11 +681,80 @@ pub(crate) enum PendingReplies {
         /// The identity the next request takes, or `None` once the exchange has handed out every
         /// identity. Identities start at 1 and are never reused on the exchange.
         next_request_id: Option<RequestId>,
-        waiters: HashMap<RequestId, oneshot::Sender<ReplyBody>>,
+        waiters: HashMap<RequestId, PendingReply>,
+        /// The open state alone keeps the frame reader waiting. Dropping it ends that wait even
+        /// when the transport never sends another frame.
+        reader_ending: watch::Sender<()>,
     },
     /// The exchange ended. Its waiters were dropped, so each observed the closed session once,
     /// and a request registered now would never be answered.
-    Closed(Option<Status>),
+    Closed(ExchangeEnd),
+}
+
+/// One outstanding reply and what it must be to answer its request.
+pub(crate) struct PendingReply {
+    reply: oneshot::Sender<ReplyBody>,
+    expected: ExpectedReply,
+}
+
+/// What a reply must be to answer the request registered under its identity.
+pub(crate) struct ExpectedReply {
+    request: ClientRequestKind,
+    /// The execution a command's outcome must name; `None` for every other request.
+    execution_reference: Option<CommandExecutionReference>,
+}
+
+impl ExpectedReply {
+    pub(crate) fn of(request: &ClientRequest) -> Self {
+        let execution_reference = match request {
+            ClientRequest::Command(command) => Some(command.execution_reference.clone()),
+            _ => None,
+        };
+        Self {
+            request: ClientRequestKind::from(request),
+            execution_reference,
+        }
+    }
+
+    /// The end a reply forces on its exchange when it cannot answer this request: a reply of
+    /// another kind, or a command outcome that names another execution. `None` when it answers it.
+    fn violated_by(&self, body: &ReplyBody) -> Option<ExchangeEnd> {
+        let reply = ReplyBodyKind::from(body);
+        if !self.request.is_answered_by(reply) {
+            return Some(ExchangeEnd::ReplyKindMismatch {
+                request: self.request,
+                reply,
+            });
+        }
+        // Only a command is answered by a command outcome, and a command's expectation always
+        // names its execution.
+        match (&self.execution_reference, body) {
+            (Some(expected), ReplyBody::Command(outcome))
+                if expected != &outcome.execution_reference =>
+            {
+                Some(ExchangeEnd::ExecutionMismatch {
+                    expected: expected.clone(),
+                    received: outcome.execution_reference.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The first reason an exchange ended, shared by every interrupted waiter.
+pub(crate) enum ExchangeEnd {
+    Closed,
+    Transport(Status),
+    ExecutionMismatch {
+        expected: CommandExecutionReference,
+        received: CommandExecutionReference,
+    },
+    /// A reply of a kind that cannot answer the request waiting under its identity.
+    ReplyKindMismatch {
+        request: ClientRequestKind,
+        reply: ReplyBodyKind,
+    },
 }
 
 /// A request registered with its exchange, before its frame is sent.
@@ -667,17 +772,28 @@ impl PendingReplies {
         Self::Open {
             next_request_id: Some(RequestId::new(NonZeroU64::MIN)),
             waiters: HashMap::default(),
+            reader_ending: watch::channel(()).0,
         }
     }
 
-    /// Takes the next identity and registers a waiter for its reply.
+    /// Registers before the reader waits for frames. An already closed registry needs no wait.
+    fn observe_end(&self) -> Option<watch::Receiver<()>> {
+        match self {
+            Self::Open { reader_ending, .. } => Some(reader_ending.subscribe()),
+            Self::Closed(_) => None,
+        }
+    }
+
+    /// Takes the next identity and registers a waiter for its reply, which must be what
+    /// `expected` describes.
     ///
     /// `None` once the exchange has ended, or has handed out every identity and has to be
     /// replaced; either way a request sent on it would never be answered.
-    pub(crate) fn register(&mut self) -> Option<RegisteredRequest> {
+    pub(crate) fn register(&mut self, expected: ExpectedReply) -> Option<RegisteredRequest> {
         let Self::Open {
             next_request_id,
             waiters,
+            ..
         } = self
         else {
             return None;
@@ -686,13 +802,23 @@ impl PendingReplies {
         *next_request_id = request_id.get().checked_add(1).map(RequestId::new);
         let (waiter, reply) = oneshot::channel();
         waiters
-            .insert(request_id, waiter)
+            .insert(
+                request_id,
+                PendingReply {
+                    reply: waiter,
+                    expected,
+                },
+            )
             .discarded("an identity is handed out once, so no earlier waiter holds it");
         Some(RegisteredRequest { request_id, reply })
     }
 
     /// Removes the waiter of `request_id`, because its reply arrived or its frame was never sent.
     pub(crate) fn take(&mut self, request_id: RequestId) -> Option<oneshot::Sender<ReplyBody>> {
+        self.take_waiter(request_id).map(|waiter| waiter.reply)
+    }
+
+    fn take_waiter(&mut self, request_id: RequestId) -> Option<PendingReply> {
         match self {
             Self::Open { waiters, .. } => waiters.remove(&request_id),
             Self::Closed(_) => None,
@@ -706,19 +832,49 @@ impl PendingReplies {
     }
 
     pub(crate) fn close_with(&mut self, status: Option<Status>) {
+        let end = match status {
+            Some(status) => ExchangeEnd::Transport(status),
+            None => ExchangeEnd::Closed,
+        };
+        self.end(end);
+    }
+
+    fn end(&mut self, end: ExchangeEnd) {
         if let Self::Closed(_) = self {
             return;
         }
-        *self = Self::Closed(status);
+        *self = Self::Closed(end);
     }
 
     pub(crate) fn failure(&self) -> ClientError {
         match self {
-            Self::Closed(Some(status)) => ClientError::Transport(Box::new(status.clone())),
-            Self::Open { .. } | Self::Closed(None) => ClientError::SessionClosed,
+            Self::Closed(ExchangeEnd::Transport(status)) => {
+                ClientError::Transport(Box::new(status.clone()))
+            }
+            Self::Closed(ExchangeEnd::ExecutionMismatch { expected, received }) => {
+                ClientError::ExecutionReferenceMismatch {
+                    expected: expected.clone(),
+                    received: received.clone(),
+                }
+            }
+            Self::Closed(ExchangeEnd::ReplyKindMismatch { request, reply }) => {
+                ClientError::ReplyKindMismatch {
+                    request: RequestKind::from(*request),
+                    reply: *reply,
+                }
+            }
+            Self::Open { .. } | Self::Closed(ExchangeEnd::Closed) => ClientError::SessionClosed,
         }
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "exchange/shuttle_tests.rs"]
+mod shuttle_tests;
 
 /// Whether an exchange goes on after a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -735,6 +891,14 @@ pub(crate) struct ExchangeReader {
     generation: Arc<()>,
     subscriptions: SubscriptionRegistry,
     transfers: HashMap<RequestId, TransferAssembly>,
+    failure: Option<Status>,
+}
+
+impl Drop for ExchangeReader {
+    fn drop(&mut self) {
+        self.pending.lock().close_with(self.failure.take());
+        self.emitters.close_generation(&self.generation);
+    }
 }
 
 impl ExchangeReader {
@@ -749,34 +913,47 @@ impl ExchangeReader {
             generation,
             subscriptions: SubscriptionRegistry::default(),
             transfers: HashMap::default(),
+            failure: None,
         }
     }
 
-    /// Routes the exchange's frames until it ends, then closes its requests.
+    /// Routes frames until the transport or the request registry ends, then interrupts this
+    /// generation after routing has stopped.
     pub(crate) async fn run<S>(mut self, mut frames: S)
     where
         S: Stream<Item = Result<VerifiedFrame<ServerFrame>, Status>> + Unpin,
     {
-        let mut failure = None;
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let received = frames.next().await;
-            let frame = match received {
-                Some(Ok(frame)) => frame,
-                Some(Err(status)) => {
-                    Result::<(), _>::Err(status.clone()).reported("reading the session exchange");
-                    failure = Some(status);
+        let ending = self.pending.lock().observe_end();
+        if let Some(mut ending) = ending {
+            // One registration remains live across frames. The open registry never sends a value,
+            // so this wait ends with its sender.
+            let mut ended = std::pin::pin!(ending.changed());
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let received = nervix_primitives::select! {
+                    biased;
+                    closed = &mut ended => {
+                        closed.discarded("dropping the open registry's only sender ends its frame reader");
+                        break;
+                    }
+                    received = frames.next() => received,
+                };
+                let frame = match received {
+                    Some(Ok(frame)) => frame,
+                    Some(Err(status)) => {
+                        Result::<(), _>::Err(status.clone())
+                            .reported("reading the session exchange");
+                        self.failure = Some(status);
+                        break;
+                    }
+                    // The server ended the exchange.
+                    None => break,
+                };
+                if let ReaderFlow::End = self.route(frame).await {
                     break;
                 }
-                // The server ended the exchange.
-                None => break,
-            };
-            if let ReaderFlow::End = self.route(frame).await {
-                break;
             }
         }
-        self.pending.lock().close_with(failure);
-        self.emitters.close_generation(&self.generation);
     }
 
     /// Routes one frame of the exchange.
@@ -786,10 +963,7 @@ impl ExchangeReader {
             Err(violation) => return Self::violated(violation, "decoding a session frame"),
         };
         match message {
-            ServerMessage::Reply(reply) => {
-                self.deliver(reply).await;
-                ReaderFlow::Continue
-            }
+            ServerMessage::Reply(reply) => self.deliver(reply).await,
             ServerMessage::TransferPart(part) => self.assemble(part).await,
             ServerMessage::Event(event) => self.publish(event).await,
         }
@@ -803,14 +977,36 @@ impl ExchangeReader {
         ReaderFlow::End
     }
 
-    /// Completes the waiter of the request a reply answers.
-    async fn deliver(&mut self, reply: Reply) {
+    /// Completes the waiter of the request a reply answers, once the reply is shown to answer it.
+    ///
+    /// A reply that cannot answer the request waiting under its identity ends the exchange before
+    /// anything it carries is applied. A reply no request waits for completes nothing, and what it
+    /// opens is still followed.
+    async fn deliver(&mut self, reply: Reply) -> ReaderFlow {
+        let mut pending = self.pending.lock();
+        let waiter = pending.take_waiter(reply.request_id);
+        if let Some(waiter) = &waiter
+            && let Some(end) = waiter.expected.violated_by(&reply.body)
+        {
+            pending.end(end);
+            let violation = pending.failure();
+            drop(pending);
+            return Self::violated(
+                violation,
+                "validating a reply against the request it answers",
+            );
+        }
+        drop(pending);
         if let ReplyBody::Subscribe(outcome) = &reply.body
             && let SubscribeDisposition::Opened(opened) = &outcome.disposition
         {
+            // The stream reads rows against the announced schema, and the desired subscription
+            // expects it when it is restored, so both share one copy of it.
+            let schema = Arc::new(opened.schema.clone());
             self.emitters
                 .desired
-                .acknowledge(&opened.subscription, &self.generation);
+                .acknowledge(&opened.subscription, &schema, &self.generation);
+            self.subscriptions.open(opened, schema);
         }
         self.subscriptions.track(&reply.body);
         match &reply.body {
@@ -829,14 +1025,15 @@ impl ExchangeReader {
             }
             _ => {}
         }
-        let waiter = self.pending.lock().take(reply.request_id);
         let Some(waiter) = waiter else {
             // No request of this exchange waits under the identity, so no one is owed the reply.
-            return;
+            return ReaderFlow::Continue;
         };
         waiter
+            .reply
             .send(reply.body)
             .means_peer_left("session request waiter");
+        ReaderFlow::Continue
     }
 
     /// Adds a part to the reply it reassembles, and delivers the reply once it is complete.
@@ -860,8 +1057,7 @@ impl ExchangeReader {
             Ok(reply) => reply,
             Err(violation) => return Self::violated(violation, "finishing a transferred reply"),
         };
-        self.deliver(reply).await;
-        ReaderFlow::Continue
+        self.deliver(reply).await
     }
 
     /// Delivers an unsolicited message to the client's event emitters.
@@ -979,31 +1175,24 @@ struct SubscriptionStream {
 }
 
 impl SubscriptionRegistry {
-    /// Follows the subscriptions a reply opens or deletes.
+    /// Follows the subscriptions a reply deletes.
+    fn track(&mut self, body: &ReplyBody) {
+        if let ReplyBody::Unsubscribe(outcome) = body
+            && let UnsubscribeDisposition::Deleted(subscription) = &outcome.disposition
+        {
+            self.close(subscription);
+        }
+    }
+
+    /// Follows a subscription a reply opened, whose rows follow `schema`.
     ///
     /// The reader calls this before the reply reaches its waiter and before it routes any later
     /// frame, and the server sends a subscription's opening reply before any of its rows, so the
     /// rows of an opened subscription always find it here.
-    fn track(&mut self, body: &ReplyBody) {
-        match body {
-            ReplyBody::Subscribe(outcome) => {
-                if let SubscribeDisposition::Opened(opened) = &outcome.disposition {
-                    self.open(opened);
-                }
-            }
-            ReplyBody::Unsubscribe(outcome) => {
-                if let UnsubscribeDisposition::Deleted(subscription) = &outcome.disposition {
-                    self.close(subscription);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn open(&mut self, opened: &SubscriptionOpened) {
+    fn open(&mut self, opened: &SubscriptionOpened, schema: Arc<RowSchema>) {
         let stream = SubscriptionStream {
             relay: opened.relay.clone(),
-            schema: Arc::new(opened.schema.clone()),
+            schema,
         };
         self.streams
             .insert(opened.subscription.clone(), stream)

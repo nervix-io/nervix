@@ -17,7 +17,7 @@ Feature: HTTP REQUEST emitter
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         event_id string, request_method string, request_path string
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:19080',
@@ -52,6 +52,7 @@ Feature: HTTP REQUEST emitter
       quiesce: none
       envelope: none
       batch: none
+      batch container: JSON record
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: outgoing
@@ -70,6 +71,7 @@ Feature: HTTP REQUEST emitter
       quiesce: none
       envelope: none
       batch: none
+      batch container: no body
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: outgoing
@@ -105,6 +107,7 @@ Feature: HTTP REQUEST emitter
       quiesce: none
       envelope: none
       batch: none
+      batch container: JSON record
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: outgoing
@@ -147,6 +150,7 @@ Feature: HTTP REQUEST emitter
       quiesce: none
       envelope: none
       batch: none
+      batch container: no body
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: outgoing
@@ -192,11 +196,11 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE SCHEMA body (id STRING);
       CREATE WIRE JSON SCHEMA body_wire MODE STRICT (id string);
-      CREATE CODEC body_codec FROM WIRE JSON SCHEMA body_wire TO SCHEMA body;
+      CREATE WIRE JSON CODEC body_codec FROM WIRE SCHEMA body_wire TO SCHEMA body;
       CREATE SCHEMA sensitive_body (id STRING, secret STRING SENSITIVE);
       CREATE WIRE JSON SCHEMA sensitive_body_wire MODE STRICT (id string, secret string);
-      CREATE CODEC sensitive_body_codec
-        FROM WIRE JSON SCHEMA sensitive_body_wire TO SCHEMA sensitive_body;
+      CREATE WIRE JSON CODEC sensitive_body_codec
+        FROM WIRE SCHEMA sensitive_body_wire TO SCHEMA sensitive_body;
       CREATE SCHEMA state_snapshot (path STRING);
       CREATE RELAY latest_path SCHEMA state_snapshot UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -391,7 +395,7 @@ Feature: HTTP REQUEST emitter
       | 1            |
       | 3            |
 
-  @http_emitter_requests
+  @http_emitter_requests @emitter_payload_observations
   Scenario Outline: An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
@@ -417,21 +421,21 @@ Feature: HTTP REQUEST emitter
         tenant string,
         payload string
       );
-      CREATE CODEC outbound_event_codec
-        FROM WIRE JSON SCHEMA outbound_event_wire
+      CREATE WIRE JSON CODEC outbound_event_codec
+        FROM WIRE SCHEMA outbound_event_wire
         TO SCHEMA outbound_event;
       CREATE SCHEMA event_body (event_id STRING, payload STRING);
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (
         event_id string,
         payload string
       );
-      CREATE CODEC event_body_codec
-        FROM WIRE JSON SCHEMA event_body_wire
+      CREATE WIRE JSON CODEC event_body_codec
+        FROM WIRE SCHEMA event_body_wire
         TO SCHEMA event_body;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
         TO outgoing
@@ -445,8 +449,9 @@ Feature: HTTP REQUEST emitter
           'endpoint' = '{{http_receiver.api}}',
           'timeout_ms' = 5000
         };
-      CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
+      CREATE HTTP REQUEST EMITTER deliver_event
         FROM outgoing
+        ATTACHED
         TO api
           METHOD input.request_method
           PATH input.request_path
@@ -489,12 +494,21 @@ Feature: HTTP REQUEST emitter
       {"event_id":"43","payload":"second"}
       """
 
+    And within "30s" DESCRIBE EMITTER "deliver_event" on the leader node contains
+      """
+      batch container: JSON record
+      """
+    And within "30s" DESCRIBE EMITTER "deliver_event" on the leader node contains
+      """
+      payloads: 2 source_messages=2 encoded_bytes=71 size_bound_bytes=71 prepared_bytes=71
+      """
+
     Examples:
       | cluster_size |
       | 1            |
       | 3            |
 
-  @http_emitter_requests
+  @http_emitter_requests @emitter_payload_observations
   Scenario Outline: An HTTP REQUEST emitter declared without a body sends zero content bytes
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
@@ -520,13 +534,13 @@ Feature: HTTP REQUEST emitter
         tenant string,
         payload string
       );
-      CREATE CODEC outbound_event_codec
-        FROM WIRE JSON SCHEMA outbound_event_wire
+      CREATE WIRE JSON CODEC outbound_event_codec
+        FROM WIRE SCHEMA outbound_event_wire
         TO SCHEMA outbound_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
         TO outgoing
@@ -569,6 +583,15 @@ Feature: HTTP REQUEST emitter
       X-Payload: ignored
       """
 
+    And within "30s" DESCRIBE EMITTER "delete_event" on the leader node contains
+      """
+      batch container: no body
+      """
+    And within "30s" DESCRIBE EMITTER "delete_event" on the leader node contains
+      """
+      payloads: 1 source_messages=1 encoded_bytes=0 size_bound_bytes=0 prepared_bytes=0
+      """
+
     Examples:
       | cluster_size |
       | 1            |
@@ -589,12 +612,12 @@ Feature: HTTP REQUEST emitter
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, request_method STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -661,19 +684,19 @@ Feature: HTTP REQUEST emitter
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, request_method STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_body (event_id STRING, payload STRING);
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA rejected_request (
         event_id STRING, error_code STRING, operation STRING, affected_fields <fields_type>
       );
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
@@ -797,19 +820,19 @@ Feature: HTTP REQUEST emitter
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, request_method STRING, padding I64);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_body (event_id STRING);
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA rejected_request (
         event_id STRING, error_code STRING, operation STRING, affected_fields <fields_type>
       );
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
@@ -900,19 +923,19 @@ Feature: HTTP REQUEST emitter
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, payload STRING, divisor I64);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_body (event_id STRING, payload STRING);
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA rejected_request (
         event_id STRING, error_code STRING, operation STRING, operation_index U32 OPTIONAL
       );
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
@@ -1000,13 +1023,13 @@ Feature: HTTP REQUEST emitter
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA route (route_key STRING, prefix STRING);
-      CREATE CODEC routes_codec FROM JSON TO SCHEMA route
+      CREATE JAQ JSON CODEC routes_codec TO SCHEMA route
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_body (event_id STRING, payload STRING);
-      CREATE CODEC guarded_body_codec FROM JSON TO SCHEMA event_body
+      CREATE JAQ JSON CODEC guarded_body_codec TO SCHEMA event_body
         WITH JAQ TRANSFORMATIONS
           ON EMITTING 'if .event_id == "2" then error("unencodable") else {event_id: .event_id, payload: .payload} end';
       CREATE SCHEMA rejected_request (
@@ -1022,9 +1045,9 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT routes_ingress ON edge PATH '/routes' TYPE HTTP;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR routes_source
+      CREATE HTTP ENDPOINT routes_ingress ON edge PATH '/routes';
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR routes_ingestor
         FROM routes_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
         TO routes
@@ -1033,7 +1056,7 @@ Feature: HTTP REQUEST emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
@@ -1130,7 +1153,7 @@ Feature: HTTP REQUEST emitter
         second_bytes I64,
         crowd BOOL
       );
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA rejected_request (
         event_id STRING,
@@ -1142,8 +1165,8 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
@@ -1406,7 +1429,7 @@ Feature: HTTP REQUEST emitter
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, request_path STRING, padding I64);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA rejected_request (
         event_id STRING, error_code STRING, operation STRING, affected_fields <fields_type>
@@ -1414,8 +1437,8 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
@@ -1513,19 +1536,19 @@ Feature: HTTP REQUEST emitter
       CREATE SCHEMA outbound_event (
         event_id STRING, tenant STRING, request_path STRING, payload STRING
       );
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_body (event_id STRING, payload STRING);
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE SCHEMA rejected_request (event_id STRING, operation STRING);
       CREATE RELAY outgoing SCHEMA outbound_event BRANCHED BY by_tenant;
       CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
@@ -1612,11 +1635,11 @@ Feature: HTTP REQUEST emitter
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, source STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_body (event_id STRING, payload STRING);
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE SCHEMA rejected_request (event_id STRING, source STRING, error_message STRING);
@@ -1624,8 +1647,8 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY source_b SCHEMA outbound_event BRANCHED BY by_tenant;
       CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
+      CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR from_a
         FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -1758,15 +1781,15 @@ Feature: HTTP REQUEST emitter
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA stamped_body (event_id STRING, payload STRING, nonce STRING);
-      CREATE CODEC stamped_body_codec FROM JSON TO SCHEMA stamped_body
+      CREATE JAQ JSON CODEC stamped_body_codec TO SCHEMA stamped_body
         WITH JAQ TRANSFORMATIONS ON EMITTING '. + {encoded_at: now}';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
@@ -1821,14 +1844,14 @@ Feature: HTTP REQUEST emitter
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, request_path STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA route (route_key STRING, method STRING, prefix STRING, token STRING SENSITIVE);
-      CREATE CODEC routes_codec FROM JSON TO SCHEMA route
+      CREATE JAQ JSON CODEC routes_codec TO SCHEMA route
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_body (event_id STRING, payload STRING);
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA rejected_request (
         event_id STRING,
         error_code STRING,
@@ -1843,9 +1866,9 @@ Feature: HTTP REQUEST emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT routes_ingress ON edge PATH '/routes' TYPE HTTP;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR routes_source
+      CREATE HTTP ENDPOINT routes_ingress ON edge PATH '/routes';
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR routes_ingestor
         FROM routes_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
         TO routes
@@ -1854,7 +1877,7 @@ Feature: HTTP REQUEST emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
@@ -1945,15 +1968,15 @@ Feature: HTTP REQUEST emitter
       CREATE SCHEMA account_event (
         account_id STRING SENSITIVE, verb STRING SENSITIVE, token STRING SENSITIVE, note STRING
       );
-      CREATE CODEC account_events_codec FROM JSON TO SCHEMA account_event
+      CREATE JAQ JSON CODEC account_events_codec TO SCHEMA account_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA account_body (account_id STRING SENSITIVE, note STRING);
       CREATE WIRE JSON SCHEMA account_body_wire MODE STRICT (account_id string, note string);
-      CREATE CODEC account_body_codec FROM WIRE JSON SCHEMA account_body_wire TO SCHEMA account_body;
+      CREATE WIRE JSON CODEC account_body_codec FROM WIRE SCHEMA account_body_wire TO SCHEMA account_body;
       CREATE RELAY accounts SCHEMA account_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT accounts_ingress ON edge PATH '/accounts' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR accounts_source
+      CREATE HTTP ENDPOINT accounts_ingress ON edge PATH '/accounts';
+      CREATE HTTP ENDPOINT INGESTOR accounts_ingestor
         FROM accounts_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING account_events_codec
         TO accounts

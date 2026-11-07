@@ -1,0 +1,30 @@
+[package]
+description = "The Python package of the Nervix client, on pyo3 over the host session runtime"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-client-python"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arrow-array = { workspace = true, features = ["ffi"] }
+meticulous = { workspace = true }
+nervix-client-core = { workspace = true, features = ["arrow", "autocomplete"] }
+nervix-client-host = { workspace = true }
+nervix-models = { workspace = true, features = ["arrow"] }
+nervix-primitives = { workspace = true, features = ["native"] }
+pyo3 = { workspace = true, features = ["abi3-py312"] }
+url = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }

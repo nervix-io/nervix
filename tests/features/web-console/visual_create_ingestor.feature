@@ -9,17 +9,17 @@ Feature: Web console visual ingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_ingest_event (message STRING);
       CREATE WIRE JSON SCHEMA visual_ingest_wire MODE STRICT (message string);
-      CREATE CODEC visual_ingest_codec FROM WIRE JSON SCHEMA visual_ingest_wire TO SCHEMA visual_ingest_event;
+      CREATE WIRE JSON CODEC visual_ingest_codec FROM WIRE SCHEMA visual_ingest_wire TO SCHEMA visual_ingest_event;
       CREATE RELAY visual_ingest_relay SCHEMA visual_ingest_event UNBRANCHED;
       CREATE VHOST visual_ingest_host ingest-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_ingest_endpoint ON visual_ingest_host PATH '/visual-ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_ingest_endpoint ON visual_ingest_host PATH '/visual-ingest';
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
-    And selector ".create-name" is filled with "visual_ingest_source"
+    And selector ".create-name" is filled with "visual_ingest_ingestor"
     And selector ".create-ingestor-source [data-source='http-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_ingest_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_ingest_endpoint']" exists
@@ -38,7 +38,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-flush [data-flush='immediate']" is clicked
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_ingest_source FROM visual_ingest_endpoint"
+    Then selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_ingest_ingestor FROM visual_ingest_endpoint"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -91,9 +91,9 @@ Feature: Web console visual ingestor creation
       CREATE UNPACED DOMAIN {{domain}}_other;
       CREATE SCHEMA visual_scope_event (message STRING);
       CREATE WIRE JSON SCHEMA visual_scope_wire MODE STRICT (message string);
-      CREATE CODEC visual_scope_codec FROM WIRE JSON SCHEMA visual_scope_wire TO SCHEMA visual_scope_event;
+      CREATE WIRE JSON CODEC visual_scope_codec FROM WIRE SCHEMA visual_scope_wire TO SCHEMA visual_scope_event;
       CREATE VHOST visual_scope_host scope-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_scope_endpoint ON visual_scope_host PATH '/scope' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_scope_endpoint ON visual_scope_host PATH '/scope';
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -131,7 +131,7 @@ Feature: Web console visual ingestor creation
       CREATE WIRE JSON SCHEMA visual_tx_wire MODE STRICT (message string);
       CREATE RELAY staged_ingest_relay SCHEMA visual_tx_event UNBRANCHED;
       CREATE VHOST visual_tx_host tx-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_tx_endpoint ON visual_tx_host PATH '/tx' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_tx_endpoint ON visual_tx_host PATH '/tx';
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -139,11 +139,11 @@ Feature: Web console visual ingestor creation
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".prompt-row" contains "{{domain}} tx"
-    When selector ".prompt-row input" is filled with "CREATE CODEC staged_ingest_codec FROM WIRE JSON SCHEMA visual_tx_wire TO SCHEMA visual_tx_event;"
+    When selector ".prompt-row input" is filled with "CREATE WIRE JSON CODEC staged_ingest_codec FROM WIRE SCHEMA visual_tx_wire TO SCHEMA visual_tx_event;"
     And selector ".prompt-row input" is pressed with "Enter"
     And selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
-    And selector ".create-name" is filled with "visual_tx_source"
+    And selector ".create-name" is filled with "visual_tx_ingestor"
     And selector ".create-ingestor-source [data-source='http-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_tx_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_tx_endpoint']" exists
@@ -162,7 +162,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-flush [data-flush='immediate']" is clicked
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_tx_source FROM visual_tx_endpoint"
+    Then selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_tx_ingestor FROM visual_tx_endpoint"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Queued in transaction"
     And selector ".create-status" contains "position 2"
@@ -174,9 +174,9 @@ Feature: Web console visual ingestor creation
     And selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".transaction-indicator" eventually disappears
-    When selector ".prompt-row input" is filled with "SHOW CREATE INGESTOR visual_tx_source;"
+    When selector ".prompt-row input" is filled with "SHOW CREATE INGESTOR visual_tx_ingestor;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE HTTP ENDPOINT INGESTOR visual_tx_source"
+    Then selector ".terminal" contains "CREATE HTTP ENDPOINT INGESTOR visual_tx_ingestor"
 
   @visual_ingestor_reconnect
   Scenario: An ingestor draft submits after the console follows a new leader
@@ -187,19 +187,20 @@ Feature: Web console visual ingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_reconnect_event (message STRING);
       CREATE WIRE JSON SCHEMA visual_reconnect_wire MODE STRICT (message string);
-      CREATE CODEC visual_reconnect_codec FROM WIRE JSON SCHEMA visual_reconnect_wire TO SCHEMA visual_reconnect_event;
+      CREATE WIRE JSON CODEC visual_reconnect_codec FROM WIRE SCHEMA visual_reconnect_wire TO SCHEMA visual_reconnect_event;
       CREATE RELAY visual_reconnect_relay SCHEMA visual_reconnect_event UNBRANCHED;
       CREATE VHOST visual_reconnect_host reconnect-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_reconnect_endpoint ON visual_reconnect_host PATH '/reconnect' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_reconnect_endpoint ON visual_reconnect_host PATH '/reconnect';
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
-    And selector ".create-name" is filled with "visual_reconnected_source"
+    And selector ".create-name" is filled with "visual_reconnected_ingestor"
     And selector ".create-ingestor-source [data-source='http-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_reconnect_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_reconnect_endpoint']" exists
@@ -221,13 +222,13 @@ Feature: Web console visual ingestor creation
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
-    And selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_reconnected_source"
+    And selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_reconnected_ingestor"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And selector ".prompt-row input" is filled with "SHOW CREATE INGESTOR visual_reconnected_source;"
+    And selector ".prompt-row input" is filled with "SHOW CREATE INGESTOR visual_reconnected_ingestor;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE HTTP ENDPOINT INGESTOR visual_reconnected_source"
+    Then selector ".terminal" contains "CREATE HTTP ENDPOINT INGESTOR visual_reconnected_ingestor"
 
   @visual_ingestor_branch
   Scenario: A visual route constructs a branch and leaks one selected sensitive field explicitly
@@ -242,11 +243,11 @@ Feature: Web console visual ingestor creation
       CREATE SCHEMA visual_branch_error (reason STRING OPTIONAL);
       CREATE BRANCH visual_branch SCHEMA visual_branch_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_branch_wire MODE STRICT (tenant string, secret string);
-      CREATE CODEC visual_branch_codec FROM WIRE JSON SCHEMA visual_branch_wire TO SCHEMA visual_branch_input;
+      CREATE WIRE JSON CODEC visual_branch_codec FROM WIRE SCHEMA visual_branch_wire TO SCHEMA visual_branch_input;
       CREATE RELAY visual_branch_relay SCHEMA visual_branch_output BRANCHED BY visual_branch;
       CREATE RELAY visual_branch_error_relay SCHEMA visual_branch_error UNBRANCHED;
       CREATE VHOST visual_branch_host branch-{{test_id}}.example.com;
-      CREATE ENDPOINT visual_branch_endpoint ON visual_branch_host PATH '/branch' TYPE HTTP;
+      CREATE HTTP ENDPOINT visual_branch_endpoint ON visual_branch_host PATH '/branch';
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -315,12 +316,13 @@ Feature: Web console visual ingestor creation
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_http_event (user_id I64, payload STRING);
-      CREATE CODEC visual_http_codec FROM JSON TO SCHEMA visual_http_event
+      CREATE JAQ JSON CODEC visual_http_codec TO SCHEMA visual_http_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
       CREATE RELAY visual_http_relay SCHEMA visual_http_event UNBRANCHED;
       CREATE HTTP CLIENT visual_http_client CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
-        'timeout_ms' = 5000
+        'timeout_ms' = 5000,
+        'secret.visual_token' = 'Bearer visual-fixture-token'
       };
       """
     And the web console is opened on the leader node
@@ -328,7 +330,7 @@ Feature: Web console visual ingestor creation
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
-    And selector ".create-name" is filled with "visual_http_source"
+    And selector ".create-name" is filled with "visual_http_ingestor"
     And selector ".create-ingestor-source [data-source='http-request']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_http_client"
     Then selector ".create-ingestor-source-ref [data-value='visual_http_client']" exists
@@ -337,6 +339,10 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-request-headers-add" is clicked
     And selector ".create-ingestor-request-header-name" is filled with "x-nervix-poll"
     And selector ".create-ingestor-request-header-value" is filled with "visual"
+    And selector ".create-ingestor-request-headers-add" is clicked
+    And selector ".create-ingestor-request-headers > div:nth-of-type(2) .create-ingestor-request-header-name" is filled with "authorization"
+    And selector ".create-ingestor-request-headers > div:nth-of-type(2) .create-ingestor-request-header-value" is filled with "secret.visual_token"
+    And selector ".create-ingestor-request-headers > div:nth-of-type(2) .create-ingestor-request-header-secret" is clicked
     And selector ".create-ingestor-max-body-size" is filled with "1MiB"
     And selector ".create-ingestor-every" is filled with "1s"
     And selector ".create-ingestor-quiesce [data-quiesce='suspend']" is clicked
@@ -352,8 +358,8 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-flush [data-flush='immediate']" is clicked
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE HTTP REQUEST INGESTOR visual_http_source FROM visual_http_client METHOD 'GET'"
-    And selector ".create-preview" contains "HEADERS { 'x-nervix-poll' = 'visual' } MAX BODY SIZE 1MiB"
+    Then selector ".create-preview" contains "CREATE HTTP REQUEST INGESTOR visual_http_ingestor FROM visual_http_client METHOD 'GET'"
+    And selector ".create-preview" contains "HEADERS { 'x-nervix-poll' = 'visual', 'authorization' = CLIENT SECRET 'secret.visual_token' } MAX BODY SIZE 1MiB"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -373,7 +379,7 @@ Feature: Web console visual ingestor creation
       | 3            |
 
   @visual_ingestor_pulsar
-  Scenario Outline: A visually created Pulsar ingestor declares its creation position and delivers
+  Scenario Outline: A visually created Pulsar ingestor declares its creation position and type and delivers
     Given Pulsar is running
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -382,7 +388,7 @@ Feature: Web console visual ingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_pulsar_event (user_id I64);
       CREATE WIRE JSON SCHEMA visual_pulsar_wire MODE STRICT (user_id integer);
-      CREATE CODEC visual_pulsar_codec FROM WIRE JSON SCHEMA visual_pulsar_wire TO SCHEMA visual_pulsar_event;
+      CREATE WIRE JSON CODEC visual_pulsar_codec FROM WIRE SCHEMA visual_pulsar_wire TO SCHEMA visual_pulsar_event;
       CREATE RELAY visual_pulsar_relay SCHEMA visual_pulsar_event UNBRANCHED;
       CREATE PULSAR CLIENT visual_pulsar_client CONFIG { 'addr' = '{{pulsar_addr}}' };
       """
@@ -416,7 +422,10 @@ Feature: Web console visual ingestor creation
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "owns the subscription"
     When selector ".create-ingestor-subscription-ownership [data-choice='OWNED BY INGESTOR START AT <start_position>']" is clicked
-    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR START AT <start_position>"
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "subscription's TYPE"
+    When selector ".create-ingestor-subscription-type [data-choice='<type>']" is clicked
+    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR START AT <start_position> TYPE <type>"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -436,8 +445,8 @@ Feature: Web console visual ingestor creation
       """
 
     Examples:
-      | cluster_size | start_position |
-      | 1            | EARLIEST       |
-      | 3            | EARLIEST       |
-      | 1            | LATEST         |
-      | 3            | LATEST         |
+      | cluster_size | start_position | type       |
+      | 1            | EARLIEST       | SHARED     |
+      | 3            | EARLIEST       | EXCLUSIVE  |
+      | 1            | LATEST         | KEY_SHARED |
+      | 3            | LATEST         | FAILOVER   |

@@ -7,13 +7,13 @@ Feature: Logical ingestion time and admission
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 100ms;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
       CREATE SCHEMA admission_error ( sequence I64, error_code STRING );
-      CREATE CODEC event_batch_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_batch_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY admission_errors SCHEMA admission_error UNBRANCHED;
       CREATE VHOST edge batch-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_batch_codec
         TIMESTAMP AT occurred_at
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -69,12 +69,12 @@ Feature: Logical ingestion time and admission
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( sequence integer, occurred_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ingestion-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP AT occurred_at
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -133,13 +133,13 @@ Feature: Logical ingestion time and admission
       CREATE SCHEMA summary ( tenant STRING, total I64, samples I64, source_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY summaries SCHEMA summary BRANCHED BY tenants;
       CREATE VHOST edge ingestion-window-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP <timestamp_source>
         TO events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
@@ -196,12 +196,12 @@ Feature: Logical ingestion time and admission
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 1h;
       CREATE SCHEMA request ( sequence I64, occurred_at DATETIME );
       CREATE WIRE JSON SCHEMA request_wire MODE STRICT ( sequence integer, occurred_at string );
-      CREATE CODEC request_codec FROM WIRE JSON SCHEMA request_wire TO SCHEMA request
+      CREATE WIRE JSON CODEC request_codec FROM WIRE SCHEMA request_wire TO SCHEMA request
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY observations SCHEMA request UNBRANCHED;
       CREATE VHOST edge retained-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
         TIMESTAMP AT occurred_at
         TO observations INHERIT ALL
@@ -235,21 +235,21 @@ Feature: Logical ingestion time and admission
         sequence I64, occurred_at DATETIME, observed_at DATETIME, samples I64
       );
       CREATE WIRE JSON SCHEMA request_wire MODE STRICT ( sequence integer, occurred_at string );
-      CREATE CODEC request_codec FROM WIRE JSON SCHEMA request_wire TO SCHEMA request
+      CREATE WIRE JSON CODEC request_codec FROM WIRE SCHEMA request_wire TO SCHEMA request
         ENCODE occurred_at AS RFC3339;
-      CREATE CODEC delivery_codec FROM WIRE JSON SCHEMA request_wire TO SCHEMA request
+      CREATE WIRE JSON CODEC delivery_codec FROM WIRE SCHEMA request_wire TO SCHEMA request
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY buffered_events SCHEMA request UNBRANCHED;
       CREATE RELAY observations SCHEMA observation UNBRANCHED;
       CREATE VHOST edge quiesced-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT clock_ingress ON edge PATH '/clock' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT clock_ingress ON edge PATH '/clock';
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
         TIMESTAMP NOW
         TO buffered_events INHERIT ALL
         UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR clock_source FROM clock_ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR clock_ingestor FROM clock_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
         TIMESTAMP NOW
         TO observations INHERIT ALL SET observed_at = now(), samples = 1
@@ -265,15 +265,15 @@ Feature: Logical ingestion time and admission
       """
     When these Plexus commands begin executing in the background
       """
-      ALTER HTTP ENDPOINT INGESTOR source SET DECODE USING delivery_codec;
+      ALTER HTTP ENDPOINT INGESTOR ingestor SET DECODE USING delivery_codec;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
-    And within "5s" node "node-1" eventually reports describe ingestor "source" as "status: quiesced"
+    And within "5s" node "node-1" eventually reports describe ingestor "ingestor" as "status: quiesced"
     When http payload is posted to host "quiesced-clock-{{test_id}}.example.com" path "/events"
       """
       {"sequence":1,"occurred_at":"1999-01-01T00:00:00Z"}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "source" as "nervix_ingestor_quiesce_buffered_records: 1"
+    Then within "5s" node "node-1" eventually reports describe ingestor "ingestor" as "nervix_ingestor_quiesce_buffered_records: 1"
     And within "5s" the clock at host "quiesced-clock-{{test_id}}.example.com" advances by "4s" and is saved as "release_time"
     When the entity gate pause for domain "{{domain}}" is released
     Then the background Plexus execution succeeds

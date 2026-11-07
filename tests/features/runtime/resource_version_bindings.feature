@@ -11,8 +11,8 @@ Feature: Resource version bindings
       """
     And these Plexus commands fail with "expected VERSION"
       """
-      CREATE CODEC notification_codec
-        FROM PROTOBUF USING RESOURCE proto_bundle
+      CREATE PROTOBUF CODEC notification_codec
+        USING RESOURCE proto_bundle
         CONFIG {'file' = 'bindings.proto'}
         MESSAGE 'nervix.test.Notification'
         TO SCHEMA notification
@@ -129,8 +129,8 @@ Feature: Resource version bindings
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE CODEC notification_codec
-        FROM PROTOBUF USING RESOURCE proto_bundle VERSION LATEST
+      CREATE PROTOBUF CODEC notification_codec
+        USING RESOURCE proto_bundle VERSION LATEST
         CONFIG {'file' = 'bindings.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Notification'
         TO SCHEMA notification
@@ -179,8 +179,8 @@ Feature: Resource version bindings
         id string,
         value integer
       );
-      CREATE CODEC lookup_entry_codec
-        FROM WIRE JSON SCHEMA lookup_entry_wire
+      CREATE WIRE JSON CODEC lookup_entry_codec
+        FROM WIRE SCHEMA lookup_entry_wire
         TO SCHEMA lookup_entry;
       CREATE HASH MAP lookup_by_id
         KEY id
@@ -216,7 +216,8 @@ Feature: Resource version bindings
       """
     Then the last command output contains
       """
-      PROTOBUF USING RESOURCE proto_bundle VERSION 2
+      CREATE PROTOBUF CODEC notification_codec
+        USING RESOURCE proto_bundle VERSION 2
       """
     When these Plexus commands are executed on the leader node
       """
@@ -387,8 +388,8 @@ Feature: Resource version bindings
     And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE CODEC notification_codec
-        FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1
+      CREATE PROTOBUF CODEC notification_codec
+        USING RESOURCE proto_bundle VERSION 1
         CONFIG {'file' = 'bindings.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Notification'
         TO SCHEMA notification
@@ -436,7 +437,8 @@ Feature: Resource version bindings
       """
     Then the last command output contains
       """
-      PROTOBUF USING RESOURCE proto_bundle VERSION 1
+      CREATE PROTOBUF CODEC notification_codec
+        USING RESOURCE proto_bundle VERSION 1
       """
     When these Plexus commands are executed on the leader node
       """
@@ -463,7 +465,8 @@ Feature: Resource version bindings
       """
     Then the last command output contains
       """
-      PROTOBUF USING RESOURCE proto_bundle VERSION 1
+      CREATE PROTOBUF CODEC notification_codec
+        USING RESOURCE proto_bundle VERSION 1
       """
     When these Plexus commands are executed on the leader node
       """
@@ -517,7 +520,7 @@ Feature: Resource version bindings
       UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_v1}}';
       CREATE SCHEMA lookup_entry (id STRING, value I64);
       CREATE WIRE JSON SCHEMA lookup_wire MODE STRICT (id string, value integer);
-      CREATE CODEC lookup_codec FROM WIRE JSON SCHEMA lookup_wire TO SCHEMA lookup_entry;
+      CREATE WIRE JSON CODEC lookup_codec FROM WIRE SCHEMA lookup_wire TO SCHEMA lookup_entry;
       CREATE HASH MAP lookup_by_id
         KEY id
         FROM RESOURCE lookup_bundle VERSION 1
@@ -829,7 +832,7 @@ Feature: Resource version bindings
         ON MESSAGE ERROR LOG;
       CREATE SCHEMA lookup_entry (id STRING, value I64);
       CREATE WIRE JSON SCHEMA lookup_wire MODE STRICT (id string, value integer);
-      CREATE CODEC lookup_codec FROM WIRE JSON SCHEMA lookup_wire TO SCHEMA lookup_entry;
+      CREATE WIRE JSON CODEC lookup_codec FROM WIRE SCHEMA lookup_wire TO SCHEMA lookup_entry;
       CREATE HASH MAP lookup_by_id
         KEY id
         FROM RESOURCE shared_bundle VERSION 1
@@ -896,12 +899,12 @@ Feature: Resource version bindings
       CREATE SCHEMA features ( vector <vector_type> );
       CREATE SCHEMA scored ( score <score_type> );
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( vector array );
-      CREATE CODEC features_codec FROM WIRE JSON SCHEMA features_wire TO SCHEMA features;
+      CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED CAPACITY 16;
       CREATE VHOST edge drift-{{test_id}}.example.com WITH TLS tls_bundle VERSION LATEST;
-      CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features

@@ -48,7 +48,9 @@ include = [
   "sessions.md",
   "backup-and-restore.md",
   "metrics-and-observability.md",
+  "client-libraries.md",
   "client-library.md",
+  "client-library-python.md",
   "examples.md",
   "paced-simulation-drivers.md",
 ]

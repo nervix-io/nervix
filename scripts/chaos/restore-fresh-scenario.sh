@@ -122,6 +122,16 @@ fresh_start_cluster() {
     done
     wait_for 'a formed fresh cluster of three voters' "${fresh_startup_bound}" fresh_cluster_formed "${case_dir}" \
         || fresh_fail product 'the fresh cluster never formed with its three node names'
+    local original_cli_host="${cli_host}" policy_status=0
+    cli_host="${fresh_hosts[0]}"
+    configure_cluster_parameters >"${case_dir}/fresh-cluster-parameter-change.txt" 2>&1 || policy_status=$?
+    if ((policy_status == 0)); then
+        wait_for 'fresh cluster parameters installed on every node' "${fresh_startup_bound}" \
+            capture_cluster_parameters "${case_dir}/fresh-cluster-parameters" "${fresh_nodes[@]}" \
+            || policy_status=$?
+    fi
+    cli_host="${original_cli_host}"
+    ((policy_status == 0)) || fresh_fail product 'the fresh cluster refused its requested policy'
 }
 
 # True when the restored domain's ingestor runs on a fresh node.
@@ -146,7 +156,7 @@ run_restore_fresh_cluster() {
 
     phase 'fresh restore: quiesced backup under load'
     wait_for 'source baseline' 40 topic_progressed chaos_input 9
-    wait_for 'acknowledged sink baseline' 60 topic_progressed chaos_output 9
+    wait_for 'acknowledged emitter baseline' 60 topic_progressed chaos_output 9
     backup_archive_domain "${archive_dir}" chaos_baseline "${archive_dir}/domain.nvxb" \
         "${archive_dir}/report.json" \
         || fresh_fail product 'the packaged CLI could not create the quiesced archive'

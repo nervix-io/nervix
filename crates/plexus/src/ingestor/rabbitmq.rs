@@ -13,7 +13,9 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{RabbitMqIngestMode, RabbitMqQueueIngestor, RabbitMqQueueName};
+use nervix_models::{
+    RabbitMqIngestMode, RabbitMqQueueIngestor, RabbitMqQueueIngestorChange, RabbitMqQueueName,
+};
 
 use super::delivery::{
     ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack, optional_instances,
@@ -25,8 +27,10 @@ use crate::{
 };
 
 /// `FROM <client> QUEUE '<queue>' [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
-pub(super) fn queue_body<'src>()
--> impl Parser<'src, &'src [Token], RabbitMqQueueIngestor, extra::Err<ParseError<'src>>> + Clone {
+/// The delivery modes of a RabbitMQ consumer: `NO ACK`, `ACK SEQUENTIAL …` or `ACK PARALLEL …`
+/// with AMQP's 16-bit prefetch count.
+fn mode<'src>()
+-> impl Parser<'src, &'src [Token], RabbitMqIngestMode, extra::Err<ParseError<'src>>> + Clone {
     let sequential = ack_sequential().map(
         |SequentialAck {
              timeout,
@@ -58,13 +62,17 @@ pub(super) fn queue_body<'src>()
             })
         },
     );
-    let mode = choice((parallel, sequential, no_ack().to(RabbitMqIngestMode::NoAck)));
+    choice((parallel, sequential, no_ack().to(RabbitMqIngestMode::NoAck)))
+}
+
+pub(super) fn queue_body<'src>()
+-> impl Parser<'src, &'src [Token], RabbitMqQueueIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Queue))
         .then(external_name::<RabbitMqQueueName>())
-        .then(optional_instances())
+        .then(optional_instances::<RabbitMqQueueIngestor>())
         .then_ignore(kw(Identifier::Mode))
-        .then(mode)
+        .then(mode())
         .then(suspend_only_quiesce_clause())
         .map(
             |((((client, queue), instances), mode), quiesce)| RabbitMqQueueIngestor {
@@ -75,6 +83,21 @@ pub(super) fn queue_body<'src>()
                 quiesce,
             },
         )
+        .boxed()
+}
+
+/// `SET QUEUE` or `SET MODE`: one part of a `RABBITMQ QUEUE` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], RabbitMqQueueIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let queue = kw(Identifier::Queue)
+        .ignore_then(external_name::<RabbitMqQueueName>())
+        .map(RabbitMqQueueIngestorChange::Queue);
+    let delivery = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(RabbitMqQueueIngestorChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((queue, delivery)))
         .boxed()
 }
 
@@ -224,7 +247,9 @@ mod tests {
         };
         assert_eq!(source.queue.as_str(), queue);
         assert_eq!(source.client.as_str(), "broker");
-        assert_eq!(source.instances.get(), expected_instances);
+        assert!(
+            matches!(source.instances, nervix_models::IngestorInstances::Count(count) if count.get() == expected_instances)
+        );
         assert_eq!(source.quiesce(), &IngestQuiesceMode::Suspend);
         let IngestAcknowledgement::Sequential { timeout, retry } = source.acknowledgement() else {
             panic!("the ingestor carries its sequential acknowledgement policy");

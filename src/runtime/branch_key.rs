@@ -1,13 +1,19 @@
+use std::borrow::Cow;
+
 use error_stack::ResultExt as _;
 use nervix_models::SchemaField;
 
 use super::*;
 use crate::runtime_schema::RuntimeValueTypeError;
 
+/// A concrete branch key: its typed fields, the canonical text they render to, and the fingerprint
+/// of that text, which also gives the key's partition seed. The text and the fingerprint are
+/// computed once, when the key is constructed, so every later reader takes them as they are.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct BranchKeyInner {
     fields: BTreeMap<FieldName, RuntimeValue>,
     json: String,
+    fingerprint: BranchKeyFingerprint,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -50,7 +56,70 @@ impl std::fmt::Debug for BranchKey {
         f.debug_struct("BranchKey")
             .field("fields", &self.0.fields)
             .field("json", &self.0.json)
+            .field("fingerprint", &self.0.fingerprint)
             .finish()
+    }
+}
+
+/// How the concrete keys of one relay are divided among its units, as its branch declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelayPartitioning {
+    /// An unbranched relay, or one whose branch declares one partition: its one `Single` unit owns
+    /// every key.
+    Whole,
+    /// A relay whose branch declares several partitions: `Partition(seed mod n)` owns a key.
+    Partitioned(BranchPartitions),
+}
+
+/// Why a batch names no unit of its relay.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum RelayPartitionError {
+    #[error("a batch of a partitioned relay names no concrete branch key")]
+    UnbranchedBatchOfPartitionedRelay,
+}
+
+impl RelayPartitioning {
+    /// The partitioning a relay of `branching` has.
+    pub(crate) fn of(branching: Option<&ResolvedBranching>) -> Self {
+        match branching.and_then(ResolvedBranching::partitions) {
+            Some(partitions) => Self::of_partitions(partitions),
+            None => Self::Whole,
+        }
+    }
+
+    /// The partitioning a relay of a branch declaring `partitions` has: one owner for a single
+    /// partition, and one unit per partition otherwise.
+    pub(crate) fn of_partitions(partitions: BranchPartitions) -> Self {
+        if partitions.is_partitioned() {
+            Self::Partitioned(partitions)
+        } else {
+            Self::Whole
+        }
+    }
+
+    /// The units such a relay is scheduled as, in partition order.
+    pub(crate) fn units(self) -> Vec<Unit> {
+        match self {
+            Self::Whole => vec![Unit::SINGLE],
+            Self::Partitioned(partitions) => partitions.units(),
+        }
+    }
+
+    /// The unit that owns the branch `key` names. A relay divided into partitions has a concrete
+    /// key on every batch, so an absent key there is refused rather than given a unit.
+    pub(crate) fn unit_of(
+        self,
+        key: &Option<BranchKey>,
+    ) -> error_stack::Result<Unit, RelayPartitionError> {
+        match (self, key) {
+            (Self::Whole, _) => Ok(Unit::SINGLE),
+            (Self::Partitioned(partitions), Some(key)) => {
+                Ok(partitions.unit_of(key.partition_seed()))
+            }
+            (Self::Partitioned(_), None) => Err(Report::new(
+                RelayPartitionError::UnbranchedBatchOfPartitionedRelay,
+            )),
+        }
     }
 }
 
@@ -133,7 +202,12 @@ impl BranchKey {
             object.insert(field.as_str().to_string(), value.to_json_value());
         }
         let json = serde_json::Value::Object(object).to_string();
-        Ok(Self(Arc::new(BranchKeyInner { fields, json })))
+        let fingerprint = BranchKeyFingerprint::of_canonical_text(&json);
+        Ok(Self(Arc::new(BranchKeyInner {
+            fields,
+            json,
+            fingerprint,
+        })))
     }
 
     pub(crate) fn from_remote_key(
@@ -177,9 +251,38 @@ impl BranchKey {
         self.0.json.as_str()
     }
 
-    /// The non-sensitive identity the control plane names this concrete branch by.
+    /// The key's public JSON projection, with fields masked by their declared sensitivity.
+    /// A key with no sensitive fields borrows its canonical text, which remains the identity used
+    /// for routing and storage.
+    pub(crate) fn to_json_string_masking(&self, sensitivity: &VmSchemaSensitivity) -> Cow<'_, str> {
+        if !sensitivity
+            .field_names()
+            .any(|field| self.0.fields.contains_key(field))
+        {
+            return Cow::Borrowed(self.as_str());
+        }
+        let mut object = serde_json::Map::new();
+        for (field, value) in &self.0.fields {
+            let rendered = if sensitivity.is_sensitive(field.as_str()) {
+                serde_json::Value::String("<masked>".to_owned())
+            } else {
+                value.to_json_value()
+            };
+            object.insert(field.as_str().to_owned(), rendered);
+        }
+        Cow::Owned(serde_json::Value::Object(object).to_string())
+    }
+
+    /// The non-sensitive identity the control plane names this concrete branch by, computed when
+    /// the key was constructed.
     pub(crate) fn fingerprint(&self) -> BranchKeyFingerprint {
-        BranchKeyFingerprint::of_canonical_text(self.as_str())
+        self.0.fingerprint
+    }
+
+    /// The seed this key is partitioned by: the first eight bytes of its fingerprint. A key lands
+    /// in partition `seed mod n` of a branch declared with n partitions.
+    pub(crate) fn partition_seed(&self) -> PartitionSeed {
+        self.0.fingerprint.partition_seed()
     }
 
     /// Orders two branch scopes by their canonical key text, the unbranched execution first, so
@@ -350,6 +453,28 @@ mod tests {
     /// How every diagnostic names the branch keyed by tenant `acme-secret`.
     const SECRET_TENANT_BRANCH: &str =
         "branch 3525112b62a3c2262596c624543a4333a324f9e7bc945c6031936604e166af12";
+
+    #[test]
+    fn materialized_inspection_masks_sensitive_key_values_of_different_types() {
+        let key = BranchKey::from_fields([
+            (
+                named("tenant"),
+                RuntimeValue::String("private-tenant".to_owned()),
+            ),
+            (named("account"), RuntimeValue::U64(42)),
+            (named("zone"), RuntimeValue::String("east".to_owned())),
+        ])
+        .assured("the fixture has named fields and finite values");
+        let sensitivity = VmSchemaSensitivity::from_sensitive_fields(["tenant", "account"]);
+
+        assert_eq!(
+            key.to_json_string_masking(&sensitivity),
+            r#"{"account":"<masked>","tenant":"<masked>","zone":"east"}"#
+        );
+        let plain = key.to_json_string_masking(&VmSchemaSensitivity::default());
+        assert_eq!(plain, key.as_str());
+        assert!(matches!(plain, Cow::Borrowed(_)));
+    }
 
     /// A branch is named by the lowercase hexadecimal fingerprint of its key, the text `DESCRIBE`
     /// prints for the same branch, and never by the key's values, which a branch schema may declare

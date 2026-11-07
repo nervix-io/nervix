@@ -18,7 +18,9 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
 use error_stack::Report;
-use futures_util::{FutureExt, SinkExt, StreamExt};
+use futures_util::{
+    FutureExt, SinkExt, StreamExt, future::LocalBoxFuture, stream::FuturesUnordered,
+};
 use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
 };
@@ -32,13 +34,14 @@ use nervix_client_wire::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
     DomainClockDetachOutcome, DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved,
     InspectTransactionRequest, InspectionOutcome, LeaderRedirect, Leadership,
-    MAX_IN_FLIGHT_REQUESTS, NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView,
-    RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
-    SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition,
-    SubscribeOutcome, SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
-    SubscriptionRows, SubscriptionType, SuggestRequest, Suggestion as WireSuggestion,
-    SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly, TransferPart,
-    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
+    MAX_IN_FLIGHT_REQUESTS, NoticeKind, NoticeLevel, ReplyBody, RequestCancelled, RequestId,
+    RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage,
+    ServerNotice, SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome,
+    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
+    Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
+    TransferError, TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest,
+    VerifiedFrame,
     websocket::{CONSOLE_SESSION_PATH, ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -69,8 +72,11 @@ use wasm_bindgen_futures::spawn_local;
 
 mod backup_dialog;
 mod clock_display;
+mod command_retry;
 mod create_dialog;
+mod node_panel;
 mod request_handoff;
+mod resource_upload;
 mod transaction_inspector;
 
 use backup_dialog::{
@@ -78,11 +84,14 @@ use backup_dialog::{
     boxed_session_storage,
 };
 use clock_display::{ClockDisplay, ClockPanel, ClockSelection, ClockSelectionChange, ClockStatus};
+use command_retry::{CommandRetries, CommandRetryWait};
 use create_dialog::{
     ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
     CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission, SubscriptionDispatch,
 };
+use node_panel::{ClusterEventLog, NodePanel};
 use request_handoff::{RequestReceiver, RequestSender, request_handoff};
+use resource_upload::UploadAnswer;
 use transaction_inspector::{InspectorSignals, TransactionInspector};
 
 const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_VERSION"));
@@ -179,6 +188,9 @@ struct WebConsoleSignals {
     /// once when that domain is selected.
     domain_snapshot: RwSignal<Option<DomainSnapshotView>>,
     cluster_counters: RwSignal<ClusterCounters>,
+    /// The membership and leadership notices of the node each session reached, which the node
+    /// panel lists beside the connection state instead of the REPL transcript.
+    cluster_events: RwSignal<ClusterEventLog>,
     active_domain: RwSignal<Option<DomainName>>,
     clock_display: RwSignal<ClockDisplay>,
     /// The clock attachment each connection asked for. The session loop records the one a
@@ -205,6 +217,17 @@ struct WebConsoleSignals {
 }
 
 impl WebConsoleSignals {
+    /// Reports the violation before the session loop stops reading and recovers its commands.
+    fn interrupt_unreadable_session(self, reason: &str) -> SessionStep {
+        self.terminal_lines.update(|lines| {
+            lines.push(TermLine::error(format!(
+                "protocol violation: {reason}; pending command outcomes are unknown; reconnecting \
+                 to recover them under their original execution references"
+            )));
+        });
+        SessionStep::Abandon
+    }
+
     /// Keep detach ahead of attach on the session's ordered request lane. The selected clock is
     /// marked before this call, so a refused request stays refused until selection or connection
     /// changes instead of being queued again by a later render.
@@ -435,6 +458,7 @@ impl WebConsoleSignals {
                             domain: tab.domain.clone(),
                             statement: tab.subscribe_command.clone(),
                             subscription_type: SubscriptionType::Row,
+                            expected_schema: None,
                         },
                         origin: SubscriptionOrigin::Restoration,
                     });
@@ -462,6 +486,7 @@ impl WebConsoleSignals {
                 domain: tab.domain.clone(),
                 statement: tab.subscribe_command.clone(),
                 subscription_type: SubscriptionType::Row,
+                expected_schema: None,
             });
         });
         request
@@ -617,7 +642,7 @@ impl ConsoleRequest {
     ///
     /// Every connection selects the active domain and attaches the session's transaction again
     /// itself. Completion and structured-choice requests only matter for the current input or
-    /// draft, so those are sent at once and forgotten with the connection.
+    /// draft, so those wait only for request capacity and are forgotten with the connection.
     fn is_ordered(&self) -> bool {
         match self {
             Self::Command { .. }
@@ -717,7 +742,7 @@ impl ConsoleRequest {
 
 /// The place of a request in the order the console issued its requests. A request keeps it when it
 /// is sent again, so requests sent again on a new connection keep their original order.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct IssueOrder(u64);
 
 /// A request and its place in the issue order.
@@ -726,14 +751,48 @@ struct IssuedRequest {
     request: ConsoleRequest,
 }
 
+/// A sent lookup still occupies a server request place after its result becomes irrelevant.
+/// Retain only that identity, releasing its text and any partial reply immediately.
+struct SentRequest {
+    /// Absence means the control no longer awaits the result; the enclosing map entry still
+    /// owns this sent request's identity and capacity place.
+    awaited: Option<IssuedRequest>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LookupPosition {
+    Held(IssueOrder),
+    Sent(RequestId),
+}
+
+/// Connection setup and lookups may progress before ordered commands are ready to run.
+#[derive(Clone, Copy)]
+enum RequestLane {
+    Ordered,
+    Connection(ConnectionPriority),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionPriority {
+    Control,
+    /// Existing session intent must be restored even when all control backlog places are
+    /// occupied. These requests still share the same 64-place wire window.
+    Setup,
+}
+
+struct HeldConnectionRequest {
+    request: ConsoleRequest,
+    priority: ConnectionPriority,
+}
+
 /// Where a server message goes.
 enum Routed {
     /// An unsolicited message. It never answers a request.
     Event(ServerEvent),
     /// The terminal reply to a request that awaited it.
     Reply(Box<AnsweredRequest>),
-    /// A reply that could not be read. The request it answers is over.
-    Unreadable(Box<UnreadableReply>),
+    /// A protocol violation. Waiting requests stay unanswered until the session ends.
+    Unreadable(Report<TransferError>),
     /// A reply to a request the console no longer awaits.
     Untracked,
     /// A part of a reply that is still arriving.
@@ -744,12 +803,6 @@ enum Routed {
 struct AnsweredRequest {
     request: IssuedRequest,
     body: ReplyBody,
-}
-
-/// A request whose reply could not be read, and why.
-struct UnreadableReply {
-    request: IssuedRequest,
-    reason: String,
 }
 
 /// What became of a request one of the console's controls issued.
@@ -778,10 +831,14 @@ struct OutstandingLoad {
 
 impl OutstandingLoad {
     fn add(&mut self, request: &ConsoleRequest) {
+        self.add_text(request.text_bytes());
+    }
+
+    fn add_text(&mut self, bytes: usize) {
         self.requests = self.requests.checked_add(1).assured(
             "the outstanding requests are held in memory, so they cannot number usize::MAX",
         );
-        self.bytes = self.bytes.checked_add(request.text_bytes()).assured(
+        self.bytes = self.bytes.checked_add(bytes).assured(
             "every counted text is held in memory at once, so the texts cannot add up past \
              usize::MAX",
         );
@@ -812,34 +869,42 @@ impl OutstandingLoad {
 /// and never by arrival order. Unsolicited server messages answer no request, so they never
 /// complete or discard one.
 struct SessionRequests {
+    /// Availability and bounded backoff of commands whose outcome remains uncertain.
+    command_retries: CommandRetries,
     /// The place the next issued request takes.
     next_issue: u64,
     /// Ordered requests waiting until the session can serve them, in the order they were issued.
     held: BTreeMap<IssueOrder, ConsoleRequest>,
+    /// Connection-local requests waiting for capacity, including the opening prefix and a
+    /// transaction reattach. Setup precedes ordered commands; other controls respect ready
+    /// work's issue order. Every request here ends with this connection.
+    connection_held: BTreeMap<IssueOrder, HeldConnectionRequest>,
     /// The identity the next request sent on the current connection carries.
     next_request_id: NonZeroU64,
     /// The requests sent on the current connection that await their terminal reply, by the
     /// identity the reply carries. Identities only increase, so iteration is send order.
-    in_flight: BTreeMap<RequestId, IssuedRequest>,
+    in_flight: BTreeMap<RequestId, SentRequest>,
     /// The replies too large for one frame whose parts are still arriving.
     transfers: BTreeMap<RequestId, TransferAssembly>,
     /// The latest completion request. An earlier one is no longer awaited, so its stale
     /// suggestions are never shown.
-    latest_suggestion: Option<RequestId>,
+    latest_suggestion: Option<LookupPosition>,
     /// The latest request for each structured control. Older replies cannot overwrite a newer
     /// draft or search.
-    latest_choices: BTreeMap<ChoiceControl, RequestId>,
+    latest_choices: BTreeMap<ChoiceControl, LookupPosition>,
     /// Whether the server confirmed that the node serving the connection leads the cluster.
     leader_confirmed: bool,
-    /// The request attaching the session's transaction to the connection, while it is in flight.
-    attaching: Option<RequestId>,
+    /// A transaction attach blocks ordered commands while waiting for capacity and in flight.
+    attaching: Option<IssueOrder>,
 }
 
 impl SessionRequests {
     fn new() -> Self {
         Self {
+            command_retries: CommandRetries::default(),
             next_issue: 0,
             held: BTreeMap::new(),
+            connection_held: BTreeMap::new(),
             next_request_id: NonZeroU64::MIN,
             in_flight: BTreeMap::new(),
             transfers: BTreeMap::new(),
@@ -866,7 +931,7 @@ impl SessionRequests {
         self.leader_confirmed && self.attaching.is_none()
     }
 
-    /// Whether an attach of the session's transaction is in flight.
+    /// Whether a transaction attach is waiting for capacity or in flight.
     fn is_attaching(&self) -> bool {
         self.attaching.is_some()
     }
@@ -878,16 +943,62 @@ impl SessionRequests {
 
     /// Takes a request one of the console's controls issued. It is refused when the session
     /// already keeps as many requests outstanding, or as much of their text, as it holds. An
-    /// ordered request then waits until it can go out in its place; anything else is sent at once.
+    /// ordered request waits until it can go out in its place. Other controls wait only for
+    /// capacity on this connection, respecting earlier ready work.
     fn accept(&mut self, issued: IssuedRequest) -> Admission {
-        if let Err(report) = self.outstanding().admits(issued.request.text_bytes()) {
+        let lane = if issued.request.is_ordered() {
+            RequestLane::Ordered
+        } else {
+            RequestLane::Connection(ConnectionPriority::Control)
+        };
+        self.admit(issued, lane)
+    }
+
+    /// Opening and reattachment requests precede ordered work, including when they must wait
+    /// for an earlier terminal reply to free a request place.
+    fn accept_connection(&mut self, issued: IssuedRequest) -> Admission {
+        self.admit(issued, RequestLane::Connection(ConnectionPriority::Setup))
+    }
+
+    fn admit(&mut self, issued: IssuedRequest, lane: RequestLane) -> Admission {
+        self.supersede_lookup(&issued.request);
+        if let RequestLane::Ordered | RequestLane::Connection(ConnectionPriority::Control) = lane
+            && let Err(report) = self.outstanding().admits(issued.request.text_bytes())
+        {
             return Admission::Refused(Box::new(RefusedRequest {
                 request: issued.request,
                 refusal: *report.current_context(),
             }));
         }
-        if issued.request.is_ordered() && !self.can_send_ordered() {
-            self.held.insert(issued.order, issued.request);
+        let can_send = match lane {
+            RequestLane::Ordered => self.can_send_ordered(),
+            RequestLane::Connection(priority) => {
+                self.connection_held.is_empty()
+                    && self.has_room_in_flight()
+                    && (priority == ConnectionPriority::Setup
+                        || !self.is_ready()
+                        || self.held.is_empty())
+            }
+        };
+        if let ConsoleRequest::AttachTransaction(_) = &issued.request {
+            self.attaching = Some(issued.order);
+        }
+        if !can_send {
+            self.remember_lookup(&issued.request, LookupPosition::Held(issued.order));
+            match lane {
+                RequestLane::Ordered => {
+                    self.held.insert(issued.order, issued.request);
+                }
+                RequestLane::Connection(priority) => {
+                    self.connection_held.insert(
+                        issued.order,
+                        HeldConnectionRequest {
+                            request: issued.request,
+                            priority,
+                        },
+                    );
+                }
+            };
             return Admission::Held;
         }
         Admission::Sent(self.dispatch(issued))
@@ -898,7 +1009,10 @@ impl SessionRequests {
     /// `MAX_IN_FLIGHT_REQUESTS` the server would refuse the request rather than queue it, so the
     /// console holds it until an earlier reply frees a place.
     fn can_send_ordered(&self) -> bool {
-        self.is_ready() && self.held.is_empty() && self.has_room_in_flight()
+        self.is_ready()
+            && self.held.is_empty()
+            && self.connection_held.is_empty()
+            && self.has_room_in_flight()
     }
 
     /// Whether the server admits another request in flight on this connection. The console
@@ -911,70 +1025,123 @@ impl SessionRequests {
     /// The requests the session keeps outstanding: held, or sent and awaiting their reply.
     fn outstanding(&self) -> OutstandingLoad {
         let mut load = OutstandingLoad::default();
-        // Bounded by `MAX_OUTSTANDING_REQUESTS`, which `accept` enforces, together with the
-        // requests the session issues itself: the requests that open a connection, one
-        // restoration or deletion per subscription tab, and one description per completed
-        // resource creation.
+        // Control admission enforces MAX_OUTSTANDING_REQUESTS and its text bound. As before,
+        // setup adds the requests for the retained tabs, selected domain/clock and transaction;
+        // refusing those at a full control backlog would prevent that backlog from recovering.
+        // Every kind still shares the wire window. Superseded sent lookups carry no text.
         for request in self.held.values() {
             load.add(request);
         }
-        for issued in self.in_flight.values() {
-            load.add(&issued.request);
+        for request in self.connection_held.values() {
+            load.add(&request.request);
+        }
+        for request in self.in_flight.values() {
+            match &request.awaited {
+                Some(issued) => load.add(&issued.request),
+                None => load.add_text(0),
+            }
         }
         load
+    }
+
+    /// Replacing a waiting lookup frees its text immediately. A sent lookup keeps only its
+    /// identity until its terminal reply, because the server still counts that request.
+    fn supersede_lookup(&mut self, request: &ConsoleRequest) {
+        let previous = match request {
+            ConsoleRequest::Suggest(_) => self.latest_suggestion.take(),
+            ConsoleRequest::Choice { context, .. } => self.latest_choices.remove(&context.control),
+            _ => None,
+        };
+        match previous {
+            Some(LookupPosition::Held(order)) => {
+                self.connection_held.remove(&order);
+            }
+            Some(LookupPosition::Sent(request_id)) => {
+                if let Some(request) = self.in_flight.get_mut(&request_id) {
+                    request.awaited = None;
+                }
+                self.transfers.remove(&request_id);
+            }
+            None => {}
+        }
+    }
+
+    fn remember_lookup(&mut self, request: &ConsoleRequest, position: LookupPosition) {
+        match request {
+            ConsoleRequest::Suggest(_) => self.latest_suggestion = Some(position),
+            ConsoleRequest::Choice { context, .. } => {
+                self.latest_choices.insert(context.control, position);
+            }
+            _ => {}
+        }
     }
 
     /// Registers a request as sent on the current connection and returns the message that
     /// carries it, under a fresh identity.
     fn dispatch(&mut self, issued: IssuedRequest) -> ClientMessage {
+        assert!(
+            self.has_room_in_flight(),
+            "admission reserves a server request place"
+        );
         let request_id = RequestId::new(self.next_request_id);
         self.next_request_id = self
             .next_request_id
             .checked_add(1)
             .assured("a console connection cannot send 2^64 requests");
-        match &issued.request {
-            ConsoleRequest::Suggest(_) => {
-                if let Some(previous) = self.latest_suggestion.replace(request_id) {
-                    self.in_flight.remove(&previous);
-                    self.transfers.remove(&previous);
-                }
-            }
-            ConsoleRequest::Choice { context, .. } => {
-                if let Some(previous) = self.latest_choices.insert(context.control, request_id) {
-                    self.in_flight.remove(&previous);
-                    self.transfers.remove(&previous);
-                }
-            }
-            ConsoleRequest::AttachTransaction(_) => {
-                self.attaching = Some(request_id);
-            }
-            ConsoleRequest::Command { .. }
-            | ConsoleRequest::ListDomains
-            | ConsoleRequest::InspectTransaction(_)
-            | ConsoleRequest::SubscriptionStart { .. }
-            | ConsoleRequest::SubscriptionStop { .. }
-            | ConsoleRequest::SelectDomain(_)
-            | ConsoleRequest::DomainClockAttach { .. }
-            | ConsoleRequest::DomainClockDetach { .. } => {}
+        self.remember_lookup(&issued.request, LookupPosition::Sent(request_id));
+        if let ConsoleRequest::AttachTransaction(_) = &issued.request {
+            self.attaching = Some(issued.order);
         }
         let message = ClientMessage {
             request_id,
             request: issued.request.client_request(),
         };
-        self.in_flight.insert(request_id, issued);
+        self.in_flight.insert(
+            request_id,
+            SentRequest {
+                awaited: Some(issued),
+            },
+        );
         message
     }
 
-    /// Dispatches the held requests in the order they were issued, once the session is ready and
-    /// while the server admits them in flight. The rest keep waiting for earlier replies.
+    /// Setup precedes ordered work, and connection-local controls can progress before that work
+    /// is ready. Otherwise issue order prevents a stream of lookups from overtaking commands.
+    fn connection_precedes_ordered(&self) -> bool {
+        let Some((connection_order, connection)) = self.connection_held.first_key_value() else {
+            return false;
+        };
+        if !self.is_ready() || connection.priority == ConnectionPriority::Setup {
+            return true;
+        }
+        match self.held.first_key_value() {
+            Some((ordered_order, _)) => connection_order < ordered_order,
+            None => true,
+        }
+    }
+
+    /// Fills the wire window without letting later controls overtake ready ordered work.
+    /// Ready ordered work is checked and removed through one occupied map entry.
     fn release_held(&mut self) -> Vec<ClientMessage> {
         let mut messages = Vec::new();
-        if !self.is_ready() {
-            return messages;
-        }
         while self.has_room_in_flight() {
-            let Some((order, request)) = self.held.pop_first() else {
-                break;
+            let (order, request) = if self.connection_precedes_ordered() {
+                let (order, held) = self
+                    .connection_held
+                    .pop_first()
+                    .verified("the connection request was found above");
+                (order, held.request)
+            } else {
+                if !self.is_ready() {
+                    break;
+                }
+                let Some(entry) = self.held.first_entry() else {
+                    break;
+                };
+                if self.command_retries.is_waiting(*entry.key()) {
+                    break;
+                }
+                entry.remove_entry()
             };
             messages.push(self.dispatch(IssuedRequest { order, request }));
         }
@@ -989,6 +1156,15 @@ impl SessionRequests {
     /// Drops every held request, because the session they were issued for is over.
     fn clear_held(&mut self) {
         self.held.clear();
+        self.command_retries.clear();
+        let connection_held = std::mem::take(&mut self.connection_held);
+        for held in connection_held.into_values() {
+            let request = held.request;
+            self.supersede_lookup(&request);
+            if let ConsoleRequest::AttachTransaction(_) = request {
+                self.attaching = None;
+            }
+        }
     }
 
     /// Pairs a server message with the request it answers. An event answers no request.
@@ -1010,14 +1186,15 @@ impl SessionRequests {
     fn answer(&mut self, request_id: RequestId) -> Option<IssuedRequest> {
         let request = self.in_flight.remove(&request_id)?;
         self.transfers.remove(&request_id);
-        if self.attaching == Some(request_id) {
+        let request = request.awaited?;
+        if self.attaching == Some(request.order) {
             self.attaching = None;
         }
-        if self.latest_suggestion == Some(request_id) {
+        if self.latest_suggestion == Some(LookupPosition::Sent(request_id)) {
             self.latest_suggestion = None;
         }
         self.latest_choices
-            .retain(|_, latest| *latest != request_id);
+            .retain(|_, latest| *latest != LookupPosition::Sent(request_id));
         Some(request)
     }
 
@@ -1025,6 +1202,16 @@ impl SessionRequests {
     fn assemble(&mut self, part: &TransferPart) -> Routed {
         let request_id = part.request_id();
         if !self.in_flight.contains_key(&request_id) {
+            return Routed::Untracked;
+        }
+        if let Some(SentRequest { awaited: None }) = self.in_flight.get(&request_id) {
+            let end = part
+                .offset()
+                .checked_add(part.chunk().len())
+                .assured("a verified transfer part ends within its declared total");
+            if end == part.total_bytes() {
+                self.in_flight.remove(&request_id);
+            }
             return Routed::Untracked;
         }
         let assembly = match self.transfers.entry(request_id) {
@@ -1036,13 +1223,7 @@ impl SessionRequests {
         let appended = assembly.append(part);
         let complete = assembly.is_complete();
         if let Err(error) = appended {
-            let request = self
-                .answer(request_id)
-                .verified("the request was found in flight above");
-            return Routed::Unreadable(Box::new(UnreadableReply {
-                request,
-                reason: format!("failed to reassemble a reply: {}", error.current_context()),
-            }));
+            return Routed::Unreadable(error);
         }
         if !complete {
             return Routed::Pending;
@@ -1051,18 +1232,24 @@ impl SessionRequests {
             .transfers
             .remove(&request_id)
             .verified("the assembly was completed above");
-        let request = self
-            .answer(request_id)
-            .verified("the request was found in flight above");
         match assembly.finish() {
-            Ok(reply) => Routed::Reply(Box::new(AnsweredRequest {
-                request,
-                body: reply.body,
-            })),
-            Err(error) => Routed::Unreadable(Box::new(UnreadableReply {
-                request,
-                reason: format!("failed to reassemble a reply: {}", error.current_context()),
-            })),
+            Ok(reply) => {
+                let request = self
+                    .answer(request_id)
+                    .verified("the request was found in flight above");
+                Routed::Reply(Box::new(AnsweredRequest {
+                    request,
+                    body: reply.body,
+                }))
+            }
+            Err(error) => Routed::Unreadable(error),
+        }
+    }
+
+    /// Holds an interrupted ordered request whole; the new connection recreates its own controls.
+    fn hold_interrupted(&mut self, issued: IssuedRequest) {
+        if issued.request.is_ordered() && !issued.request.belongs_to_connection() {
+            self.hold_again(issued);
         }
     }
 
@@ -1071,14 +1258,17 @@ impl SessionRequests {
     /// so the server recovers its recorded outcome instead of executing it twice. A request that
     /// belongs to the ended connection ends with it.
     fn end_connection(&mut self) {
+        self.command_retries.connection_ended();
         let in_flight = std::mem::take(&mut self.in_flight);
-        for issued in in_flight.into_values() {
-            if issued.request.is_ordered() && !issued.request.belongs_to_connection() {
-                self.hold_again(issued);
-            }
+        for request in in_flight.into_values() {
+            let Some(issued) = request.awaited else {
+                continue;
+            };
+            self.hold_interrupted(issued);
         }
         self.held
             .retain(|_, request| !request.belongs_to_connection());
+        self.connection_held.clear();
         self.transfers.clear();
         self.next_request_id = NonZeroU64::MIN;
         self.latest_suggestion = None;
@@ -1092,6 +1282,8 @@ impl SessionRequests {
 enum SessionStep {
     /// Keep serving the connection.
     Continue,
+    /// Keep the connection open while this command waits to repeat under its original identity.
+    RetryCommand(CommandRetryWait),
     /// Attach the session's transaction again. The requests held for it follow once it is
     /// attached.
     Reattach { transaction_id: String },
@@ -1099,6 +1291,10 @@ enum SessionStep {
     Redirect(Url),
     /// End the connection and connect again at the same address after the reconnect delay.
     Reconnect,
+    /// Stop reading the connection at once: a reply on it broke the session contract, so nothing
+    /// later on it can be trusted. Its unanswered ordered requests wait for the next connection,
+    /// which opens at the same address after the reconnect delay.
+    Abandon,
 }
 
 /// How a connection ended.
@@ -1322,6 +1518,7 @@ fn App() -> impl IntoView {
     let suggestion_continuation = RwSignal::new(None::<String>);
     let domain_snapshot = RwSignal::new(None::<DomainSnapshotView>);
     let cluster_counters = RwSignal::new(ClusterCounters::default());
+    let cluster_events = RwSignal::new(ClusterEventLog::default());
     let resource_details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
     let domains_loaded = RwSignal::new(false);
     let auth_token = RwSignal::new(web_console_auth_token_from_location());
@@ -1348,6 +1545,7 @@ fn App() -> impl IntoView {
         suggestion_continuation,
         domain_snapshot,
         cluster_counters,
+        cluster_events,
         active_domain,
         clock_display,
         clock_selection,
@@ -1538,6 +1736,7 @@ fn App() -> impl IntoView {
             domain,
             statement,
             subscription_type: SubscriptionType::Row,
+            expected_schema: None,
         };
         send_subscription_start(signals, subscription_request_tx, tab_id, request, origin);
     };
@@ -1844,6 +2043,7 @@ fn App() -> impl IntoView {
                 <Header
                     active_theme=active_theme
                     websocket_state=web_console_session.state
+                    cluster_events=cluster_events
                     active_domain=active_domain
                     clock_display=clock_display
                     domains=domains
@@ -2310,7 +2510,12 @@ async fn drain_closed_connection(
         received = true;
         match receive_frame(signals, state, requests, &frame) {
             SessionStep::Redirect(leader) => return Some(ConnectionEnd::Redirected(leader)),
-            SessionStep::Continue | SessionStep::Reattach { .. } | SessionStep::Reconnect => {}
+            // Nothing after a reply that broke the session contract is read.
+            SessionStep::Abandon => return Some(ConnectionEnd::Dropped),
+            SessionStep::Continue
+            | SessionStep::RetryCommand(_)
+            | SessionStep::Reattach { .. }
+            | SessionStep::Reconnect => {}
         }
     }
     if received {
@@ -2341,12 +2546,14 @@ async fn serve_connection(
             return ConnectionEnd::Dropped;
         }
         let issued = requests.issue(request);
-        let message = requests.dispatch(issued);
-        if !send_message(&mut socket, &codec, signals, requests, message).await {
+        let admission = requests.accept_connection(issued);
+        if !send_admission(&mut socket, &codec, signals, requests, admission).await {
             return ConnectionEnd::Dropped;
         }
     }
     let mut retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
+    let mut command_waits: FuturesUnordered<LocalBoxFuture<'static, IssueOrder>> =
+        FuturesUnordered::new();
     loop {
         if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
             return ConnectionEnd::Dropped;
@@ -2366,17 +2573,9 @@ async fn serve_connection(
                 if issued.request.inspects_transaction() {
                     signals.inspector.requested(issued.order.0);
                 }
-                match requests.accept(issued) {
-                    Admission::Sent(message) => {
-                        if !send_message(&mut socket, &codec, signals, requests, message).await {
-                            return ConnectionEnd::Dropped;
-                        }
-                    }
-                    Admission::Held => {}
-                    Admission::Refused(refused) => {
-                        let RefusedRequest { request, refusal } = *refused;
-                        fail_request(signals, request, refusal.to_string());
-                    }
+                let admission = requests.accept(issued);
+                if !send_admission(&mut socket, &codec, signals, requests, admission).await {
+                    return ConnectionEnd::Dropped;
                 }
                 SessionStep::Continue
             }
@@ -2411,6 +2610,10 @@ async fn serve_connection(
                     }
                 }
             }
+            order = next_command_retry(&mut command_waits).fuse() => {
+                requests.command_retries.ready(order);
+                SessionStep::Continue
+            }
             () = retry_delay.as_mut() => {
                 retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
                 // A tab whose restoration was refused is tried again while the session is ready,
@@ -2421,8 +2624,8 @@ async fn serve_connection(
                 if requests.can_send_ordered() && !transaction_active {
                     for request in signals.begin_restorations() {
                         let issued = requests.issue(request);
-                        let message = requests.dispatch(issued);
-                        if !send_message(&mut socket, &codec, signals, requests, message).await {
+                        let admission = requests.accept_connection(issued);
+                        if !send_admission(&mut socket, &codec, signals, requests, admission).await {
                             return ConnectionEnd::Dropped;
                         }
                     }
@@ -2432,20 +2635,29 @@ async fn serve_connection(
         };
         match step {
             SessionStep::Continue => {}
+            SessionStep::RetryCommand(wait) => {
+                command_waits.push(
+                    async move {
+                        wait_for_browser_delay(wait.delay).await;
+                        wait.order
+                    }
+                    .boxed_local(),
+                );
+            }
             SessionStep::Reattach { transaction_id } => {
                 if !requests.is_attaching() {
                     let attach = ConsoleRequest::AttachTransaction(AttachTransactionRequest {
                         transaction_id,
                     });
                     let issued = requests.issue(attach);
-                    let message = requests.dispatch(issued);
-                    if !send_message(&mut socket, &codec, signals, requests, message).await {
+                    let admission = requests.accept_connection(issued);
+                    if !send_admission(&mut socket, &codec, signals, requests, admission).await {
                         return ConnectionEnd::Dropped;
                     }
                 }
             }
             SessionStep::Redirect(leader) => return ConnectionEnd::Redirected(leader),
-            SessionStep::Reconnect => return ConnectionEnd::Dropped,
+            SessionStep::Reconnect | SessionStep::Abandon => return ConnectionEnd::Dropped,
         }
         for message in requests.release_held() {
             if !send_message(&mut socket, &codec, signals, requests, message).await {
@@ -2453,6 +2665,19 @@ async fn serve_connection(
             }
         }
     }
+}
+
+/// An empty timer set must remain pending, so an idle connection never spins on an ended stream.
+async fn next_command_retry(
+    waits: &mut FuturesUnordered<LocalBoxFuture<'static, IssueOrder>>,
+) -> IssueOrder {
+    if waits.is_empty() {
+        return std::future::pending().await;
+    }
+    waits
+        .next()
+        .await
+        .assured("this connection owns the nonempty timer set exclusively")
 }
 
 /// An acknowledged subscription belongs to the connection that ended. Its tab remains desired,
@@ -2491,11 +2716,27 @@ fn interrupt_subscription_tabs(signals: WebConsoleSignals) {
     }
 }
 
-/// Sends one request message as one binary WebSocket message.
-///
-/// `false` says the connection is gone. The request stays registered, so the next connection sends
-/// it again when it is ordered. A request that cannot become a frame is answered here, because no
-/// reply will ever answer it.
+/// Applies admission without bypassing the session's count or text bounds.
+async fn send_admission(
+    socket: &mut WebSocket,
+    codec: &ClientWebSocketCodec,
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    admission: Admission,
+) -> bool {
+    match admission {
+        Admission::Sent(message) => send_message(socket, codec, signals, requests, message).await,
+        Admission::Held => true,
+        Admission::Refused(refused) => {
+            let RefusedRequest { request, refusal } = *refused;
+            fail_request(signals, request, refusal.to_string());
+            true
+        }
+    }
+}
+
+/// Sends an admitted request as one binary WebSocket message. An encoding refusal ends it
+/// locally; a lost connection retains ordered work for recovery under its original identity.
 async fn send_message(
     socket: &mut WebSocket,
     codec: &ClientWebSocketCodec,
@@ -2507,6 +2748,7 @@ async fn send_message(
         Ok(frame) => frame,
         Err(error) => {
             if let Some(unsent) = requests.answer(message.request_id) {
+                requests.command_retries.finished(unsent.order);
                 let reason = format!("the request cannot be sent: {}", error.current_context());
                 fail_request(signals, unsent.request, reason);
             }
@@ -2536,33 +2778,16 @@ fn receive_frame(
     let message = match ServerMessage::decode(frame) {
         Ok(message) => message,
         Err(error) => {
-            let reason = format!(
-                "failed to decode a server message: {}",
-                error.current_context()
-            );
-            // A reply that cannot be read still ends the request it answers.
-            let answered = match frame.request_id() {
-                Some(request_id) => requests.answer(request_id),
-                None => None,
-            };
-            match answered {
-                Some(unread) => fail_request(signals, unread.request, reason),
-                None => {
-                    signals
-                        .terminal_lines
-                        .update(|lines| lines.push(TermLine::error(reason)));
-                }
-            }
-            return SessionStep::Continue;
+            let reason = format!("failed to decode a server message: {error:#}");
+            return signals.interrupt_unreadable_session(&reason);
         }
     };
     match requests.route(message) {
         Routed::Event(event) => apply_event(signals, state, requests, event),
         Routed::Reply(answered) => apply_reply(signals, requests, *answered),
-        Routed::Unreadable(unreadable) => {
-            let UnreadableReply { request, reason } = *unreadable;
-            fail_request(signals, request.request, reason);
-            SessionStep::Continue
+        Routed::Unreadable(error) => {
+            let reason = format!("failed to reassemble a reply: {error:#}");
+            signals.interrupt_unreadable_session(&reason)
         }
         Routed::Untracked | Routed::Pending => SessionStep::Continue,
     }
@@ -2735,8 +2960,18 @@ fn apply_event(
             Leadership::Unknown => redirect_step(signals, &LeaderRedirect { leader: None }),
         },
         ServerEvent::Notice(notice) => {
-            let line = notice_line(notice);
-            signals.terminal_lines.update(|lines| lines.push(line));
+            match notice.kind {
+                NoticeKind::Membership | NoticeKind::Leadership => {
+                    let session = signals.session_generation.get_untracked();
+                    signals
+                        .cluster_events
+                        .update(|events| events.record(session, notice));
+                }
+                NoticeKind::ClusterParameters | NoticeKind::Runtime | NoticeKind::ControlPlane => {
+                    let line = notice_line(notice);
+                    signals.terminal_lines.update(|lines| lines.push(line));
+                }
+            }
             SessionStep::Continue
         }
         ServerEvent::Domains(observed) => {
@@ -2858,10 +3093,12 @@ fn apply_reply(
     let IssuedRequest { order, request } = request;
     match (request, body) {
         (request, ReplyBody::Rejected(rejected)) => {
+            requests.command_retries.finished(order);
             fail_request(signals, request, rejected.message);
             SessionStep::Continue
         }
         (request, ReplyBody::Cancelled(cancelled)) => {
+            requests.command_retries.finished(order);
             fail_request(signals, request, cancellation_reason(cancelled));
             SessionStep::Continue
         }
@@ -2987,19 +3224,22 @@ fn apply_reply(
             SessionStep::Continue
         }
         (request, _) => {
-            fail_request(signals, request, UNEXPECTED_REPLY.to_string());
-            SessionStep::Continue
+            requests.hold_interrupted(IssuedRequest { order, request });
+            signals.interrupt_unreadable_session(UNEXPECTED_REPLY)
         }
     }
 }
 
 /// Applies the outcome of a command.
 ///
-/// A command the serving node could not run because it does not lead is sent again at the leader's
-/// console, and a command the leader could not bind to the session's transaction is sent again
-/// once the transaction is attached. An unknown outcome reconnects before another attempt. Each
-/// attempt keeps the command's execution reference, so the server recovers its recorded outcome
-/// instead of running it twice. A definitive outcome goes to whoever reads the command.
+/// An outcome that names another execution than the command's own is refused before anything it
+/// carries is applied, as [`refuse_foreign_outcome`] describes. A command the serving node could
+/// not run because it does not lead is sent again at the leader's console, and a command the
+/// leader could not bind to the session's transaction is sent again once the transaction is
+/// attached. An unknown outcome waits before repeating on the open connection, which continues
+/// serving other messages. Each attempt keeps the command's execution reference, so the server
+/// recovers its recorded outcome instead of running it twice. A definitive outcome goes to
+/// whoever reads the command.
 fn apply_command_outcome(
     signals: WebConsoleSignals,
     requests: &mut SessionRequests,
@@ -3008,6 +3248,16 @@ fn apply_command_outcome(
     purpose: CommandPurpose,
     mut outcome: CommandOutcome,
 ) -> SessionStep {
+    if outcome.execution_reference != request.execution_reference {
+        return refuse_foreign_outcome(
+            signals,
+            requests,
+            order,
+            request,
+            purpose,
+            outcome.execution_reference,
+        );
+    }
     if let Some(redirect) = command_redirect(&outcome.disposition) {
         if let CommandPurpose::Create(context) = &purpose {
             signals
@@ -3022,16 +3272,12 @@ fn apply_command_outcome(
         return step;
     }
     if matches!(outcome.disposition, CommandDisposition::OutcomeUnknown(_)) {
-        if let CommandPurpose::Create(context) = &purpose {
-            signals
-                .create
-                .queued_reconnect(context.attempt, context.draft_revision);
-        }
+        let wait = requests.command_retries.wait(order);
         requests.hold_again(IssuedRequest {
             order,
             request: ConsoleRequest::Command { request, purpose },
         });
-        return SessionStep::Reconnect;
+        return SessionStep::RetryCommand(wait);
     }
     let queued_transaction_position = queued_transaction_position(&outcome);
     if let Some(status) = outcome.transaction.take() {
@@ -3045,6 +3291,7 @@ fn apply_command_outcome(
         });
         return SessionStep::Reattach { transaction_id };
     }
+    requests.command_retries.finished(order);
     match purpose {
         CommandPurpose::Repl => show_command_outcome(signals, order, &request.query, outcome),
         CommandPurpose::Create(context) => {
@@ -3068,6 +3315,54 @@ fn apply_command_outcome(
         }
     }
     SessionStep::Continue
+}
+
+/// A command outcome that names another execution than its command's own, which the session
+/// contract forbids (E-5 of the client implementation manual).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "protocol violation: the reply to command execution '{expected}' names execution \
+     '{received}'; the console reconnects and sends the command again under its own reference"
+)]
+struct ForeignCommandOutcome {
+    expected: CommandExecutionReference,
+    received: CommandExecutionReference,
+}
+
+/// Refuses a command outcome that names another execution (E-5), before anything it carries is
+/// applied: its result, its redirect, its unknown outcome, its detached transaction or its
+/// transaction status.
+///
+/// The reply broke the session contract, so the console reports the violation and stops reading
+/// the connection, which interrupts every request still waiting on it (F-8). The command keeps
+/// its place in the issue order and its whole original request, so the next connection sends it
+/// again under its own execution reference, and the server answers with the command's own
+/// recorded outcome instead of running it twice (E-3).
+fn refuse_foreign_outcome(
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    order: IssueOrder,
+    request: CommandRequest,
+    purpose: CommandPurpose,
+    received: CommandExecutionReference,
+) -> SessionStep {
+    let violation = ForeignCommandOutcome {
+        expected: request.execution_reference.clone(),
+        received,
+    };
+    signals
+        .terminal_lines
+        .update(|lines| lines.push(TermLine::error(violation.to_string())));
+    if let CommandPurpose::Create(context) = &purpose {
+        signals
+            .create
+            .queued_reconnect(context.attempt, context.draft_revision);
+    }
+    requests.hold_again(IssuedRequest {
+        order,
+        request: ConsoleRequest::Command { request, purpose },
+    });
+    SessionStep::Abandon
 }
 
 fn show_create_outcome(
@@ -3305,7 +3600,7 @@ fn apply_subscribe_outcome(
                 signals.create.completed(attempt, draft_revision);
             }
         }
-        SubscribeDisposition::Failed => {
+        SubscribeDisposition::Refused(_) => {
             let reason = message.clone();
             let lines = failed_lines(message, diagnostics, statement);
             fail_subscription_start(signals, tab_id, lines);
@@ -3969,6 +4264,7 @@ fn notice_line(notice: ServerNotice) -> TermLine {
 fn Header(
     active_theme: RwSignal<usize>,
     websocket_state: RwSignal<ConsoleConnectionState>,
+    cluster_events: RwSignal<ClusterEventLog>,
     active_domain: RwSignal<Option<DomainName>>,
     clock_display: RwSignal<ClockDisplay>,
     domains: RwSignal<Vec<DomainView>>,
@@ -4007,6 +4303,7 @@ fn Header(
                 <span class=move || websocket_state.get().pill_class()>
                     {move || websocket_state.get().label()}
                 </span>
+                <NodePanel events=cluster_events />
                 <Show
                     when=move || selected_domain()
                         .is_some_and(|domain| domain.state_command().is_some())
@@ -4552,7 +4849,7 @@ fn ResourceDialog(
                     resource_name.clone(),
                     upload_domain,
                     input,
-                    upload_base_url.get_untracked(),
+                    upload_base_url,
                     attempt_auth.clone(),
                 ),
                 registration,
@@ -4727,11 +5024,18 @@ fn event_target_input(event: &ev::Event) -> web_sys::HtmlInputElement {
         .verified("this handler is only bound to the upload input element")
 }
 
+/// Uploads the files selected in `input` as a new version of `resource`, and returns what the
+/// dialog shows of the outcome.
+///
+/// Every attempt posts the same files under one upload identity to the leader the console knows
+/// at that moment. An answer that decided nothing, from a node that could not act as the leader,
+/// is sent again after the wait the console's reconnects use, doubling up to their longest, for as
+/// long as the dialog keeps the upload; every other answer ends it.
 async fn upload_resource_files(
     resource: String,
     domain: DomainName,
     input: web_sys::HtmlInputElement,
-    upload_base_url: Option<String>,
+    upload_base_url: RwSignal<Option<String>>,
     auth_token: Option<String>,
 ) -> String {
     let Some(files) = input.files() else {
@@ -4769,30 +5073,45 @@ async fn upload_resource_files(
         return "failed to access browser upload identity source".to_string();
     };
     let upload_identity = crypto.random_uuid();
-    let url = web_console_resource_upload_url(
-        upload_base_url.as_deref(),
-        &resource,
-        domain.as_str(),
-        &upload_identity,
-        auth_token.as_deref(),
-    );
-    match gloo_net::http::Request::post(&url).body(form) {
-        Ok(request) => match request.send().await {
-            Ok(response) => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                if (200..300).contains(&status) {
-                    text
-                } else if text.is_empty() {
-                    format!("upload failed with HTTP {status}")
-                } else {
-                    text
-                }
-            }
-            Err(error) => format!("upload request failed: {error}"),
-        },
-        Err(error) => format!("failed to build upload request: {error}"),
+    let mut retry_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
+    loop {
+        let base_url = upload_base_url.get_untracked();
+        let url = web_console_resource_upload_url(
+            base_url.as_deref(),
+            &resource,
+            domain.as_str(),
+            &upload_identity,
+            auth_token.as_deref(),
+        );
+        let answer = post_resource_upload(&url, &form).await;
+        match answer {
+            UploadAnswer::Installed(text) | UploadAnswer::Failed(text) => return text,
+            UploadAnswer::NotDecided(_) => {}
+        }
+        wait_for_browser_delay(retry_delay).await;
+        let doubled = retry_delay
+            .checked_mul(2)
+            .assured("a delay of at most the reconnect ceiling doubles well within a Duration");
+        retry_delay = doubled.min(WEBSOCKET_MAX_RECONNECT_DELAY);
     }
+}
+
+/// Posts one attempt of an upload and reads what its answer decided. A request the browser could
+/// not build or send is a final failure.
+async fn post_resource_upload(url: &str, form: &web_sys::FormData) -> UploadAnswer {
+    let request = match gloo_net::http::Request::post(url).body(form.clone()) {
+        Ok(request) => request,
+        Err(error) => {
+            return UploadAnswer::Failed(format!("failed to build upload request: {error}"));
+        }
+    };
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => return UploadAnswer::Failed(format!("upload request failed: {error}")),
+    };
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    UploadAnswer::of_response(status, text)
 }
 
 fn web_console_resource_upload_url(
@@ -7869,11 +8188,15 @@ impl TermLineKind {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    mod foreign_execution;
+    mod reply_kind;
+    mod unreadable_reply;
+
     use leptos::prelude::Owner;
     use nervix_client_wire::{
         DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockObserved,
         DomainClockTicked, DomainList, DomainsObserved, OutcomeOrigin, Reply, ReplyDelivery,
-        SessionLimitSettings, SourceSpan, SubscriptionEndReason,
+        SessionLimitSettings, SourceSpan, SubscriptionEndReason, SubscriptionRefusal,
     };
     use nervix_dataflow_graph::{
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
@@ -8090,6 +8413,7 @@ mod tests {
             suggestion_continuation: RwSignal::new(None),
             domain_snapshot: RwSignal::new(None),
             cluster_counters: RwSignal::new(ClusterCounters::default()),
+            cluster_events: RwSignal::new(ClusterEventLog::default()),
             active_domain: RwSignal::new(Some(domain.clone())),
             clock_display: RwSignal::new(ClockDisplay::selected(Some(domain.clone()), true)),
             clock_selection: RwSignal::new(ClockSelection::default()),
@@ -8518,6 +8842,7 @@ mod tests {
                     domain: domain_name("tenant"),
                     statement: "CREATE SUBSCRIPTION other TO orders;".to_string(),
                     subscription_type: SubscriptionType::Row,
+                    expected_schema: None,
                 },
                 origin: SubscriptionOrigin::Console,
             });
@@ -9244,7 +9569,7 @@ mod tests {
                 &mut requests,
                 console_start(1),
                 SubscribeOutcome {
-                    disposition: SubscribeDisposition::Failed,
+                    disposition: SubscribeDisposition::Refused(SubscriptionRefusal::Unavailable),
                     message: "relay is unavailable".to_string(),
                     diagnostics: Vec::new(),
                 },
@@ -9270,7 +9595,7 @@ mod tests {
                 &mut requests,
                 console_start(1),
                 SubscribeOutcome {
-                    disposition: SubscribeDisposition::Failed,
+                    disposition: SubscribeDisposition::Refused(SubscriptionRefusal::Unavailable),
                     message: "leader is changing".to_string(),
                     diagnostics: Vec::new(),
                 },
@@ -9348,6 +9673,7 @@ mod tests {
                     domain: domain.clone(),
                     statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                     subscription_type: SubscriptionType::Row,
+                    expected_schema: None,
                 },
                 origin: SubscriptionOrigin::Console,
             });
@@ -9452,6 +9778,7 @@ mod tests {
                         domain: DomainName::parse("tenant").assured("the test domain is valid"),
                         statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                         subscription_type: SubscriptionType::Row,
+                        expected_schema: None,
                     },
                     origin: SubscriptionOrigin::Console,
                 });
@@ -9520,6 +9847,71 @@ mod tests {
                 .text
                 .is_char_boundary(lines[1].line.text.len())
         );
+    }
+
+    fn server_notice(level: NoticeLevel, kind: NoticeKind, message: &str) -> ServerEvent {
+        ServerEvent::Notice(ServerNotice {
+            level,
+            kind,
+            message: message.to_string(),
+        })
+    }
+
+    #[test]
+    fn membership_and_leadership_notices_go_to_the_node_panel_and_the_rest_to_the_transcript() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
+            let state = RwSignal::new(ConsoleConnectionState::Connected);
+            let mut requests = SessionRequests::new();
+            let notices = [
+                server_notice(
+                    NoticeLevel::Info,
+                    NoticeKind::Membership,
+                    "node 'node-3' left",
+                ),
+                server_notice(
+                    NoticeLevel::Info,
+                    NoticeKind::Leadership,
+                    "raft transition: state=Follower leader=node-2 term=3",
+                ),
+                server_notice(
+                    NoticeLevel::Info,
+                    NoticeKind::ClusterParameters,
+                    "cluster parameters committed at revision 4",
+                ),
+                server_notice(
+                    NoticeLevel::Error,
+                    NoticeKind::Runtime,
+                    "emitter 'redis_orders' publish failed",
+                ),
+                server_notice(
+                    NoticeLevel::Error,
+                    NoticeKind::ControlPlane,
+                    "resource 'model' failed to load",
+                ),
+            ];
+            for notice in notices {
+                let step = apply_event(signals, state, &mut requests, notice);
+                assert!(matches!(step, SessionStep::Continue));
+            }
+
+            assert_eq!(signals.cluster_events.with(ClusterEventLog::received), 2);
+            let transcript = signals.terminal_lines.with(|lines| {
+                lines
+                    .lines
+                    .iter()
+                    .map(|entry| entry.line.text.clone())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                transcript,
+                vec![
+                    "cluster parameters committed at revision 4".to_string(),
+                    "error: emitter 'redis_orders' publish failed".to_string(),
+                    "error: resource 'model' failed to load".to_string(),
+                ]
+            );
+        });
     }
 
     /// The notice with which the server ends the generation `subscription`.
@@ -9661,7 +10053,7 @@ mod tests {
                 &mut requests,
                 console_start(1),
                 SubscribeOutcome {
-                    disposition: SubscribeDisposition::Failed,
+                    disposition: SubscribeDisposition::Refused(SubscriptionRefusal::RelayNotFound),
                     message: "stream 'orders' does not exist in domain 'tenant'".to_string(),
                     diagnostics: Vec::new(),
                 },
@@ -9799,6 +10191,7 @@ mod tests {
                 domain: domain_name("tenant"),
                 statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                 subscription_type: SubscriptionType::Row,
+                expected_schema: None,
             };
             let (sender, mut receiver) = request_handoff();
             send_subscription_start(
@@ -9989,6 +10382,7 @@ mod tests {
                         domain: domain_name("tenant"),
                         statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                         subscription_type: SubscriptionType::Row,
+                        expected_schema: None,
                     },
                     origin: SubscriptionOrigin::Console,
                 });
@@ -10088,6 +10482,264 @@ mod tests {
     }
 
     #[test]
+    fn every_control_waits_for_a_place_in_the_session_request_window() {
+        for request in [
+            suggest("CREATE "),
+            choice_request(ChoiceControl::DomainPace, 1),
+            ConsoleRequest::SelectDomain(SelectDomainRequest {
+                domain: domain_name("selected"),
+            }),
+            ConsoleRequest::AttachTransaction(AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            }),
+        ] {
+            let mut requests = SessionRequests::new();
+            requests.confirm_leader();
+            for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+                let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+                sent(requests.accept(issued));
+            }
+            let issued = requests.issue(request);
+            assert!(
+                matches!(requests.accept(issued), Admission::Held),
+                "every control waits while the server's request window is full"
+            );
+            assert_eq!(requests.in_flight.len(), MAX_IN_FLIGHT_REQUESTS);
+            assert!(requests.release_held().is_empty());
+            assert!(requests.answer(request_id(1)).is_some());
+            assert_eq!(requests.release_held().len(), 1);
+        }
+    }
+
+    #[test]
+    fn superseding_a_lookup_does_not_release_its_server_request_place() {
+        let mut requests = SessionRequests::new();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(suggest("CREATE "));
+            sent(requests.accept(issued));
+        }
+        let latest = requests.issue(suggest("SHOW "));
+        assert!(matches!(requests.accept(latest), Admission::Held));
+        assert!(requests.release_held().is_empty());
+        assert!(matches!(
+            requests.route(reply(request_id(1), ready_choice_reply())),
+            Routed::Untracked
+        ));
+        let released = requests.release_held();
+        assert_eq!(released.len(), 1);
+        assert!(matches!(released[0].request, ClientRequest::Suggest(_)));
+    }
+
+    #[test]
+    fn waiting_lookups_keep_the_latest_input_and_each_controls_latest_draft() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            sent(requests.accept(issued));
+        }
+        for request in [
+            suggest(&"a".repeat(1024)),
+            choice_request(ChoiceControl::DomainPace, 1),
+            suggest("SHOW "),
+            choice_request(ChoiceControl::DomainPace, 2),
+            choice_request(ChoiceControl::PlacementPolicy, 1),
+        ] {
+            let issued = requests.issue(request);
+            assert!(matches!(requests.accept(issued), Admission::Held));
+        }
+        let load = requests.outstanding();
+        assert_eq!(load.requests, MAX_IN_FLIGHT_REQUESTS + 3);
+        assert_eq!(
+            load.bytes,
+            "SHOW CLUSTER STATUS;".len() * MAX_IN_FLIGHT_REQUESTS + "SHOW ".len()
+        );
+        for number in 1..=MAX_IN_FLIGHT_REQUESTS {
+            let number = u64::try_from(number).assured("the request window fits in u64");
+            assert!(requests.answer(request_id(number)).is_some());
+        }
+        let released = requests.release_held();
+        assert_eq!(released.len(), 3);
+        let ClientRequest::Suggest(suggestion) = &released[0].request else {
+            panic!("the latest completion goes out first");
+        };
+        assert_eq!(suggestion.input(), "SHOW ");
+        let Routed::Reply(answered) =
+            requests.route(reply(released[1].request_id, ready_choice_reply()))
+        else {
+            panic!("the latest domain choice remains awaited");
+        };
+        let ConsoleRequest::Choice { context, .. } = answered.request.request else {
+            panic!("the reply belongs to a choice lookup");
+        };
+        assert_eq!(context.control, ChoiceControl::DomainPace);
+        assert_eq!(context.draft_revision, 2);
+        assert!(matches!(released[2].request, ClientRequest::Choice(_)));
+    }
+
+    #[test]
+    fn a_waiting_transaction_attach_precedes_held_commands_and_releases_them() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            sent(requests.accept(issued));
+        }
+        let command = requests.issue(repl_command("held command"));
+        assert!(matches!(requests.accept(command), Admission::Held));
+        let attach = requests.issue(ConsoleRequest::AttachTransaction(
+            AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            },
+        ));
+        assert!(matches!(
+            requests.accept_connection(attach),
+            Admission::Held
+        ));
+        assert!(requests.is_attaching());
+        assert!(requests.answer(request_id(1)).is_some());
+        let released = requests.release_held();
+        assert_eq!(released.len(), 1);
+        assert!(matches!(
+            released[0].request,
+            ClientRequest::AttachTransaction(_)
+        ));
+        assert!(requests.answer(released[0].request_id).is_some());
+        assert_eq!(sent_queries(&requests.release_held()), vec!["held command"]);
+    }
+
+    #[test]
+    fn waiting_controls_and_ready_commands_share_issue_order() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            sent(requests.accept(issued));
+        }
+        for request in [
+            repl_command("earlier command"),
+            suggest("CREATE "),
+            repl_command("later command"),
+            choice_request(ChoiceControl::DomainPace, 1),
+        ] {
+            let issued = requests.issue(request);
+            assert!(matches!(requests.accept(issued), Admission::Held));
+        }
+        assert!(requests.answer(request_id(1)).is_some());
+        assert_eq!(
+            sent_queries(&requests.release_held()),
+            vec!["earlier command"]
+        );
+        // New input replaces the waiting lookup in its new issue position. It must not
+        // continually overtake the command that was issued before that replacement.
+        let latest = requests.issue(suggest("SHOW "));
+        assert!(matches!(requests.accept(latest), Admission::Held));
+        let last = requests.issue(repl_command("last command"));
+        assert!(matches!(requests.accept(last), Admission::Held));
+        assert!(requests.answer(request_id(2)).is_some());
+        assert_eq!(
+            sent_queries(&requests.release_held()),
+            vec!["later command"]
+        );
+        assert!(requests.answer(request_id(3)).is_some());
+        let choice = requests.release_held();
+        assert_eq!(choice.len(), 1);
+        assert!(matches!(choice[0].request, ClientRequest::Choice(_)));
+        assert!(requests.answer(request_id(4)).is_some());
+        let completion = requests.release_held();
+        assert_eq!(completion.len(), 1);
+        let ClientRequest::Suggest(suggestion) = &completion[0].request else {
+            panic!("the latest input keeps its own position after the earlier choice");
+        };
+        assert_eq!(suggestion.input(), "SHOW ");
+        assert!(requests.answer(request_id(5)).is_some());
+        assert_eq!(sent_queries(&requests.release_held()), vec!["last command"]);
+    }
+
+    #[test]
+    fn a_new_connection_replays_commands_and_issues_its_own_local_controls() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            sent(requests.accept(issued));
+        }
+        for request in [
+            suggest("CREATE "),
+            choice_request(ChoiceControl::DomainPace, 1),
+            ConsoleRequest::SelectDomain(SelectDomainRequest {
+                domain: domain_name("selected"),
+            }),
+            ConsoleRequest::AttachTransaction(AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            }),
+        ] {
+            let issued = requests.issue(request);
+            assert!(matches!(requests.accept(issued), Admission::Held));
+        }
+        requests.end_connection();
+        requests.confirm_leader();
+        let replayed = requests.release_held();
+        assert_eq!(
+            sent_queries(&replayed),
+            vec!["SHOW CLUSTER STATUS;"; MAX_IN_FLIGHT_REQUESTS]
+        );
+        assert!(!requests.is_attaching());
+        assert_eq!(replayed[0].request_id, request_id(1));
+    }
+
+    #[test]
+    fn a_full_control_backlog_can_restore_its_transaction_before_it_replays() {
+        let mut requests = SessionRequests::new();
+        for _ in 0..MAX_OUTSTANDING_REQUESTS {
+            let issued = requests.issue(repl_command("held command"));
+            assert!(matches!(requests.accept(issued), Admission::Held));
+        }
+        let attach = requests.issue(ConsoleRequest::AttachTransaction(
+            AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            },
+        ));
+        let attach = sent(requests.accept_connection(attach));
+        requests.confirm_leader();
+        assert!(requests.release_held().is_empty());
+        assert!(requests.answer(attach.request_id).is_some());
+        let replayed = requests.release_held();
+        assert_eq!(
+            sent_queries(&replayed),
+            vec!["held command"; MAX_IN_FLIGHT_REQUESTS]
+        );
+        assert_eq!(requests.outstanding().requests, MAX_OUTSTANDING_REQUESTS);
+    }
+
+    #[test]
+    fn connection_opening_waits_for_capacity_without_waiting_for_leader_confirmation() {
+        let mut requests = SessionRequests::new();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(ConsoleRequest::SelectDomain(SelectDomainRequest {
+                domain: domain_name("selected"),
+            }));
+            sent(requests.accept_connection(issued));
+        }
+        let issued = requests.issue(ConsoleRequest::AttachTransaction(
+            AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            },
+        ));
+        assert!(matches!(
+            requests.accept_connection(issued),
+            Admission::Held
+        ));
+        assert!(requests.answer(request_id(1)).is_some());
+        let released = requests.release_held();
+        assert_eq!(released.len(), 1);
+        assert!(matches!(
+            released[0].request,
+            ClientRequest::AttachTransaction(_)
+        ));
+    }
+
+    #[test]
     fn ordered_requests_beyond_the_in_flight_limit_wait_in_order_for_earlier_replies() {
         let mut requests = SessionRequests::new();
         requests.confirm_leader();
@@ -10142,6 +10794,33 @@ mod tests {
 
     /// The first part of a completion reply to `request_id` too large for one frame.
     fn first_suggestion_part(request_id: RequestId) -> ServerMessage {
+        suggestion_parts(request_id)
+            .into_iter()
+            .next()
+            .assured("a transfer has a first part")
+    }
+
+    fn suggestion_parts(request_id: RequestId) -> Vec<ServerMessage> {
+        suggestion_frames(request_id)
+            .iter()
+            .map(|frame| ServerMessage::decode(frame).assured("a verified part decodes"))
+            .collect()
+    }
+
+    /// The one verified frame a server sends `reply` in.
+    fn reply_frame(reply: &Reply) -> VerifiedFrame<ServerFrame> {
+        let ReplyDelivery::Frame(frame) = reply
+            .encode(&SESSION_LIMITS)
+            .assured("a test reply is far below the session limits")
+        else {
+            panic!("a test reply fits one frame");
+        };
+        frame
+            .verify(&SESSION_LIMITS)
+            .assured("an encoded frame verifies under the limits it was encoded for")
+    }
+
+    fn suggestion_frames(request_id: RequestId) -> Vec<VerifiedFrame<ServerFrame>> {
         let small_frames = SessionLimits::try_from(SessionLimitSettings {
             frame_bytes: std::num::NonZeroUsize::new(1024).assured("a literal nonzero size"),
             transfer_bytes: std::num::NonZeroUsize::new(SESSION_LIMITS.transfer_bytes())
@@ -10171,18 +10850,20 @@ mod tests {
                 }],
             }),
         };
-        let ReplyDelivery::Transfer(mut parts) = reply
+        let ReplyDelivery::Transfer(parts) = reply
             .encode(&small_frames)
             .assured("the reply stays within the transfer limit")
         else {
             panic!("a reply larger than a frame travels as parts");
         };
-        let first = parts
-            .next()
-            .assured("a transfer has a first part")
-            .verify(&small_frames)
-            .assured("an encoded part verifies under the limits it was encoded for");
-        ServerMessage::decode(&first).assured("a verified part decodes")
+        let mut messages = Vec::new();
+        for part in parts {
+            let frame = part
+                .verify(&small_frames)
+                .assured("an encoded part verifies under the limits it was encoded for");
+            messages.push(frame);
+        }
+        messages
     }
 
     #[test]
@@ -10200,6 +10881,26 @@ mod tests {
             requests.transfers.is_empty(),
             "the parts of a reply nobody awaits are not kept"
         );
+    }
+
+    #[test]
+    fn a_superseded_transfer_releases_its_request_place_only_at_its_final_part() {
+        let mut requests = SessionRequests::new();
+        let issued = requests.issue(suggest("SH"));
+        let earlier = sent(requests.accept(issued));
+        let issued = requests.issue(suggest("SHOW"));
+        sent(requests.accept(issued));
+        let mut parts = suggestion_parts(earlier.request_id);
+        let last = parts.pop().assured("the large reply has a final part");
+        assert!(!parts.is_empty());
+        for part in parts {
+            assert!(matches!(requests.route(part), Routed::Untracked));
+            assert_eq!(requests.in_flight.len(), 2);
+            assert!(requests.transfers.is_empty());
+        }
+        assert!(matches!(requests.route(last), Routed::Untracked));
+        assert_eq!(requests.in_flight.len(), 1);
+        assert!(requests.transfers.is_empty());
     }
 
     #[test]
@@ -10526,6 +11227,96 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_command_waits_before_repeating_on_its_open_connection() {
+        use nervix_client_wire::UnknownOutcomeCause;
+
+        for cause in [
+            UnknownOutcomeCause::LeadershipLost,
+            UnknownOutcomeCause::StillApplying,
+            UnknownOutcomeCause::NotYetAuthoritative,
+        ] {
+            Owner::new().with(|| {
+                let signals = subscription_signals(SubscriptionTabState::Pending);
+                let mut requests = SessionRequests::new();
+                requests.confirm_leader();
+                let mut first = repl_command("first");
+                let ConsoleRequest::Command { request, .. } = &mut first else {
+                    panic!("the test prepares a command");
+                };
+                request.expected_transaction_position = Some(TransactionPosition::new(2));
+                request.expected_preview = Some(TransactionPreviewIdentity {
+                    transaction_id: "attached".to_string(),
+                    position: TransactionPosition::new(2),
+                    planning_basis: ImpactPlanningBasis::new([7; 32]),
+                });
+                let issued = requests.issue(first);
+                let message = sent(requests.accept(issued));
+                let issued = requests
+                    .answer(message.request_id)
+                    .assured("the command is awaiting its reply");
+                let IssuedRequest { order, request } = issued;
+                let ConsoleRequest::Command { request, purpose } = request else {
+                    panic!("the test issued a command");
+                };
+                let original = request.clone();
+                let mut outcome = completed_outcome("the command's outcome is not known yet");
+                outcome.execution_reference = request.execution_reference.clone();
+                outcome.disposition = CommandDisposition::OutcomeUnknown(cause);
+                let step =
+                    apply_command_outcome(signals, &mut requests, order, request, purpose, outcome);
+                let SessionStep::RetryCommand(wait) = step else {
+                    panic!("an uncertain command waits on the open connection");
+                };
+                assert_eq!(wait.order, order);
+                assert_eq!(wait.delay, WEBSOCKET_INITIAL_RECONNECT_DELAY);
+
+                let later = requests.issue(repl_command("later"));
+                assert!(matches!(requests.accept(later), Admission::Held));
+                assert!(requests.is_ready(), "the serving leader is still confirmed");
+                assert!(
+                    requests.release_held().is_empty(),
+                    "an unknown {cause:?} outcome holds the command and later work for its retry \
+                     delay"
+                );
+                assert!(
+                    signals
+                        .terminal_lines
+                        .get_untracked()
+                        .into_lines()
+                        .is_empty()
+                );
+                requests.command_retries.ready(wait.order);
+                let repeated = requests.release_held();
+                assert_eq!(sent_queries(&repeated), vec!["first", "later"]);
+                assert_eq!(sent_commands(&repeated)[0], &original);
+
+                let mut completed = completed_outcome("created schema");
+                completed.execution_reference = original.execution_reference;
+                let terminal = reply(
+                    repeated[0].request_id,
+                    ReplyBody::Command(Box::new(completed)),
+                );
+                let Routed::Reply(answered) = requests.route(terminal.clone()) else {
+                    panic!("the repeated command awaits its terminal outcome");
+                };
+                assert!(matches!(
+                    apply_reply(signals, &mut requests, *answered),
+                    SessionStep::Continue
+                ));
+                assert!(matches!(requests.route(terminal), Routed::Untracked));
+                let lines = signals.terminal_lines.get_untracked().into_lines();
+                assert_eq!(
+                    lines
+                        .iter()
+                        .filter(|line| line.line.text == "created schema")
+                        .count(),
+                    1
+                );
+            });
+        }
+    }
+
+    #[test]
     fn unknown_command_outcome_retries_with_its_execution_reference() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
@@ -10537,13 +11328,16 @@ mod tests {
             };
             let reference = request.execution_reference.clone();
             let mut outcome = completed_outcome("leadership moved during admission");
+            outcome.execution_reference = reference.clone();
             outcome.disposition = CommandDisposition::OutcomeUnknown(
                 nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
             );
 
             let step =
                 apply_command_outcome(signals, &mut requests, order, request, purpose, outcome);
-            assert!(matches!(step, SessionStep::Reconnect));
+            let SessionStep::RetryCommand(wait) = step else {
+                panic!("the uncertain command waits before repeating");
+            };
             assert!(
                 signals
                     .terminal_lines
@@ -10552,8 +11346,8 @@ mod tests {
                     .is_empty()
             );
 
-            requests.end_connection();
             requests.confirm_leader();
+            requests.command_retries.ready(wait.order);
             let resent = requests.release_held();
             assert_eq!(sent_commands(&resent)[0].execution_reference, reference);
         });
@@ -11968,6 +12762,7 @@ mod tests {
                 panic!("the test issued a create command");
             };
             let mut unknown = completed_outcome("leadership moved during admission");
+            unknown.execution_reference = request.execution_reference.clone();
             unknown.disposition = CommandDisposition::OutcomeUnknown(
                 nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
             );
@@ -11980,13 +12775,13 @@ mod tests {
                     purpose,
                     unknown,
                 ),
-                SessionStep::Reconnect
+                SessionStep::RetryCommand(_)
             ));
         });
     }
 
     #[test]
-    fn cancelled_create_and_wrong_command_replies_report_terminal_failures() {
+    fn a_cancelled_create_fails_and_a_reply_of_another_kind_interrupts_its_session() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let mut requests = SessionRequests::new();
@@ -12043,7 +12838,7 @@ mod tests {
                     }),
                 },
             );
-            assert!(matches!(step, SessionStep::Continue));
+            assert!(matches!(step, SessionStep::Abandon));
             assert!(
                 signals
                     .terminal_lines

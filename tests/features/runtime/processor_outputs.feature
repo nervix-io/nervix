@@ -26,16 +26,16 @@ Feature: Processor output routing
         divisor integer,
         result integer OPTIONAL
       );
-      CREATE CODEC routed_event_codec
-        FROM WIRE JSON SCHEMA routed_event_wire
+      CREATE WIRE JSON CODEC routed_event_codec
+        FROM WIRE SCHEMA routed_event_wire
         TO SCHEMA routed_event;
       CREATE RELAY source_events SCHEMA routed_event UNBRANCHED;
       CREATE RELAY successful_events SCHEMA routed_event UNBRANCHED;
       CREATE RELAY failing_events SCHEMA routed_event UNBRANCHED;
       CREATE RELAY route_errors SCHEMA error_record UNBRANCHED;
       CREATE VHOST edge output-error-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
         TO source_events
@@ -101,15 +101,15 @@ Feature: Processor output routing
         id string,
         route string OPTIONAL
       );
-      CREATE CODEC routed_event_codec
-        FROM WIRE JSON SCHEMA routed_event_wire
+      CREATE WIRE JSON CODEC routed_event_codec
+        FROM WIRE SCHEMA routed_event_wire
         TO SCHEMA routed_event;
       CREATE RELAY incoming_events SCHEMA routed_event UNBRANCHED;
       CREATE RELAY immediate_events SCHEMA routed_event UNBRANCHED;
       CREATE RELAY delayed_events SCHEMA routed_event UNBRANCHED;
       CREATE VHOST edge output-flush-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
         TO incoming_events
@@ -182,8 +182,8 @@ Feature: Processor output routing
         raw string
       );
 
-      CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+      CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event_in;
 
       CREATE RELAY error_events SCHEMA event_projection UNBRANCHED;
@@ -191,12 +191,11 @@ Feature: Processor output routing
 
       CREATE VHOST edge http-ingestor-output-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/ingestor-output'
-        TYPE HTTP;
+        PATH '/ingestor-output';
 
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         FILTER WHERE input.active
@@ -266,13 +265,13 @@ Feature: Processor output routing
       CREATE WIRE JSON SCHEMA source_event_wire MODE STRICT (
         id string
       );
-      CREATE CODEC source_event_codec
-        FROM WIRE JSON SCHEMA source_event_wire
+      CREATE WIRE JSON CODEC source_event_codec
+        FROM WIRE SCHEMA source_event_wire
         TO SCHEMA source_event;
       CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
       CREATE VHOST edge sequential-set-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source_events
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TO projected_events
@@ -356,8 +355,8 @@ Feature: Processor output routing
         level string,
         urgent boolean
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
         CREATE IF NOT EXISTS BRANCH by_source_logs_a SCHEMA id_branch TTL 5m;
@@ -367,15 +366,13 @@ Feature: Processor output routing
         CREATE RELAY warnings_ss SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE RELAY info_ss SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress_a
+        CREATE HTTP ENDPOINT ingress_a
         ON edge
-        PATH '/route-a'
-        TYPE HTTP;
-        CREATE ENDPOINT ingress_b
+        PATH '/route-a';
+        CREATE HTTP ENDPOINT ingress_b
         ON edge
-        PATH '/route-b'
-        TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR source_logs_a
+        PATH '/route-b';
+        CREATE HTTP ENDPOINT INGESTOR ingestor_logs_a
         FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs_a
@@ -385,7 +382,7 @@ Feature: Processor output routing
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_logs_b
+        CREATE HTTP ENDPOINT INGESTOR ingestor_logs_b
         FROM ingress_b MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs_b
@@ -487,18 +484,17 @@ Feature: Processor output routing
         amount integer,
         raw string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_http_notifications;
         CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-output-route-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/output-route'
-        TYPE HTTP;
+        PATH '/output-route';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -580,8 +576,8 @@ Feature: Processor output routing
         level string,
         legacy string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
         CREATE IF NOT EXISTS BRANCH by_source_logs SCHEMA id_branch TTL 5m;
@@ -590,11 +586,10 @@ Feature: Processor output routing
         CREATE RELAY warnings_ss SCHEMA notification_out BRANCHED BY by_source_logs;
         CREATE RELAY info_ss SCHEMA notification_out BRANCHED BY by_source_logs;
         CREATE VHOST edge http-project-output-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/project-output'
-        TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR source_logs
+        PATH '/project-output';
+        CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs
@@ -700,11 +695,11 @@ Feature: Processor output routing
         theme string,
         hint string OPTIONAL
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
-        CREATE CODEC preference_codec
-        FROM WIRE JSON SCHEMA preference_wire
+        CREATE WIRE JSON CODEC preference_codec
+        FROM WIRE SCHEMA preference_wire
         TO SCHEMA preference;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_branch_state SCHEMA tenant_branch TTL 5m;
@@ -715,9 +710,9 @@ Feature: Processor output routing
         CREATE RELAY primary_out SCHEMA notification BRANCHED BY by_branch_state;
         CREATE RELAY audit_out SCHEMA notification BRANCHED BY by_branch_state;
         CREATE VHOST edge http-branch-state-{{test_id}}.example.com;
-        CREATE ENDPOINT state_ingress ON edge PATH '/branch-state' TYPE HTTP;
-        CREATE ENDPOINT ingress ON edge PATH '/branch-input' TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR preference_source
+        CREATE HTTP ENDPOINT state_ingress ON edge PATH '/branch-state';
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/branch-input';
+        CREATE HTTP ENDPOINT INGESTOR preference_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING preference_codec
         TO tenant_preferences
@@ -727,7 +722,7 @@ Feature: Processor output routing
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR notification_source
+        CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming

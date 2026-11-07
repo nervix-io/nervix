@@ -7,6 +7,7 @@
 //! - **Depends on.** Tokio's TCP sockets and I/O traits.
 //! - **Must not know.** The connector's ingestor or emitter, the runtime host, or how a real broker decides.
 
+use meticulous::ResultExt as _;
 use nervix_primitives::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -74,15 +75,16 @@ pub(crate) struct ScriptedBroker {
     listener: TcpListener,
 }
 
-/// The connection a emitter's client opened to a scripted broker.
+/// The connection an emitter's client opened to a scripted broker.
 pub(crate) struct ScriptedConnection {
     stream: TcpStream,
 }
 
-/// A PUBLISH the client sent: the packet identifier the broker answers it under, and its payload.
+/// A PUBLISH the client sent: its packet identifier, payload and complete MQTT 5 properties.
 pub(crate) struct ReceivedPublish {
     pub(crate) packet_id: u16,
     pub(crate) payload: Vec<u8>,
+    pub(crate) properties: Option<rumqttc::PublishProperties>,
 }
 
 impl ScriptedBroker {
@@ -93,7 +95,7 @@ impl ScriptedBroker {
         Self { listener }
     }
 
-    /// The address a emitter's client dials to reach this broker.
+    /// The address an emitter's client dials to reach this broker.
     pub(crate) fn addr(&self) -> String {
         let address = self
             .listener
@@ -107,6 +109,11 @@ impl ScriptedBroker {
     pub(crate) async fn accept(&self) -> ScriptedConnection {
         // CONNACK: no session present, success, and an empty property section.
         self.accept_answering(&[0x20, 0x03, 0x00, 0x00, 0x00]).await
+    }
+
+    /// Resumes a persistent session, which can exist even after SUBACK refused its filter.
+    pub(crate) async fn accept_retained_session(&self) -> ScriptedConnection {
+        self.accept_answering(&[0x20, 0x03, 0x01, 0x00, 0x00]).await
     }
 
     /// Accepts the client's connection and answers its CONNECT with a CONNACK that resumes no
@@ -138,15 +145,28 @@ impl ScriptedBroker {
 
     /// Accepts and reads CONNECT without answering, so a check can exercise the handshake budget.
     pub(crate) async fn accept_without_reply(&self) -> ScriptedConnection {
+        let (connection, _) = self.accept_connect().await;
+        connection
+    }
+
+    /// Answer a cleanup connection, whose clean start must discard its rejected subscription.
+    pub(crate) async fn accept_expiring_session(&self) -> ScriptedConnection {
+        let (mut connection, connect) = self.accept_connect().await;
+        assert_ne!(connect[7] & 0x02, 0, "retirement asks for a clean start");
+        connection.write(&[0x20, 0x03, 0x00, 0x00, 0x00]).await;
+        connection
+    }
+
+    async fn accept_connect(&self) -> (ScriptedConnection, Vec<u8>) {
         let (stream, _) = self
             .listener
             .accept()
             .await
-            .expect("the sink's client connects to the scripted broker");
+            .expect("the emitter's client connects to the scripted broker");
         let mut connection = ScriptedConnection { stream };
-        let (packet_type, _) = connection.read_packet().await;
+        let (packet_type, connect) = connection.read_packet().await;
         assert_eq!(packet_type, CONNECT, "the client opens with a CONNECT");
-        connection
+        (connection, connect)
     }
 }
 
@@ -166,6 +186,10 @@ impl ScriptedConnection {
         ReceivedPublish {
             packet_id,
             payload: body[payload_at..].to_vec(),
+            properties: rumqttc::PublishProperties::read(&mut bytes::Bytes::copy_from_slice(
+                &body[properties_at..],
+            ))
+            .assured("the client writes a valid MQTT property section"),
         }
     }
 
@@ -190,13 +214,22 @@ impl ScriptedConnection {
 
     /// Reads the client's SUBSCRIBE and answers it with a SUBACK that grants the QoS `qos`.
     pub(crate) async fn grant_subscription_at(&mut self, qos: u8) {
+        self.answer_subscription(qos).await;
+    }
+
+    /// Refuses the requested filter with MQTT 5's Not Authorized reason code.
+    pub(crate) async fn refuse_subscription(&mut self) {
+        self.answer_subscription(0x87).await;
+    }
+
+    async fn answer_subscription(&mut self, reason: u8) {
         let (packet_type, body) = self.read_packet().await;
         assert_eq!(
             packet_type, SUBSCRIBE,
             "the client subscribes once connected"
         );
-        // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, the granted QoS.
-        self.write(&[0x90, 0x04, body[0], body[1], 0, qos]).await;
+        // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, and its reason.
+        self.write(&[0x90, 0x04, body[0], body[1], 0, reason]).await;
     }
 
     /// A QoS 1 PUBLISH to `events` under the packet identifier `packet_id`, carrying `payload`.
@@ -239,6 +272,18 @@ impl ScriptedConnection {
     /// `payload`.
     pub(crate) async fn write_publish(&mut self, packet_id: u16, payload: &[u8]) {
         self.write(&Self::publish_packet(packet_id, payload)).await;
+    }
+
+    /// Writes a QoS 1 PUBLISH to `events` with its duplicate and retain flags set, under the packet
+    /// identifier `packet_id`, carrying `payload`.
+    pub(crate) async fn write_duplicate_retained_publish(
+        &mut self,
+        packet_id: u16,
+        payload: &[u8],
+    ) {
+        // PUBLISH with the flags: duplicate, QoS 1, retain.
+        self.write(&Self::publish_packet_with_flags(0x3b, packet_id, payload))
+            .await;
     }
 
     /// Writes a QoS 2 PUBLISH to `events` under the packet identifier `packet_id`, carrying
@@ -333,4 +378,17 @@ fn variable_integer(bytes: &[u8]) -> (usize, usize) {
         }
     }
     panic!("a variable byte integer ends within {VARIABLE_INTEGER_BYTES} bytes");
+}
+
+impl ScriptedConnection {
+    /// A rejected subscription ends its session instead of retaining the downgraded grant.
+    pub(crate) async fn expect_session_expiry_zero(&mut self) {
+        let (packet_type, body) = self.read_packet().await;
+        assert_eq!(
+            packet_type, 14,
+            "the client ends the refused session with DISCONNECT"
+        );
+        // Normal Disconnection, five property bytes: Session Expiry Interval (0x11), zero.
+        assert_eq!(body, [0, 5, 0x11, 0, 0, 0, 0]);
+    }
 }

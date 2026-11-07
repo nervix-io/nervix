@@ -123,6 +123,15 @@ pub(crate) enum ConnectorDeclarationIssue {
         ConnectorKind::Sqs
     )]
     SqsStandardQueueDeduplication { queue: nervix_models::SqsQueueName },
+    #[error(
+        "{} subscription TYPE {kind} reads through one consumer, so it refuses INSTANCES \
+         {instances}",
+        ConnectorKind::Pulsar
+    )]
+    PulsarSingleConsumerType {
+        kind: nervix_models::PulsarSubscriptionType,
+        instances: nervix_models::IngestorInstances,
+    },
     #[error("VALUES requires at least one mapping")]
     EmptyValues,
     #[error("{entity} declares no direct value type contract")]
@@ -146,13 +155,22 @@ pub(crate) enum ConnectorDeclarationIssue {
     },
     #[error("{0}")]
     Envelope(nervix_models::EnvelopeDeclarationError),
+    #[error(
+        "{} REPLY TO requires a valid publication subject",
+        ConnectorKind::Nats
+    )]
+    NatsReplySubject,
     #[error("{0}")]
     Delivery(nervix_models::UnmetDeliveryRequirement),
+    #[error("{0}")]
+    Publishing(nervix_models::UnmetPublishingRequirement),
     #[error("{site} requires an exact, non-null, non-sensitive {expected} value")]
     EnvelopeValue {
         site: EnvelopeValueSite,
-        expected: nervix_models::ParseAsType,
+        expected: nervix_models::EnvelopeValueType,
     },
+    #[error("PARTITION FROM BRANCH requires branched input; relay '{relay}' is unbranched")]
+    PartitionRequiresBranch { relay: nervix_models::RelayName },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -244,6 +262,36 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error("inferencer '{node}' has invalid tensor schemas in domain '{domain}'")]
+    InferencerTensorSchemas { domain: DomainName, node: ModelName },
+    #[error("inferencer '{node}' tensor port '{port}' is invalid in domain '{domain}'")]
+    InferencerState {
+        domain: DomainName,
+        node: ModelName,
+        port: String,
+    },
+    #[error("ingestor '{ingestor}' has invalid instancing in domain '{domain}'")]
+    IngestorInstancing {
+        domain: DomainName,
+        ingestor: nervix_models::IngestorName,
+    },
+    #[error("{parameter} limit {maximum} is below {actual} required by resource {resource:?}")]
+    ResourceParameterLimit {
+        resource: nervix_models::ResourceId,
+        parameter: nervix_models::ClusterParameterKey,
+        actual: u64,
+        maximum: u64,
+    },
+    #[error(
+        "{parameter} limit {maximum} is below {actual} required by {node:?} in domain '{domain}'"
+    )]
+    ClusterParameterLimit {
+        domain: DomainName,
+        node: nervix_models::NodeRef,
+        parameter: nervix_models::ClusterParameterKey,
+        actual: u64,
+        maximum: u64,
+    },
     #[error("client '{client}' configuration is invalid in domain '{domain}'")]
     ClientConfig {
         domain: DomainName,
@@ -339,8 +387,8 @@ pub(crate) enum RegistryError {
         client: ClientName,
     },
     #[error(
-        "{kind} ingestor '{ingestor}' in domain '{domain}' requires a TYPE {required} endpoint, \
-         but endpoint '{endpoint}' is TYPE {found}"
+        "{kind} ingestor '{ingestor}' in domain '{domain}' requires a {required} ENDPOINT, but \
+         endpoint '{endpoint}' is {found} ENDPOINT"
     )]
     IngestorEndpointTypeMismatch {
         domain: DomainName,
@@ -371,6 +419,17 @@ pub(crate) enum RegistryError {
     /// The upgrade header refusal is the frame beneath, rendered once in the chain.
     #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS")]
     InvalidWebsocketsUpgradeHeaders {
+        domain: DomainName,
+        ingestor: ModelName,
+    },
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS")]
+    InvalidHttpRequestHeaders {
+        domain: DomainName,
+        ingestor: ModelName,
+    },
+    /// The method refusal is the frame beneath, rendered once in the chain.
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its METHOD")]
+    InvalidHttpRequestMethod {
         domain: DomainName,
         ingestor: ModelName,
     },
@@ -665,7 +724,7 @@ mod tests {
         AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterPlacement,
         AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
         AlterRelay, AlterRelayError, AlterRelayOperation, AlterWireSchema, AlterWireSchemaError,
-        AlterWireSchemaOperation, AvroType, CreatePlacement, CreateWireSchema, JsonType, Model,
+        AlterWireSchemaOperation, AvroType, CreatePlacement, CreateWireSchema, Model,
         PlacementPolicy, WireSchemaField,
     };
 
@@ -707,7 +766,7 @@ mod tests {
             strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: named("value"),
-                ty: JsonType::String,
+                ty: nervix_models::CborType::Text,
                 optional: false,
             }],
         }));

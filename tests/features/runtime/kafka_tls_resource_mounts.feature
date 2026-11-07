@@ -24,8 +24,8 @@ Feature: Kafka TLS resource mounts
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -38,7 +38,7 @@ Feature: Kafka TLS resource mounts
           'ssl.ca.location' = '{{dev_tls}}/ca.pem'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_tls TOPIC 'tls_notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'tls_notifications_group_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_tls TOPIC 'tls_notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'tls_notifications_group_{{test_id}}' START AT LATEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

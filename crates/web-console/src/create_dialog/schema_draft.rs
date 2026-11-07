@@ -13,7 +13,7 @@
 
 use std::{
     collections::BTreeSet,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU16, NonZeroU32, NonZeroU64},
 };
 
 use error_stack::Report;
@@ -188,10 +188,47 @@ impl SchemaDraft {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WireFieldType {
     Json(JsonType),
+    Cbor(CborType),
+    /// The complete AVRO type, the arrays that wrap the picked item type included.
     Avro(AvroType),
+}
+
+impl WireFieldType {
+    fn json(&self) -> Option<JsonType> {
+        if let Self::Json(ty) = self {
+            Some(*ty)
+        } else {
+            None
+        }
+    }
+
+    fn cbor(&self) -> Option<CborType> {
+        if let Self::Cbor(ty) = self {
+            Some(*ty)
+        } else {
+            None
+        }
+    }
+
+    fn avro(&self) -> Option<AvroType> {
+        if let Self::Avro(ty) = self {
+            Some(ty.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Whether this type is built from the editor's `choice`: the same type, or for AVRO the item
+    /// type its arrays wrap.
+    pub(super) fn is_built_from(&self, choice: &Self) -> bool {
+        if let (Self::Avro(ty), Self::Avro(item)) = (self, choice) {
+            return ty.innermost() == item;
+        }
+        self == choice
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -255,9 +292,80 @@ impl WireSchemaDraft {
         }
     }
 
+    /// Sets the field's type to the picked `ty`. An AVRO field keeps its array layers, so picking
+    /// another item type replaces only the type they wrap.
     pub(super) fn set_field_type(&mut self, index: usize, ty: WireFieldType) {
+        let Some(field) = self.fields.get_mut(index) else {
+            return;
+        };
+        let depth = match &field.ty {
+            Some(WireFieldType::Avro(current)) => current.array_depth(),
+            _ => 0,
+        };
+        let ty = match ty {
+            WireFieldType::Avro(item) => {
+                let mut wrapped = item;
+                for _ in 0..depth {
+                    wrapped = AvroType::array_of(wrapped);
+                }
+                WireFieldType::Avro(wrapped)
+            }
+            other => other,
+        };
+        field.ty = Some(ty);
+    }
+
+    /// Whether the field's type is built from the editor's `choice`, the item type of an AVRO
+    /// array included.
+    pub(super) fn field_is_built_from(&self, index: usize, choice: &WireFieldType) -> bool {
+        let Some(field) = self.fields.get(index) else {
+            return false;
+        };
+        let Some(written) = &field.ty else {
+            return false;
+        };
+        written.is_built_from(choice)
+    }
+
+    /// The array layers around an AVRO field's item type: none for a JSON or CBOR field, whose
+    /// arrays are bare, or a field without a type.
+    pub(super) fn field_array_layers(&self, index: usize) -> usize {
+        let Some(field) = self.fields.get(index) else {
+            return 0;
+        };
+        match &field.ty {
+            Some(WireFieldType::Avro(ty)) => ty.array_depth(),
+            _ => 0,
+        }
+    }
+
+    /// Whether the field has an AVRO type its next array layer can wrap.
+    pub(super) fn field_wraps_in_array(&self, index: usize) -> bool {
+        let Some(field) = self.fields.get(index) else {
+            return false;
+        };
+        matches!(field.ty, Some(WireFieldType::Avro(_)))
+    }
+
+    /// Wraps an AVRO field's type in one more array; the other formats' arrays are bare.
+    pub(super) fn push_field_array_layer(&mut self, index: usize) {
         if let Some(field) = self.fields.get_mut(index) {
-            field.ty = Some(ty);
+            field.ty = match field.ty.take() {
+                Some(WireFieldType::Avro(ty)) => Some(WireFieldType::Avro(AvroType::array_of(ty))),
+                other => other,
+            };
+        }
+    }
+
+    /// Removes one of an AVRO field's array layers. Every layer is alike, so the outermost goes.
+    pub(super) fn remove_field_array_layer(&mut self, index: usize) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.ty = match field.ty.take() {
+                Some(WireFieldType::Avro(AvroType::Array(item))) => {
+                    Some(WireFieldType::Avro(*item))
+                }
+                other => other,
+            };
         }
     }
 
@@ -276,68 +384,51 @@ impl WireSchemaDraft {
         if self.fields.is_empty() {
             return Err(Report::new(SchemaDraftError::FieldsRequired));
         }
-        let mut names = BTreeSet::new();
         match format {
-            WireFormat::Json | WireFormat::Cbor => {
-                let mut fields = Vec::<WireSchemaField<CborType>>::with_capacity(self.fields.len());
-                for (index, draft) in self.fields.iter().enumerate() {
-                    let field = index + 1;
-                    let field_name = FieldName::parse(draft.name.trim()).map_err(|cause| {
-                        cause.change_context(SchemaDraftError::FieldName { field })
-                    })?;
-                    if !names.insert(field_name.clone()) {
-                        return Err(Report::new(SchemaDraftError::DuplicateField {
-                            name: field_name,
-                        }));
-                    }
-                    let Some(WireFieldType::Json(ty)) = draft.ty else {
-                        return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
-                    };
-                    fields.push(WireSchemaField {
-                        name: field_name,
-                        ty,
-                        optional: draft.optional,
-                    });
-                }
-                let schema = CreateWireSchema {
-                    name,
-                    strictness,
-                    fields,
-                };
-                if format == WireFormat::Json {
-                    Ok(Model::WireJsonSchema(schema))
-                } else {
-                    Ok(Model::WireCborSchema(schema))
-                }
-            }
-            WireFormat::Avro => {
-                let mut fields = Vec::with_capacity(self.fields.len());
-                for (index, draft) in self.fields.iter().enumerate() {
-                    let field = index + 1;
-                    let field_name = FieldName::parse(draft.name.trim()).map_err(|cause| {
-                        cause.change_context(SchemaDraftError::FieldName { field })
-                    })?;
-                    if !names.insert(field_name.clone()) {
-                        return Err(Report::new(SchemaDraftError::DuplicateField {
-                            name: field_name,
-                        }));
-                    }
-                    let Some(WireFieldType::Avro(ty)) = draft.ty else {
-                        return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
-                    };
-                    fields.push(WireSchemaField {
-                        name: field_name,
-                        ty,
-                        optional: draft.optional,
-                    });
-                }
-                Ok(Model::WireAvroSchema(CreateWireSchema {
-                    name,
-                    strictness,
-                    fields,
-                }))
-            }
+            WireFormat::Json => Ok(Model::WireJsonSchema(CreateWireSchema {
+                name,
+                strictness,
+                fields: self.build_fields(WireFieldType::json)?,
+            })),
+            WireFormat::Cbor => Ok(Model::WireCborSchema(CreateWireSchema {
+                name,
+                strictness,
+                fields: self.build_fields(WireFieldType::cbor)?,
+            })),
+            WireFormat::Avro => Ok(Model::WireAvroSchema(CreateWireSchema {
+                name,
+                strictness,
+                fields: self.build_fields(WireFieldType::avro)?,
+            })),
         }
+    }
+
+    fn build_fields<T>(
+        &self,
+        extract: impl Fn(&WireFieldType) -> Option<T>,
+    ) -> error_stack::Result<Vec<WireSchemaField<T>>, SchemaDraftError> {
+        let mut names = BTreeSet::new();
+        let mut fields = Vec::with_capacity(self.fields.len());
+        for (index, draft) in self.fields.iter().enumerate() {
+            let field = index + 1;
+            let name = FieldName::parse(draft.name.trim())
+                .map_err(|cause| cause.change_context(SchemaDraftError::FieldName { field }))?;
+            if !names.insert(name.clone()) {
+                return Err(Report::new(SchemaDraftError::DuplicateField { name }));
+            }
+            let Some(written) = &draft.ty else {
+                return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
+            };
+            let Some(ty) = extract(written) else {
+                return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
+            };
+            fields.push(WireSchemaField {
+                name,
+                ty,
+                optional: draft.optional,
+            });
+        }
+        Ok(fields)
     }
 }
 
@@ -361,15 +452,32 @@ fn remove_item<T>(items: &mut Vec<T>, index: usize) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BranchDraft {
     pub(super) name: String,
     pub(super) if_not_exists: bool,
     /// A changed domain keeps the prior reference visible until it is reselected.
     pub(super) schema: Option<SelectedReference<SchemaName>>,
     pub(super) ttl: String,
+    /// The partition count as typed; a new draft starts at the single partition every branch
+    /// has when its declaration writes no count.
+    pub(super) partitions: String,
     pub(super) limit_instances: bool,
     pub(super) max_instances: String,
+}
+
+impl Default for BranchDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            if_not_exists: false,
+            schema: None,
+            ttl: String::new(),
+            partitions: nervix_models::BranchPartitions::ONE.count().to_string(),
+            limit_instances: false,
+            max_instances: String::new(),
+        }
+    }
 }
 
 impl BranchDraft {
@@ -409,6 +517,11 @@ impl BranchDraft {
         if ttl.is_empty() {
             return Err(Report::new(SchemaDraftError::TtlRequired));
         }
+        let partitions = self
+            .partitions
+            .trim()
+            .parse::<NonZeroU16>()
+            .map_err(|cause| Report::new(cause).change_context(SchemaDraftError::Partitions))?;
         let eviction = if self.limit_instances {
             let max_instances =
                 self.max_instances
@@ -425,7 +538,7 @@ impl BranchDraft {
             name,
             schema: schema.clone(),
             ttl: ttl.to_string(),
-            partitions: nervix_models::BranchPartitions::ONE,
+            partitions: nervix_models::BranchPartitions::Direct(partitions),
             eviction,
         })
     }
@@ -457,6 +570,8 @@ pub(super) enum SchemaDraftError {
     SchemaReferenceChanged,
     #[error("Branch TTL is required")]
     TtlRequired,
+    #[error("Partitions must be a whole number from 1 through 65535")]
+    Partitions,
     #[error("Maximum instances must be a positive integer")]
     MaxInstances,
 }
@@ -562,10 +677,16 @@ mod tests {
     fn each_wire_format_builds_its_own_model_with_every_type() {
         for format in [WireFormat::Json, WireFormat::Cbor, WireFormat::Avro] {
             let types = match format {
-                WireFormat::Json | WireFormat::Cbor => JsonType::iter()
+                WireFormat::Json => JsonType::iter()
                     .map(WireFieldType::Json)
                     .collect::<Vec<_>>(),
-                WireFormat::Avro => AvroType::iter()
+                WireFormat::Cbor => CborType::iter()
+                    .map(WireFieldType::Cbor)
+                    .collect::<Vec<_>>(),
+                WireFormat::Avro => AvroType::scalar_variants()
+                    .iter()
+                    .cloned()
+                    .chain([AvroType::array_of(AvroType::array_of(AvroType::Double))])
                     .map(WireFieldType::Avro)
                     .collect::<Vec<_>>(),
             };
@@ -593,14 +714,85 @@ mod tests {
                     assert_eq!(schema.fields.len(), JsonType::iter().count())
                 }
                 (WireFormat::Cbor, Model::WireCborSchema(schema)) => {
-                    assert_eq!(schema.fields.len(), JsonType::iter().count())
+                    assert_eq!(schema.fields.len(), CborType::iter().count())
                 }
                 (WireFormat::Avro, Model::WireAvroSchema(schema)) => {
-                    assert_eq!(schema.fields.len(), AvroType::iter().count())
+                    assert_eq!(schema.fields.len(), AvroType::scalar_variants().len() + 1)
                 }
                 _ => panic!("each format must keep its model identity"),
             }
         }
+    }
+
+    #[test]
+    fn the_avro_form_wraps_its_item_type_in_arrays_it_keeps_across_picks() {
+        let mut draft = WireSchemaDraft {
+            name: "lists".to_string(),
+            if_not_exists: false,
+            mode: Some(WireSchemaStrictness::Strict),
+            fields: vec![WireFieldDraft {
+                name: "matrix".to_string(),
+                ty: None,
+                optional: false,
+            }],
+        };
+        draft.push_field_array_layer(0);
+        assert_eq!(draft.fields[0].ty, None);
+        assert!(!draft.field_wraps_in_array(0));
+        assert!(!draft.field_is_built_from(0, &WireFieldType::Avro(AvroType::Long)));
+
+        draft.set_field_type(0, WireFieldType::Avro(AvroType::Long));
+        draft.push_field_array_layer(0);
+        draft.push_field_array_layer(0);
+        assert_eq!(draft.field_array_layers(0), 2);
+        draft.set_field_type(0, WireFieldType::Avro(AvroType::Double));
+        let nested = AvroType::array_of(AvroType::array_of(AvroType::Double));
+        assert_eq!(
+            draft.fields[0].ty,
+            Some(WireFieldType::Avro(nested.clone()))
+        );
+        assert!(
+            draft.fields[0]
+                .ty
+                .as_ref()
+                .assured("the field was given a type")
+                .is_built_from(&WireFieldType::Avro(AvroType::Double))
+        );
+
+        draft.remove_field_array_layer(0);
+        assert_eq!(draft.field_array_layers(0), 1);
+        let model = draft
+            .build(WireFormat::Avro)
+            .assured("the field has a name and a complete AVRO type");
+        let Model::WireAvroSchema(schema) = &model else {
+            panic!("an AVRO draft builds an AVRO wire schema");
+        };
+        assert_eq!(schema.fields[0].ty, AvroType::array_of(AvroType::Double));
+        assert_canonical_round_trip(model, false);
+
+        draft.remove_field_array_layer(0);
+        draft.remove_field_array_layer(0);
+        assert_eq!(
+            draft.fields[0].ty,
+            Some(WireFieldType::Avro(AvroType::Double))
+        );
+
+        let mut json = WireSchemaDraft {
+            fields: vec![WireFieldDraft {
+                name: "items".to_string(),
+                ty: Some(WireFieldType::Json(JsonType::Array)),
+                optional: false,
+            }],
+            ..draft
+        };
+        json.push_field_array_layer(0);
+        json.remove_field_array_layer(0);
+        assert_eq!(
+            json.fields[0].ty,
+            Some(WireFieldType::Json(JsonType::Array))
+        );
+        assert_eq!(json.field_array_layers(0), 0);
+        assert!(!json.field_wraps_in_array(0));
     }
 
     #[test]
@@ -636,6 +828,36 @@ mod tests {
         assert_canonical_round_trip(Model::Branch(model), false);
         branch.max_instances = "0".to_string();
         assert_eq!(draft_error(branch.build()), SchemaDraftError::MaxInstances);
+    }
+
+    #[test]
+    fn branch_partitions_default_to_one_and_keep_the_typed_count() {
+        let schema = SchemaName::parse("branch_key").assured("the test name is valid");
+        let mut branch = BranchDraft {
+            name: "by_key".to_string(),
+            schema: Some(SelectedReference::chosen(schema)),
+            ttl: "5m".to_string(),
+            ..BranchDraft::default()
+        };
+        assert_eq!(branch.partitions, "1");
+        let model = branch
+            .build()
+            .assured("a new draft declares the default single partition");
+        assert_eq!(model.partitions, nervix_models::BranchPartitions::ONE);
+
+        branch.partitions = " 4 ".to_string();
+        let model = branch.build().assured("four partitions are a valid count");
+        assert_eq!(model.partitions.count().get(), 4);
+        assert_canonical_round_trip(Model::Branch(model), false);
+
+        for invalid in ["0", "65536", "", "four", "-1"] {
+            branch.partitions = invalid.to_string();
+            assert_eq!(
+                draft_error(branch.build()),
+                SchemaDraftError::Partitions,
+                "{invalid:?} is not a partition count"
+            );
+        }
     }
 
     #[test]
@@ -839,7 +1061,12 @@ mod tests {
         draft.set_field_name(usize::MAX, "stale".to_string());
         draft.set_field_type(usize::MAX, WireFieldType::Json(JsonType::String));
         draft.set_field_optional(usize::MAX, false);
+        draft.push_field_array_layer(usize::MAX);
+        draft.remove_field_array_layer(usize::MAX);
         assert_eq!(draft, snapshot);
+        assert!(!draft.field_is_built_from(usize::MAX, &WireFieldType::Json(JsonType::String)));
+        assert!(!draft.field_wraps_in_array(usize::MAX));
+        assert_eq!(draft.field_array_layers(usize::MAX), 0);
 
         let model = draft
             .build(WireFormat::Json)

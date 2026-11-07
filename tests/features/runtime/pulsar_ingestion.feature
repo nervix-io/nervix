@@ -15,8 +15,8 @@ Feature: Pulsar ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_pulsar_notifications SCHEMA user_id_branch TTL 5m;
@@ -26,7 +26,7 @@ Feature: Pulsar ingestion
           'addr' = '{{pulsar_addr}}'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-        FROM pulsar_main TOPIC 'notifications_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_main TOPIC 'notifications_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -73,8 +73,8 @@ Feature: Pulsar ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE PULSAR CLIENT pulsar_main
@@ -82,7 +82,7 @@ Feature: Pulsar ingestion
         'addr' = '{{pulsar_addr}}'
       };
       CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-      FROM pulsar_main TOPIC 'notifications_modes_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_modes_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST MODE <mode>
+      FROM pulsar_main TOPIC 'notifications_modes_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_modes_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED MODE <mode>
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -136,8 +136,8 @@ Feature: Pulsar ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_pulsar_notifications SCHEMA user_id_branch TTL 5m;
@@ -147,7 +147,7 @@ Feature: Pulsar ingestion
           'addr' = '{{pulsar_addr}}'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-        FROM pulsar_main TOPIC 'notifications_reconnect_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_reconnect_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_main TOPIC 'notifications_reconnect_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_reconnect_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -161,7 +161,7 @@ Feature: Pulsar ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "pulsar_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "pulsar_notifications" leaves fault mode
     And Pulsar message is published to topic "notifications_reconnect_{{test_id}}"
@@ -201,8 +201,8 @@ Feature: Pulsar ingestion
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE PULSAR CLIENT pulsar_ingress CONFIG {
@@ -213,7 +213,7 @@ Feature: Pulsar ingestion
       };
       CREATE PULSAR TOPIC INGESTOR confirmed_notifications
         FROM pulsar_ingress TOPIC 'confirmed_acks_in_{{test_id}}'
-          SUBSCRIPTION 'nervix_confirmed_acks_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST
+          SUBSCRIPTION 'nervix_confirmed_acks_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -290,8 +290,8 @@ Feature: Pulsar ingestion
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE PULSAR CLIENT pulsar_ingress CONFIG {
@@ -302,7 +302,7 @@ Feature: Pulsar ingestion
       };
       CREATE PULSAR TOPIC INGESTOR rejected_notifications
         FROM pulsar_ingress TOPIC 'unsent_redeliveries_in_{{test_id}}'
-          SUBSCRIPTION 'nervix_unsent_redeliveries_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST
+          SUBSCRIPTION 'nervix_unsent_redeliveries_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications

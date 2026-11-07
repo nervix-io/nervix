@@ -272,12 +272,47 @@ pub struct SubscriptionOpened {
     pub schema: RowSchema,
 }
 
+/// Why a subscribe request opened nothing. The session holds nothing for the request after any
+/// of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubscriptionRefusal {
+    /// The session holds a transaction. A subscription belongs to the session, not to a
+    /// transaction.
+    InTransaction,
+    /// The request does not carry exactly one valid `CREATE SUBSCRIPTION` statement.
+    InvalidStatement,
+    /// The session already holds a subscription of that name.
+    NameInUse,
+    /// The committed state the serving node installed holds no such domain.
+    DomainNotFound,
+    /// The committed state the serving node installed holds no such relay in the domain.
+    RelayNotFound,
+    /// The relay's current definition announces another schema than the request's expected one.
+    RelayChanged,
+    /// The `WHERE` predicate does not compile against the relay's definition.
+    InvalidFilter,
+    /// The serving node could not open the subscription now. Opening it again may succeed.
+    Unavailable,
+}
+
+wire_enum!(ALL_SUBSCRIPTION_REFUSALS: SubscriptionRefusal => wire::SubscriptionRefusal {
+    InTransaction,
+    InvalidStatement,
+    NameInUse,
+    DomainNotFound,
+    RelayNotFound,
+    RelayChanged,
+    InvalidFilter,
+    Unavailable,
+});
+
 /// What became of a subscribe request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubscribeDisposition {
     Opened(Box<SubscriptionOpened>),
-    /// The subscription was not opened; the outcome's message and diagnostics say why.
-    Failed,
+    /// The subscription was not opened. The refusal says why, and the outcome's message and
+    /// diagnostics describe it.
+    Refused(SubscriptionRefusal),
 }
 
 /// The depth of an opened subscription's schema table in its reply frame: the server message, the
@@ -314,10 +349,15 @@ impl SubscribeOutcome {
                 );
                 EncodedUnion::new(wire::SubscribeDisposition::SubscriptionOpened, opened)
             }
-            SubscribeDisposition::Failed => EncodedUnion::new(
-                wire::SubscribeDisposition::RequestFailed,
-                wire::RequestFailed::create(encoder.fbb(), &wire::RequestFailedArgs {}),
-            ),
+            SubscribeDisposition::Refused(refusal) => {
+                let refused = wire::SubscriptionRefused::create(
+                    encoder.fbb(),
+                    &wire::SubscriptionRefusedArgs {
+                        refusal: Some((*refusal).into()),
+                    },
+                );
+                EncodedUnion::new(wire::SubscribeDisposition::SubscriptionRefused, refused)
+            }
         };
         let message = encoder.text("SubscribeOutcome.message", &self.message)?;
         let diagnostics =
@@ -357,8 +397,10 @@ impl SubscribeOutcome {
                 subscription_type,
                 schema,
             }))
-        } else if let wire::SubscribeDisposition::RequestFailed = outcome.disposition_type() {
-            SubscribeDisposition::Failed
+        } else if let Some(refused) = outcome.disposition_as_subscription_refused() {
+            let refusal =
+                decoder.required_enumeration("SubscriptionRefused.refusal", refused.refusal())?;
+            SubscribeDisposition::Refused(refusal)
         } else {
             return Err(
                 decoder.unknown_union("SubscribeOutcome.disposition", outcome.disposition_type().0)
@@ -506,7 +548,10 @@ impl CancelOutcome {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Where a cancellation found the request it ended. Its `snake_case` name labels the node's
+/// cancellation series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
 pub enum CancellationStage {
     /// The request was not admitted and has no effects.
     BeforeAdmission,
@@ -545,7 +590,9 @@ impl RequestCancelled {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Why a request was not served. Its `snake_case` name labels the node's rejection series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
 pub enum RequestRejection {
     /// A field is missing, malformed or out of range.
     InvalidRequest,

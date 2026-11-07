@@ -16,18 +16,18 @@
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant};
 use nervix_models::{
-    AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestorError,
-    BatchMessageLimit, BatchUnavailability, ClickHouseEmitter, ClickHouseEmitterEntity,
-    ClickHouseTableEmitter, ClickHouseValueMapping, ClientConsumerEmitter, ClientEmitterEntity,
-    ClientIngestMode, ClientIngestorEntity, ClientName, ConnectorKind, EmitterBatchLegality,
-    EmitterBatchPolicy, EmitterBodyForm, EmitterClientReference, EmitterEntity, EmitterEntityKind,
-    EmitterReference, EmitterValueMapping, EndpointIngestMode, EndpointType, Expression,
-    HeaderLayout, HeaderModel, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor,
-    HttpIngestorEntity, IcebergCatalog, IcebergEmitter, IcebergEmitterEntity, IcebergTableEmitter,
-    IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity,
-    IngestorEntityKind, IngestorMetadataType, IngestorReferenceKind, KafkaEmitterEntity,
-    KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor,
-    Literal, Model, ModelKind, MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter,
+    AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, BatchMessageLimit,
+    BatchUnavailability, ClickHouseEmitter, ClickHouseEmitterEntity, ClickHouseTableEmitter,
+    ClickHouseValueMapping, ClientConsumerEmitter, ClientEmitterEntity, ClientIngestMode,
+    ClientIngestorEntity, ClientName, ConnectorKind, EmitterBatchLegality, EmitterBatchPolicy,
+    EmitterBodyForm, EmitterClientReference, EmitterEntity, EmitterEntityKind, EmitterReference,
+    EmitterValueMapping, EndpointIngestMode, EndpointType, Expression, HeaderLayout, HeaderModel,
+    HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor, HttpIngestorEntity, IcebergCatalog,
+    IcebergEmitter, IcebergEmitterEntity, IcebergTableEmitter, IngestAcknowledgement,
+    IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
+    IngestorMetadataType, IngestorReferenceKind, KafkaEmitterEntity, KafkaIngestMode,
+    KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor, Literal, Model,
+    ModelKind, MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter,
     MongoDbEmitterEntity, MqttEmitterEntity, MqttIngestMode, MqttIngestorEntity, MqttQos,
     MqttSession, MqttTopicIngestor, MySqlConflictAction, MySqlEmitter, MySqlEmitterEntity,
     MySqlTableEmitter, NatsEmitterEntity, NatsIngestorEntity, OtelEmitter, OtelEmitterEntity,
@@ -44,6 +44,7 @@ use nervix_models::{
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
 
+mod instancing;
 mod surface;
 
 fn named<N>(raw: &str) -> N
@@ -147,6 +148,7 @@ fn the_source_kinds_name_every_pair_once_with_its_phrase() {
             "PULSAR TOPIC",
             "MQTT TOPIC",
             "NATS SUBJECT",
+            "NATS STREAM",
             "RABBITMQ QUEUE",
             "REDIS PUBSUB",
             "PROMETHEUS QUERY",
@@ -177,6 +179,7 @@ fn the_emitter_kinds_name_every_pair_once_with_its_phrase() {
             "REDIS PUBSUB",
             "MQTT TOPIC",
             "NATS SUBJECT",
+            "NATS STREAM",
             "ZEROMQ PUSH",
             "SQS QUEUE",
             "SENTRY EVENT",
@@ -231,6 +234,7 @@ fn a_source_form_names_its_pair_by_key_and_label() {
         ("pulsar-topic", "Pulsar"),
         ("mqtt-topic", "MQTT"),
         ("nats-subject", "NATS"),
+        ("nats-stream", "NATS JetStream"),
         ("rabbitmq-queue", "RabbitMQ"),
         ("redis-pubsub", "Redis Pub/Sub"),
         ("prometheus-query", "Prometheus"),
@@ -293,21 +297,82 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         },
-        IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-            ConnectorKind::Pulsar,
-        ),
-        IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
-            headers_only(None, ConnectorKind::Mqtt)
-        }
-        IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-            ConnectorKind::Nats,
-        ),
-        IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::SortedByName)),
-            ConnectorKind::RabbitMq,
-        ),
+        IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("topic", IngestorMetadataType::String),
+                ("message_id", IngestorMetadataType::String),
+                ("publish_time", IngestorMetadataType::Datetime),
+                ("event_time", IngestorMetadataType::Datetime),
+                ("key", IngestorMetadataType::String),
+                ("ordering_key", IngestorMetadataType::Bytes),
+                ("producer_name", IngestorMetadataType::String),
+                ("sequence_id", IngestorMetadataType::I64),
+                ("redelivery_count", IngestorMetadataType::I64),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
+        },
+        IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("topic", IngestorMetadataType::String),
+                ("retain", IngestorMetadataType::Bool),
+                ("qos", IngestorMetadataType::U8),
+                ("duplicate", IngestorMetadataType::Bool),
+                ("content_type", IngestorMetadataType::String),
+                ("response_topic", IngestorMetadataType::String),
+                ("correlation_data", IngestorMetadataType::Bytes),
+                ("message_expiry", IngestorMetadataType::U32),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
+        },
+        IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("subject", IngestorMetadataType::String),
+                ("reply", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
+        },
+        IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("subject", IngestorMetadataType::String),
+                ("reply", IngestorMetadataType::String),
+                ("stream", IngestorMetadataType::String),
+                ("consumer", IngestorMetadataType::String),
+                ("sequence", IngestorMetadataType::U64),
+                ("timestamp", IngestorMetadataType::Datetime),
+                ("delivered", IngestorMetadataType::U64),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
+        },
+        IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
+            metadata: &[
+                ("exchange", IngestorMetadataType::String),
+                ("routing_key", IngestorMetadataType::String),
+                ("delivery_tag", IngestorMetadataType::U64),
+                ("redelivered", IngestorMetadataType::Bool),
+                ("content_type", IngestorMetadataType::String),
+                ("content_encoding", IngestorMetadataType::String),
+                ("message_id", IngestorMetadataType::String),
+                ("correlation_id", IngestorMetadataType::String),
+                ("reply_to", IngestorMetadataType::String),
+                ("type", IngestorMetadataType::String),
+                ("app_id", IngestorMetadataType::String),
+                ("user_id", IngestorMetadataType::String),
+                ("priority", IngestorMetadataType::U8),
+                ("expiration", IngestorMetadataType::String),
+                ("timestamp", IngestorMetadataType::Datetime),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::RabbitMq),
+        },
         IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => IngestorDeclaration {
             headers: None,
             metadata: &[
@@ -317,16 +382,33 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Redis),
         },
-        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
-            headers_only(None, ConnectorKind::Prometheus)
-        }
+        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => IngestorDeclaration {
+            headers: None,
+            metadata: &[
+                ("query", IngestorMetadataType::String),
+                ("evaluated_at", IngestorMetadataType::Datetime),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
+        },
         IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
             headers_only(None, ConnectorKind::ZeroMq)
         }
-        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::LastWins)),
-            ConnectorKind::Sqs,
-        ),
+        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
+            metadata: &[
+                ("message_id", IngestorMetadataType::String),
+                ("sent_at", IngestorMetadataType::Datetime),
+                ("receive_count", IngestorMetadataType::U32),
+                ("first_received_at", IngestorMetadataType::Datetime),
+                ("group_id", IngestorMetadataType::String),
+                ("deduplication_id", IngestorMetadataType::String),
+                ("sequence_number", IngestorMetadataType::String),
+                ("sender_id", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Sqs),
+        },
         IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
             metadata: &[
@@ -359,7 +441,11 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         },
         IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => IngestorDeclaration {
             headers: None,
-            metadata: &[("peer_addr", IngestorMetadataType::String)],
+            metadata: &[
+                ("peer_addr", IngestorMetadataType::String),
+                ("transport", IngestorMetadataType::String),
+                ("tls_peer", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Client(ConnectorKind::Syslog),
         },
@@ -446,6 +532,7 @@ fn a_transport_source_states_what_its_pair_declares() {
 #[case::kafka(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic), [true, false, false, false, false])]
 #[case::pulsar(IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic), [true, false, false, false, false])]
 #[case::nats(IngestorEntityKind::Nats(NatsIngestorEntity::Subject), [false, true, true, false, false])]
+#[case::nats_stream(IngestorEntityKind::Nats(NatsIngestorEntity::Stream), [true, true, true, false, false])]
 #[case::rabbitmq(IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue), [true, false, false, false, false])]
 #[case::redis(IngestorEntityKind::Redis(RedisIngestorEntity::PubSub), [false, true, true, false, false])]
 #[case::prometheus(IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query), [true, true, false, false, false])]
@@ -475,16 +562,11 @@ fn a_source_supports_the_quiesce_modes_its_entity_declares(
     ];
     let bytes = seeded_bytes(1);
     let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
-    let mut source = arbitrary
+    let source = arbitrary
         .ingest_source_of(kind)
         .assured("every modeled pair has a transport Model");
     for (mode, supported) in modes.into_iter().zip(expected) {
         assert_eq!(source.supports_quiesce(&mode), supported, "{mode:?}");
-        let outcome = source.set_quiesce(mode.clone());
-        assert_eq!(outcome.is_ok(), supported, "{mode:?}");
-        if supported {
-            assert_eq!(source.quiesce(), &mode);
-        }
     }
 }
 
@@ -494,7 +576,7 @@ fn an_mqtt_source_suspends_only_a_persistent_session_delivered_at_least_once() {
         IngestorEntity::from(MqttTopicIngestor {
             client: named("broker"),
             topic: named("orders/#"),
-            instances: std::num::NonZeroU64::MIN,
+            instances: nervix_models::IngestorInstances::ONE,
             session,
             qos,
             mode,
@@ -560,7 +642,7 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
         client: named("events"),
         topic: named("orders"),
         offset_mode: KafkaOffsetMode::Domain,
-        instances: std::num::NonZeroU64::MIN,
+        instances: nervix_models::IngestorInstances::ONE,
         mode: KafkaIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Suspend,
     });
@@ -677,12 +759,17 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
         EmitterEntityKind::Redis(RedisEmitterEntity::PubSub)
         | EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push)
         | EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) => codec(None, &["NoAck"]),
-        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
-            codec(None, &["MqttQos0", "MqttQos1", "MqttQos2"])
-        }
+        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => codec(
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            &["NoAck", "BrokerAck"],
+        ),
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => codec(
-            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-            &["NoAck", "NatsJetStream"],
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            &["NoAck"],
+        ),
+        EmitterEntityKind::Nats(NatsEmitterEntity::Stream) => codec(
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            &["BrokerAck"],
         ),
         EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterDeclaration {
             batch: EmitterBatchLegality::Optional {
@@ -739,7 +826,7 @@ fn every_emitter_pair_declares_its_headers_codec_batching_and_publishing_modes()
         );
         for (name, mode) in publishing_modes() {
             assert_eq!(
-                declared.publishing_modes.contains(&mode),
+                declared.accepts_publishing_mode_kind(mode),
                 expected.modes.contains(&name.as_str()),
                 "{kind:?} {name}"
             );
@@ -783,11 +870,7 @@ fn an_emitter_states_what_its_pair_declares() {
                 entity.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );
-            assert!(
-                declared
-                    .publishing_modes
-                    .contains(&entity.publishing().kind())
-            );
+            assert!(declared.accepts_publishing_mode_kind(entity.publishing().kind()));
             match entity.reference() {
                 EmitterReference::Client(EmitterClientReference { client, connector }) => {
                     assert_eq!(entity.client(), Some(client));
@@ -1245,7 +1328,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
             client: named("events"),
             topic: named("orders"),
             offset_mode: KafkaOffsetMode::Domain,
-            instances: std::num::NonZeroU64::MIN,
+            instances: nervix_models::IngestorInstances::ONE,
             mode,
             quiesce: IngestQuiesceMode::Suspend,
         })
@@ -1292,7 +1375,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
         let source = IngestorEntity::from(MqttTopicIngestor {
             client: named("broker"),
             topic: named("orders/#"),
-            instances: std::num::NonZeroU64::MIN,
+            instances: nervix_models::IngestorInstances::ONE,
             session: MqttSession::Persistent,
             qos: MqttQos::Qos1,
             mode,
@@ -1365,7 +1448,7 @@ fn a_client_producer_window_counts_the_batches_it_admits() {
 }
 
 #[test]
-fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
+fn an_endpoint_source_honors_no_suspend_whatever_it_holds() {
     let buffer = IngestQuiesceMode::EndpointBuffer {
         max_size: "1MiB".to_string(),
     };
@@ -1374,21 +1457,11 @@ fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
         mode: EndpointIngestMode::NoAck,
         quiesce: buffer.clone(),
     }));
+    assert!(source.supports_quiesce(&buffer));
 
-    let error = source
-        .set_quiesce(IngestQuiesceMode::Suspend)
-        .expect_err("an endpoint cannot suspend its callers");
+    // Setting a mode writes it, and the complete Model is what the registry checks it against.
+    source.set_quiesce(IngestQuiesceMode::Suspend);
 
-    assert_eq!(
-        error.current_context(),
-        &AlterIngestorError::UnsupportedQuiesceMode {
-            kind: IngestorEntityKind::Http(HttpIngestorEntity::Endpoint),
-            mode: "SUSPEND",
-        }
-    );
-    assert_eq!(
-        error.to_string(),
-        "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
-    );
-    assert_eq!(source.quiesce(), &buffer);
+    assert_eq!(source.quiesce(), &IngestQuiesceMode::Suspend);
+    assert!(!source.supports_quiesce(&IngestQuiesceMode::Suspend));
 }

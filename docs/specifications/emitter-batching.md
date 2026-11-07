@@ -80,9 +80,10 @@ BATCH MAX MESSAGES <n> MAX SIZE <bytes>
 The clause sits between the complete `TO` emitter clause and the `FLUSH` policy:
 
 ```plexus,ignore
-CREATE [IF NOT EXISTS] [ATTACHED | DETACHED] EMITTER <name>
+CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> EMITTER <name>
   FROM <relay> [WHERE <expr>] [, ...] [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
-  [WITH MATERIALIZED STATE ...]
+  [ATTACHED | DETACHED]
+  [USING MATERIALIZED STATE ...]
   TO <emitter clause, including MODE, ENCODE USING and construction>
   [BATCH MAX MESSAGES <n> MAX SIZE <bytes>]
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
@@ -333,8 +334,7 @@ therefore names it.
 ### Protobuf batch messages
 
 ```plexus,ignore
-CREATE CODEC <name>
-  FROM PROTOBUF
+CREATE PROTOBUF CODEC <name>
   USING RESOURCE <resource> VERSION <n> | LATEST
   CONFIG { ... }
   MESSAGE '<message>'
@@ -346,7 +346,7 @@ CREATE CODEC <name>
 `BATCH MESSAGE` names a message in the same compiled descriptors. Without a batch transformation
 the batch message must declare exactly one field and that field must be `repeated <message>`;
 Nervix fills it with the members in packing order. With a batch transformation, the batch message
-may have any shape the transformation's single output is a valid instance of. `CREATE CODEC` fails
+may have any shape the transformation's single output is a valid instance of. `CREATE PROTOBUF CODEC` fails
 when the named message does not exist, and a batching emitter fails validation when the batch
 message has no single repeated field and the codec declares no batch transformation.
 
@@ -426,7 +426,7 @@ record rather than assumed.
 | RabbitMQ | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One AMQP message whose body is the batch payload | One message carrying the members |
 | Redis Pub/Sub | `NO ACK` | One `PUBLISH` message whose payload is the batch payload | One channel message carrying the members |
 | MQTT | `QOS 0`, `QOS 1`, `QOS 2` | One PUBLISH packet whose payload is the batch payload | One message on the topic carrying the members |
-| NATS | `NO ACK` (core), `JETSTREAM ACK SEQUENTIAL`, `JETSTREAM ACK PARALLEL` | One message on the subject whose payload is the batch payload | One core message or one stream message carrying the members |
+| NATS SUBJECT, NATS STREAM | `NO ACK` (subject), `ACK SEQUENTIAL`, `ACK PARALLEL` (stream) | One message on the subject whose payload is the batch payload | One core message or one stream message carrying the members |
 | ZeroMQ | `NO ACK` | One single-frame PUSH message whose frame is the batch payload | One message; the puller reads the first frame and decodes the members |
 | SQS | `SEND SINGLE`, `SEND BATCH`; standard and FIFO queues | One SQS message whose body is the batch payload, with the members' common attributes and FIFO group | One queue message carrying the members; `SEND BATCH` still packs up to ten such messages per request, and each stays an independent message |
 | Sentry | `ACK` | One envelope with one `event` item, whose event is the single value the codec's batch transformation produced | One Sentry event carrying the members in the field the transformation placed them in, typically `extra` |
@@ -691,8 +691,7 @@ batch shape does not depend on how many records were available.
 ### An envelope instead of an array
 
 ```plexus,ignore
-CREATE IF NOT EXISTS CODEC notification_envelope
-  FROM JSON
+CREATE IF NOT EXISTS JAQ JSON CODEC notification_envelope
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS
     ON EMITTING '{id: .user_id, action: .action}'
@@ -725,8 +724,7 @@ message NotificationBatch { repeated Notification notifications = 1; }
 ```
 
 ```plexus,ignore
-CREATE CODEC notification_proto
-  FROM PROTOBUF
+CREATE PROTOBUF CODEC notification_proto
   USING RESOURCE proto_bundle VERSION 1
   CONFIG {'file' = 'notification.proto', 'include' = '.'}
   MESSAGE 'nervix.test.Notification'
@@ -766,8 +764,7 @@ the next one.
 ### Sentry
 
 ```plexus,ignore
-CREATE CODEC sentry_batch_codec
-  FROM JSON
+CREATE JAQ JSON CODEC sentry_batch_codec
   TO SCHEMA error_event
   WITH JAQ TRANSFORMATIONS
     ON EMITTING '{message: .message, level: .level, environment: .environment}'

@@ -8,23 +8,25 @@ use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    ClientRequest, ReplyBody, SubscribeDisposition, SubscribeOutcome, UnsubscribeDisposition,
-    UnsubscribeOutcome,
+    ClientRequest, ReplyBody, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
+    SubscriptionRefusal, UnsubscribeDisposition, UnsubscribeOutcome,
 };
 use nervix_models::SubscriptionName;
 use nervix_primitives::time::Instant;
 
-use super::{DEADLINE, Loopback, domain, opened_reply, subscription};
-use crate::{SubscriptionEvent, SubscriptionLifecycle, SubscriptionRequest};
+use super::{DEADLINE, Loopback, domain, opened_reply, orders_schema, subscription};
+use crate::{
+    SubscriptionEvent, SubscriptionLifecycle, SubscriptionRequest, SubscriptionRestorationCause,
+};
 
 fn name(value: &str) -> SubscriptionName {
     SubscriptionName::parse(value).assured("the test subscription name is valid")
 }
 
 /// The reply of a session that refuses to open a subscription.
-fn refused(message: &str) -> ReplyBody {
+fn refused(refusal: SubscriptionRefusal, message: &str) -> ReplyBody {
     ReplyBody::Subscribe(SubscribeOutcome {
-        disposition: SubscribeDisposition::Failed,
+        disposition: SubscribeDisposition::Refused(refusal),
         message: message.to_string(),
         diagnostics: Vec::new(),
     })
@@ -53,6 +55,10 @@ impl Loopback {
         assert_eq!(
             subscribe.statement,
             format!("CREATE SUBSCRIPTION {subscription_name} TO orders;")
+        );
+        assert_eq!(
+            subscribe.expected_schema, None,
+            "a first subscribe expects no schema"
         );
         self.answer(
             sent.request_id,
@@ -121,7 +127,10 @@ impl Loopback {
                 ClientRequest::Unsubscribe(unsubscribe) => {
                     not_held(unsubscribe.subscription.as_str())
                 }
-                ClientRequest::Subscribe(_) => refused("relay 'orders' does not exist"),
+                ClientRequest::Subscribe(_) => refused(
+                    SubscriptionRefusal::Unavailable,
+                    "failed to subscribe to relay 'orders': it is not running",
+                ),
                 other => panic!("the test serves subscription requests only, not {other:?}"),
             };
             self.answer(request.request_id, reply).await;
@@ -210,7 +219,13 @@ async fn deleting_a_subscription_whose_restoration_was_refused_needs_no_server()
     let restore = loopback.next_request().await;
     assert!(matches!(restore.request, ClientRequest::Subscribe(_)));
     loopback
-        .answer(restore.request_id, refused("relay 'orders' does not exist"))
+        .answer(
+            restore.request_id,
+            refused(
+                SubscriptionRefusal::Unavailable,
+                "failed to subscribe to relay 'orders': it is not running",
+            ),
+        )
         .await;
     loopback
         .wait_for_lifecycle(
@@ -248,7 +263,13 @@ async fn a_refused_restoration_is_repeated_after_a_growing_delay() {
         assert!(matches!(restore.request, ClientRequest::Subscribe(_)));
         sent_at.push(Instant::now());
         loopback
-            .answer(restore.request_id, refused("relay 'orders' is starting"))
+            .answer(
+                restore.request_id,
+                refused(
+                    SubscriptionRefusal::Unavailable,
+                    "relay 'orders' is starting",
+                ),
+            )
             .await;
         let reported = loopback
             .client
@@ -259,6 +280,7 @@ async fn a_refused_restoration_is_repeated_after_a_growing_delay() {
             panic!("a refused restoration is reported as such: {reported:?}");
         };
         assert_eq!(failure.subscription, subscription("live", 1));
+        assert_eq!(failure.cause, SubscriptionRestorationCause::Unavailable);
         assert_eq!(failure.message, "relay 'orders' is starting");
         reported_waits.push(failure.retry_after);
         assert_eq!(
@@ -298,6 +320,124 @@ async fn a_refused_restoration_is_repeated_after_a_growing_delay() {
 }
 
 #[nervix_primitives::test]
+async fn a_restoration_expects_the_schema_its_replaced_generation_announced() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    loopback.open("live", 1).await;
+    loopback.replace_exchange().await;
+    let restore = loopback.next_request().await;
+    let ClientRequest::Subscribe(subscribe) = restore.request else {
+        panic!("a restoration opens the subscription with a subscribe request");
+    };
+    assert_eq!(subscribe.statement, "CREATE SUBSCRIPTION live TO orders;");
+    assert_eq!(
+        subscribe.expected_schema,
+        Some(orders_schema()),
+        "a restoration expects the schema of the generation it replaces"
+    );
+}
+
+/// Opens `live` and loses its session, so that the next exchange restores it, and returns the
+/// restoration's request after the caller read the interruption.
+async fn interrupted_restoration(loopback: &mut Loopback) -> nervix_client_wire::ClientMessage {
+    loopback.open("live", 1).await;
+    loopback.replace_exchange().await;
+    let interrupted = loopback
+        .client
+        .next_subscription()
+        .await
+        .assured("the lost session reports the subscription's gap");
+    assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
+    let restore = loopback.next_request().await;
+    assert!(matches!(restore.request, ClientRequest::Subscribe(_)));
+    restore
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_restoration_refused_because_its_relay_is_gone_ends_the_subscription_as_removed() {
+    let cases = [
+        (
+            SubscriptionRefusal::RelayNotFound,
+            "stream 'orders' does not exist in domain 'tenant'",
+        ),
+        (
+            SubscriptionRefusal::DomainNotFound,
+            "domain 'tenant' does not exist",
+        ),
+    ];
+    for (refusal, message) in cases {
+        let mut loopback = Loopback::new(Some(domain("tenant")));
+        let restore = interrupted_restoration(&mut loopback).await;
+        loopback
+            .answer(restore.request_id, refused(refusal, message))
+            .await;
+        let reported = loopback
+            .client
+            .next_subscription()
+            .await
+            .assured("the refused restoration ends the subscription");
+        let SubscriptionEvent::Ended(ended) = reported else {
+            panic!("a restoration refused as {refusal:?} ends the subscription: {reported:?}");
+        };
+        assert_eq!(ended.subscription, subscription("live", 1));
+        assert_eq!(ended.reason, SubscriptionEndReason::RelayRemoved);
+        assert_eq!(ended.message, message);
+        assert_eq!(
+            loopback.client.subscription_lifecycle(&name("live")),
+            Some(SubscriptionLifecycle::Ended(subscription("live", 1)))
+        );
+
+        nervix_primitives::time::sleep(Duration::from_secs(60)).await;
+        assert!(
+            loopback.requests.try_recv().is_err(),
+            "a restoration refused as {refusal:?} is never sent again"
+        );
+        let deleted = loopback
+            .client
+            .unsubscribe("live")
+            .await
+            .assured("an ended subscription is deleted without the server");
+        assert!(deleted.succeeded(), "{}", deleted.message);
+        assert_eq!(
+            deleted.message,
+            "subscription 'live' deleted; the server had already ended it"
+        );
+        assert_eq!(loopback.client.subscription_lifecycle(&name("live")), None);
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_restoration_refused_because_its_relay_changed_ends_the_subscription_as_changed() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let restore = interrupted_restoration(&mut loopback).await;
+    let message = "relay 'orders' in domain 'tenant' was redefined, so it no longer announces the \
+                   schema session subscription 'live' expects";
+    loopback
+        .answer(
+            restore.request_id,
+            refused(SubscriptionRefusal::RelayChanged, message),
+        )
+        .await;
+    let reported = loopback
+        .client
+        .next_subscription()
+        .await
+        .assured("the refused restoration ends the subscription");
+    let SubscriptionEvent::Ended(ended) = reported else {
+        panic!("a restoration refused as RelayChanged ends the subscription: {reported:?}");
+    };
+    assert_eq!(ended.subscription, subscription("live", 1));
+    assert_eq!(ended.reason, SubscriptionEndReason::RelayChanged);
+    assert_eq!(ended.message, message);
+
+    loopback.open("live", 2).await;
+    assert_eq!(
+        loopback.client.subscription_lifecycle(&name("live")),
+        Some(SubscriptionLifecycle::Active(subscription("live", 2))),
+        "subscribing again under the name opens a new generation under the current schema"
+    );
+}
+
+#[nervix_primitives::test]
 async fn a_restoration_whose_exchange_ends_unanswered_is_sent_again_on_the_next_exchange() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback.open("live", 1).await;
@@ -320,6 +460,44 @@ async fn a_restoration_whose_exchange_ends_unanswered_is_sent_again_on_the_next_
             Some(SubscriptionLifecycle::Active(subscription("live", 2))),
         )
         .await;
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn an_unanswered_subscription_restoration_wakes_the_waiting_reader() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    loopback.open("live", 1).await;
+    loopback.replace_exchange().await;
+    let interrupted = loopback
+        .client
+        .next_subscription()
+        .await
+        .assured("the lost session reports the subscription's gap");
+    assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
+    let restore = loopback.next_request().await;
+    assert!(matches!(restore.request, ClientRequest::Subscribe(_)));
+
+    let client = loopback.client.clone();
+    let reading = nervix_primitives::task::spawn(async move { client.next_subscription().await });
+    let deadline = loopback
+        .client
+        .inner
+        .connector
+        .request_timeout()
+        .checked_add(DEADLINE)
+        .assured("two test deadlines add within Duration's range");
+    let read = nervix_primitives::time::timeout(deadline, reading)
+        .await
+        .assured("the unanswered reopening wakes the subscription reader")
+        .assured("the subscription reader completes");
+    let failure = read.expect_err("the client knows no server to open another session on");
+    assert!(
+        matches!(failure.current_context(), crate::ClientError::SessionClosed),
+        "{failure:?}"
+    );
+    assert_eq!(
+        loopback.client.subscription_lifecycle(&name("live")),
+        Some(SubscriptionLifecycle::Interrupted(subscription("live", 1)))
+    );
 }
 
 #[nervix_primitives::test(start_paused = true)]
@@ -352,10 +530,15 @@ async fn a_rejected_restoration_is_reported_and_sent_again() {
     let SubscriptionEvent::RestorationFailed(failure) = reported else {
         panic!("a rejected restoration is reported as a failed restoration: {reported:?}");
     };
-    assert!(
-        failure.message.contains("TooManyRequestsInFlight"),
-        "{}",
-        failure.message
+    assert_eq!(
+        failure.cause,
+        SubscriptionRestorationCause::Rejected(
+            nervix_client_wire::RequestRejection::TooManyRequestsInFlight
+        )
+    );
+    assert_eq!(
+        failure.message,
+        "the session already has 64 requests in flight"
     );
     assert_eq!(failure.retry_after, Duration::from_secs(1));
 

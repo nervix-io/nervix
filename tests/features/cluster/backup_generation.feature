@@ -21,16 +21,15 @@ Feature: Bounded complete restore generations
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
@@ -115,19 +114,19 @@ Feature: Bounded complete restore generations
       """
       relay 'raw_metrics' materialized state is empty
       """
-    Then within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    Then within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       kafka observed partitions: 0
       """
-    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       kafka instance 0 partitions: 0
       """
-    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       transient error: -
       """
-    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_ingestor" on the leader node contains
       """
       ready: true
       """

@@ -20,7 +20,7 @@ The observability listener exposes:
 
 - `/livez`: process liveness
 - `/readyz`: readiness once a leader is known
-- `/metrics`: Prometheus text output for graph, interconnection, and allocator metrics
+- `/metrics`: Prometheus text output for graph, command history, interconnection, and allocator metrics
 
 Use the node's observability address, not the data-plane HTTP listener:
 
@@ -31,7 +31,8 @@ curl http://127.0.0.1:<observability-port>/metrics
 Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay
 branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a
 relay is branched by high-cardinality values such as tenant, user, account, or device id. Branch
-lifecycle metrics identify the declared branch, not the concrete key.
+lifecycle metrics identify the declared branch, not the concrete key. A partitioned relay or processor's series
+carry its partition, whose cardinality is bounded by the partition count its branch declares.
 
 ## Metric Labels
 
@@ -42,21 +43,24 @@ Graph metric series use these labels:
 - `target`: relay or node name
 - `physical_node_id`: Nervix cluster node where the metric was observed
 - `direction`: `received` or `sent`
-- `stream`: logical relay associated with the observation, or `-` when no relay applies
+- `relay`: logical relay associated with the observation, or `-` when no relay applies
 - `peer_kind` and `peer`: relay peer labels for node-to-relay observations, or `-` when no peer applies
+- `partition`: the partition of a partitioned relay or processor recording the series, or `-`
+  for a unit without partitions
+- `instance`: the global index of an ingestor instance, or `-` for a non-instance unit
 - `branch`: named branch declaration on branch lifecycle metrics
 - `reason`: branch eviction reason, either `lru` or `ttl`
 - `le`: Prometheus histogram bucket boundary
 
-For a single-input emitter, sent metrics retain that input relay as `stream`. A multi-input
+For a single-input emitter, sent metrics retain that input relay as `relay`. A multi-input
 emitter's received metrics identify the actual source relay, while its sent metrics aggregate the
-shared emitter pipeline with `stream="-"` because one flush may contain work from several sources.
+shared emitter pipeline with `relay="-"` because one flush may contain work from several sources.
 
 An emitter's sent metrics count the records its destination delivered, each once, however many
 attempts it took: a flush that completes after retries counts its delivered records once, and a
 record the destination refused follows `ON MESSAGE ERROR` and is not sent. When a flush fails for
 good, the records its emitter delivered before the failure are counted as its other records are routed
-to their error policy. A emitter that publishes on its own commit, such as Iceberg, counts what each
+to their error policy. An emitter that publishes on its own commit, such as Iceberg, counts what each
 commit publishes. Sent bytes measure a delivered record's payload as the emitter's buffer measures
 it; an HTTP request's method, target and headers are not payload, and a request without a body
 carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-and-metrics).
@@ -66,8 +70,19 @@ carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-an
 Example Prometheus series:
 
 ```text
-nervix_messages_total{domain="prod",target_kind="RELAY",target="notifications",physical_node_id="node-1",direction="received",stream="notifications",peer_kind="-",peer="-"} 42
+nervix_messages_total{domain="prod",target_kind="RELAY",target="notifications",physical_node_id="node-1",direction="received",relay="notifications",peer_kind="-",peer="-",partition="-",instance="-"} 42
+nervix_messages_total{domain="prod",target_kind="RELAY",target="tenant_events",physical_node_id="node-2",direction="received",relay="tenant_events",peer_kind="-",peer="-",partition="1",instance="-"} 17
 ```
+
+`DESCRIBE` metric lines of a partitioned relay name the partition after the relay, for example
+`messages_total received relay=tenant_events partition=1 physical_node=node-2 total=17 ...`.
+Every `RELAY` series a partitioned relay records names one of its partitions, so such a relay has no
+`RELAY` series with `partition="-"`. A partition's series exist on the node that owns it and are
+withdrawn when that owner ends, as when the partition moves to another node.
+
+Processor input, output, latency and branch-aggregated series carry the processor unit's partition.
+`DESCRIBE` gathers those series from each unit's execution owner; state replicas do not repeat a
+sibling owner's series. Concrete branch keys remain outside the Prometheus label set.
 
 Example `DESCRIBE INGESTOR` edge metric section:
 
@@ -89,6 +104,10 @@ Nervix records these raw metric families:
   `8192`, `16384`, `32768`, and `65536`, followed by `+Inf`. The rolling HDR histograms used by
   `DESCRIBE` track batch sizes through 65,536 messages.
 - `nervix_delivery_latency_seconds`: histogram of delivery latency between graph nodes
+- `nervix_emitter_publish_attempts_total`: completed host publish and commit attempts, split by
+  `operation` and `outcome`; see [Connector Interactions](#connector-interactions)
+- `nervix_emitter_publish_duration_seconds`: elapsed wall seconds per host publish or commit
+  attempt, split by `operation`
 - `nervix_relay_buffer_len`: histogram of runtime relay buffer occupancy in queued batches
 - `nervix_branch_instances`: current concrete branch keys with at least one runtime instance on the
   physical node
@@ -102,17 +121,17 @@ Nervix records these raw metric families:
   overflow, memory-pressure zero-capacity behavior, or an interrupting termination
 - `nervix_ingestor_quiesce_rejected_total`: endpoint requests or connections refused while an
   ingestor cannot accept them
-- `nervix_ingestor_unfolding_refused_total`: payloads a source handed over without an
+- `nervix_ingestor_unfolding_refused_total`: payloads an ingestor handed over without an
   acknowledgement that an ingestor did not deliver because the node's extension workers had no room
-  to unfold them, for a source whose transport would not survive a held loop; see
+  to unfold them, for an ingestor whose transport would not survive a held loop; see
   [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full)
 - `nervix_ingestor_transport_redeliveries_total`: pending acknowledgements and rejections an
-  ingestor discarded after its RabbitMQ, SQS or MQTT source reconnected. The broker redelivers what
+  ingestor discarded after its RabbitMQ, SQS or MQTT ingestor reconnected. The broker redelivers what
   the lost connection did not acknowledge, so each counted position is ingested again
 - `nervix_ingestor_decode_rejections_total`: payloads an ingestor consumed because its codec
   refused them, each reported as a decode rejection under its `ON GENERAL ERROR` policy; see
   [When The Codec Refuses A Payload](./ingestors.md#when-the-codec-refuses-a-payload)
-- `nervix_ingestor_oversized_payloads_total`: payloads an ingestor's source dropped because they
+- `nervix_ingestor_oversized_payloads_total`: payloads an ingestor dropped because they
   exceed their client's message size bound, such as a Syslog UDP datagram larger than
   `max_message_size`; see [Oversized payloads](./connector-contract.md#oversized-payloads)
 - `nervix_ingestor_header_values_dropped_total`: invalid UTF-8 transport header values an
@@ -124,7 +143,7 @@ Nervix records these raw metric families:
 - `nervix_ingestor_read_ahead_dropped_payloads_total`: QoS 0 publishes an ACK-mode MQTT ingestor
   dropped because its separate 64-outcome read-ahead quota was full. The driver counts each drop
   immediately, including during a downstream acknowledgement wait; see
-  [MQTT source connections](./connector-contract.md#mqtt-source-connections)
+  [MQTT ingestor connections](./connector-contract.md#mqtt-ingestor-connections)
 - `nervix_session_subscriptions`: open session subscriptions the node delivers from a relay. The
   node advertises interest in the relay to the cluster exactly while this is above zero, and the
   series stays at `0` once the relay's last subscription on the node closes
@@ -139,6 +158,16 @@ Nervix records these raw metric families:
   acknowledgement window
 - `nervix_client_ingestor_submissions_total`: batches the ingestor answered, by `outcome` and
   `cause`
+- `nervix_sessions`: client sessions the node serves now
+- `nervix_sessions_opened_total`: client sessions the node has served
+- `nervix_session_requests_total`: requests the node's client sessions decoded, by `request`
+- `nervix_session_rejections_total`: requests those sessions answered with a rejection, by
+  `rejection`
+- `nervix_session_cancellations_total`: requests a cancellation ended, by `stage`
+- `nervix_session_transfer_parts_total`: transfer parts those sessions queued for replies larger
+  than one frame
+- `nervix_client_authentications_total`: calls the node's client listeners authenticated or
+  refused, by `outcome`
 - `nervix_jemalloc_active_bytes`: bytes in active allocator pages
 - `nervix_jemalloc_allocated_bytes`: bytes allocated by the process
 - `nervix_jemalloc_mapped_bytes`: bytes mapped by active allocator extents
@@ -176,9 +205,68 @@ first observation. Their labels and counting contracts are unchanged.
 
 The two session-subscription families use `domain` and `relay` labels and describe the node that
 exports them: the subscriptions its sessions hold and the rows those sessions lost. A client is told
-of its own losses directly, as described in [Sessions](sessions.md). The server exports no other
-session metrics; [Client Session Protocol](./client-session-protocol.md#observability) describes
-what clients and operators observe instead.
+of its own losses directly, as described in [Sessions](sessions.md). The rest of a node's session
+traffic, and the authentication attempts its client listeners judge, are described under
+[Client Traffic](#client-traffic).
+
+## Client Traffic
+
+Seven families describe the traffic the node's two client listeners carry, the native gRPC listener
+and the web console listener, which the `transport` label names as `grpc` or `console`. They
+describe the node that exports them: a session counts on the node its client connected to, and a
+call counts on the node that judged its credentials. Every other label is drawn from a set fixed at
+compile time. No label carries a user name, a session, request or execution identity, a domain, or
+a payload value, and every child is registered at zero when the node starts, so each series appears
+before its first observation.
+
+| Family | Kind | Labels | Counts |
+| --- | --- | --- | --- |
+| `nervix_sessions` | gauge | `transport` | Sessions the node serves now, from the moment a session's call is authenticated until the session has released its subscriptions and its transaction binding. |
+| `nervix_sessions_opened_total` | counter | `transport` | Sessions the node has served. |
+| `nervix_session_requests_total` | counter | `transport`, `request` | Requests the sessions decoded, by kind: `command`, `suggest`, `choice`, `list_domains`, `select_domain`, `attach_transaction`, `inspect_transaction`, `subscribe`, `unsubscribe`, `cancel`, `attach_domain_clock`, `detach_domain_clock`, `open_ingestor`, `submit_batch`, `close_ingestor`, `open_emitter`, `read_emitter_batch`, `settle_emitter_batch` or `close_emitter`. A frame that does not decode names no kind and counts only as a rejection. |
+| `nervix_session_rejections_total` | counter | `transport`, `rejection` | Requests answered with a rejection, by its reason: `invalid_request`, `unsupported_request`, `unsupported_value`, `duplicate_request_id`, `reply_too_large`, `too_many_requests_in_flight` or `server_busy`. A reply replaced by a rejection because it could not be encoded counts under the replacement's reason. |
+| `nervix_session_cancellations_total` | counter | `transport`, `stage` | Requests a cancellation ended, by whether it found them `before_admission` or `after_admission`. A cancellation whose target was already answered ended nothing and is not counted here; the cancel request itself counts under `request="cancel"`. |
+| `nervix_session_transfer_parts_total` | counter | `transport` | Transfer parts queued for replies larger than one frame. |
+| `nervix_client_authentications_total` | counter | `transport`, `outcome` | Calls whose authentication ended `authenticated`, `missing` (no readable Basic credentials), `rejected` (an unknown user, a wrong password, or a stored hash the node could not verify) or `unavailable` (the node could not judge the credentials now). Every call counts: a session, an upload, a download and a restore, and on the console a `/console/auth` check and a resource upload. |
+
+`rejected` deliberately does not tell an unknown user from a wrong password. The observability
+listener is unauthenticated, and that distinction is what enumerating the cluster's users would
+look for; an unknown user also costs the node the same credentials work, as
+[Authentication](./client-session-protocol.md#authentication) describes. A rate of `rejected`
+attempts is the sign of a client guessing passwords, and the `warn` record of each names the address
+it came from.
+
+## Command Execution History
+
+Every node exposes its applied command history through these bounded metric families:
+
+| Family | Kind and labels | Meaning |
+| --- | --- | --- |
+| `nervix_command_execution_records` | Gauge, `state` is `applying`, `finished` or `expired` | Retained executions in each state, including compact expiry tombstones. |
+| `nervix_command_execution_retry_fence_timestamp_seconds` | Gauge, no labels | The durable retry fence as Unix seconds, absent until a fence has been committed. |
+| `nervix_command_execution_admission_refusals_total` | Counter, `reason` is `expired`, `future`, `missing_timestamp` or `capacity` | Definitive admission refusals handled by this node process. |
+
+The record counts and fence come from one applied revision at scrape time. Reading the three
+existing history indexes takes constant time and does not scan executions or advance the fence.
+Followers expose their own applied revision, so they may briefly trail the leader. These gauges
+describe replicated state: use the leader's values for a cluster total rather than summing copies
+across nodes. A restart restores them from the recovered history and fence. `time() -
+nervix_command_execution_retry_fence_timestamp_seconds` shows the fence's age against the scraper's
+clock, including an unexpectedly advanced fence.
+
+Refusal counters are process-local and start at zero for all four reasons. They count refused
+attempts, including a retry whose compact tombstone is still retained, rather than unique execution
+references. `future` means the UUIDv7 creation time exceeds the accepted five-minute clock skew or
+the timestamp range; `missing_timestamp` means the reference carries no UUIDv7 creation time.
+Follower application of a refused proposal adds no event, and a leadership change neither copies
+nor resets counters on either live process. Sum their rates across nodes to follow refusals as
+leadership moves; a process restart resets its counters. Completion and background recovery add no
+admission event, including when history maintenance has expired the completed outcome. Recovered
+successful outcomes, reference content conflicts, redirects and uncertain admission outcomes add
+no refusal event to these four reasons. No execution identity, domain or user appears in their labels.
+
+See [Bounded History And Expired Identities](./client-session-protocol.md#bounded-history-and-expired-identities)
+for retention and admission semantics.
 
 ## Client Ingestors
 
@@ -304,7 +392,7 @@ Relay admission:
   `direction="outbound"` the refusals this node received for its own deliveries. The capacity
   reasons, `memory`, `queue_item`, `terminal_outcome` and `channel_busy`, hold the delivery back,
   and its sender asks again; a count of them that keeps rising on a sender means its deliveries are
-  waiting for the receiver's room, and its sources are held with them. Every other reason fails the
+  waiting for the receiver's room, and its ingestors are held with them. Every other reason fails the
   delivery at once. See [Held Deliveries](./interconnect.md#held-deliveries)
 - `nervix_interconnect_relay_admissions_total` and
   `nervix_interconnect_relay_admission_wait_seconds_total`: attempts resolved, by `outcome`
@@ -323,7 +411,7 @@ Relay admission:
 Execution admission:
 
 Worker series include the `connector_storage` class. Its running and pending jobs show Kafka
-source control calls, consumer-group commits and the destruction of retired consumers and producers
+ingestor control calls, consumer-group commits and the destruction of retired consumers and producers
 waiting on their broker, independently of `filesystem_storage` and `consensus_storage`. A commit may
 keep its worker after its caller's thirty-second deadline; the next commit from that instance waits
 for the same job. A retired consumer whose group coordinator does not answer keeps its worker for up
@@ -394,10 +482,116 @@ family of their own: their transfers appear in the interconnection series and th
 the `bulk` and `restore_metadata` memory classes. [Backup And
 Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) defines each series.
 
+## Connector Interactions
+
+Emitter destination observations describe the host's interaction with a connector, separately
+from delivered graph traffic. Both interaction families carry `domain`, `emitter`,
+`physical_node_id`, `connector` and `entity`. Connector names use the vocabulary's display form,
+such as `REDIS`; entities use their declared name, such as `PUBSUB`. `operation` is `publish` or
+`commit`. Each starting emitter registers every operation/outcome child and histogram at zero,
+even if that connector has no separate commit operation.
+
+`nervix_emitter_publish_attempts_total` records one outcome per nonempty host publish attempt or
+due staged commit, including each retry. It never counts one attempt per record. Its bounded
+`outcome` label projects the typed result the host already handles:
+
+- `succeeded`: the operation completed, including settled per-record rejections that do not fail
+  the operation
+- `transient`: an existing retryable publish failure, a stop deadline or shutdown while stalled,
+  or cancellation of an attempt before it has a definitive answer
+- `misconfigured`: the connector returned the host's invalid-connector-configuration outcome
+- `violation`: a terminal preparation or connector-contract failure, including an unknown or
+  repeated record answer
+
+This observation does not change retry, acknowledgement or error policy. In particular, delivered
+records still increase the existing `messages_total sent` only once. A connector can make several
+external calls inside one host attempt; these families do not count those calls separately.
+
+`nervix_emitter_publish_duration_seconds` observes elapsed wall time once per started attempt,
+including failed and cancelled attempts. Its finite bucket boundaries are `0.001`, `0.005`,
+`0.01`, `0.05`, `0.1`, `0.5`, `1`, `5` and `30` seconds, followed by `+Inf`. Empty flushes and
+commits that are not due record neither a counter nor a duration.
+
+Interaction observations are process-local and are retained for that process's lifetime. A
+restarted task with the same labels continues its totals; another connector entity or physical
+node has separate children. A new process starts at zero. These observations are neither
+replicated nor restored from snapshots, and removing a task does not withdraw its history.
+
+`DESCRIBE EMITTER` renders a `destination:` section after status and before the graph-edge
+`metrics:` section. The existing owner route also supplies this section when another node receives
+the command. Each counter line includes its full family and label selector, `total`, the wall
+average rate and the one-minute and fifteen-minute wall EMA rates. Domain rates are `-`, because
+an attempt has no domain timestamp. Each duration line includes its full selector, `count` and
+`sum_seconds`. For example:
+
+```text
+destination:
+  nervix_emitter_publish_attempts_total{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish",outcome="succeeded"} total=2 wall_rate_per_sec=0.5 domain_rate_per_sec=- wall_rate_ema_1m_per_sec=0.4 wall_rate_ema_15m_per_sec=0.1 domain_rate_ema_1m_per_sec=- domain_rate_ema_15m_per_sec=-
+  nervix_emitter_publish_duration_seconds{domain="prod",emitter="notifications_out",physical_node_id="node-1",connector="REDIS",entity="PUBSUB",operation="publish"} count=2 sum_seconds=0.003
+```
+
+### Emitter payload preparation
+
+Payload observations use the same five identity labels as destination attempts. They have no
+branch-key, record, request or error-text label. Every child exists at zero when its emitter starts.
+`DESCRIBE EMITTER` includes the same totals in its owner-routed `destination:` section.
+
+| Family | Unit and meaning |
+| --- | --- |
+| `nervix_emitter_payloads_total` | Successfully encoded or sized logical payload preparations. |
+| `nervix_emitter_payload_source_messages_total` | Source-record memberships in those preparations. |
+| `nervix_emitter_payload_encoded_bytes_total` | Exact encoded bytes at the payload's documented measurement boundary. |
+| `nervix_emitter_payload_size_bound_bytes_total` | The corresponding exact size bounds; these equal measured encoded bytes because Nervix measures rather than estimates. |
+| `nervix_emitter_prepared_bytes_total` | Prepared content bytes, including connector preparation such as a Sentry envelope, counted once per preparation. |
+| `nervix_emitter_messages_per_payload` | Histogram of source records per prepared payload. |
+| `nervix_emitter_payload_splits_total` | Candidate halvings caused by an encoded-size limit, excluding count and metadata boundaries. |
+| `nervix_emitter_work_messages` | Current source rows by `state="buffered"`, `prepared`, `in_flight` or `staged`. |
+| `nervix_emitter_prepared_payloads` | Logical payloads whose bytes and membership the host retains for an answer. |
+| `nervix_emitter_prepared_bytes` | Bytes of the prepared content the host currently retains. |
+
+For codec emitters, encoded bytes mean the codec's completed record or container before connector
+preparation. Keys, headers and transport framing are excluded, as they are from `MAX SIZE`.
+HTTP measures its codec body, or zero for `WITHOUT BODY`; native client emitters measure Arrow IPC;
+OTEL measures the prepared export request. Database emitters use the exact insert or document
+boundary in [Database writes](emitters.md#database-writes). Iceberg counts the rows and physical
+Parquet bytes of each prepared data file. These quantities keep their own units: the existing
+`nervix_bytes_total` remains the emitter's Arrow and metadata estimate of delivered source records.
+Prepared content is measured before a driver's framing or compression. A Sentry envelope can
+therefore increase prepared bytes beyond the codec bytes bounded by `MAX SIZE`, while most codec
+emitters prepare their bytes unchanged. Native row emitters use their documented measured request
+boundary for both quantities.
+
+A preparation is observed before its destination outcome. It can subsequently succeed, be rejected
+or remain uncertain, and therefore does not mean delivery. A retained record, HTTP request, OTEL
+export or client IPC payload is observed once: resending its bytes does not increase preparation
+totals or the membership histogram. A native row emitter that reconstructs a request on retry
+observes that new preparation. Driver request grouping and row isolation do not turn a logical
+payload into several observations; these families describe the sized candidates, rather than
+protocol calls or bytes on a socket. Use destination attempt outcomes alongside sent source-record
+totals to distinguish retries and confirmed progress.
+
+A native row publish loop observes each sized request when it visits that request for submission.
+Requests left unvisited by an interrupted loop add no preparation observation.
+
+A row refused before a bounded payload is produced adds no successful payload preparation.
+A later destination rejection can follow a successful preparation and does not decrement
+that measurement. Structured message errors and existing error-relay traffic remain the rejection
+evidence; payload counters do not define a second error classification or count those rows as sent.
+
+Work states overlap. `buffered` counts rows of Arrow carriers the host still holds, including rows
+already prepared or partly answered until those carriers leave the buffer. `prepared` counts the
+source members of retained payloads. `in_flight` counts source rows handed to a connector in an
+active write; a native row write can have in-flight rows without host-retained prepared bytes.
+`staged` counts rows waiting for a separate commit. Do not sum these states. Owner destruction
+withdraws its gauge contribution, including cancellation and terminal teardown, while counters keep
+their process-local history across task restarts.
+
 ## DESCRIBE Metrics
 
 `DESCRIBE` commands include metric summaries for the described target when metrics exist. For a
-scheduled target, the request is answered from its owner. Node traffic is grouped under
+scheduled target, the request is answered from its owner. An ingestor that runs on every live node,
+such as an `HTTP ENDPOINT` ingestor, has no single owner, so the node that receives
+`DESCRIBE INGESTOR` answers for its own instance. Node traffic is grouped under
 `incoming_edges` and `outgoing_edges`; relay descriptions keep owner-buffer utilization under
 `relay_buffers` rather than mixing relay traffic into the relay node:
 
@@ -413,7 +607,10 @@ DESCRIBE HASH MAP user_profiles;
 DESCRIBE DOMAIN;
 ```
 
-`DESCRIBE DOMAIN` summarizes active-domain traffic from per-node metric state. Its
+`DESCRIBE DOMAIN` is answered by the node that receives it and summarizes active-domain traffic
+from that node's own metric state. Traffic is counted on the node that observed it, under that
+node's `physical_node`, so the traffic another node observed is in that node's answer: run
+`DESCRIBE DOMAIN` on each node to see the whole cluster. Its
 `input_output` section aggregates ingestor and emitter metrics. Its `processed`
 section aggregates metrics for all runtime nodes in the domain, including
 processing nodes.
@@ -447,7 +644,7 @@ Histogram summaries include:
 - `domain_p50_1m`, `domain_p90_1m`, `domain_p99_1m`: one-minute domain-clock decayed percentiles
 - `domain_p50_15m`, `domain_p90_15m`, `domain_p99_15m`: fifteen-minute domain-clock decayed percentiles
 
-Histogram `DESCRIBE` lines do not include raw `count` / `sum` values or rates. For `messages_per_batch`, the raw observation count is the batch count and the raw sum is the message count; those are already reported clearly by `batches_total` and `messages_total`. The histogram answers distribution questions such as typical and tail batch size. Percentiles are rendered as decimal estimates interpolated within the configured histogram bucket range rather than as raw bucket boundary labels. The same rule applies to delivery latency: `messages_total` and `batches_total` answer throughput questions, while `delivery_latency_seconds` answers latency distribution questions.
+Graph-edge histogram `DESCRIBE` lines do not include raw `count` / `sum` values or rates. For `messages_per_batch`, the raw observation count is the batch count and the raw sum is the message count; those are already reported clearly by `batches_total` and `messages_total`. The histogram answers distribution questions such as typical and tail batch size. Percentiles are rendered as decimal estimates interpolated within the configured histogram bucket range rather than as raw bucket boundary labels. The same rule applies to delivery latency: `messages_total` and `batches_total` answer throughput questions, while `delivery_latency_seconds` answers latency distribution questions. Connector-interaction durations use the separate `count` and `sum_seconds` summary described above.
 
 Relay buffer summaries use `relay_buffer_len`. The percentile values are queued batch slots
 observed in the single buffer on the relay owner, and `capacity=<n>` shows that buffer's declared
@@ -521,3 +718,20 @@ Prometheus export is a separate, live process-local registry. Traffic metrics ig
 identity, while lifecycle metrics retain only the bounded declared branch name. Prometheus
 registry values are not snapshotted into Nervix internal metric state and do not migrate during a
 planned handoff or failover.
+
+## Ingestor Unit Metrics And Recovery
+
+`DESCRIBE INGESTOR` queries each unit's current owner and reports its global index, owner, running
+state and readiness. Its edge metric lines render `instance=<i>`. Ingestor-specific quiesce,
+redelivery, decode-rejection, oversize, header-drop, read-ahead-drop and unfolding-refusal metrics
+use `domain`, `ingestor`, `physical_node_id` and `instance`; a `Single` ingestor uses `instance="-"`.
+
+A `BranchAggregated` checkpoint belongs to an exact execution unit. Capture includes that unit's
+series with each series' physical-node attribution intact. Installation replaces only that unit's
+namespace, preserving a colocated sibling's live counters. After a move, later checkpoints retain
+both the predecessor's and the new owner's contributions. A final snapshot selects its bytes
+before a departing owner withdraws the unit's live series. Raw Prometheus recorders belong to
+their local assignment lifetime and are not restored from checkpoints; durable summarized
+metrics use the checkpoint store.
+Inspection discovers the current units through a key-only checkpoint listing, including before a
+stopped ingestor is restarted, and never substitutes one sibling's measurements for another's.

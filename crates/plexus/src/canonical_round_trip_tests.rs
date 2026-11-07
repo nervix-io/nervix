@@ -248,7 +248,7 @@ fn bolero_entity_presentations_keep_declared_rows_and_complete_configuration() {
                 let presentation = emitter
                     .connector
                     .entity_presentation()
-                    .unwrap_or_else(|error| panic!("the generated sink renders: {error:#}"));
+                    .unwrap_or_else(|error| panic!("the generated emitter renders: {error:#}"));
                 assert_eq!(presentation.phrase(), kind.phrase());
                 assert_presentation_rows(&presentation, "to");
                 statements.push(ClientStatement::Server(Statement::Create(
@@ -313,6 +313,47 @@ fn assert_presentation_rows(presentation: &nervix_models::EntityPresentation, re
 }
 
 #[test]
+fn codec_corpus_reaches_every_family_head() {
+    macro_rules! input {
+        ($file:literal) => {
+            include_bytes!(concat!(
+                "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/\
+                 corpus/",
+                $file
+            ))
+            .as_slice()
+        };
+    }
+    for (bytes, head) in [
+        (input!("codec-wire-json"), "WIRE JSON"),
+        (input!("codec-wire-cbor"), "WIRE CBOR"),
+        (input!("codec-wire-avro"), "WIRE AVRO"),
+        (input!("codec-jaq-json"), "JAQ JSON"),
+        (input!("codec-jaq-yaml"), "JAQ YAML"),
+        (input!("codec-jaq-toml"), "JAQ TOML"),
+        (input!("codec-jaq-xml"), "JAQ XML"),
+        (input!("codec-jaq-cbor"), "JAQ CBOR"),
+        (input!("codec-protobuf"), "PROTOBUF"),
+        (input!("codec-syslog"), "SYSLOG"),
+    ] {
+        let model = Arbitrary::new(bytes, Domain::Plexus).model();
+        assert!(matches!(&model, Model::Codec(_)), "{head}: {model:?}");
+        let statement = ClientStatement::Server(Statement::Create(CreateStatement::new(
+            Box::new(model),
+            false,
+        )));
+        let canonical = statement
+            .to_canonical_plexus()
+            .unwrap_or_else(|error| panic!("{head} must render: {error:?}"));
+        assert!(
+            canonical.starts_with(&format!("CREATE {head} CODEC ")),
+            "{head}: {canonical}"
+        );
+        assert_statement_round_trips(&statement);
+    }
+}
+
+#[test]
 fn bolero_model_roundtrip_canonical_plexus() {
     bolero::check!()
         .with_iterations(256)
@@ -327,22 +368,20 @@ fn bolero_model_roundtrip_canonical_plexus() {
 }
 
 #[test]
-fn postgres_update_corpus_keeps_a_mapped_column_to_update() {
-    let seeds: [&[u8]; 2] = [
-        include_bytes!(
-            "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus/\
-             postgres-update-column"
-        ),
-        include_bytes!(
-            "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus/\
-             postgres_update_covering_every_column"
-        ),
-    ];
-    for bytes in seeds {
-        let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
-        let Model::Emitter(emitter) = arbitrary.model() else {
-            panic!("current emitter seed");
-        };
+fn postgres_update_generation_keeps_a_mapped_column_to_update() {
+    let mut checked = 0;
+    for seed in 0..=u8::MAX {
+        let bytes = (0..512_u16)
+            .map(|index| {
+                index.to_le_bytes()[0]
+                    .wrapping_mul(31)
+                    .wrapping_add(seed.wrapping_mul(17))
+            })
+            .collect::<Vec<_>>();
+        let mut arbitrary = Arbitrary::new(&bytes, Domain::Plexus);
+        let emitter = arbitrary.create_emitter_to(nervix_models::EmitterEntityKind::Postgres(
+            nervix_models::PostgresEmitterEntity::Table,
+        ));
         let nervix_models::EmitterEntity::Postgres(nervix_models::PostgresEmitter::Table(
             destination,
         )) = emitter.connector.as_ref()
@@ -352,8 +391,9 @@ fn postgres_update_corpus_keeps_a_mapped_column_to_update() {
         let nervix_models::PostgresConflictAction::DoUpdate { target } =
             &destination.conflict_action
         else {
-            panic!("current update policy");
+            continue;
         };
+        checked += 1;
         assert!(!target.is_empty());
         assert!(
             destination
@@ -365,6 +405,10 @@ fn postgres_update_corpus_keeps_a_mapped_column_to_update() {
             nervix_models::CreateStatement::new(Box::new(Model::Emitter(emitter)), false),
         )));
     }
+    assert!(
+        checked >= 2,
+        "the current generator reaches Postgres updates"
+    );
 }
 
 #[test]

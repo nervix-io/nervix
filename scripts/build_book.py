@@ -103,6 +103,8 @@ MDBOOK_EDIT_LINK = re.compile(
     r'<a href="[^"]*" title="Suggest an edit".*?</a>\s*',
     re.S,
 )
+# The file an mdBook include names, before any anchor or line range.
+MDBOOK_INCLUDE = re.compile(r"\{\{#include\s+([^\s:}]+)")
 
 
 def render_title(version: str) -> str:
@@ -288,11 +290,37 @@ def stage_book(staging_dir: Path) -> Path:
     shutil.copytree(DOCS_DIR / "theme", staging_dir / "theme")
     source_dir = staging_dir / "src"
     shutil.copytree(DOCS_DIR / "src", source_dir)
+    stage_included_sources(DOCS_DIR / "src", source_dir)
     generate_upstream_references(source_dir)
     generate_cli_reference(source_dir)
     generate_server_reference(source_dir)
     stage_screenshots(source_dir)
     return staging_dir
+
+
+def stage_included_sources(chapters: Path, staged_chapters: Path) -> None:
+    """Stage every file a chapter includes from outside the chapters themselves.
+
+    mdBook resolves `{{#include <path>}}` against the chapter that holds it, and the book renders
+    from a staged copy of the chapters. A path that leaves them, as a client library guide's
+    includes of its suite's tests under `tests` do, therefore needs its file at the same relative
+    place beside the staged copy.
+    """
+    repository = chapters.resolve().parent.parent
+    staging_root = staged_chapters.resolve().parent.parent
+    for chapter in sorted(chapters.rglob("*.md")):
+        staged_chapter = staged_chapters / chapter.relative_to(chapters)
+        for path in MDBOOK_INCLUDE.findall(chapter.read_text(encoding="utf-8")):
+            source = Path(os.path.normpath(chapter.resolve().parent / path))
+            target = Path(os.path.normpath(staged_chapter.resolve().parent / path))
+            if not source.is_relative_to(repository) or not target.is_relative_to(staging_root):
+                raise SystemExit(f"{chapter.name} includes {path}, which is outside the repository")
+            if target.exists():
+                continue
+            if not source.is_file():
+                raise SystemExit(f"{chapter.name} includes {path}, which does not exist")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
 
 
 def stage_screenshots(source_dir: Path) -> None:

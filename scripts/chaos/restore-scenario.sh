@@ -69,9 +69,11 @@ restore_guest_checkpoints_committed() {
     # The answer is the JSON document after the administration container's own progress lines.
     sed -n '/^{/,$p' "${output%.json}.txt" >"${output}"
     jq -e --argjson branches "${#restore_branches[@]}" --argjson replicas "${CHAOS_REPLICA_COUNT:-0}" '
-        .checkpoint_counts.total == $branches and .checkpoint_counts.failed == 0
-        and (.checkpoints | length) == $branches
-        and all(.checkpoints[]; .stage == "ReplicaConfirmed"
+        [.units[].checkpoints[]] as $checkpoints
+        | ([.units[].checkpoint_counts.total] | add) == $branches
+        and all(.units[]; .checkpoint_counts.failed == 0)
+        and ($checkpoints | length) == $branches
+        and all($checkpoints[]; .stage == "ReplicaConfirmed"
                 and .committed_revision == .latest_revision
                 and .required_replicas == $replicas and .confirmed_replicas == $replicas)
     ' "${output}" >/dev/null 2>&1
@@ -431,7 +433,7 @@ restore_take_archive() {
     local archive_dir="${case_dir}/archive"
     mkdir -p "${archive_dir}"
     wait_for 'source baseline' 40 topic_progressed chaos_input 9
-    wait_for 'acknowledged sink baseline' 60 topic_progressed chaos_output 9
+    wait_for 'acknowledged emitter baseline' 60 topic_progressed chaos_output 9
     backup_archive_domain "${archive_dir}" chaos_baseline "${archive_dir}/domain.nvxb" \
         "${archive_dir}/report.json" \
         || restore_fail product 'the packaged CLI could not create the quiesced archive'

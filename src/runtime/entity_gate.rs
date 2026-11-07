@@ -1,3 +1,12 @@
+//! Layer: data plane.
+//! - **Owns.** Retained entity and partition dispatch gates, drain observation and branch freezes.
+//! - **Depends on.** Typed execution revisions, relay boundaries and coordination identities.
+//! - **Must not know.** Plexus Models, consensus publication or placement decisions.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -10,9 +19,6 @@
 use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
-
-/// Default deadline for draining one runtime branch during a domain or node transition.
-pub const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Includes the grace a branch task receives after its configured drain deadline.
 pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duration {
@@ -34,7 +40,7 @@ pub(in crate::runtime) const OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL: Duration
 pub(super) struct EntityGateScope {
     domain: DomainName,
     relays: SortedSet<RelayName>,
-    affected_entities: SortedSet<NodeRef>,
+    targets: EntityGateTargets,
     purpose: EntityGatePurpose,
 }
 
@@ -42,13 +48,13 @@ impl EntityGateScope {
     fn new(
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
     ) -> Self {
         Self {
             domain: domain.clone(),
             relays: SortedSet::from_unsorted(relays.to_vec()),
-            affected_entities: SortedSet::from_unsorted(affected_entities.to_vec()),
+            targets: targets.normalized(),
             purpose,
         }
     }
@@ -315,7 +321,7 @@ pub(crate) struct EntityGateLease<'a> {
 pub(super) struct EntityAlterHold {
     pub(super) coordination: CoordinationIdentity,
     pub(super) gates: EntityGateHold,
-    pub(super) affected_entities: Vec<NodeRef>,
+    pub(super) targets: EntityGateTargets,
     pub(super) purpose: EntityGatePurpose,
     /// The quiesce this hold engaged, holding the control it engaged rather than a name to look
     /// up again. An ingestor that is dropped and rebuilt gets a fresh control with zero counts,
@@ -324,6 +330,7 @@ pub(super) struct EntityAlterHold {
 }
 
 pub(super) struct QuiescedIngestorHold {
+    pub(super) unit: Unit,
     pub(super) ingestor: IngestorName,
     pub(super) cause: IngestorQuiesceCause,
     pub(super) control: Arc<IngestorQuiesceControl>,
@@ -764,6 +771,7 @@ pub(in crate::runtime) struct OwnershipHandoffFreeze<'watch> {
 }
 
 impl OwnershipHandoffFreezeWatch {
+    #[cfg(any(test, feature = "benchmarks"))]
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -775,6 +783,13 @@ impl OwnershipHandoffFreezeWatch {
         Self::for_unit(runtime, DomainNodeUnitRef::single(entity))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "resolve the exact unit freeze watch before admitted execution"
+        )
+    )]
     pub(in crate::runtime) fn for_unit(runtime: &Runtime, unit: DomainNodeUnitRef) -> Self {
         let state = runtime
             .inner
@@ -858,12 +873,13 @@ impl Runtime {
     pub(crate) fn entity_pause_relays(
         &self,
         domain: &DomainName,
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
     ) -> Vec<RelayName> {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
-        let mut relays = affected_entities
+        let mut relays = targets
+            .entities()
             .iter()
             .filter_map(|entity| execution.revision.nodes.get(entity))
             .flat_map(|node| node.gate_relays.iter().cloned())
@@ -898,6 +914,87 @@ impl Runtime {
             gates,
             branch_gates: Vec::new(),
         }
+    }
+
+    /// Ownership moves of partition units fence only those input partitions. A logical selection
+    /// and an instance whose intake can produce every branch keep the whole-relay boundary.
+    pub(in crate::runtime) fn engage_entity_unit_gates(
+        &self,
+        domain: &DomainName,
+        relays: &[RelayName],
+        targets: &EntityGateTargets,
+        deadline: Instant,
+        reason: &str,
+    ) -> EntityGateHold {
+        let EntityGateTargets::Units(_) = targets else {
+            return self.engage_entity_gates(domain, relays, deadline, reason);
+        };
+        let revision = self
+            .inner
+            .executions
+            .get(domain)
+            .map(|execution| execution.revision.clone());
+        let mut gates = Vec::new();
+        for relay in relays {
+            let selected = Self::relay_partition_targets(revision.as_deref(), relay, targets);
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
+            let Some(fanout) = self
+                .inner
+                .relay_boundary_fanouts
+                .get(&key)
+                .map(|fanout| fanout.clone())
+            else {
+                continue;
+            };
+            if let Some(selected) = selected {
+                for unit in selected {
+                    let gate = fanout
+                        .unit_dispatch_gate(unit)
+                        .verified("a partition has its own dispatch gate");
+                    gates.push(RelayDispatchGateLease::engage(gate, deadline, reason));
+                }
+            } else {
+                gates.push(RelayDispatchGateLease::engage(
+                    fanout.dispatch_gate(),
+                    deadline,
+                    reason,
+                ));
+            }
+        }
+        EntityGateHold {
+            gates,
+            branch_gates: Vec::new(),
+        }
+    }
+
+    fn relay_partition_targets(
+        revision: Option<&ExecutionRevision>,
+        relay: &RelayName,
+        targets: &EntityGateTargets,
+    ) -> Option<BTreeSet<Unit>> {
+        let EntityGateTargets::Units(members) = targets else {
+            return None;
+        };
+        let mut selected = BTreeSet::new();
+        for member in members {
+            let affects = revision
+                .and_then(|revision| revision.nodes.get(&member.node))
+                .is_some_and(|node| node.gate_relays.contains(relay))
+                || (member.node.kind == ModelKind::Relay
+                    && member.node.identifier == ModelName::from(relay));
+            if !affects {
+                continue;
+            }
+            match member.unit.kind() {
+                nervix_models::UnitKind::Partition(_) => {
+                    selected.insert(member.unit);
+                }
+                nervix_models::UnitKind::Single | nervix_models::UnitKind::Instance(_) => {
+                    return None;
+                }
+            }
+        }
+        (!selected.is_empty()).then_some(selected)
     }
 
     async fn engage_wasm_state_reset_gates(
@@ -936,7 +1033,7 @@ impl Runtime {
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
         lease: EntityGateLease<'_>,
     ) -> Result<(), Report<EntityGateOperationError>> {
@@ -948,7 +1045,7 @@ impl Runtime {
                 domain: domain.clone(),
             }));
         }
-        let scope = EntityGateScope::new(domain, relays, affected_entities, purpose);
+        let scope = EntityGateScope::new(domain, relays, targets, purpose);
         let operation = match self.inner.entity_gate_holds.entry(coordination.clone()) {
             nervix_primitives::collections::dash_map::Entry::Occupied(entry) => {
                 let operation = entry.get().clone();
@@ -1039,7 +1136,14 @@ impl Runtime {
                 };
                 gates
             }
-            EntityGatePurpose::ModelAlteration | EntityGatePurpose::OwnershipHandoff => {
+            EntityGatePurpose::OwnershipHandoff => self.engage_entity_unit_gates(
+                domain,
+                &scope.relays,
+                &scope.targets,
+                deadline,
+                &reason,
+            ),
+            EntityGatePurpose::ModelAlteration => {
                 self.engage_entity_gates(domain, &scope.relays, deadline, &reason)
             }
         };
@@ -1054,11 +1158,18 @@ impl Runtime {
                 .remove_if(&coordination, |_, current| Arc::ptr_eq(current, &operation));
             return;
         }
-        let ingestors = scope
-            .affected_entities
+        let ingestors = self
+            .inner
+            .ingestors
             .iter()
-            .filter(|entity| entity.kind == ModelKind::Ingestor)
-            .map(|entity| entity.identifier.clone())
+            .filter(|entry| {
+                entry.key().entity.domain == *domain
+                    && scope.targets.contains(&NodeUnitRef::new(
+                        entry.key().entity.node.clone(),
+                        entry.key().unit,
+                    ))
+            })
+            .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         let quiesce_cause = match purpose {
             EntityGatePurpose::ModelAlteration => IngestorQuiesceCause::EntityHold,
@@ -1066,17 +1177,15 @@ impl Runtime {
             EntityGatePurpose::WasmStateReset(_) => IngestorQuiesceCause::EntityHold,
         };
         let mut quiesced_ingestors = Vec::new();
-        for ingestor in &ingestors {
+        for key in &ingestors {
             nervix_primitives::task::consume_budget().await;
-            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-            if !self.inner.ingestors.contains_key(&key) {
-                continue;
-            }
+            let ingestor = IngestorName::from(key.entity.identifier());
             if let Some(control) =
-                self.engage_ingestor_quiesce(domain, &IngestorName::from(ingestor), quiesce_cause)
+                self.engage_ingestor_quiesce(domain, &ingestor, key.unit, quiesce_cause)
             {
                 quiesced_ingestors.push(QuiescedIngestorHold {
-                    ingestor: IngestorName::from(ingestor),
+                    ingestor,
+                    unit: key.unit,
                     cause: quiesce_cause,
                     control,
                 });
@@ -1085,7 +1194,7 @@ impl Runtime {
         let hold = EntityAlterHold {
             coordination: coordination.clone(),
             gates,
-            affected_entities: scope.affected_entities.to_vec(),
+            targets: scope.targets.clone(),
             purpose,
             quiesced_ingestors,
         };
@@ -1163,30 +1272,20 @@ impl Runtime {
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
     ) -> EntityDrainStatus {
-        let status = self.entity_drain_status(
-            domain,
-            relays,
-            affected_entities,
-            EntityGatePurpose::OwnershipHandoff,
-        );
+        let status =
+            self.entity_drain_status(domain, relays, targets, EntityGatePurpose::OwnershipHandoff);
         if status.is_drained() {
-            for entity in affected_entities {
-                let units = if let Some(execution) = self.inner.executions.get(domain)
-                    && let Some(node) = execution.revision.nodes.get(entity)
-                {
-                    node.units.keys().copied().collect::<Vec<_>>()
-                } else {
-                    vec![nervix_models::Unit::Single]
-                };
-                for unit in units {
-                    self.inner
-                        .frozen_ownership_handoff_entities
-                        .entry(DomainNodeUnitRef::new(entity.in_domain(domain), unit))
-                        .or_default()
-                        .insert(coordination.clone());
-                }
+            for member in self.entity_gate_units(domain, targets) {
+                self.inner
+                    .frozen_ownership_handoff_entities
+                    .entry(DomainNodeUnitRef::new(
+                        member.node.in_domain(domain),
+                        member.unit,
+                    ))
+                    .or_default()
+                    .insert(coordination.clone());
             }
         }
         status
@@ -1197,10 +1296,10 @@ impl Runtime {
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
     ) -> Result<EntityDrainStatus, Report<EntityGateOperationError>> {
-        let requested_scope = EntityGateScope::new(domain, relays, affected_entities, purpose);
+        let requested_scope = EntityGateScope::new(domain, relays, targets, purpose);
         let Some(operation) = self.inner.entity_gate_holds.get(coordination) else {
             return Err(Report::new(EntityGateOperationError::NotHeld {
                 coordination: coordination.clone(),
@@ -1226,24 +1325,19 @@ impl Runtime {
                 coordination,
                 &scope.domain,
                 &scope.relays,
-                &scope.affected_entities,
+                &scope.targets,
             )
         } else {
-            self.entity_drain_status(
-                &scope.domain,
-                &scope.relays,
-                &scope.affected_entities,
-                scope.purpose,
-            )
+            self.entity_drain_status(&scope.domain, &scope.relays, &scope.targets, scope.purpose)
         };
         Ok(status)
     }
 
-    pub(crate) fn entity_gate_operation_owns_entity(
+    pub(crate) fn entity_gate_operation_owns_unit(
         &self,
         coordination: &CoordinationIdentity,
         domain: &DomainName,
-        entity: &NodeRef,
+        member: &NodeUnitRef,
         purpose: EntityGatePurpose,
     ) -> bool {
         let Some(operation) = self.inner.entity_gate_holds.get(coordination) else {
@@ -1253,10 +1347,62 @@ impl Runtime {
         operation.is_held()
             && &scope.domain == domain
             && scope.purpose == purpose
-            && scope.affected_entities.binary_search(entity).is_ok()
+            && scope.targets.contains(member)
             && (purpose != EntityGatePurpose::OwnershipHandoff
                 || self
-                    .ownership_handoff_entity_is_frozen_by(&entity.in_domain(domain), coordination))
+                    .inner
+                    .frozen_ownership_handoff_entities
+                    .get(&DomainNodeUnitRef::new(
+                        member.node.in_domain(domain),
+                        member.unit,
+                    ))
+                    .is_some_and(|freeze| freeze.contains(coordination)))
+    }
+
+    fn entity_gate_units(
+        &self,
+        domain: &DomainName,
+        targets: &EntityGateTargets,
+    ) -> Vec<NodeUnitRef> {
+        let entities = match targets {
+            EntityGateTargets::Entities(entities) => entities,
+            EntityGateTargets::Units(units) => return units.clone(),
+        };
+        let mut units = BTreeSet::new();
+        if let Some(execution) = self.inner.executions.get(domain) {
+            for entity in entities {
+                if let Some(node) = execution.revision.nodes.get(entity) {
+                    units.extend(
+                        node.units
+                            .keys()
+                            .map(|unit| NodeUnitRef::new(entity.clone(), *unit)),
+                    );
+                }
+            }
+        }
+        for key in self
+            .inner
+            .node_quiesce_counters
+            .iter()
+            .map(|entry| entry.key().clone())
+            .chain(
+                self.inner
+                    .in_flight_by_ingestor
+                    .iter()
+                    .map(|entry| entry.key().clone()),
+            )
+            .chain(self.inner.ingestors.iter().map(|entry| entry.key().clone()))
+        {
+            if key.entity.domain == *domain && entities.contains(&key.entity.node) {
+                units.insert(NodeUnitRef::new(key.entity.node, key.unit));
+            }
+        }
+        for entry in self.inner.emitter_buffers.iter() {
+            if entry.key().domain == *domain && entities.contains(&entry.key().node) {
+                units.insert(NodeUnitRef::new(entry.key().node.clone(), Unit::SINGLE));
+            }
+        }
+        units.into_iter().collect()
     }
 
     pub(crate) async fn release_entity_gate_operation(
@@ -1304,8 +1450,8 @@ impl Runtime {
 
     async fn release_entity_gate_operation_from_state(
         entity_gate_holds: &DashMap<CoordinationIdentity, Arc<EntityGateOperation>, RandomState>,
-        ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
-        ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
+        ingestors: &DashMap<DomainNodeUnitRef, IngestorRuntime, RandomState>,
+        ingestor_quiescence: &DashMap<DomainNodeUnitRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
             DomainNodeUnitRef,
             Arc<OwnershipHandoffFreezeState>,
@@ -1336,8 +1482,8 @@ impl Runtime {
     }
 
     async fn release_entity_alter_hold(
-        ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
-        ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
+        ingestors: &DashMap<DomainNodeUnitRef, IngestorRuntime, RandomState>,
+        ingestor_quiescence: &DashMap<DomainNodeUnitRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
             DomainNodeUnitRef,
             Arc<OwnershipHandoffFreezeState>,
@@ -1349,13 +1495,14 @@ impl Runtime {
         if hold.purpose == EntityGatePurpose::OwnershipHandoff {
             // The freeze is lifted before the wake, because a waiter that rereads a freeze this
             // release has not lifted yet parks again on a change that has already happened.
-            for entity in &hold.affected_entities {
-                let identity =
-                    DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
-                for entry in frozen_ownership_handoff_entities.iter() {
-                    if entry.key().entity == identity {
-                        entry.value().remove(&hold.coordination);
-                    }
+            for entry in frozen_ownership_handoff_entities.iter() {
+                if entry.key().entity.domain == *domain
+                    && hold.targets.contains(&NodeUnitRef::new(
+                        entry.key().entity.node.clone(),
+                        entry.key().unit,
+                    ))
+                {
+                    entry.value().remove(&hold.coordination);
                 }
             }
             // Each retained entity slot publishes and wakes its own observers.
@@ -1369,13 +1516,17 @@ impl Runtime {
                 cause = quiesced.cause.as_str(),
                 "ingestor left quiesce"
             );
-            let key = DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                quiesced.ingestor.clone(),
+            let key = DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(
+                    domain.clone(),
+                    ModelKind::Ingestor,
+                    quiesced.ingestor.clone(),
+                ),
+                quiesced.unit,
             );
             if !ingestors.contains_key(&key)
-                && let Some((_, control)) = ingestor_quiescence.remove(&key)
+                && let Some((_, control)) = ingestor_quiescence
+                    .remove_if(&key, |_, current| Arc::ptr_eq(current, &quiesced.control))
             {
                 control.terminate();
             }
@@ -1398,9 +1549,17 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
     ) -> EntityDrainStatus {
+        let revision = match targets {
+            EntityGateTargets::Units(_) => self
+                .inner
+                .executions
+                .get(domain)
+                .map(|execution| execution.revision.clone()),
+            EntityGateTargets::Entities(_) => None,
+        };
         let buffered_relay_batches = relays
             .iter()
             .filter_map(|relay| {
@@ -1411,7 +1570,12 @@ impl Runtime {
                         ModelKind::Relay,
                         relay.clone(),
                     ))
-                    .map(|fanout| fanout.outstanding_work_len())
+                    .map(|fanout| {
+                        match Self::relay_partition_targets(revision.as_deref(), relay, targets) {
+                            Some(units) => fanout.unit_outstanding_work_len(&units),
+                            None => fanout.outstanding_work_len(),
+                        }
+                    })
             })
             .sum();
         #[cfg(feature = "testing")]
@@ -1431,49 +1595,57 @@ impl Runtime {
             } else {
                 buffered_relay_batches
             };
-        let node_work_items = affected_entities
+        let units = self.entity_gate_units(domain, targets);
+        let node_work_items = units
             .iter()
-            .map(|entity| {
-                let quiesce_work = match self
+            .map(|member| {
+                let work = match self
                     .inner
                     .node_quiesce_counters
-                    .get(&entity.in_domain(domain))
-                {
+                    .get(&DomainNodeUnitRef::new(
+                        member.node.in_domain(domain),
+                        member.unit,
+                    )) {
                     Some(counters) => counters.outstanding_work_for(purpose),
                     None => 0,
                 };
-                let emitter_work = if entity.kind == ModelKind::Emitter {
-                    match self.inner.emitter_buffers.get(&entity.in_domain(domain)) {
-                        Some(buffered) => buffered.load(Ordering::Acquire),
+                let emitter_work = if member.node.kind == ModelKind::Emitter {
+                    match self
+                        .inner
+                        .emitter_buffers
+                        .get(&member.node.in_domain(domain))
+                    {
+                        Some(buffer) => buffer.load(Ordering::Acquire),
                         None => 0,
                     }
                 } else {
                     0
                 };
-                quiesce_work
-                    .checked_add(emitter_work)
-                    .assured("both counts total work items this node already holds in memory")
+                work.checked_add(emitter_work)
+                    .assured("counts total work held in memory")
             })
             .sum();
-        let mut outstanding_acks = 0;
-        for entity in affected_entities {
-            if entity.kind != ModelKind::Ingestor {
-                continue;
-            }
-            let Some(tracker) = self
-                .inner
-                .in_flight_by_ingestor
-                .get(&entity.in_domain(domain))
-            else {
-                continue;
-            };
-            outstanding_acks += if purpose == EntityGatePurpose::OwnershipHandoff {
-                tracker.outstanding_for_ownership_handoff()
-            } else {
-                tracker.outstanding()
-            };
-        }
-        let mut emitter_publishing = affected_entities
+        let outstanding_acks = units
+            .iter()
+            .filter(|member| member.node.kind == ModelKind::Ingestor)
+            .filter_map(|member| {
+                self.inner
+                    .in_flight_by_ingestor
+                    .get(&DomainNodeUnitRef::new(
+                        member.node.in_domain(domain),
+                        member.unit,
+                    ))
+            })
+            .map(|tracker| {
+                if purpose == EntityGatePurpose::OwnershipHandoff {
+                    tracker.outstanding_for_ownership_handoff()
+                } else {
+                    tracker.outstanding()
+                }
+            })
+            .sum();
+        let mut emitter_publishing = targets
+            .entities()
             .iter()
             .filter(|entity| entity.kind == ModelKind::Emitter)
             .filter_map(|entity| self.emitter_publishing_drain_status(&entity.in_domain(domain)))
@@ -1542,9 +1714,27 @@ impl Runtime {
         domain: &DomainName,
         node: NodeRef,
     ) -> Arc<NodeQuiesceCounters> {
+        self.unit_quiesce_counters(domain, NodeUnitRef::new(node, Unit::SINGLE))
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "task startup retains the exact unit counters before processing input"
+        )
+    )]
+    pub(super) fn unit_quiesce_counters(
+        &self,
+        domain: &DomainName,
+        member: NodeUnitRef,
+    ) -> Arc<NodeQuiesceCounters> {
         self.inner
             .node_quiesce_counters
-            .entry(DomainNodeRef::new(domain.clone(), node))
+            .entry(DomainNodeUnitRef::new(
+                member.node.in_domain(domain),
+                member.unit,
+            ))
             .or_insert_with(|| Arc::new(NodeQuiesceCounters::default()))
             .clone()
     }
@@ -1592,7 +1782,7 @@ impl Runtime {
             .ingestors
             .iter()
             .filter(|entry| {
-                &entry.key().domain == domain
+                &entry.key().entity.domain == domain
                     && self
                         .inner
                         .ingestor_quiescence
@@ -1693,1124 +1883,8 @@ impl Runtime {
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
-mod tests {
-    use std::time::Duration;
-
-    use nervix_interconnect::EntityGatePurpose;
-    use nervix_models::{
-        AckMode, BranchSelection, ClusterNodeName, CoordinationIdentity, CreateEmitter,
-        CreateJunction, CreateRelay, DomainSchedule, EmitterEntity, EmitterName, ErrorPolicies,
-        IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef, ProcessorInputWhere,
-        ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, ZeroMqEmitter,
-        ZeroMqPushEmitter,
-    };
-    use nervix_primitives::{
-        sync::{
-            Arc, StdArc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            watch,
-        },
-        time::Instant,
-    };
-    use nonzero_ext::nonzero;
-
-    use super::*;
-    use crate::emitter_execution_plan::EmitterExecutionPlans;
-
-    fn coordination(coordinator: &str, process_epoch: u64, sequence: u64) -> CoordinationIdentity {
-        CoordinationIdentity::new(named(coordinator), process_epoch, sequence)
-    }
-
-    #[test]
-    fn bolero_freeze_sequences_publish_exact_coordination_owners() {
-        bolero::check!().with_type::<[u8; 64]>().for_each(|steps| {
-            let state = Arc::new(OwnershipHandoffFreezeState::default());
-            let watch = OwnershipHandoffFreezeWatch::over(state.clone());
-            let mut expected = BTreeSet::new();
-            for step in steps {
-                let owner = coordination("coordinator", 1, u64::from((step / 2) % 8) + 1);
-                if step % 2 == 0 {
-                    state.insert(owner.clone());
-                    expected.insert(owner);
-                } else {
-                    state.remove(&owner);
-                    expected.remove(&owner);
-                }
-                assert_eq!(&**state.published.load(), &expected);
-                assert_eq!(watch.observe().is_frozen(), !expected.is_empty());
-                for sequence in 1..=8 {
-                    let owner = coordination("coordinator", 1, sequence);
-                    assert_eq!(state.contains(&owner), expected.contains(&owner));
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn domain_drain_status_reports_structured_emitter_publishing_state() {
-        let runtime = Runtime::new();
-        let domain = domain("default");
-        let confirming = named::<EmitterName>("confirming");
-        let retrying = named::<EmitterName>("retrying");
-        let committing = named::<EmitterName>("held_for_commit");
-
-        for (emitter, pending_messages) in [
-            (&confirming, 3_usize),
-            (&retrying, 2_usize),
-            (&committing, 5_usize),
-        ] {
-            runtime.inner.emitter_buffers.insert(
-                DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone()),
-                Arc::new(AtomicUsize::new(pending_messages)),
-            );
-        }
-
-        let confirmation = runtime.begin_emitter_confirmation_wait(&domain, &confirming);
-        runtime.record_emitter_transient_error_with_backoff(
-            &domain,
-            &retrying,
-            "sensitive infrastructure detail that drain status must not expose",
-            Duration::from_secs(2),
-        );
-        runtime.record_commit_failure_with_backoff(
-            &domain,
-            &committing,
-            "sensitive catalog detail that drain status must not expose",
-            Duration::from_secs(3),
-        );
-
-        let status = runtime.domain_drain_status(&domain);
-
-        assert_eq!(status.emitter_publishing.len(), 3);
-        assert_eq!(
-            status.emitter_publishing[0],
-            EmitterPublishingDrainStatus {
-                emitter: confirming,
-                state: EmitterPublishingDrainState::AwaitingConfirmation,
-                pending_messages: 3,
-                retry_backoff: None,
-                retry_wait: None,
-            }
-        );
-        assert_eq!(status.emitter_publishing[1].emitter, committing);
-        assert_eq!(
-            status.emitter_publishing[1].state,
-            EmitterPublishingDrainState::RetryingCommit
-        );
-        assert_eq!(
-            status.emitter_publishing[1].retry_backoff,
-            Some(Duration::from_secs(3))
-        );
-        assert!(
-            status.emitter_publishing[1]
-                .retry_wait
-                .is_some_and(|wait| wait <= Duration::from_secs(3))
-        );
-        assert_eq!(status.emitter_publishing[2].emitter, retrying);
-        assert_eq!(
-            status.emitter_publishing[2].state,
-            EmitterPublishingDrainState::RetryingInfrastructure
-        );
-        assert_eq!(
-            status.emitter_publishing[2].retry_backoff,
-            Some(Duration::from_secs(2))
-        );
-        let affected_emitters = [
-            status.emitter_publishing[0].emitter.clone(),
-            status.emitter_publishing[1].emitter.clone(),
-            status.emitter_publishing[2].emitter.clone(),
-        ]
-        .into_iter()
-        .map(|identifier| NodeRef {
-            kind: ModelKind::Emitter,
-            identifier: ModelName::from(&identifier),
-        })
-        .collect::<Vec<_>>();
-        let entity_status = runtime
-            .entity_drain_status(
-                &domain,
-                &[],
-                &affected_emitters,
-                EntityGatePurpose::ModelAlteration,
-            )
-            .emitter_publishing;
-        assert_eq!(entity_status.len(), status.emitter_publishing.len());
-        for (entity, domain) in entity_status.iter().zip(&status.emitter_publishing) {
-            assert_eq!(entity.emitter, domain.emitter);
-            assert_eq!(entity.state, domain.state);
-            assert_eq!(entity.pending_messages, domain.pending_messages);
-            assert_eq!(entity.retry_backoff, domain.retry_backoff);
-            assert_eq!(entity.retry_wait.is_some(), domain.retry_wait.is_some());
-        }
-
-        drop(confirmation);
-        assert!(
-            runtime
-                .domain_drain_status(&domain)
-                .emitter_publishing
-                .iter()
-                .all(|status| status.emitter != named("confirming")),
-            "a completed confirmation must disappear from drain status"
-        );
-    }
-
-    #[nervix_primitives::test]
-    async fn entity_gate_hold_quiesces_an_ingestor_without_stopping_it() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let relay = named::<RelayName>("events");
-        let ingestor = named::<IngestorName>("events_source");
-        let coordination = coordination("coordinator-a", 7, 41);
-
-        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let gate = fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
-            fanout,
-        );
-
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let stopped = StdArc::new(AtomicBool::new(false));
-        let task_stopped = stopped.clone();
-        let task = nervix_primitives::task::spawn(async move {
-            let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
-            task_stopped.store(true, Ordering::SeqCst);
-        });
-        runtime.inner.ingestors.insert(
-            key.clone(),
-            IngestorRuntime {
-                shutdown: shutdown_tx,
-                branched: Vec::new(),
-                tasks: vec![task],
-                domain_offsets: None,
-            },
-        );
-        runtime.inner.ingestor_quiescence.insert(
-            key.clone(),
-            test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend),
-        );
-
-        let affected = NodeRef {
-            kind: ModelKind::Ingestor,
-            identifier: ModelName::from(&ingestor.clone()),
-        };
-        runtime
-            .engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                std::slice::from_ref(&relay),
-                std::slice::from_ref(&affected),
-                EntityGatePurpose::ModelAlteration,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_secs(5),
-                    reason: "quiesce regression",
-                },
-            )
-            .await
-            .expect("entity hold should engage");
-
-        assert!(runtime.inner.ingestors.get(&key).is_some());
-        assert!(!stopped.load(Ordering::SeqCst));
-        assert!(gate.is_closed());
-        assert!(runtime.entity_gate_operation_is_held(&coordination));
-        assert_eq!(
-            runtime
-                .inner
-                .ingestor_quiescence
-                .get(&key)
-                .and_then(|control| control.cause()),
-            Some(IngestorQuiesceCause::EntityHold)
-        );
-
-        runtime
-            .release_entity_gate_operation(&coordination, &domain)
-            .await
-            .expect("entity hold should release");
-        assert!(!runtime.entity_gate_operation_is_held(&coordination));
-        assert!(!gate.is_closed());
-        assert!(runtime.inner.ingestors.get(&key).is_some());
-        assert!(!stopped.load(Ordering::SeqCst));
-        assert_eq!(
-            runtime
-                .inner
-                .ingestor_quiescence
-                .get(&key)
-                .and_then(|control| control.cause()),
-            None
-        );
-
-        runtime
-            .stop_ingestor(&domain, &ingestor)
-            .await
-            .expect("test ingestor should stop");
-    }
-
-    #[nervix_primitives::test]
-    async fn entity_gate_operation_releases_when_its_lease_deadline_expires() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let relay = named::<RelayName>("events");
-        let coordination = coordination("coordinator-a", 7, 42);
-        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let gate = fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
-            fanout,
-        );
-
-        runtime
-            .engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                std::slice::from_ref(&relay),
-                &[],
-                EntityGatePurpose::OwnershipHandoff,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_millis(25),
-                    reason: "deadline regression",
-                },
-            )
-            .await
-            .expect("entity hold should engage");
-        assert!(gate.is_closed());
-
-        nervix_primitives::time::timeout(Duration::from_secs(1), async {
-            while runtime.entity_gate_operation_is_held(&coordination) {
-                nervix_primitives::task::consume_budget().await;
-                nervix_primitives::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("entity hold should release at its deadline");
-        assert!(!gate.is_closed());
-    }
-
-    /// A lease that a handoff left held, with a deadline past the node's stop, ends with the
-    /// runtime: teardown releases its hold, so nothing of it is left to retain the ingestor control
-    /// it quiesced, or what that control holds, after the runtime stopped.
-    #[nervix_primitives::test]
-    async fn runtime_shutdown_ends_an_entity_gate_lease_held_past_its_stop() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let relay = named::<RelayName>("events");
-        let ingestor = named::<IngestorName>("events_source");
-        let coordination = coordination("coordinator-a", 7, 43);
-
-        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let gate = fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
-            fanout,
-        );
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let task = nervix_primitives::task::spawn(async move {
-            let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
-        });
-        runtime.inner.ingestors.insert(
-            key.clone(),
-            IngestorRuntime {
-                shutdown: shutdown_tx,
-                branched: Vec::new(),
-                tasks: vec![task],
-                domain_offsets: None,
-            },
-        );
-        runtime.inner.ingestor_quiescence.insert(
-            key.clone(),
-            test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend),
-        );
-        let affected = NodeRef {
-            kind: ModelKind::Ingestor,
-            identifier: ModelName::from(&ingestor.clone()),
-        };
-        runtime
-            .engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                std::slice::from_ref(&relay),
-                std::slice::from_ref(&affected),
-                EntityGatePurpose::OwnershipHandoff,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_secs(3600),
-                    reason: "a lease past the node's stop",
-                },
-            )
-            .await
-            .expect("the handoff gate should engage");
-        let quiesced = runtime
-            .inner
-            .ingestor_quiescence
-            .get(&key)
-            .map(|control| control.value().clone())
-            .expect("the engaged ingestor keeps its quiesce control");
-        assert!(runtime.entity_gate_operation_is_held(&coordination));
-        assert!(gate.is_closed());
-        assert_eq!(
-            quiesced.cause(),
-            Some(IngestorQuiesceCause::OwnershipHandoff)
-        );
-
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
-
-        assert!(
-            !runtime.entity_gate_operation_is_held(&coordination),
-            "runtime teardown must end the lease it holds"
-        );
-        assert!(
-            !gate.is_closed(),
-            "the ended lease reopens the relay it fenced"
-        );
-        assert_eq!(
-            quiesced.cause(),
-            None,
-            "the ended lease releases the ingestor it quiesced"
-        );
-
-        runtime
-            .stop_ingestor(&domain, &ingestor)
-            .await
-            .expect("test ingestor should stop");
-    }
-
-    /// An engagement still waiting for its relays when the runtime stops ends with the stop: its
-    /// waiter learns why, the relay it fenced reopens, and nothing is left registered.
-    #[nervix_primitives::test]
-    async fn runtime_shutdown_ends_an_engagement_still_waiting_for_its_relays() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let relay = named::<RelayName>("events");
-        let coordination = coordination("leader-a", 12, 1);
-        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let gate = fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
-            fanout,
-        );
-        let dispatch = gate.acquire_dispatch().await;
-        let request = nervix_primitives::task::spawn({
-            let runtime = runtime.clone();
-            let domain = domain.clone();
-            let relay = relay.clone();
-            let coordination = coordination.clone();
-            async move {
-                runtime
-                    .engage_entity_gate_operation(
-                        &coordination,
-                        &domain,
-                        &[relay],
-                        &[],
-                        EntityGatePurpose::ModelAlteration,
-                        EntityGateLease {
-                            deadline: Instant::now() + Duration::from_secs(3600),
-                            reason: "an engagement the stop interrupts",
-                        },
-                    )
-                    .await
-            }
-        });
-        while !gate.is_closed() {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
-
-        let outcome = request
-            .await
-            .expect("the engagement request must not panic");
-        let Err(failure) = outcome else {
-            panic!("an engagement the stop interrupted is never held");
-        };
-        assert!(matches!(
-            failure.current_context(),
-            EntityGateOperationError::RuntimeStopped { domain: stopped } if stopped == &domain
-        ));
-        assert!(
-            !gate.is_closed(),
-            "the interrupted engagement reopens the relay it fenced"
-        );
-        assert!(runtime.inner.entity_gate_holds.get(&coordination).is_none());
-        drop(dispatch);
-    }
-
-    /// A runtime that has stopped engages no new gate, and a peer that asked learns that the
-    /// operation failed rather than that it addressed a hold this node never had.
-    #[nervix_primitives::test]
-    async fn a_stopped_runtime_refuses_a_new_entity_gate_engagement() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let coordination = coordination("leader-a", 13, 1);
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
-
-        let Err(refusal) = runtime
-            .engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                &[],
-                &[],
-                EntityGatePurpose::OwnershipHandoff,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_secs(5),
-                    reason: "an engagement after the stop",
-                },
-            )
-            .await
-        else {
-            panic!("a stopped runtime must refuse the engagement");
-        };
-        assert!(matches!(
-            refusal.current_context(),
-            EntityGateOperationError::RuntimeStopped { domain: stopped } if stopped == &domain
-        ));
-        assert!(matches!(
-            refusal.current_context().as_remote_failure(
-                nervix_interconnect::RemoteOperationSubject::Domain {
-                    domain: domain.clone(),
-                }
-            ),
-            nervix_interconnect::RemoteOperationFailure::Failed { .. }
-        ));
-        assert!(runtime.inner.entity_gate_holds.get(&coordination).is_none());
-    }
-
-    #[nervix_primitives::test]
-    async fn equal_operation_ids_from_different_coordinators_fence_each_requested_relay() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let first_relay = named::<RelayName>("first_events");
-        let second_relay = named::<RelayName>("second_events");
-        let first_coordination = coordination("leader-a", 10, 1);
-        let second_coordination = coordination("leader-b", 20, 1);
-        let first_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let first_gate = first_fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, first_relay.clone()),
-            first_fanout,
-        );
-        let second_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let second_gate = second_fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, second_relay.clone()),
-            second_fanout,
-        );
-
-        runtime
-            .engage_entity_gate_operation(
-                &first_coordination,
-                &domain,
-                std::slice::from_ref(&first_relay),
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_secs(5),
-                    reason: "first coordinator",
-                },
-            )
-            .await
-            .expect("the first coordinator hold should engage");
-        runtime
-            .engage_entity_gate_operation(
-                &second_coordination,
-                &domain,
-                std::slice::from_ref(&second_relay),
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_secs(5),
-                    reason: "replacement coordinator",
-                },
-            )
-            .await
-            .expect("a successful second coordinator hold should engage its complete scope");
-
-        assert!(first_gate.is_closed());
-        assert!(second_gate.is_closed());
-    }
-
-    #[nervix_primitives::test]
-    async fn concurrent_coordinators_with_equal_sequences_hold_independent_scopes() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let first_relay = named::<RelayName>("first_events");
-        let second_relay = named::<RelayName>("second_events");
-        let first_coordination = coordination("leader-a", 10, 1);
-        let second_coordination = coordination("leader-b", 20, 1);
-        let first_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let first_gate = first_fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, first_relay.clone()),
-            first_fanout,
-        );
-        let second_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let second_gate = second_fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, second_relay.clone()),
-            second_fanout,
-        );
-
-        let first = runtime.engage_entity_gate_operation(
-            &first_coordination,
-            &domain,
-            std::slice::from_ref(&first_relay),
-            &[],
-            EntityGatePurpose::ModelAlteration,
-            EntityGateLease {
-                deadline: Instant::now() + Duration::from_secs(5),
-                reason: "first concurrent coordinator",
-            },
-        );
-        let second = runtime.engage_entity_gate_operation(
-            &second_coordination,
-            &domain,
-            std::slice::from_ref(&second_relay),
-            &[],
-            EntityGatePurpose::ModelAlteration,
-            EntityGateLease {
-                deadline: Instant::now() + Duration::from_secs(5),
-                reason: "second concurrent coordinator",
-            },
-        );
-        let (first, second) = tokio::join!(first, second);
-
-        first.expect("the first concurrent hold should engage");
-        second.expect("the second concurrent hold should engage");
-        assert!(first_gate.is_closed());
-        assert!(second_gate.is_closed());
-    }
-
-    #[nervix_primitives::test]
-    async fn receiver_finishes_engagement_after_the_coordinator_request_is_cancelled() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let relay = named::<RelayName>("events");
-        let coordination = coordination("leader-a", 10, 1);
-        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let gate = fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
-            fanout,
-        );
-        let dispatch = gate.acquire_dispatch().await;
-        let request = nervix_primitives::task::spawn({
-            let runtime = runtime.clone();
-            let domain = domain.clone();
-            let relay = relay.clone();
-            let coordination = coordination.clone();
-            async move {
-                runtime
-                    .engage_entity_gate_operation(
-                        &coordination,
-                        &domain,
-                        &[relay],
-                        &[],
-                        EntityGatePurpose::ModelAlteration,
-                        EntityGateLease {
-                            deadline: Instant::now() + Duration::from_secs(5),
-                            reason: "coordinator request cancellation regression",
-                        },
-                    )
-                    .await
-            }
-        });
-        while !gate.is_closed() {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-
-        request.abort();
-        assert!(
-            request
-                .await
-                .expect_err("the simulated coordinator request should be cancelled")
-                .is_cancelled()
-        );
-        drop(dispatch);
-
-        nervix_primitives::time::timeout(
-            Duration::from_secs(1),
-            runtime.engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                std::slice::from_ref(&relay),
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_secs(5),
-                    reason: "same operation retry after coordinator loss",
-                },
-            ),
-        )
-        .await
-        .expect("the receiver-owned engagement should finish after request cancellation")
-        .expect("the same operation retry should observe the completed hold");
-        assert!(runtime.entity_gate_operation_is_held(&coordination));
-        assert!(gate.is_closed());
-    }
-
-    #[nervix_primitives::test]
-    async fn retries_require_the_same_scope_and_stale_operations_cannot_observe_or_release_it() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let held_relay = named::<RelayName>("held_events");
-        let conflicting_relay = named::<RelayName>("conflicting_events");
-        let current = coordination("leader-a", 11, 1);
-        let prior_incarnation = coordination("leader-a", 10, 1);
-        let held_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let held_gate = held_fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, held_relay.clone()),
-            held_fanout,
-        );
-        let conflicting_fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let conflicting_gate = conflicting_fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, conflicting_relay.clone()),
-            conflicting_fanout,
-        );
-        let lease = || EntityGateLease {
-            deadline: Instant::now() + Duration::from_secs(5),
-            reason: "scope identity regression",
-        };
-
-        runtime
-            .engage_entity_gate_operation(
-                &current,
-                &domain,
-                std::slice::from_ref(&held_relay),
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                lease(),
-            )
-            .await
-            .expect("the current operation should engage");
-        runtime
-            .engage_entity_gate_operation(
-                &current,
-                &domain,
-                &[held_relay.clone(), held_relay.clone()],
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                lease(),
-            )
-            .await
-            .expect("a retry with the same canonical scope should succeed");
-
-        let conflict = runtime
-            .engage_entity_gate_operation(
-                &current,
-                &domain,
-                std::slice::from_ref(&conflicting_relay),
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                lease(),
-            )
-            .await;
-        assert!(conflict.is_err());
-        assert!(!conflicting_gate.is_closed());
-        runtime
-            .entity_gate_operation_drain_status(
-                &current,
-                &domain,
-                std::slice::from_ref(&held_relay),
-                &[],
-                EntityGatePurpose::ModelAlteration,
-            )
-            .expect("the exact operation and scope should report status");
-        assert!(
-            runtime
-                .entity_gate_operation_drain_status(
-                    &prior_incarnation,
-                    &domain,
-                    std::slice::from_ref(&held_relay),
-                    &[],
-                    EntityGatePurpose::ModelAlteration,
-                )
-                .is_err()
-        );
-
-        runtime
-            .release_entity_gate_operation(&prior_incarnation, &domain)
-            .await
-            .expect("a stale release should be idempotent");
-        assert!(runtime.entity_gate_operation_is_held(&current));
-        assert!(held_gate.is_closed());
-        runtime
-            .release_entity_gate_operation(&current, &domain)
-            .await
-            .expect("the exact operation should release");
-        assert!(!held_gate.is_closed());
-    }
-
-    #[nervix_primitives::test]
-    async fn releasing_one_coordinator_preserves_an_overlapping_ownership_freeze() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let affected = NodeRef {
-            kind: ModelKind::Deduplicator,
-            identifier: named("deduplicate_events"),
-        };
-        let entity = affected.clone().in_domain(&domain);
-        let first = coordination("leader-a", 10, 1);
-        let second = coordination("leader-b", 20, 1);
-        let lease = || EntityGateLease {
-            deadline: Instant::now() + Duration::from_secs(5),
-            reason: "overlapping ownership freeze regression",
-        };
-
-        runtime
-            .engage_entity_gate_operation(
-                &first,
-                &domain,
-                &[],
-                std::slice::from_ref(&affected),
-                EntityGatePurpose::OwnershipHandoff,
-                lease(),
-            )
-            .await
-            .expect("the first ownership hold should engage");
-        runtime
-            .engage_entity_gate_operation(
-                &second,
-                &domain,
-                &[],
-                std::slice::from_ref(&affected),
-                EntityGatePurpose::OwnershipHandoff,
-                lease(),
-            )
-            .await
-            .expect("the replacement coordinator ownership hold should engage");
-
-        for coordination in [&first, &second] {
-            assert!(
-                runtime
-                    .entity_gate_operation_drain_status(
-                        coordination,
-                        &domain,
-                        &[],
-                        std::slice::from_ref(&affected),
-                        EntityGatePurpose::OwnershipHandoff,
-                    )
-                    .expect("each exact hold reports its drain and installs its freeze")
-                    .is_drained()
-            );
-        }
-
-        runtime
-            .release_entity_gate_operation(&first, &domain)
-            .await
-            .expect("the first ownership hold should release");
-        assert!(!runtime.ownership_handoff_entity_is_frozen_by(&entity, &first));
-        assert!(runtime.ownership_handoff_entity_is_frozen_by(&entity, &second));
-        assert!(runtime.ownership_handoff_entity_is_frozen(&entity));
-
-        runtime
-            .release_entity_gate_operation(&second, &domain)
-            .await
-            .expect("the replacement ownership hold should release");
-        assert!(!runtime.ownership_handoff_entity_is_frozen(&entity));
-    }
-
-    #[nervix_primitives::test(start_paused = true)]
-    async fn preceding_lease_expiry_does_not_release_a_reengaged_hold() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let relay = named::<RelayName>("events");
-        let coordination = coordination("leader-a", 10, 1);
-        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let gate = fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
-            fanout,
-        );
-
-        runtime
-            .engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                std::slice::from_ref(&relay),
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_millis(10),
-                    reason: "preceding lease",
-                },
-            )
-            .await
-            .expect("the preceding hold should engage");
-        runtime
-            .release_entity_gate_operation(&coordination, &domain)
-            .await
-            .expect("the preceding hold should release");
-        runtime
-            .engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                std::slice::from_ref(&relay),
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_secs(1),
-                    reason: "replacement lease",
-                },
-            )
-            .await
-            .expect("the replacement hold should engage");
-
-        nervix_primitives::time::advance(Duration::from_millis(11)).await;
-        nervix_primitives::task::yield_now().await;
-
-        assert!(runtime.entity_gate_operation_is_held(&coordination));
-        assert!(gate.is_closed());
-    }
-
-    #[test]
-    fn emitter_entity_pause_gates_every_input_relay() {
-        let emitter = CreateEmitter {
-            name: named("combined_emitter"),
-            from: ProcessorInputs::new(
-                vec![named("source_b"), named("source_a")],
-                vec![ProcessorInputWhere {
-                    relay: named("source_b"),
-                    where_clause: nervix_plexus::parse_expression("input.seq > 0")
-                        .expect("the source predicate is valid"),
-                }],
-            ),
-            body: nervix_models::EmitterBody::Codec {
-                codec: named("event_codec"),
-            },
-            envelope: Box::new(nervix_models::EmitterEnvelope::default()),
-            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
-                ZeroMqPushEmitter {
-                    mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                        retry_policy: RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
-                        },
-                    },
-                    client: named("emitter"),
-                },
-            ))),
-            batch: None,
-            flush_policy: FlushPolicy::Immediate,
-            error_policies: ErrorPolicies::handled_by_log(),
-            mode: AckMode::Attached,
-            construction: nervix_models::RouteConstruction::default(),
-            materialized_state: Vec::new(),
-        };
-        let input_relay = |name: &str| {
-            scheduled_model(nervix_models::Model::Relay(CreateRelay {
-                name: named(name),
-                schema: named("event"),
-                buffer: nonzero!(2usize),
-                branching: RelayBranching::unbranched(),
-                materialized_state: None,
-            }))
-        };
-        let mut schedule = DomainSchedule::new(
-            domain("testing"),
-            vec![
-                scheduled_model(nervix_models::Model::Schema(nervix_models::CreateSchema {
-                    name: named("event"),
-                    fields: vec![nervix_models::SchemaField {
-                        name: named("seq"),
-                        ty: nervix_models::ParseAsType::I64,
-                        optional: false,
-                        sensitive: false,
-                    }],
-                })),
-                scheduled_model(nervix_models::Model::Codec(nervix_models::CreateCodec {
-                    name: named("event_codec"),
-                    wire_format: nervix_models::CodecWireFormat::Syslog,
-                    schema: named("event"),
-                    encoding_rules: Vec::new(),
-                })),
-                scheduled_model(nervix_models::Model::ClientZeroMq(
-                    nervix_models::CreateClientZeroMq {
-                        name: named("emitter"),
-                        mount: None,
-                        config: Vec::new(),
-                    },
-                )),
-                input_relay("source_a"),
-                input_relay("source_b"),
-                scheduled_model(nervix_models::Model::Emitter(emitter.clone())),
-            ],
-            Vec::new(),
-        );
-        let emitter_node = schedule
-            .nodes
-            .values_mut()
-            .find(|node| node.kind() == ModelKind::Emitter)
-            .expect("test schedule must contain its emitter");
-        emitter_node.single_unit_mut().primary_node =
-            Some(ClusterNodeName::parse("node-2").expect("valid name"));
-        emitter_node.single_unit_mut().assigned_nodes =
-            vec![ClusterNodeName::parse("node-2").expect("valid name")];
-        let entity = NodeRef {
-            kind: ModelKind::Emitter,
-            identifier: ModelName::from(&emitter.name),
-        };
-
-        assert_eq!(
-            crate::registry::entity_pause_relays_for_schedule(&schedule, &[entity]),
-            vec![named("source_a"), named("source_b")]
-        );
-        let activation =
-            DomainActivationPlan::from_scheduled_nodes(&domain("testing"), &schedule.nodes)
-                .expect("the test schedule has planned schemas and relays");
-        let emitter_plans =
-            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation)
-                .expect("the test emitter has a matching client and inputs");
-        let planned = emitter_plans
-            .emitter(&emitter.name)
-            .expect("the scheduled emitter has one plan");
-        assert_eq!(
-            planned
-                .inputs
-                .iter()
-                .map(|input| input.relay.as_str())
-                .collect::<Vec<_>>(),
-            ["source_b", "source_a"]
-        );
-        assert!(planned.inputs[0].from_where.is_some());
-        assert!(planned.inputs[1].from_where.is_none());
-        let revision = ExecutionRevision::from_schedule(&schedule)
-            .assured("the emitter fixture produces a complete revision");
-        let remote_consumers = Runtime::remote_runtime_consumers_for_revision(
-            &revision,
-            &ClusterNodeName::parse("node-1").expect("valid name"),
-        );
-        assert_eq!(remote_consumers.len(), 2);
-        for relay in [named("source_a"), named("source_b")] {
-            let consumers = remote_consumers
-                .get(&relay)
-                .expect("every emitter input needs a remote consumer");
-            assert_eq!(consumers.len(), 1);
-            assert_eq!(consumers[0].relay, relay);
-            assert_eq!(
-                consumers[0].node_id,
-                ClusterNodeName::parse("node-2").expect("valid name")
-            );
-        }
-    }
-
-    #[test]
-    fn ownership_handoff_keeps_internal_moved_group_relays_open() {
-        let junction = |name: &str, input: &str, output: &str| {
-            scheduled_model(nervix_models::Model::Junction(CreateJunction {
-                name: named(name),
-                from: ProcessorInputs::single(named(input)),
-                output_routes: (ProcessorOutputs::single(named(output)))
-                    .with_flush_policy(FlushPolicy::Immediate),
-                branched_by: BranchSelection::unbranched(),
-                mode: AckMode::Attached,
-                filter_where: None,
-                materialized_state: Vec::new(),
-            }))
-        };
-        let schedule = DomainSchedule::new(
-            domain("testing"),
-            vec![
-                junction("corridor_source", "inbound", "corridor_stage"),
-                junction("corridor_emitter", "corridor_stage", "outbound"),
-            ],
-            Vec::new(),
-        );
-        let affected = ["corridor_source", "corridor_emitter"].map(|name| NodeRef {
-            kind: ModelKind::Junction,
-            identifier: named(name),
-        });
-
-        assert_eq!(
-            crate::registry::entity_pause_relays_for_schedule(&schedule, &affected),
-            vec![named("corridor_stage"), named("inbound")]
-        );
-        assert_eq!(
-            crate::registry::ownership_handoff_relays_for_schedule(&schedule, &affected),
-            vec![named("inbound")]
-        );
-    }
-
-    #[test]
-    fn quiesce_counters_belong_to_one_node_not_to_a_shared_identifier() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let shared = named::<ModelName>("orders");
-        let relay = runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &shared));
-        let emitter =
-            runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Emitter, &shared));
-
-        let _work = NodeQuiesceWorkGuard::begin(relay.clone());
-
-        assert_eq!(relay.outstanding_work(), 1);
-        assert_eq!(emitter.outstanding_work(), 0);
-    }
-    #[nervix_primitives::test(start_paused = true)]
-    async fn ownership_handoff_expiry_reopens_gates_after_an_unfinished_local_flush() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let relay = named::<RelayName>("events");
-        let entity = NodeRef::new(ModelKind::Ingestor, named::<IngestorName>("source"));
-        let coordination = coordination("coordinator-a", 7, 42);
-        let counters = runtime.node_quiesce_counters(&domain, entity.clone());
-        let participant = runtime.force_flush_participant(&domain, counters.clone());
-        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
-        let dispatch_gate = fanout.dispatch_gate();
-        runtime.inner.relay_boundary_fanouts.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
-            fanout,
-        );
-        runtime
-            .engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                std::slice::from_ref(&relay),
-                std::slice::from_ref(&entity),
-                EntityGatePurpose::OwnershipHandoff,
-                EntityGateLease {
-                    deadline: Instant::now() + Duration::from_secs(5),
-                    reason: "unfinished local flush",
-                },
-            )
-            .await
-            .expect("closed admission engages while its admitted work remains observable");
-        assert!(dispatch_gate.is_closed());
-        assert!(runtime.entity_gate_operation_is_held(&coordination));
-        let status = runtime
-            .entity_gate_operation_drain_status(
-                &coordination,
-                &domain,
-                std::slice::from_ref(&relay),
-                std::slice::from_ref(&entity),
-                EntityGatePurpose::OwnershipHandoff,
-            )
-            .expect("the engaged operation reports its pending flush");
-        assert_eq!(status.node_work_items, 1);
-        assert!(!runtime.entity_gate_operation_owns_entity(
-            &coordination,
-            &domain,
-            &entity,
-            EntityGatePurpose::OwnershipHandoff,
-        ));
-        let freeze = OwnershipHandoffFreezeWatch::new(&runtime, entity.in_domain(&domain));
-        assert!(!freeze.observe().is_frozen());
-        nervix_primitives::time::advance(Duration::from_secs(6)).await;
-        nervix_primitives::time::timeout(Duration::from_secs(1), async {
-            while runtime.entity_gate_operation_is_held(&coordination) {
-                nervix_primitives::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the original lease releases its unfinished operation");
-        assert!(!dispatch_gate.is_closed());
-        assert!(!freeze.observe().is_frozen());
-        assert_eq!(counters.force_flush_obligations(), 1);
-        drop(participant);
-        assert_eq!(counters.force_flush_obligations(), 0);
-    }
-}
+#[path = "entity_gate_tests.rs"]
+mod tests;
 
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "entity_gate_shuttle_tests.rs"]

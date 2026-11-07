@@ -99,8 +99,9 @@ pub enum OptionValue {
     Expression,
     /// `{ '<name>' = <expression>, … }`: named expressions.
     Mapping,
-    /// `{ '<name>' = '<value>', … }`: named string literals.
-    LiteralMapping,
+    /// `{ '<name>' = '<value>' | CLIENT SECRET '<key>', … }`: named string literals, or the secret
+    /// keys of the client that read them.
+    RequestHeaders,
     /// A configured client of one connector.
     Client(ConnectorKind),
     /// A clause of several parts, as the option's example writes them.
@@ -116,7 +117,7 @@ pub struct OptionChoice {
     /// in angle brackets. A requirement and a capability name the choice by it.
     pub name: &'static str,
     /// The value a statement writes with the choice, where it takes one: after the choice's own
-    /// words, or before them where the example writes it there.
+    /// words, or before or among them where the example writes it there.
     pub value: Option<OptionValue>,
     /// The option written in full with this choice, its keywords included.
     pub example: &'static str,
@@ -155,18 +156,25 @@ pub struct OptionDeclaration {
 }
 
 impl OptionDeclaration {
-    /// `INSTANCES <n>`: how many consumers read the entity together, one where a statement leaves
-    /// it out.
+    /// Independent consumers by count, or one consumer for each constructed branch partition.
     pub const INSTANCES: Self = Self {
         keywords: "INSTANCES",
         presence: OptionPresence::Optional { default: Some("1") },
-        form: OptionForm::Value {
-            value: OptionValue::Count,
-            example: "INSTANCES 2",
-        },
+        form: OptionForm::Choice(&[
+            OptionChoice {
+                name: "<count>",
+                value: Some(OptionValue::Count),
+                example: "INSTANCES 2",
+            },
+            OptionChoice {
+                name: "PER PARTITION",
+                value: None,
+                example: "INSTANCES PER PARTITION",
+            },
+        ]),
     };
 
-    /// `EVERY <duration>`: the domain-time cadence on which a polled source reads.
+    /// `EVERY <duration>`: the domain-time cadence on which a polled ingestor reads.
     pub const EVERY: Self = Self {
         keywords: "EVERY",
         presence: OptionPresence::Required,
@@ -259,9 +267,68 @@ impl ChoiceRequirement {
     }
 }
 
+/// The choice a statement makes for one declared option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrittenChoice {
+    /// The keywords of the option.
+    pub option: &'static str,
+    /// The name of the choice the statement makes, where its body answers for the option.
+    pub choice: Option<&'static str>,
+}
+
+impl WrittenChoice {
+    /// The choice a statement makes for each option `requirements` name, in their order, where
+    /// `chosen` names the choice it makes for an option by the option's keywords.
+    pub(crate) fn of(
+        requirements: &[ChoiceRequirement],
+        chosen: &dyn Fn(&str) -> Option<&'static str>,
+    ) -> Vec<Self> {
+        let mut written = Vec::with_capacity(requirements.len());
+        for requirement in requirements {
+            written.push(Self {
+                option: requirement.option,
+                choice: chosen(requirement.option),
+            });
+        }
+        written
+    }
+
+    /// Every choice of `written`, as a statement writes them together, such as
+    /// `SESSION CLEAN and QOS 0`.
+    pub(crate) fn conjunction(written: &[Self]) -> String {
+        let phrases: Vec<String> = written.iter().map(ToString::to_string).collect();
+        phrases.join(" and ")
+    }
+}
+
+/// A choice is written as its option's keywords, then the choice's own name.
+impl Display for WrittenChoice {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.choice {
+            Some(choice) => write!(f, "{} {choice}", self.option),
+            None => write!(f, "no {}", self.option),
+        }
+    }
+}
+
 /// A clause an emitter writes to set what its transport carries beside each payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    EnumIter,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum EnvelopeClauseKind {
+    Key,
+    PartitionFromBranch,
     Persistent,
     Mandatory,
     Retain,
@@ -277,6 +344,8 @@ impl EnvelopeClauseKind {
     /// The keywords that open the clause.
     pub const fn keywords(self) -> &'static str {
         match self {
+            Self::Key => "KEY",
+            Self::PartitionFromBranch => "PARTITION FROM BRANCH",
             Self::Persistent => "PERSISTENT",
             Self::Mandatory => "MANDATORY",
             Self::Retain => "RETAIN",
@@ -292,6 +361,8 @@ impl EnvelopeClauseKind {
     /// The clause written in full, as documentation and generated statements write it.
     pub const fn example(self) -> &'static str {
         match self {
+            Self::Key => "KEY 'record-key'",
+            Self::PartitionFromBranch => "PARTITION FROM BRANCH",
             Self::Persistent => "PERSISTENT",
             Self::Mandatory => "MANDATORY",
             Self::Retain => "RETAIN",
@@ -307,11 +378,16 @@ impl EnvelopeClauseKind {
     /// What a statement writes after the clause's keywords.
     pub fn form(self) -> EnvelopeClauseForm {
         match self {
-            Self::Persistent | Self::Mandatory | Self::Retain => EnvelopeClauseForm::Flag,
+            Self::PartitionFromBranch | Self::Persistent | Self::Mandatory | Self::Retain => {
+                EnvelopeClauseForm::Flag
+            }
             Self::DeliverAfter | Self::Delay => EnvelopeClauseForm::Duration,
-            Self::Timestamp => EnvelopeClauseForm::Expression(ParseAsType::Datetime),
+            Self::Key => EnvelopeClauseForm::Expression(EnvelopeValueType::Key),
+            Self::Timestamp => {
+                EnvelopeClauseForm::Expression(EnvelopeValueType::Exact(PropertyType::Datetime))
+            }
             Self::ReplyTo | Self::MessageId | Self::DeduplicationId => {
-                EnvelopeClauseForm::Expression(ParseAsType::String)
+                EnvelopeClauseForm::Expression(EnvelopeValueType::Exact(PropertyType::String))
             }
         }
     }
@@ -324,9 +400,33 @@ pub enum EnvelopeClauseForm {
     Flag,
     /// A duration literal, the same for every record.
     Duration,
-    /// An expression evaluated for every record, whose value is never null and has exactly this
-    /// type.
-    Expression(ParseAsType),
+    /// An expression evaluated for every record, with a non-null, non-sensitive value admitted
+    /// by this constraint.
+    Expression(EnvelopeValueType),
+}
+
+/// The exact scalar type of an envelope value, or the two exact types a record key admits.
+///
+/// A key keeps its inferred STRING or BYTES type; this constraint never requests a conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeValueType {
+    Exact(PropertyType),
+    Key,
+}
+
+impl Display for EnvelopeValueType {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exact(ty) => ty.fmt(formatter),
+            Self::Key => formatter.write_str("STRING or BYTES"),
+        }
+    }
+}
+
+impl From<PropertyType> for EnvelopeValueType {
+    fn from(ty: PropertyType) -> Self {
+        Self::Exact(ty)
+    }
 }
 
 /// One key of an emitter's closed `PROPERTIES { … }` set, and the exact type of its value.

@@ -18,11 +18,11 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING, tags <tags_type>, raw STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge databases-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -86,7 +86,7 @@ Feature: Database emitter batches
       | 1            | MongoDB        | VEC<VEC<I64>> | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION |
       | 3            | MongoDB        | VEC<VEC<I64>> | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION |
 
-  @emitter_batch_databases @database_batch_size
+  @emitter_batch_databases @database_batch_size @emitter_payload_observations
   Scenario Outline: MAX SIZE bounds the exact bytes of every <connector_body> write
     Given <connector_body> is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -100,11 +100,11 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge database-sizes-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -149,16 +149,43 @@ Feature: Database emitter batches
       {"seq":7,"note":"abc"}
       """
 
+    And within "30s" DESCRIBE EMITTER "at_limit" on the leader node contains
+      """
+      batch: MAX MESSAGES 3 MAX SIZE <three_rows>
+      batch container: <container>
+      """
+    And within "30s" DESCRIBE EMITTER "at_limit" on the leader node contains
+      """
+      payloads: 3 source_messages=7
+      """
+    And within "30s" DESCRIBE EMITTER "below_limit" on the leader node contains
+      """
+      payloads: 4 source_messages=7
+      """
+    And the last command output owner is saved as placeholder "metrics_owner"
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_payload_encoded_bytes_total" with labels eventually reaches at least 1
+      """
+      emitter="below_limit"
+      """
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_payload_splits_total" with labels eventually equals 3
+      """
+      emitter="below_limit"
+      """
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_messages_per_payload_count" with labels eventually equals 4
+      """
+      emitter="below_limit"
+      """
+
     Examples:
-      | cluster_size | connector_body | three_rows | one_byte_less | client                                                                                                                                   | target        | emitter_kind       |
-      | 1            | ClickHouse     | 69B        | 68B           | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix', 'timeout_ms' = '5000' }; | db TABLE      | CLICKHOUSE TABLE   |
-      | 3            | ClickHouse     | 69B        | 68B           | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix', 'timeout_ms' = '5000' }; | db TABLE      | CLICKHOUSE TABLE   |
-      | 1            | Postgres       | 242B       | 241B          | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                                                 | db TABLE      | POSTGRES TABLE     |
-      | 3            | Postgres       | 242B       | 241B          | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                                                 | db TABLE      | POSTGRES TABLE     |
-      | 1            | MySQL          | 137B       | 136B          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                                       | db TABLE      | MYSQL TABLE        |
-      | 3            | MySQL          | 137B       | 136B          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                                       | db TABLE      | MYSQL TABLE        |
-      | 1            | MongoDB        | 147B       | 146B          | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION |
-      | 3            | MongoDB        | 147B       | 146B          | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION |
+      | cluster_size | connector_body | three_rows | one_byte_less | client                                                                                                                                   | target        | emitter_kind       | container            |
+      | 1            | ClickHouse     | 69B        | 68B           | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix', 'timeout_ms' = '5000' }; | db TABLE      | CLICKHOUSE TABLE   | JSONEachRow insert   |
+      | 3            | ClickHouse     | 69B        | 68B           | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix', 'timeout_ms' = '5000' }; | db TABLE      | CLICKHOUSE TABLE   | JSONEachRow insert   |
+      | 1            | Postgres       | 242B       | 241B          | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                                                 | db TABLE      | POSTGRES TABLE     | binary-array insert  |
+      | 3            | Postgres       | 242B       | 241B          | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                                                 | db TABLE      | POSTGRES TABLE     | binary-array insert  |
+      | 1            | MySQL          | 137B       | 136B          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                                       | db TABLE      | MYSQL TABLE        | parameterized insert |
+      | 3            | MySQL          | 137B       | 136B          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                                       | db TABLE      | MYSQL TABLE        | parameterized insert |
+      | 1            | MongoDB        | 147B       | 146B          | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION | BSON bulk write      |
+      | 3            | MongoDB        | 147B       | 146B          | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION | BSON bulk write      |
 
   @emitter_batch_databases @database_batch_rejections
   Scenario Outline: Rows <connector_body> or MAX SIZE rejects follow ON MESSAGE ERROR and the rest of their batch is written
@@ -176,12 +203,12 @@ Feature: Database emitter batches
       CREATE SCHEMA rejected_event (
         seq I64, error_code STRING, error_operation STRING, error_message STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge database-rejections-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -250,11 +277,11 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge database-conflicts-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -319,11 +346,11 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge database-retries-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -387,11 +414,11 @@ Feature: Database emitter batches
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION 'range(.count) | {seq: ., note: "n"}';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge mysql-placeholders-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -441,12 +468,12 @@ Feature: Database emitter batches
       CREATE SCHEMA rejected_event (
         seq I64, error_code STRING, error_operation STRING, error_message STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge mongodb-documents-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec

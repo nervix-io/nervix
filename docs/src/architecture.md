@@ -47,7 +47,7 @@ replicas. A relay is one of those runtime nodes: it has one owner, and only mate
 has scheduler-selected replicas.
 
 The decision layer converts each committed domain schedule into one in-memory typed execution
-revision, including node identity, placement, branch and schema contracts, resources, source and
+revision, including node identity, placement, branch and schema contracts, resources, ingestor and
 emitter plans, processor programs, and message-error routes. The runtime binds local resources and
 executes that revision without reading a Model. [Execution Plans](./execution-plans.md) follows
 construction, publication, incremental application, rebuilds, and recovery end to end.
@@ -64,6 +64,13 @@ ownership. [Data-Plane Concurrency](./data-plane-concurrency.md#resolved-archite
 states the finite compiler rules and their supported effects.
 
 This graph configuration is persisted with strong control-plane consistency. It is separate from runtime execution state and from the hot-path records moving through the graph.
+
+The engines layer also contains `nervix-rate-limit`, a unit-owned allowance engine. It consumes
+validated quotas, per-payload costs and key fingerprints, and returns admission outcomes and
+clock-independent generations. It knows no Model, Plexus syntax, connector, graph or persistence
+policy. Governor owns GCRA arithmetic; the engine owns bounded stores, whole-payload refund and
+injected-time conversion. [Unit Allowance Transactions](./data-plane-concurrency.md#unit-allowance-transactions)
+defines its ownership and synchronization boundary.
 
 Before a transaction changes that graph, the control plane plans its ordered execution steps and
 their before/after affected topology. Its typed report separates required pause scopes from actual
@@ -98,7 +105,7 @@ The runtime then instantiates that schedule:
 - emitters encode records and publish them externally
 
 Ingestors and emitters meet external systems through connector crates. The server composes a
-validated typed plan with an integration-specific source or emitter, and its data-plane host owns
+validated typed plan with an integration-specific ingestor or emitter, and its data-plane host owns
 intake, routing, buffering, acknowledgements, and lifecycle. The
 [Connector Crates And The Connector Contract](./connector-contract.md) chapter defines that
 boundary, its ingestor and emitter families, delivery and commit points, special integrations, and

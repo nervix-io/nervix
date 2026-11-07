@@ -37,25 +37,25 @@ use nervix_connector_iceberg::IcebergCommitPolicy;
 use nervix_connector_mongodb::MongoDbConflictAction;
 use nervix_connector_mqtt::MqttPublishingMode;
 use nervix_connector_mysql::MySqlConflictAction;
-use nervix_connector_nats::NatsPublishingMode;
 use nervix_connector_otel::{
     OtelAggregationTemporality, OtelLiteral, OtelMetric, OtelMetricKind, OtelResourceAttribute,
     OtelScope,
 };
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_models::{
-    AckWindow, Assignment, AssignmentTarget, CLIENT_CONSUMER_SESSION_BYTES, ClickHouseEmitter,
-    ClickHouseTableEmitter, ClickHouseValueMapping, ClientConfigEntry, ClientConsumerEmitter,
-    ClientEmitter, ClientName, ClientPoolBounds, ClientResourceMount, CreateEmitter,
-    EmitterBatchPolicy, EmitterEntity, Expression, FieldName, HttpEmitter, HttpOrigin,
+    AckWindow, Assignment, AssignmentTarget, ClickHouseEmitter, ClickHouseTableEmitter,
+    ClickHouseValueMapping, ClientConfigEntry, ClientConsumerEmitter, ClientEmitter, ClientName,
+    ClientPoolBounds, ClientResourceMount, CreateEmitter, EmitterBatchPolicy,
+    EmitterDeclaration as _, EmitterEntity, Expression, FieldName, HttpEmitter, HttpOrigin,
     HttpRequestEmitter, IcebergCatalog, IcebergEmitter, IcebergStorageBackend, IcebergTableEmitter,
     KafkaEmitter, KafkaTopicEmitter, Literal, Model, MongoDbCollectionEmitter, MongoDbEmitter,
-    MqttEmitter, MqttTopicEmitter, MySqlEmitter, MySqlTableEmitter, NatsEmitter,
-    NatsSubjectEmitter, OtelEmitter, OtelMappings, OtelMetricsEmitter, PostgresEmitter,
-    PostgresTableEmitter, PulsarEmitter, PulsarTopicEmitter, RabbitMqEmitter,
-    RabbitMqExchangeEmitter, RabbitMqQueueEmitter, RedisEmitter, RedisPubSubEmitter, RetryPolicy,
-    RouteConstruction, SchemaName, SentryEmitter, SqsEmitter, SqsQueueEmitter,
-    SyslogCollectorEmitter, SyslogEmitter, ZeroMqEmitter, ZeroMqPushEmitter, parse_duration_text,
+    MqttEmitter, MqttQos, MqttTopicEmitter, MqttTopicPublishingMode, MySqlEmitter,
+    MySqlTableEmitter, NatsEmitter, NatsStreamEmitter, NatsSubjectEmitter, OtelEmitter,
+    OtelMappings, OtelMetricsEmitter, PostgresEmitter, PostgresTableEmitter, PulsarEmitter,
+    PulsarTopicEmitter, RabbitMqEmitter, RabbitMqExchangeEmitter, RabbitMqQueueEmitter,
+    RedisEmitter, RedisPubSubEmitter, RetryPolicy, RouteConstruction, SchemaName, SentryEmitter,
+    SqsEmitter, SqsQueueEmitter, SyslogCollectorEmitter, SyslogEmitter, UnmetPublishingRequirement,
+    ZeroMqEmitter, ZeroMqPushEmitter, parse_duration_text,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -128,8 +128,8 @@ pub(super) enum EmitterStartPlanError {
     RetryMaxBackoffBelowBackoff,
     #[error("ack timeout must be greater than zero")]
     ZeroAckTimeout,
-    #[error("{} emitter batch maximum {bytes} bytes exceeds the 32 MiB consumer window", <ClientConsumerEmitter as nervix_models::EmitterEntityModel>::KIND)]
-    ClientBatchTooLarge { bytes: u64 },
+    #[error("{0}")]
+    UnmetPublishing(UnmetPublishingRequirement),
     #[error("{} emitter client '{client}' declares no http or https origin endpoint", <HttpRequestEmitter as nervix_models::EmitterEntityModel>::KIND)]
     InvalidHttpEndpoint { client: ClientName },
     #[error("{connector} emitter '{emitter}' requires at least one VALUES mapping")]
@@ -565,10 +565,11 @@ pub(super) enum MqttEmitterPlan<Config = ResolvedClientConfig> {
     Topic(MqttTopicEmitterPlan<Config>),
 }
 
-/// The subject entity planned for Nats execution.
+/// The NATS entity planned for execution.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum NatsEmitterPlan<Config = ResolvedClientConfig> {
     Subject(NatsSubjectEmitterPlan<Config>),
+    Stream(NatsStreamEmitterPlan<Config>),
 }
 
 /// The push entity planned for ZeroMq execution.
@@ -664,6 +665,7 @@ impl<Config> EmitterConnectorPlan<Config> {
             Self::Redis(RedisEmitterPlan::PubSub(plan)) => plan.batch,
             Self::Mqtt(MqttEmitterPlan::Topic(plan)) => plan.batch,
             Self::Nats(NatsEmitterPlan::Subject(plan)) => plan.batch,
+            Self::Nats(NatsEmitterPlan::Stream(plan)) => plan.batch,
             Self::ZeroMq(ZeroMqEmitterPlan::Push(plan)) => plan.batch,
             Self::Syslog(SyslogEmitterPlan::Collector(plan)) => plan.batch,
             Self::Sqs(SqsEmitterPlan::Queue(plan)) => plan.batch,
@@ -707,6 +709,9 @@ impl<Config> EmitterConnectorPlan<Config> {
             }
             Self::Nats(NatsEmitterPlan::Subject(_)) => {
                 <nervix_models::NatsSubjectEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Nats(NatsEmitterPlan::Stream(_)) => {
+                <nervix_models::NatsStreamEmitter as EmitterEntityModel>::KIND
             }
             Self::ZeroMq(ZeroMqEmitterPlan::Push(_)) => {
                 <nervix_models::ZeroMqPushEmitter as EmitterEntityModel>::KIND
@@ -782,6 +787,9 @@ impl EmitterConnectorPlan<DeclaredClientConfig> {
             }
             Self::Nats(NatsEmitterPlan::Subject(plan)) => {
                 EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(plan.resolve_clients(resolve)?))
+            }
+            Self::Nats(NatsEmitterPlan::Stream(plan)) => {
+                EmitterConnectorPlan::Nats(NatsEmitterPlan::Stream(plan.resolve_clients(resolve)?))
             }
             Self::ZeroMq(ZeroMqEmitterPlan::Push(plan)) => EmitterConnectorPlan::ZeroMq(
                 ZeroMqEmitterPlan::Push(plan.resolve_clients(resolve)?),
@@ -872,11 +880,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             let batch = emitter
                 .batch
                 .verified("the registry checked this entity's required BATCH declaration");
-            if batch.max_size.bytes().get() > CLIENT_CONSUMER_SESSION_BYTES {
-                return Err(Report::new(EmitterStartPlanError::ClientBatchTooLarge {
-                    bytes: batch.max_size.bytes().get(),
-                }));
-            }
+
             return Ok(Self {
                 label: <ClientConsumerEmitter as nervix_models::EmitterEntityModel>::KIND
                     .connector()
@@ -936,6 +940,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 )?,
                 topic: topic.clone(),
                 mode: decide_kafka_publication(mode)?,
+                partition_from_branch: emitter.envelope.partition_from_branch,
             })),
             (
                 EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
@@ -955,6 +960,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 )?,
                 topic: topic.clone(),
                 mode: decide_pulsar_publication(mode)?,
+                partition_from_branch: emitter.envelope.partition_from_branch,
             })),
             (
                 EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
@@ -1016,30 +1022,23 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 pool: client.pool,
                 channel: channel.clone(),
             })),
-            (
-                EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
-                    client: expected,
-                    topic,
-                    mode,
-                    ..
-                })),
-                Model::ClientMqtt(client),
-            ) => EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(MqttTopicEmitterPlan {
-                batch: emitter.batch,
-                client: EmitterClientSpec::declared(
-                    expected,
-                    &client.name,
-                    client.mount.as_ref(),
-                    &client.config,
-                )?,
-                topic: topic.clone(),
-                mode: decide_mqtt_publishing_mode(mode)?,
-            })),
+            (EmitterEntity::Mqtt(MqttEmitter::Topic(destination)), Model::ClientMqtt(client)) => {
+                EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(MqttTopicEmitterPlan {
+                    batch: emitter.batch,
+                    client: EmitterClientSpec::declared(
+                        &destination.client,
+                        &client.name,
+                        client.mount.as_ref(),
+                        &client.config,
+                    )?,
+                    topic: destination.topic.clone(),
+                    mode: decide_mqtt_publishing_mode(destination)?,
+                }))
+            }
             (
                 EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
                     client: expected,
                     subject,
-                    mode,
                     ..
                 })),
                 Model::ClientNats(client),
@@ -1052,8 +1051,34 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 subject: subject.clone(),
-                mode: decide_nats_publishing_mode(mode)?,
             })),
+            (
+                EmitterEntity::Nats(NatsEmitter::Stream(NatsStreamEmitter {
+                    client: expected,
+                    stream,
+                    subject,
+                    mode,
+                })),
+                Model::ClientNats(client),
+            ) => {
+                let nervix_models::NatsStreamPublishingMode::Ack {
+                    window,
+                    ack_timeout,
+                    ..
+                } = mode;
+                EmitterConnectorPlan::Nats(NatsEmitterPlan::Stream(NatsStreamEmitterPlan {
+                    batch: emitter.batch,
+                    client: EmitterClientSpec::declared(
+                        expected,
+                        &client.name,
+                        client.mount.as_ref(),
+                        &client.config,
+                    )?,
+                    stream: stream.clone(),
+                    subject: subject.clone(),
+                    confirmation: decide_ack_confirmation(window, ack_timeout)?,
+                }))
+            }
             (
                 EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
                     client: expected,
@@ -1515,44 +1540,43 @@ broker_publication!(
     RabbitMqExchangePublishingMode
 );
 
-/// The quality of service `mode` declares for an MQTT `emitter`.
+/// The quality of service an MQTT `destination` publishes at, with the confirmation its mode
+/// declares for an answered one. The plan holds both in one value, so a pairing the declaration
+/// refuses has no plan.
 fn decide_mqtt_publishing_mode(
-    mode: &nervix_models::MqttTopicPublishingMode,
+    destination: &MqttTopicEmitter,
 ) -> Result<MqttPublishingMode, Report<EmitterStartPlanError>> {
-    match mode {
-        nervix_models::MqttTopicPublishingMode::Qos0 { .. } => Ok(MqttPublishingMode::Qos0),
-        nervix_models::MqttTopicPublishingMode::Qos1 {
-            window,
-            ack_timeout,
-            ..
-        } => {
+    match (destination.qos, &destination.mode) {
+        (MqttQos::Qos0, MqttTopicPublishingMode::NoAck { .. }) => Ok(MqttPublishingMode::Qos0),
+        (
+            MqttQos::Qos1,
+            MqttTopicPublishingMode::Ack {
+                window,
+                ack_timeout,
+                ..
+            },
+        ) => {
             let confirmation = decide_ack_confirmation(window, ack_timeout)?;
             Ok(MqttPublishingMode::Qos1(confirmation))
         }
-        nervix_models::MqttTopicPublishingMode::Qos2 {
-            window,
-            ack_timeout,
-            ..
-        } => {
+        (
+            MqttQos::Qos2,
+            MqttTopicPublishingMode::Ack {
+                window,
+                ack_timeout,
+                ..
+            },
+        ) => {
             let confirmation = decide_ack_confirmation(window, ack_timeout)?;
             Ok(MqttPublishingMode::Qos2(confirmation))
         }
-    }
-}
-
-/// The NATS delivery `mode` declares for a NATS `emitter`.
-fn decide_nats_publishing_mode(
-    mode: &nervix_models::NatsSubjectPublishingMode,
-) -> Result<NatsPublishingMode, Report<EmitterStartPlanError>> {
-    match mode {
-        nervix_models::NatsSubjectPublishingMode::NoAck { .. } => Ok(NatsPublishingMode::Core),
-        nervix_models::NatsSubjectPublishingMode::JetStream {
-            window,
-            ack_timeout,
-            ..
-        } => {
-            let confirmation = decide_ack_confirmation(window, ack_timeout)?;
-            Ok(NatsPublishingMode::JetStream(confirmation))
+        (MqttQos::Qos0, MqttTopicPublishingMode::Ack { .. })
+        | (MqttQos::Qos1 | MqttQos::Qos2, MqttTopicPublishingMode::NoAck { .. }) => {
+            let unmet = destination.unmet_publishing().assured(
+                "the MQTT TOPIC declaration requires another quality of service for exactly these \
+                 pairings",
+            );
+            Err(Report::new(EmitterStartPlanError::UnmetPublishing(unmet)))
         }
     }
 }
@@ -1874,7 +1898,7 @@ mod tests {
                 },
                 Self::Mqtt => EmitterCase {
                     connector: EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
-                        mode: nervix_models::MqttTopicPublishingMode::Qos0 {
+                        mode: MqttTopicPublishingMode::NoAck {
                             retry_policy: nervix_models::RetryPolicy {
                                 backoff: "100ms".to_string(),
                                 max_backoff: "1s".to_string(),
@@ -1882,6 +1906,7 @@ mod tests {
                         },
                         client: client(),
                         topic: named("orders"),
+                        qos: MqttQos::Qos0,
                     })),
                     client: Model::ClientMqtt(CreateClientMqtt {
                         name: client(),
@@ -2543,7 +2568,8 @@ mod tests {
         let EmitterEntity::Mqtt(MqttEmitter::Topic(destination)) = &mut mqtt.connector else {
             panic!("expected Mqtt destination");
         };
-        destination.mode = nervix_models::MqttTopicPublishingMode::Qos2 {
+        destination.qos = MqttQos::Qos2;
+        destination.mode = MqttTopicPublishingMode::Ack {
             window: AckWindow::Sequential,
             ack_timeout: "7s".to_string(),
             retry_policy: retry_policy("10ms", "1s"),
@@ -2561,32 +2587,36 @@ mod tests {
             })
         );
 
-        let mut jetstream = EmitterKind::Nats.case();
-        let EmitterEntity::Nats(NatsEmitter::Subject(destination)) = &mut jetstream.connector
-        else {
+        let mut stream = EmitterKind::Nats.case();
+        let EmitterEntity::Nats(NatsEmitter::Subject(destination)) = &stream.connector else {
             panic!("expected Nats destination");
         };
-        destination.mode = nervix_models::NatsSubjectPublishingMode::JetStream {
-            window: AckWindow::Parallel {
-                max: nonzero!(23u64),
+        stream.connector = EmitterEntity::Nats(NatsEmitter::Stream(NatsStreamEmitter {
+            client: destination.client.clone(),
+            stream: nervix_models::NatsStreamName::try_from("orders").expect("valid stream"),
+            subject: destination.subject.clone(),
+            mode: nervix_models::NatsStreamPublishingMode::Ack {
+                window: AckWindow::Parallel {
+                    max: nonzero!(23u64),
+                },
+                ack_timeout: "11s".to_string(),
+                retry_policy: retry_policy("10ms", "1s"),
             },
-            ack_timeout: "11s".to_string(),
-            retry_policy: retry_policy("10ms", "1s"),
-        };
-        let EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(jetstream)) =
-            jetstream.decide().expect("valid JetStream mode").connector
+        }));
+        let EmitterConnectorPlan::Nats(NatsEmitterPlan::Stream(stream)) =
+            stream.decide().expect("valid NATS stream mode").connector
         else {
             panic!("a NATS emitter must be planned as NATS");
         };
         assert_eq!(
-            jetstream.mode,
-            NatsPublishingMode::JetStream(AckConfirmation {
+            stream.confirmation,
+            AckConfirmation {
                 max_in_flight: nonzero!(23usize),
                 timeout: Duration::from_secs(11),
-            })
+            }
         );
 
-        let EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(core)) = EmitterKind::Nats
+        let EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(_core)) = EmitterKind::Nats
             .case()
             .decide()
             .expect("a NATS emitter accepts NO_ACK")
@@ -2594,7 +2624,6 @@ mod tests {
         else {
             panic!("a NATS emitter must be planned as NATS");
         };
-        assert_eq!(core.mode, NatsPublishingMode::Core);
 
         let EmitterConnectorPlan::Sqs(SqsEmitterPlan::Queue(sqs)) = EmitterKind::Sqs
             .case()
@@ -2644,6 +2673,93 @@ mod tests {
             .expect_err("an unusable retry policy must not be planned");
 
         assert_eq!(error.current_context(), &expected);
+    }
+
+    /// The MQTT emitter of `EmitterKind::Mqtt` publishing at `qos` in `mode`.
+    fn mqtt_case(qos: MqttQos, mode: MqttTopicPublishingMode) -> EmitterCase {
+        let mut case = EmitterKind::Mqtt.case();
+        let EmitterEntity::Mqtt(MqttEmitter::Topic(destination)) = &mut case.connector else {
+            panic!("expected Mqtt destination");
+        };
+        destination.qos = qos;
+        destination.mode = mode;
+        case
+    }
+
+    fn mqtt_acknowledged() -> MqttTopicPublishingMode {
+        MqttTopicPublishingMode::Ack {
+            window: AckWindow::Parallel {
+                max: nonzero!(4u64),
+            },
+            ack_timeout: "2s".to_string(),
+            retry_policy: retry_policy("10ms", "1s"),
+        }
+    }
+
+    fn mqtt_unacknowledged() -> MqttTopicPublishingMode {
+        MqttTopicPublishingMode::NoAck {
+            retry_policy: retry_policy("10ms", "1s"),
+        }
+    }
+
+    #[test]
+    fn each_quality_of_service_plans_with_the_confirmation_its_mode_declares() {
+        let confirmation = AckConfirmation {
+            max_in_flight: nonzero!(4usize),
+            timeout: Duration::from_secs(2),
+        };
+        for (case, expected) in [
+            (
+                mqtt_case(MqttQos::Qos0, mqtt_unacknowledged()),
+                MqttPublishingMode::Qos0,
+            ),
+            (
+                mqtt_case(MqttQos::Qos1, mqtt_acknowledged()),
+                MqttPublishingMode::Qos1(confirmation),
+            ),
+            (
+                mqtt_case(MqttQos::Qos2, mqtt_acknowledged()),
+                MqttPublishingMode::Qos2(confirmation),
+            ),
+        ] {
+            let EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(plan)) =
+                case.decide().expect("a legal pairing is planned").connector
+            else {
+                panic!("an MQTT emitter must be planned as MQTT");
+            };
+            assert_eq!(plan.mode, expected);
+        }
+    }
+
+    #[rstest]
+    #[case::unanswered(
+        MqttQos::Qos0,
+        mqtt_acknowledged(),
+        "MQTT TOPIC emitters name MODE ACK only with QOS 1 or 2; the statement writes QOS 0"
+    )]
+    #[case::at_least_once(
+        MqttQos::Qos1,
+        mqtt_unacknowledged(),
+        "MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1"
+    )]
+    #[case::exactly_once(
+        MqttQos::Qos2,
+        mqtt_unacknowledged(),
+        "MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 2"
+    )]
+    fn a_pairing_the_declaration_refuses_has_no_plan(
+        #[case] qos: MqttQos,
+        #[case] mode: MqttTopicPublishingMode,
+        #[case] refusal: &str,
+    ) {
+        let error = mqtt_case(qos, mode)
+            .decide()
+            .expect_err("a pairing the declaration refuses must not be planned");
+
+        let EmitterStartPlanError::UnmetPublishing(unmet) = error.current_context() else {
+            panic!("expected the declared requirement, got {error:?}");
+        };
+        assert_eq!(unmet.to_string(), refusal);
     }
 
     #[rstest]

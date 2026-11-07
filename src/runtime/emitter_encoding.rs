@@ -162,10 +162,18 @@ impl EmitterConnector for EncodedRecordEmitter {
         for mut payload in packed {
             nervix_primitives::task::consume_budget().await;
             let bytes = std::mem::take(&mut payload.content.payload);
+            let encoded_bytes: u64 = bytes.len().arch_into();
             match self.connector.prepare_payload(bytes, payload.occurred_at) {
                 Ok(bytes) => {
+                    let source_messages = payload.members.len().arch_into();
+                    let prepared_bytes = bytes.len().arch_into();
                     payload.content.payload = bytes;
                     prepared.retain(payload, batches)?;
+                    context.interactions.record_payload(
+                        source_messages,
+                        encoded_bytes,
+                        prepared_bytes,
+                    );
                 }
                 Err(error) => {
                     for position in payload.members {
@@ -191,6 +199,11 @@ impl EmitterConnector for EncodedRecordEmitter {
         let record_count = records.len();
         let outcome = self.connector.publish(records).await;
         let outcome = context.received_outcome(record_count, outcome);
+        let outcome = context
+            .runtime
+            .inner
+            .fault_injection
+            .received_emitter_record_outcome(&context.emitter, record_count, outcome);
         prepared
             .answers(batches, payloads, outcome)?
             .apply(context, batches, DeliveredAcknowledgements::Host)
@@ -467,6 +480,7 @@ async fn pack_batch_records(
     )
     .await?;
     if packing.subdivisions > 0 {
+        context.interactions.record_splits(packing.subdivisions);
         tracing::debug!(
             emitter = %context.emitter,
             subdivisions = packing.subdivisions,
@@ -599,17 +613,11 @@ fn batch_envelope(
     batch: &EmitterPublishBatch,
     row_index: usize,
 ) -> EmitterRuntimeResult<Result<BatchEnvelope, UnpublishableRow>> {
-    let key = batch
-        .relay_batch()
-        .keys
-        .get(row_index)
-        .ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "emitter batch row {row_index} has no branch key entry"
-            ))
-        })?
-        .as_ref()
-        .map(|key| key.as_str().to_string());
+    batch.relay_batch().keys.get(row_index).ok_or_else(|| {
+        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+            "emitter batch row {row_index} has no branch key entry"
+        ))
+    })?;
     let headers = batch.headers_for_row(row_index).cloned().ok_or_else(|| {
         Report::new(EmitterRuntimeError::EncodeBatch)
             .attach_printable(format!("emitter batch row {row_index} has no header entry"))
@@ -623,7 +631,7 @@ fn batch_envelope(
         Err(failure) => return Ok(Err(UnpublishableRow::Envelope(failure))),
     };
     Ok(Ok(BatchEnvelope {
-        key,
+        destination: batch.destination(row_index),
         headers,
         message_group,
         clauses,
@@ -796,7 +804,7 @@ mod tests {
                 batch,
             };
             let mut batches = vec![one_row(1)];
-            let mut prepared = PreparedPayloads::default();
+            let mut prepared = PreparedPayloads::observed(&context.interactions);
             let Err(stalled) = connector
                 .publish_batches(
                     &context,
@@ -813,6 +821,19 @@ mod tests {
                 panic!("the first scripted publish must leave its payload unresolved");
             };
             assert!(emitter_publish_error_is_retryable(&stalled));
+            let encoded = if batch.is_some() { 13 } else { 11 };
+            let expected = format!(
+                "payloads: 1 source_messages=1 encoded_bytes={encoded} size_bound_bytes={encoded} \
+                 prepared_bytes={} ",
+                encoded + 11
+            );
+            assert!(
+                context
+                    .interactions
+                    .describe_lines()
+                    .iter()
+                    .any(|line| line.starts_with(&expected))
+            );
             batches.push(one_row(2));
             connector
                 .publish_batches(
@@ -835,6 +856,30 @@ mod tests {
             assert!(writes[1][0].starts_with(b"prepared-1:"));
             assert!(writes[1][1].starts_with(b"prepared-2:"));
             assert!(prepared.is_empty());
+            let expected = format!(
+                "payloads: 2 source_messages=2 encoded_bytes={} size_bound_bytes={} \
+                 prepared_bytes={} ",
+                encoded * 2,
+                encoded * 2,
+                (encoded + 11) * 2
+            );
+            assert!(
+                context
+                    .interactions
+                    .describe_lines()
+                    .iter()
+                    .any(|line| line.starts_with(&expected))
+            );
+            assert!(
+                context
+                    .interactions
+                    .describe_lines()
+                    .iter()
+                    .any(|line| line.starts_with(
+                        "work: buffered=0 prepared=0 in_flight=0 staged=0 prepared_payloads=0 \
+                         prepared_bytes=0 "
+                    ))
+            );
         }
     }
 
@@ -862,11 +907,14 @@ mod tests {
                 .expect("the test rows match the emitter input schema"),
             Timestamp::from_unix_nanos(100),
         )
-        .with_envelopes(RowEnvelopes::Evaluated(vec![
-            Ok(Arc::new(message_id("first"))),
-            Ok(Arc::new(message_id("second"))),
-            Err(EnvelopeError::OmittedInputRow),
-        ]))
+        .with_envelopes(RowEnvelopes::Evaluated(
+            vec![
+                Ok(Arc::new(message_id("first")).into()),
+                Ok(Arc::new(message_id("second")).into()),
+                Err(EnvelopeError::OmittedInputRow),
+            ]
+            .into(),
+        ))
     }
 
     #[nervix_primitives::test]
@@ -1094,9 +1142,18 @@ mod tests {
     }
 
     fn context_with(executor: Executor) -> EmitterConnectorContext {
+        let context = emitter_context();
+        let runtime = Runtime::with_executor(executor);
+        let interactions = runtime.inner.metrics.register_emitter_interactions(
+            &context.domain,
+            &context.emitter,
+            None,
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
+        );
         EmitterConnectorContext {
-            runtime: Runtime::with_executor(executor),
-            ..emitter_context()
+            runtime,
+            interactions,
+            ..context
         }
     }
 

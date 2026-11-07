@@ -11,7 +11,7 @@ Feature: Emitter publishing modes
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -118,17 +118,17 @@ Feature: Emitter publishing modes
 
       CREATE MQTT TOPIC EMITTER mqtt_qos_zero FROM outgoing
         TO mqtt_main TOPIC 'mqtt_qos_zero'
-          MODE QOS 0 RETRY POLICY BACKOFF 80ms MAX 8s
+          QOS 0 MODE NO ACK RETRY POLICY BACKOFF 80ms MAX 8s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_qos_one FROM outgoing
         TO mqtt_main TOPIC 'mqtt_qos_one'
-          MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
+          QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_qos_two FROM outgoing
         TO mqtt_main TOPIC 'mqtt_qos_two'
-          MODE QOS 2 ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
+          QOS 2 MODE ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -137,9 +137,9 @@ Feature: Emitter publishing modes
           MODE NO ACK RETRY POLICY BACKOFF 110ms MAX 11s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE NATS SUBJECT EMITTER nats_jetstream FROM outgoing
-        TO nats_main SUBJECT 'nats_jetstream'
-          MODE JETSTREAM ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
+      CREATE NATS STREAM EMITTER nats_jetstream FROM outgoing
+        TO nats_main STREAM 'nats_jetstream' SUBJECT 'nats_jetstream'
+          MODE ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -165,7 +165,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SQS QUEUE EMITTER sqs_fifo FROM tenant_outgoing
-        TO sqs_main QUEUE 'sqs_fifo.fifo' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'sqs_fifo.fifo' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 165ms MAX 16s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -267,7 +267,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE QOS 0 RETRY POLICY BACKOFF 80ms MAX 8s
+      TO mqtt_main TOPIC 'mqtt_qos_zero' QOS 0
+      """
+    And the last command output contains
+      """
+      MODE NO ACK RETRY POLICY BACKOFF 80ms MAX 8s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -275,7 +279,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
+      TO mqtt_main TOPIC 'mqtt_qos_one' QOS 1
+      """
+    And the last command output contains
+      """
+      MODE ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -283,7 +291,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE QOS 2 ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
+      TO mqtt_main TOPIC 'mqtt_qos_two' QOS 2
+      """
+    And the last command output contains
+      """
+      MODE ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -299,7 +311,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE JETSTREAM ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
+      MODE ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -342,11 +354,12 @@ Feature: Emitter publishing modes
     Then the last command output contains
       """
       to: SQS QUEUE sqs_main QUEUE 'sqs_fifo.fifo'
-      options: FIFO GROUP FROM BRANCH SEND SINGLE
+      options: FIFO GROUP branch.tenant SEND SINGLE
       mode: ACK RETRY POLICY BACKOFF 165ms MAX 16s
       quiesce: none
       envelope: none
       batch: none
+      batch container: JSON record
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       """
@@ -382,6 +395,7 @@ Feature: Emitter publishing modes
       quiesce: none
       envelope: none
       batch: MAX MESSAGES 2 MAX SIZE 1MiB
+      batch container: JSONEachRow insert
       flush: FLUSH IMMEDIATE
       errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       """
@@ -455,7 +469,7 @@ Feature: Emitter publishing modes
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -476,7 +490,7 @@ Feature: Emitter publishing modes
         'timeout_ms' = '5000'
       };
       CREATE SQS QUEUE EMITTER alter_fifo_group FROM tenant_outgoing
-        TO sqs_main QUEUE 'alter_orders.fifo' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'alter_orders.fifo' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -519,9 +533,9 @@ Feature: Emitter publishing modes
       """
     When these Plexus commands fail with "QOS"
       """
-      CREATE KAFKA TOPIC EMITTER foreign_mode FROM outgoing
-        TO kafka_main TOPIC 'foreign_mode'
-          MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE KAFKA TOPIC EMITTER foreign_option FROM outgoing
+        TO kafka_main TOPIC 'foreign_option'
+          QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -544,28 +558,28 @@ Feature: Emitter publishing modes
     When these Plexus commands fail with "ending in .fifo"
       """
       CREATE SQS QUEUE EMITTER group_on_standard_queue FROM tenant_outgoing
-        TO sqs_main QUEUE 'orders' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'orders' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus commands fail with "requires branched input"
+    When these Plexus commands fail with "branch.tenant"
       """
       CREATE SQS QUEUE EMITTER unbranched_fifo_group FROM outgoing
-        TO sqs_main QUEUE 'orders.fifo' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'orders.fifo' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus commands fail with "requires branched input"
+    When these Plexus commands fail with "branch.tenant"
       """
       CREATE SQS QUEUE EMITTER mixed_fifo_group FROM tenant_outgoing, outgoing
-        TO sqs_main QUEUE 'mixed_orders.fifo' FIFO GROUP FROM BRANCH
+        TO sqs_main QUEUE 'mixed_orders.fifo' FIFO GROUP branch.tenant
           SEND SINGLE MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus commands fail with "requires branched input"
+    When these Plexus commands fail with "branch.tenant"
       """
       ALTER SQS QUEUE EMITTER alter_fifo_group ADD FROM outgoing;
       """
@@ -580,7 +594,7 @@ Feature: Emitter publishing modes
     When these Plexus commands fail with "MODE"
       """
       CREATE KAFKA TOPIC EMITTER fifo_on_kafka FROM outgoing
-        TO kafka_main TOPIC 'fifo_on_kafka' FIFO GROUP FROM BRANCH
+        TO kafka_main TOPIC 'fifo_on_kafka' FIFO GROUP branch.tenant
           MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -611,7 +625,7 @@ Feature: Emitter publishing modes
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
@@ -659,11 +673,11 @@ Feature: Emitter publishing modes
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge http-{{test_id}}-set-mode-timeout.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
