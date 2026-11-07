@@ -2243,7 +2243,7 @@ retains no pending positions. The status reports the settlement failure while re
 that class's contract. A stop that reaches the ingestor loop once a batch's
 acknowledgement roots have resolved does not abandon the batch: the loop takes the resolved outcome
 before the stop and confirms the batch first. A batch whose roots had not all resolved when its
-ingestor stopped is left unconfirmed; the ingestor instance logs `source instance stopped before its
+ingestor stopped is left unconfirmed; the ingestor instance logs `ingestor instance stopped before its
 transport confirmed positions it read; the transport presents them again` with the count, and its
 transport's own redelivery contract applies.
 

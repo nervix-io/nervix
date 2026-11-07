@@ -4266,8 +4266,9 @@ emitter; it changes only whether the result participates upstream.
 
 Emit a stable idempotency key at ingestion, for example with `uuid_v7()`, and carry it through the
 graph. Downstream consumers and queries can use that key to suppress retries within that admitted
-record's fan-out. A source-provided identifier is stronger because it also survives a fresh source
-redelivery. Generate the key once; regenerating it on a downstream route defeats the purpose.
+record's fan-out. An identifier provided by the external system is stronger because it also survives
+a fresh ingestor redelivery. Generate the key once; regenerating it on a downstream route defeats the
+purpose.
 
 For Postgres, MySQL, and MongoDB, use `ON CONFLICT` against a stable key. This preserves
 at-least-once delivery attempts while making the resulting table or collection state
