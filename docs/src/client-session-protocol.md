@@ -2367,9 +2367,12 @@ runtime, so every decision above is the C ABI's, and it differs from the C ABI o
 host differs from a C one:
 
 - **Lifetimes.** An object owns its share of the session and releases it when Python collects it;
-  no application retain or release call exists. A producer, a consumer and a delivery keep their
-  session running until they are collected, and a `memoryview` of an event's frame or a batch's or
-  delivery's stream keeps that object alive.
+  no application retain or release call exists. A session, a producer, a consumer and a delivery
+  also release their share when their `with` block ends, after which a call on them raises
+  `ClosedError`; a call another thread is in keeps its own share until it returns. A producer, a
+  consumer and a delivery keep their session running until they are released, and a `memoryview`
+  of an event's frame or a batch's or delivery's stream keeps that object alive, a released
+  delivery's stream included.
 - **Threads.** Every call that waits runs on the calling Python thread with the GIL released for
   as long as it waits, and the library never calls Python from a thread of its own. A `Cancel`
   triggered from another thread ends a wait with `CancelledError`, and one created with a deadline

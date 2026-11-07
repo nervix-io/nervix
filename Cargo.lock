@@ -6891,6 +6891,7 @@ name = "nervix-client-python"
 version = "0.1.0-dev"
 dependencies = [
  "arrow-array",
+ "bytes",
  "meticulous",
  "nervix-client-core",
  "nervix-client-host",
@@ -6900,6 +6901,7 @@ dependencies = [
  "pyo3-build-config",
  "tonic 0.13.1",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -8030,6 +8032,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
  "tokio-util",
+ "toml 0.8.2",
  "tonic 0.13.1",
  "tracing",
  "ubyte",

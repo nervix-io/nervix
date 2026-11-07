@@ -10,9 +10,13 @@
 //! - **Must not know.** How a batch is admitted, sent again or restored, or how output is
 //!   assigned or redelivered; the Rust client decides all of it.
 //!
-//! An endpoint keeps its session running until Python collects it, and a delivery its consumer's.
-//! Collecting a delivery settles nothing: an unsettled attempt is delivered again once the
-//! emitter's ACK timeout passes or its attachment ends.
+//! An endpoint keeps its session running until it is released, and a delivery its consumer's.
+//! Producers, consumers and deliveries are context managers: leaving the `with` block releases the
+//! object as collecting it does, a producer or consumer is then closed without waiting, and every
+//! later call raises `ClosedError`. A call another thread is in keeps its own reference until it
+//! returns, so a release never waits for it. Releasing or collecting a delivery settles nothing: an
+//! unsettled attempt is delivered again once the emitter's ACK timeout passes or its attachment
+//! ends.
 
 use std::{borrow::Cow, ffi::c_int, time::Duration};
 
@@ -36,7 +40,7 @@ use crate::{
     },
     errors,
     schema::{Fields, Schema},
-    session::{Cancel, Session, token},
+    session::{Cancel, token},
     values,
 };
 
@@ -251,9 +255,10 @@ impl SubmissionOutcome {
 }
 
 /// A producer opened on a client ingestor.
-#[pyclass(frozen, module = "nervix_client")]
+#[pyclass(module = "nervix_client", weakref)]
 pub(crate) struct Producer {
-    producer: host::Producer,
+    /// The producer, until its `with` block releases it.
+    producer: Option<Arc<host::Producer>>,
 }
 
 impl Producer {
@@ -263,7 +268,7 @@ impl Producer {
     )]
     pub(crate) fn open(
         py: Python<'_>,
-        session: &Session,
+        session: &host::Session,
         domain: &str,
         ingestor: &str,
         fields: &Fields,
@@ -277,27 +282,50 @@ impl Producer {
         };
         let limits = ClientProducerLimits { batches, bytes };
         let fields = fields.host();
-        let session = session.host();
         let opened =
             py.detach(|| host::Producer::open(session, domain, ingestor, fields, limits, cancel));
         match opened {
-            Ok(producer) => Ok(Self { producer }),
+            Ok(producer) => Ok(Self {
+                producer: Some(Arc::new(producer)),
+            }),
             Err(failure) => Err(errors::raise(py, failure)),
         }
     }
 
-    /// The batch `data` stands for: one a host built, the canonical Arrow IPC stream of one, or
-    /// Arrow data held to the producer's schema.
-    fn submitted<'a>(&self, py: Python<'_>, data: &'a Bound<'_, PyAny>) -> PyResult<Submitted<'a>> {
-        if let Ok(batch) = data.cast::<Batch>() {
-            return Ok(Submitted::Built(batch.get().host().clone()));
+    /// The producer a call that does not wait reads.
+    fn held(&self, py: Python<'_>) -> PyResult<&host::Producer> {
+        match &self.producer {
+            Some(producer) => Ok(producer),
+            None => Err(errors::released(py, "producer")),
         }
-        if arrow::exports(data)? {
-            let batch = arrow::import(py, data, self.producer.schema().clone())?;
-            return Ok(Submitted::Built(Arc::new(batch)));
-        }
-        Ok(Submitted::Ipc(values::host_bytes(data)?))
     }
+
+    /// The producer a call that waits runs on, as a reference of its own: a `with` block another
+    /// thread leaves while the call waits releases the object without waiting for the call.
+    fn shared(slf: &Bound<'_, Self>) -> PyResult<Arc<host::Producer>> {
+        let producer = slf.try_borrow()?;
+        match &producer.producer {
+            Some(held) => Ok(held.clone()),
+            None => Err(errors::released(slf.py(), "producer")),
+        }
+    }
+}
+
+/// The batch `data` stands for on `producer`: one a host built, the canonical Arrow IPC stream of
+/// one, or Arrow data held to the producer's schema.
+fn submitted<'a>(
+    py: Python<'_>,
+    producer: &host::Producer,
+    data: &'a Bound<'_, PyAny>,
+) -> PyResult<Submitted<'a>> {
+    if let Ok(batch) = data.cast::<Batch>() {
+        return Ok(Submitted::Built(batch.get().host().clone()));
+    }
+    if arrow::exports(data)? {
+        let batch = arrow::import(py, data, producer.schema().clone())?;
+        return Ok(Submitted::Built(Arc::new(batch)));
+    }
+    Ok(Submitted::Ipc(values::host_bytes(data)?))
 }
 
 /// A batch a host submits, as the producer sends it: a batch, or the canonical Arrow IPC stream
@@ -323,60 +351,84 @@ impl Submitted<'_> {
 
 #[pymethods]
 impl Producer {
+    /// The producer itself, which leaving the block releases.
+    fn __enter__(slf: Bound<'_, Self>) -> PyResult<Bound<'_, Self>> {
+        Self::shared(&slf)?;
+        Ok(slf)
+    }
+
+    /// Releases the producer, closing it without waiting when it is still open, as collecting it
+    /// does. An exception raised in the block is never suppressed.
+    fn __exit__(
+        &mut self,
+        _exception_type: &Bound<'_, PyAny>,
+        _exception: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) -> bool {
+        self.producer = None;
+        false
+    }
+
     /// The schema of the producer's batches.
     #[getter]
-    fn schema(&self) -> Schema {
-        Schema::new(self.producer.schema().clone())
+    fn schema(&self, py: Python<'_>) -> PyResult<Schema> {
+        Ok(Schema::new(self.held(py)?.schema().clone()))
     }
 
     #[getter]
-    fn state(&self) -> EndpointState {
-        EndpointState::from(self.producer.state())
+    fn state(&self, py: Python<'_>) -> PyResult<EndpointState> {
+        Ok(EndpointState::from(self.held(py)?.state()))
     }
 
     #[getter]
-    fn admission(&self) -> Admission {
-        Admission::from(self.producer.admission())
+    fn admission(&self, py: Python<'_>) -> PyResult<Admission> {
+        Ok(Admission::from(self.held(py)?.admission()))
     }
 
     #[getter]
-    fn generation(&self) -> u64 {
-        self.producer.description().generation
+    fn generation(&self, py: Python<'_>) -> PyResult<u64> {
+        Ok(self.held(py)?.description().generation)
     }
 
     /// The digest of the contract the producer was opened under.
     #[getter]
-    fn contract<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.producer.description().contract.as_digest())
+    fn contract<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let producer = self.held(py)?;
+        Ok(PyBytes::new(
+            py,
+            producer.description().contract.as_digest(),
+        ))
     }
 
     #[getter]
-    fn grant(&self) -> Grant {
-        let grant = self.producer.description().grant;
-        Grant {
+    fn grant(&self, py: Python<'_>) -> PyResult<Grant> {
+        let grant = self.held(py)?.description().grant;
+        Ok(Grant {
             batches: grant.batches.get(),
             bytes: grant.bytes.get(),
             max_batch_rows: grant.max_batch_rows.get(),
             max_batch_bytes: grant.max_batch_bytes.get(),
-        }
+        })
     }
 
     #[getter]
-    fn policy(&self) -> Policy {
-        let policy = self.producer.description().policy;
-        Policy::of(
+    fn policy(&self, py: Python<'_>) -> PyResult<Policy> {
+        let policy = self.held(py)?.description().policy;
+        Ok(Policy::of(
             policy.window,
             policy.ack_timeout,
             policy.retry_backoff,
             policy.retry_max_backoff,
-        )
+        ))
     }
 
     /// Why the producer has to be opened again, or `None` while it does not.
     #[getter]
-    fn reopen(&self) -> Option<Reopen> {
-        let reopen = self.producer.reopen()?;
-        Some(Reopen::of(reopen))
+    fn reopen(&self, py: Python<'_>) -> PyResult<Option<Reopen>> {
+        let Some(reopen) = self.held(py)?.reopen() else {
+            return Ok(None);
+        };
+        Ok(Some(Reopen::of(reopen)))
     }
 
     /// Submits a batch, waiting for credit, and returns its submission id. `data` is a batch a
@@ -384,27 +436,29 @@ impl Producer {
     /// exports itself through the Arrow PyCapsule interface, held to the producer's schema.
     #[pyo3(signature = (data, *, cancel = None))]
     fn submit(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         data: &Bound<'_, PyAny>,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<u64> {
-        let submitted = self.submitted(py, data)?;
+        let py = slf.py();
+        let producer = Self::shared(slf)?;
+        let submitted = submitted(py, &producer, data)?;
         let cancel = token(cancel.as_ref());
-        let sent = py.detach(|| submitted.send(&self.producer, cancel));
+        let sent = py.detach(|| submitted.send(&producer, cancel));
         sent.map_err(|failure| errors::raise(py, failure))
     }
 
     /// Waits for the outcome of `submission` and takes it.
     #[pyo3(signature = (submission, *, cancel = None))]
     fn rejoin(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         submission: u64,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<SubmissionOutcome> {
+        let py = slf.py();
+        let producer = Self::shared(slf)?;
         let cancel = token(cancel.as_ref());
-        let rejoined = py.detach(|| self.producer.rejoin(submission, cancel));
+        let rejoined = py.detach(|| producer.rejoin(submission, cancel));
         match rejoined {
             Ok(outcome) => Ok(SubmissionOutcome { outcome }),
             Err(failure) => Err(errors::raise(py, failure)),
@@ -413,7 +467,7 @@ impl Producer {
 
     /// Lets `submission` go, returning its outcome when it is already known.
     fn release(&self, py: Python<'_>, submission: u64) -> PyResult<Option<SubmissionOutcome>> {
-        match self.producer.release(submission) {
+        match self.held(py)?.release(submission) {
             Ok(Some(outcome)) => Ok(Some(SubmissionOutcome { outcome })),
             Ok(None) => Ok(None),
             Err(failure) => Err(errors::raise(py, failure)),
@@ -421,27 +475,27 @@ impl Producer {
     }
 
     /// The submissions the producer holds, in submission order.
-    fn pending(&self) -> Vec<PendingSubmission> {
-        self.producer
-            .pending_submissions()
-            .iter()
-            .map(PendingSubmission::of)
-            .collect()
+    fn pending(&self, py: Python<'_>) -> PyResult<Vec<PendingSubmission>> {
+        let held = self.held(py)?.pending_submissions();
+        Ok(held.iter().map(PendingSubmission::of).collect())
     }
 
     /// Closes the producer, waiting until the server has.
     #[pyo3(signature = (*, cancel = None))]
-    fn close(&self, py: Python<'_>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<()> {
+    fn close(slf: &Bound<'_, Self>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<()> {
+        let py = slf.py();
+        let producer = Self::shared(slf)?;
         let cancel = token(cancel.as_ref());
-        let closed = py.detach(|| self.producer.close(cancel));
+        let closed = py.detach(|| producer.close(cancel));
         closed.map_err(|failure| errors::raise(py, failure))
     }
 }
 
 /// A consumer opened on a client emitter.
-#[pyclass(frozen, module = "nervix_client")]
+#[pyclass(module = "nervix_client", weakref)]
 pub(crate) struct Consumer {
-    consumer: host::Consumer,
+    /// The consumer, until its `with` block releases it.
+    consumer: Option<Arc<host::Consumer>>,
 }
 
 impl Consumer {
@@ -451,7 +505,7 @@ impl Consumer {
     )]
     pub(crate) fn open(
         py: Python<'_>,
-        session: &Session,
+        session: &host::Session,
         domain: &str,
         emitter: &str,
         fields: &Fields,
@@ -465,85 +519,135 @@ impl Consumer {
         };
         let limits = ClientConsumerLimits { batches, bytes };
         let fields = fields.host();
-        let session = session.host();
         let opened =
             py.detach(|| host::Consumer::open(session, domain, emitter, fields, limits, cancel));
         match opened {
-            Ok(consumer) => Ok(Self { consumer }),
+            Ok(consumer) => Ok(Self {
+                consumer: Some(Arc::new(consumer)),
+            }),
             Err(failure) => Err(errors::raise(py, failure)),
+        }
+    }
+
+    /// The consumer a call that does not wait reads.
+    fn held(&self, py: Python<'_>) -> PyResult<&host::Consumer> {
+        match &self.consumer {
+            Some(consumer) => Ok(consumer),
+            None => Err(errors::released(py, "consumer")),
+        }
+    }
+
+    /// The consumer a call that waits runs on, as a reference of its own: a `with` block another
+    /// thread leaves while the call waits releases the object without waiting for the call.
+    fn shared(slf: &Bound<'_, Self>) -> PyResult<Arc<host::Consumer>> {
+        let consumer = slf.try_borrow()?;
+        match &consumer.consumer {
+            Some(held) => Ok(held.clone()),
+            None => Err(errors::released(slf.py(), "consumer")),
         }
     }
 }
 
 #[pymethods]
 impl Consumer {
+    /// The consumer itself, which leaving the block releases.
+    fn __enter__(slf: Bound<'_, Self>) -> PyResult<Bound<'_, Self>> {
+        Self::shared(&slf)?;
+        Ok(slf)
+    }
+
+    /// Releases the consumer, closing it without waiting when it is still open, as collecting it
+    /// does. Its deliveries keep its session running until they are released too. An exception
+    /// raised in the block is never suppressed.
+    fn __exit__(
+        &mut self,
+        _exception_type: &Bound<'_, PyAny>,
+        _exception: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) -> bool {
+        self.consumer = None;
+        false
+    }
+
     /// The schema of the consumer's batches.
     #[getter]
-    fn schema(&self) -> Schema {
-        Schema::new(self.consumer.schema().clone())
+    fn schema(&self, py: Python<'_>) -> PyResult<Schema> {
+        Ok(Schema::new(self.held(py)?.schema().clone()))
     }
 
     #[getter]
-    fn state(&self) -> EndpointState {
-        EndpointState::from(self.consumer.state())
+    fn state(&self, py: Python<'_>) -> PyResult<EndpointState> {
+        Ok(EndpointState::from(self.held(py)?.state()))
     }
 
     #[getter]
-    fn generation(&self) -> u64 {
-        self.consumer.description().generation
+    fn generation(&self, py: Python<'_>) -> PyResult<u64> {
+        Ok(self.held(py)?.description().generation)
     }
 
     /// The digest of the contract the consumer was opened under.
     #[getter]
-    fn contract<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.consumer.description().contract.as_digest())
+    fn contract<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let consumer = self.held(py)?;
+        Ok(PyBytes::new(
+            py,
+            consumer.description().contract.as_digest(),
+        ))
     }
 
     #[getter]
-    fn grant(&self) -> Grant {
-        let description = self.consumer.description();
-        Grant {
+    fn grant(&self, py: Python<'_>) -> PyResult<Grant> {
+        let description = self.held(py)?.description();
+        Ok(Grant {
             batches: description.granted.batches.get(),
             bytes: description.granted.bytes.get(),
             max_batch_rows: description.max_batch_rows,
             max_batch_bytes: description.max_batch_bytes,
-        }
+        })
     }
 
     #[getter]
-    fn policy(&self) -> Policy {
-        let description = self.consumer.description();
-        Policy::of(
+    fn policy(&self, py: Python<'_>) -> PyResult<Policy> {
+        let description = self.held(py)?.description();
+        Ok(Policy::of(
             description.window,
             description.ack_timeout,
             description.retry_backoff,
             description.retry_max_backoff,
-        )
+        ))
     }
 
     /// Why the consumer has to be opened again, or `None` while it does not.
     #[getter]
-    fn reopen(&self) -> Option<Reopen> {
-        let reopen = self.consumer.reopen()?;
-        Some(Reopen::of(reopen))
+    fn reopen(&self, py: Python<'_>) -> PyResult<Option<Reopen>> {
+        let Some(reopen) = self.held(py)?.reopen() else {
+            return Ok(None);
+        };
+        Ok(Some(Reopen::of(reopen)))
     }
 
     /// Waits for the next delivery.
     #[pyo3(signature = (*, cancel = None))]
-    fn next(&self, py: Python<'_>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<Delivery> {
+    fn next(slf: &Bound<'_, Self>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<Delivery> {
+        let py = slf.py();
+        let consumer = Self::shared(slf)?;
         let cancel = token(cancel.as_ref());
-        let read = py.detach(|| self.consumer.next(cancel));
+        let read = py.detach(|| consumer.next(cancel));
         match read {
-            Ok(delivery) => Ok(Delivery { delivery }),
+            Ok(delivery) => Ok(Delivery {
+                delivery: Some(Arc::new(delivery)),
+            }),
             Err(failure) => Err(errors::raise(py, failure)),
         }
     }
 
     /// Closes the consumer, waiting until the server has.
     #[pyo3(signature = (*, cancel = None))]
-    fn close(&self, py: Python<'_>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<()> {
+    fn close(slf: &Bound<'_, Self>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<()> {
+        let py = slf.py();
+        let consumer = Self::shared(slf)?;
         let cancel = token(cancel.as_ref());
-        let closed = py.detach(|| self.consumer.close(cancel));
+        let closed = py.detach(|| consumer.close(cancel));
         closed.map_err(|failure| errors::raise(py, failure))
     }
 }
@@ -551,50 +655,94 @@ impl Consumer {
 /// One delivery of a client emitter's output.
 ///
 /// It exports its canonical Arrow IPC stream through the buffer protocol: `memoryview(delivery)`,
-/// or `delivery.ipc`, borrows it without a copy and keeps the delivery alive.
-#[pyclass(frozen, module = "nervix_client")]
+/// or `delivery.ipc`, borrows it without a copy and keeps the delivery alive, and keeps the stream
+/// valid after the delivery's `with` block released it.
+#[pyclass(module = "nervix_client", weakref)]
 pub(crate) struct Delivery {
-    delivery: host::Delivery,
+    /// The delivery, until its `with` block releases it. Every exported view holds a reference of
+    /// its own until the view is released.
+    delivery: Option<Arc<host::Delivery>>,
+}
+
+impl Delivery {
+    /// The delivery a call that does not wait reads.
+    fn held(&self, py: Python<'_>) -> PyResult<&host::Delivery> {
+        match &self.delivery {
+            Some(delivery) => Ok(delivery),
+            None => Err(errors::released(py, "delivery")),
+        }
+    }
+
+    /// The delivery a call that waits, or a view, holds as a reference of its own: a `with` block
+    /// another thread leaves while the call waits releases the object without waiting for it.
+    fn shared(slf: &Bound<'_, Self>) -> PyResult<Arc<host::Delivery>> {
+        let delivery = slf.try_borrow()?;
+        match &delivery.delivery {
+            Some(held) => Ok(held.clone()),
+            None => Err(errors::released(slf.py(), "delivery")),
+        }
+    }
 }
 
 #[pymethods]
 impl Delivery {
+    /// The delivery itself, which leaving the block releases.
+    fn __enter__(slf: Bound<'_, Self>) -> PyResult<Bound<'_, Self>> {
+        Self::shared(&slf)?;
+        Ok(slf)
+    }
+
+    /// Releases the delivery, settling nothing, as collecting it does. A view of its stream keeps
+    /// the stream valid until the view is released. An exception raised in the block is never
+    /// suppressed.
+    fn __exit__(
+        &mut self,
+        _exception_type: &Bound<'_, PyAny>,
+        _exception: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) -> bool {
+        self.delivery = None;
+        false
+    }
+
     /// The identity every attempt of the same output keeps.
     #[getter]
-    fn identity<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.delivery.identity())
+    fn identity<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(PyBytes::new(py, self.held(py)?.identity()))
     }
 
     /// The reference this attempt is settled by.
     #[getter]
-    fn reference<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.delivery.reference())
+    fn reference<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(PyBytes::new(py, self.held(py)?.reference()))
     }
 
     #[getter]
-    fn source_relay(&self) -> &str {
-        self.delivery.source_relay()
+    fn source_relay(&self, py: Python<'_>) -> PyResult<&str> {
+        Ok(self.held(py)?.source_relay())
     }
 
     /// The fingerprint of the concrete branch the output came from, or `None` when it is
     /// unbranched.
     #[getter]
-    fn branch_fingerprint<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
-        let fingerprint = self.delivery.branch_fingerprint()?;
-        Some(PyBytes::new(py, fingerprint))
+    fn branch_fingerprint<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let Some(fingerprint) = self.held(py)?.branch_fingerprint() else {
+            return Ok(None);
+        };
+        Ok(Some(PyBytes::new(py, fingerprint)))
     }
 
     /// The rows the delivery carries.
     #[getter]
-    fn members(&self) -> u32 {
-        self.delivery.members()
+    fn members(&self, py: Python<'_>) -> PyResult<u32> {
+        Ok(self.held(py)?.members())
     }
 
     /// The domain's logical time when the output was produced, in nanoseconds since the Unix
     /// epoch.
     #[getter]
-    fn execution_now(&self) -> i64 {
-        self.delivery.execution_now()
+    fn execution_now(&self, py: Python<'_>) -> PyResult<i64> {
+        Ok(self.held(py)?.execution_now())
     }
 
     /// The delivery's canonical Arrow IPC stream, borrowed without a copy. The view keeps the
@@ -609,17 +757,39 @@ impl Delivery {
         view: *mut ffi::Py_buffer,
         flags: c_int,
     ) -> PyResult<()> {
-        let ipc = slf.get().delivery.ipc();
-        // SAFETY: Python passes a view to fill; the stream is owned by the delivery `slf` holds,
-        // which the view keeps alive until it is released.
-        unsafe { values::export_bytes(slf.as_any(), ipc, view, flags) }
+        let delivery = Self::shared(&slf)?;
+        // SAFETY: Python passes a view to fill; the stream is owned by the delivery whose
+        // reference the view holds below until it is released.
+        unsafe { values::export_bytes(slf.as_any(), delivery.ipc(), view, flags)? };
+        // The view keeps its own reference to the delivery, so a `with` block that releases the
+        // object leaves the stream the view borrows valid until `__releasebuffer__`.
+        //
+        // SAFETY: `view` is the view Python asked this object to fill, `export_bytes` filled it,
+        // and its `internal` slot belongs to the exporter.
+        unsafe {
+            (*view).internal = Arc::into_raw(delivery).cast_mut().cast();
+        }
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(slf: Bound<'_, Self>, view: *mut ffi::Py_buffer) {
+        drop(slf);
+        // SAFETY: Python passes the view this object filled, once, when the view is released, and
+        // `__getbuffer__` left in its `internal` slot the reference it took.
+        let internal = unsafe { (*view).internal };
+        if internal.is_null() {
+            return;
+        }
+        // SAFETY: `internal` is the pointer `Arc::into_raw` returned for this view's reference,
+        // which nothing else reclaims.
+        drop(unsafe { Arc::from_raw(internal.cast::<host::Delivery>().cast_const()) });
     }
 
     /// The batch the delivery carries, decoded the first time it is read and held to the
     /// consumer's schema and the delivery's row count.
     #[getter]
     fn batch(&self, py: Python<'_>) -> PyResult<Batch> {
-        match self.delivery.batch() {
+        match self.held(py)?.batch() {
             Ok(batch) => Ok(Batch::new(batch.clone())),
             Err(failure) => Err(errors::raise(py, failure)),
         }
@@ -627,9 +797,11 @@ impl Delivery {
 
     /// Acknowledges the delivery.
     #[pyo3(signature = (*, cancel = None))]
-    fn ack(&self, py: Python<'_>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<Settlement> {
+    fn ack(slf: &Bound<'_, Self>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<Settlement> {
+        let py = slf.py();
+        let delivery = Self::shared(slf)?;
         let cancel = token(cancel.as_ref());
-        let settled = py.detach(|| self.delivery.ack(cancel));
+        let settled = py.detach(|| delivery.ack(cancel));
         match settled {
             Ok(settlement) => Ok(Settlement::from(settlement)),
             Err(failure) => Err(errors::raise(py, failure)),
@@ -638,9 +810,11 @@ impl Delivery {
 
     /// Asks for the delivery again, after the emitter's retry backoff.
     #[pyo3(signature = (*, cancel = None))]
-    fn retry(&self, py: Python<'_>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<Settlement> {
+    fn retry(slf: &Bound<'_, Self>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<Settlement> {
+        let py = slf.py();
+        let delivery = Self::shared(slf)?;
         let cancel = token(cancel.as_ref());
-        let settled = py.detach(|| self.delivery.retry(cancel));
+        let settled = py.detach(|| delivery.retry(cancel));
         match settled {
             Ok(settlement) => Ok(Settlement::from(settlement)),
             Err(failure) => Err(errors::raise(py, failure)),
@@ -650,13 +824,14 @@ impl Delivery {
     /// Rejects the delivery for `reason`, which the emitter's message error policy handles.
     #[pyo3(signature = (reason, *, cancel = None))]
     fn reject(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         reason: &str,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<Settlement> {
+        let py = slf.py();
+        let delivery = Self::shared(slf)?;
         let cancel = token(cancel.as_ref());
-        let settled = py.detach(|| self.delivery.reject(reason, cancel));
+        let settled = py.detach(|| delivery.reject(reason, cancel));
         match settled {
             Ok(settlement) => Ok(Settlement::from(settlement)),
             Err(failure) => Err(errors::raise(py, failure)),

@@ -21,10 +21,14 @@ COVERAGE_RECIPES = ("coverage-scenarios", "coverage-scenarios-append")
 
 class ScenarioArgumentTests(unittest.TestCase):
     def test_upload_recipes_select_their_public_cases_and_keep_failure(self) -> None:
+        # Each case names the input its recipe passes and the features that input selects from.
+        # The conformance recipe passes one absolute pattern for the probes' and the host suites'
+        # features, because the scenario binary walks a relative pattern from the working directory.
         cases = (
             (
                 "test-resource-upload-identity-scenarios",
                 "tests/features/cluster/resource_describe.feature",
+                ("tests/features/cluster/resource_describe.feature",),
                 None,
                 "Upload retry reports one assigned version|An upload whose installing call loses its reply reports its one assigned version",
                 4,
@@ -35,7 +39,11 @@ class ScenarioArgumentTests(unittest.TestCase):
             ),
             (
                 "test-client-upload-conflict-conformance",
-                "tests/features/runtime/client_conformance.feature",
+                str(ROOT / "tests/features/runtime/client_{conformance,suites}.feature"),
+                (
+                    "tests/features/runtime/client_conformance.feature",
+                    "tests/features/runtime/client_suites.feature",
+                ),
                 "@client_upload_failure",
                 None,
                 12,
@@ -59,7 +67,7 @@ class ScenarioArgumentTests(unittest.TestCase):
             environment["SCENARIO_ARGUMENT_CAPTURE"] = str(capture)
             from scripts.deloxide_lane import parse_scenarios
 
-            for recipe, feature, tag, pattern, count, names in cases:
+            for recipe, selected_input, features, tag, pattern, count, names in cases:
                 with self.subTest(recipe=recipe):
                     completed = subprocess.run(
                         ["just", "--no-deps", recipe],
@@ -70,7 +78,7 @@ class ScenarioArgumentTests(unittest.TestCase):
                     observed = json.loads(capture.read_text())
                     expected = [
                         "test", "--package", "nervix-scenarios", "--test", "scenarios", "--",
-                        "--input", feature,
+                        "--input", selected_input,
                     ]
                     if tag is not None:
                         expected.extend(("--tags", tag))
@@ -80,15 +88,21 @@ class ScenarioArgumentTests(unittest.TestCase):
                     self.assertEqual(observed, expected)
                     self.assertFalse("--tags" in observed and "--name" in observed,
                                      "Cucumber's name and tag selectors are mutually exclusive")
-                    text = (ROOT / feature).read_text()
-                    if tag is None:
-                        # A name selector ranges over the whole feature, including untagged cases.
-                        text = "@recipe_inventory\n" + text
-                        tag = "@recipe_inventory"
-                    tagged = parse_scenarios(feature, text, frozenset({tag}))
-                    selected = tagged
-                    if pattern is not None:
-                        selected = [scenario for scenario in tagged if re.search(pattern, scenario.name)]
+                    selected = []
+                    for feature in features:
+                        text = (ROOT / feature).read_text()
+                        selector = tag
+                        if selector is None:
+                            # A name selector ranges over the whole feature, including untagged
+                            # cases.
+                            text = "@recipe_inventory\n" + text
+                            selector = "@recipe_inventory"
+                        tagged = parse_scenarios(feature, text, frozenset({selector}))
+                        if pattern is not None:
+                            tagged = [
+                                scenario for scenario in tagged if re.search(pattern, scenario.name)
+                            ]
+                        selected.extend(tagged)
                     self.assertEqual(sum(scenario.runs for scenario in selected), count)
                     self.assertEqual({scenario.name for scenario in selected}, names)
 
