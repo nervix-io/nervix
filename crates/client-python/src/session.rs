@@ -11,6 +11,10 @@
 //!
 //! Every call that waits releases the GIL for as long as it waits, so another Python thread runs
 //! meanwhile and may cancel it through its token.
+//!
+//! A session is a context manager. Leaving its `with` block releases the host's share of it, as
+//! collecting it does; a call another thread is in keeps its own share until it returns, so the
+//! release never waits for it, and every later call raises `ClosedError`.
 
 use std::time::Duration;
 
@@ -87,11 +91,12 @@ impl Cancel {
 
 /// An open session.
 ///
-/// It is released when Python collects it; its producers, consumers and deliveries keep it
-/// running until they are collected too.
-#[pyclass(frozen, module = "nervix_client")]
+/// It is released when its `with` block ends or Python collects it; its producers, consumers and
+/// deliveries keep it running until they are released too.
+#[pyclass(module = "nervix_client", weakref)]
 pub(crate) struct Session {
-    session: host::Session,
+    /// The host's share of the session, until its `with` block releases it.
+    session: Option<host::Session>,
 }
 
 /// One command, with the durable execution identity it keeps across every attempt.
@@ -176,8 +181,14 @@ impl Connection<'_> {
 }
 
 impl Session {
-    pub(crate) fn host(&self) -> &host::Session {
-        &self.session
+    /// The session a call runs on, as a share of its own: a `with` block another thread leaves
+    /// while the call waits releases the object without waiting for the call.
+    fn held(slf: &Bound<'_, Self>) -> PyResult<host::Session> {
+        let session = slf.try_borrow()?;
+        match &session.session {
+            Some(held) => Ok(held.clone()),
+            None => Err(errors::released(slf.py(), "session")),
+        }
     }
 }
 
@@ -237,21 +248,43 @@ impl Session {
         let cancel = token(cancel.as_ref());
         let connected = py.detach(|| host::Session::connect(server, domain, options, cancel));
         match connected {
-            Ok(session) => Ok(Self { session }),
+            Ok(session) => Ok(Self {
+                session: Some(session),
+            }),
             Err(failure) => Err(errors::raise(py, failure)),
         }
+    }
+
+    /// The session itself, which leaving the block releases.
+    fn __enter__(slf: Bound<'_, Self>) -> PyResult<Bound<'_, Self>> {
+        Self::held(&slf)?;
+        Ok(slf)
+    }
+
+    /// Releases the host's share of the session. The session ends once every producer, consumer
+    /// and delivery opened on it is released too. An exception raised in the block is never
+    /// suppressed.
+    fn __exit__(
+        &mut self,
+        _exception_type: &Bound<'_, PyAny>,
+        _exception: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) -> bool {
+        self.session = None;
+        false
     }
 
     /// Captures `query` and a fresh execution identity before anything is sent.
     #[pyo3(signature = (query, *, cancel = None))]
     fn prepare(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         query: &str,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<Execution> {
+        let py = slf.py();
+        let session = Self::held(slf)?;
         let cancel = token(cancel.as_ref());
-        let prepared = py.detach(|| self.session.prepare(query, cancel));
+        let prepared = py.detach(|| session.prepare(query, cancel));
         match prepared {
             Ok(execution) => Ok(Execution { execution }),
             Err(failure) => Err(errors::raise(py, failure)),
@@ -263,14 +296,15 @@ impl Session {
     /// the command twice.
     #[pyo3(signature = (execution, *, cancel = None))]
     fn execute(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         execution: PyRef<'_, Execution>,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<Outcome> {
+        let py = slf.py();
+        let session = Self::held(slf)?;
         let cancel = token(cancel.as_ref());
         let execution = &execution.execution;
-        let executed = py.detach(|| self.session.execute(execution, cancel));
+        let executed = py.detach(|| session.execute(execution, cancel));
         match executed {
             Ok(outcome) => Ok(Outcome { outcome }),
             Err(failure) => Err(errors::raise(py, failure)),
@@ -280,9 +314,11 @@ impl Session {
     /// Waits for the next event of any subscription the session holds, continuing across a lost
     /// session.
     #[pyo3(signature = (*, cancel = None))]
-    fn next_event(&self, py: Python<'_>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<Event> {
+    fn next_event(slf: &Bound<'_, Self>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<Event> {
+        let py = slf.py();
+        let session = Self::held(slf)?;
         let cancel = token(cancel.as_ref());
-        let waited = py.detach(|| self.session.next_event(cancel));
+        let waited = py.detach(|| session.next_event(cancel));
         match waited {
             Ok(event) => Ok(Event::new(event)),
             Err(failure) => Err(errors::raise(py, failure)),
@@ -292,12 +328,13 @@ impl Session {
     /// Waits for the next event about the domain clocks the session follows.
     #[pyo3(signature = (*, cancel = None))]
     fn next_clock_event(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<ClockEvent> {
+        let py = slf.py();
+        let session = Self::held(slf)?;
         let cancel = token(cancel.as_ref());
-        let waited = py.detach(|| self.session.next_clock_event(cancel));
+        let waited = py.detach(|| session.next_clock_event(cancel));
         match waited {
             Ok(event) => Ok(ClockEvent::new(event)),
             Err(failure) => Err(errors::raise(py, failure)),
@@ -307,13 +344,16 @@ impl Session {
     /// The clock of `domain` as the session last received it, or `None` when it follows no clock
     /// of that domain. It reads what the session already holds, so it never waits.
     fn domain_clock(&self, py: Python<'_>, domain: &str) -> PyResult<Option<DomainClock>> {
+        let Some(session) = &self.session else {
+            return Err(errors::released(py, "session"));
+        };
         let domain = match DomainName::try_from(domain) {
             Ok(domain) => domain,
             Err(error) => {
                 return Err(errors::invalid_argument(py, "domain", &error.to_string()));
             }
         };
-        let clock = self.session.domain_clock(&domain);
+        let clock = session.domain_clock(&domain);
         match clock {
             Some(clock) => Ok(Some(DomainClock::new(clock))),
             None => Ok(None),
@@ -324,19 +364,18 @@ impl Session {
     /// current context, continuing an earlier page when `continuation` is given.
     #[pyo3(signature = (input, cursor, page_size, continuation = None, *, cancel = None))]
     fn suggest(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         input: &str,
         cursor: usize,
         page_size: u16,
         continuation: Option<&str>,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<Suggestions> {
+        let py = slf.py();
+        let session = Self::held(slf)?;
         let cancel = token(cancel.as_ref());
-        let suggested = py.detach(|| {
-            self.session
-                .suggest_page(input, cursor, page_size, continuation, cancel)
-        });
+        let suggested =
+            py.detach(|| session.suggest_page(input, cursor, page_size, continuation, cancel));
         match suggested {
             Ok(outcome) => Ok(Suggestions {
                 page: host::Suggestions::new(outcome),
@@ -348,13 +387,8 @@ impl Session {
     /// Opens a producer on client ingestor `ingestor` of `domain`, expecting exactly `fields`
     /// and asking for credit of `batches` batches and `bytes` bytes.
     #[pyo3(signature = (domain, ingestor, fields, *, batches, bytes, cancel = None))]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a Python method takes the endpoint, its fields and its credit as keywords"
-    )]
     fn open_ingestor(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         domain: &str,
         ingestor: &str,
         fields: PyRef<'_, Fields>,
@@ -362,9 +396,10 @@ impl Session {
         bytes: u64,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<Producer> {
+        let session = Self::held(slf)?;
         Producer::open(
-            py,
-            self,
+            slf.py(),
+            &session,
             domain,
             ingestor,
             &fields,
@@ -377,13 +412,8 @@ impl Session {
     /// Opens a consumer on client emitter `emitter` of `domain`, expecting exactly `fields` and
     /// asking for credit of `batches` batches and `bytes` bytes.
     #[pyo3(signature = (domain, emitter, fields, *, batches, bytes, cancel = None))]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a Python method takes the endpoint, its fields and its credit as keywords"
-    )]
     fn subscribe_emitter(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         domain: &str,
         emitter: &str,
         fields: PyRef<'_, Fields>,
@@ -391,9 +421,10 @@ impl Session {
         bytes: u64,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<Consumer> {
+        let session = Self::held(slf)?;
         Consumer::open(
-            py,
-            self,
+            slf.py(),
+            &session,
             domain,
             emitter,
             &fields,
@@ -447,7 +478,8 @@ impl Backup {
         self.total_bytes
     }
 
-    /// The archive's SHA-256 digest.
+    /// The archive's 32-byte BLAKE3 digest, which the client checked the downloaded archive
+    /// against.
     #[getter]
     fn digest(&self) -> &[u8] {
         &self.digest

@@ -198,6 +198,24 @@ Beyond the shared report, each kind of probe checks what only it can reach:
 | Ruby | References nothing reaches are released by the collector's free function while retained references are read. |
 | Go, TypeScript | A request that omits the required subscription type is rejected rather than defaulted, and cancelling an identity that is not in flight reports `NotInFlight`. The TypeScript client reads every 64-bit value as a `BigInt`. |
 
+## Host suites
+
+A probe holds every runtime to one report. A host suite holds one binding to the behaviour its
+guide documents, in that host's own test framework, asserting values and exceptions rather than
+report lines. A suite has two tiers: its boundary tier needs no cluster, and its cluster tier runs
+in `tests/features/runtime/client_suites.feature` against a cluster whose session listener serves
+TLS. `tests/client-suites-inventory.toml` registers every test by host, tier and stable identity,
+and a run of either tier fails on a registered test that did not run or did not pass, on a skipped
+test and on a test the inventory does not register. Each runner prints one
+`NERVIX-SUITE <outcome> <identity>` line per test, which the scenario harness and
+`scripts/client_suites.py check-run` read. `just validate-client-suites` holds each suite to its
+binding's whole public surface, measured by mypy over the typed suite, and its guide to the shared
+section list with every code block an include of an anchored test.
+
+| Host | Build | Boundary tier | Cluster tier | Covers | Runs in | Guide |
+| --- | --- | --- | --- | --- | --- | --- |
+| CPython 3.12+ | `just build-client-python`: the wheel with pytest, pyarrow, polars and mypy in `target/client-conformance/python`, and alone in `target/client-conformance/python-bare` | `just test-client-python-api`, which `just test` runs | `just test-client-python-cluster`, or the `@client_suite_python` rows of `just test-client-conformance` | Connection over TLS with seeds and timeouts, execution and recovery by the same execution, completion, subscriptions and their events, domain clocks across generations and a lost session, producers and every outcome class, consumers and every settlement, backup and restore, `with` blocks and collection-driven lifetimes, threads, typed exceptions, Arrow exchange with pyarrow and polars, and the wheel's packaging | The `client-conformance` job, for a pull request labeled `client-conformance` | [Python Client Library](../docs/src/client-library-python.md) |
+
 ## Batch buffers
 
 What the binding copies on the way from a host's buffers to the session and back:
@@ -280,7 +298,8 @@ for the outstanding-outcome deadline or a producer close that cannot drain that 
   test `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain` does, and the
   settlement reports `NX_ERROR_UNCERTAIN`.
 - The probes connect over plaintext. TLS selection is the Rust client's and is not reimplemented by
-  the binding.
+  the binding; the Python suite's cluster tier connects over TLS with the fixture certificate
+  authority.
 - C and C++ consume the binding. No independent C or C++ reader is maintained.
 - Only the Rust client restores subscriptions and domain clock attachments after reconnection. The
   Go and TypeScript clients show that the protocol is implementable, not that they recover; a

@@ -33,7 +33,7 @@ use crate::{arrow, enums::CellState, errors, schema::Schema, values};
 /// It exports its canonical Arrow IPC stream through the buffer protocol: `memoryview(batch)`, or
 /// `batch.ipc`, borrows it without a copy and keeps the batch alive. It also exports itself
 /// through the Arrow PyCapsule interface, so an Arrow library reads it without a copy.
-#[pyclass(frozen, module = "nervix_client")]
+#[pyclass(frozen, module = "nervix_client", weakref)]
 pub(crate) struct Batch {
     batch: Arc<host::Batch>,
 }

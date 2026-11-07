@@ -15,8 +15,10 @@
 //!   decides; or the C ABI other hosts load.
 //!
 //! Every object owns its share of the runtime and releases it when Python collects it, and a
-//! borrowed view keeps its owner alive. A blocking call runs on the calling Python thread with the
-//! GIL released, and the library never calls Python from a thread of its own.
+//! borrowed view keeps its owner alive. A session, a producer, a consumer and a delivery are also
+//! context managers, which release that share when their `with` block ends. A blocking call runs on
+//! the calling Python thread with the GIL released, and the library never calls Python from a
+//! thread of its own.
 
 #![cfg_attr(
     nervix_lint,

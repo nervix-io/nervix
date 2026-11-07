@@ -1,0 +1,352 @@
+# Every test of a host's language-level suite, by host, tier and stable identity: a pytest node
+# id relative to the suite, a JUnit class and method, a minitest class and method, or a C or C++
+# test function.
+#
+# A tier's run fails when a test registered here did not run or did not pass, when a test was
+# skipped, and when a test ran that this inventory does not register. `just validate-client-suites`
+# holds this inventory to the suite sources: every identity exists, and every test is registered.
+
+[[test]]
+host = "python"
+identity = "boundary/test_cancellation.py::test_a_token_refuses_a_deadline_that_is_not_a_finite_number_of_seconds"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_cancellation.py::test_a_connect_ends_at_its_deadline_against_a_listener_that_never_answers"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_cancellation.py::test_a_connect_is_cancelled_from_another_thread"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_cancellation.py::test_one_token_ends_every_wait_it_was_passed_to"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_connecting.py::test_an_option_the_session_cannot_use_is_refused_before_anything_is_sent"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_connecting.py::test_a_session_that_requires_tls_refuses_a_plaintext_address_before_connecting"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_connecting.py::test_a_server_nothing_listens_on_fails_to_connect"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_descriptions.py::test_a_level_reads_its_type_and_length_and_compares_as_a_value"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_descriptions.py::test_fields_describe_a_nested_type_one_level_at_a_time"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_descriptions.py::test_a_level_that_cannot_be_placed_is_refused_as_an_invalid_argument"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_descriptions.py::test_every_withheld_value_is_the_one_redacted_marker"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_enumerations.py::test_every_enumeration_member_keeps_its_stable_value"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_enumerations.py::test_a_member_compares_and_hashes_as_itself_and_reads_as_its_name"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_enumerations.py::test_every_failure_kind_has_its_exception_class_under_client_error"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_packaging.py::test_the_package_loads_without_pyarrow_or_polars"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "boundary/test_packaging.py::test_the_package_carries_its_stub_and_typed_marker"
+tier = "boundary"
+
+[[test]]
+host = "python"
+identity = "cluster/test_application.py::test_an_application_publishes_a_batch_and_handles_its_output"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_arrow.py::test_a_batch_exports_itself_through_the_arrow_pycapsule_interface"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_arrow.py::test_arrow_data_from_pyarrow_and_polars_is_submitted_and_imported"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_arrow.py::test_rows_of_an_event_are_read_by_pyarrow_with_withheld_values_as_nulls"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_backup.py::test_a_backup_writes_its_archive_and_a_restore_reads_it"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_backup.py::test_a_backup_whose_wait_ended_is_recovered_by_executing_it_again"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_clocks.py::test_a_running_clock_is_read_before_its_first_tick_and_projected"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_clocks.py::test_a_followed_clock_keeps_its_generations_apart_across_stop_and_start"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_clocks.py::test_a_lost_session_interrupts_the_clock_until_its_attachment_is_restored"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_clocks.py::test_a_detached_clock_is_no_longer_followed"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_clocks.py::test_a_clock_wait_ends_at_its_deadline_and_by_cancellation"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_completion.py::test_a_statement_is_completed_by_the_cluster"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_completion.py::test_the_cluster_suggests_the_names_it_holds"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_completion.py::test_a_page_continues_with_its_token_until_the_last_page"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_connect.py::test_a_session_opens_over_tls_with_the_certificate_authority"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_connect.py::test_every_tls_requirement_reaches_the_tls_listener"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_connect.py::test_a_session_that_does_not_trust_the_listener_fails_to_connect"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_connect.py::test_a_wrong_password_is_refused"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_connect.py::test_a_seed_reaches_the_cluster_when_the_server_does_not"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_connect.py::test_a_cluster_no_server_or_seed_reaches_fails_to_connect"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_consumers.py::test_a_delivery_carries_its_identity_metadata_and_columns"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_consumers.py::test_a_consumer_describes_what_its_open_established"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_consumers.py::test_a_retried_delivery_comes_back_with_its_identity_and_a_new_reference"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_consumers.py::test_a_rejected_delivery_is_handled_by_the_emitters_error_policy"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_consumers.py::test_a_consumer_wait_ends_at_its_deadline_and_by_cancellation"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_consumers.py::test_a_lost_session_interrupts_the_consumer_which_is_then_restored"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_execute.py::test_a_prepared_command_completes_under_its_execution_reference"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_execute.py::test_a_failed_command_reports_its_diagnostics_with_their_spans"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_execute.py::test_a_command_cancelled_before_it_was_sent_runs_once_when_executed_again"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_execute.py::test_a_command_whose_deadline_passed_is_recovered_by_executing_it_again"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_execute.py::test_one_session_serves_several_threads_at_once"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_execute.py::test_a_wait_in_one_thread_leaves_another_thread_progressing"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_execute.py::test_an_object_read_from_a_session_outlives_its_release"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_lifetimes.py::test_a_with_block_releases_its_object_and_later_calls_raise_closed"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_lifetimes.py::test_a_producer_keeps_its_session_running_after_the_session_is_collected"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_lifetimes.py::test_a_view_of_a_delivery_outlives_the_delivery_and_its_release"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_producers.py::test_a_producer_opens_with_the_description_its_open_established"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_producers.py::test_an_open_the_cluster_cannot_serve_is_refused_with_its_refusal"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_producers.py::test_a_built_batch_completes_once_its_output_is_acknowledged"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_producers.py::test_a_batch_written_as_an_ipc_stream_completes"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_producers.py::test_every_submission_outcome_class_reads_its_cause"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_producers.py::test_a_submission_let_go_is_no_longer_held"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_producers.py::test_a_batch_beyond_the_credit_waits_for_an_outcome"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_producers.py::test_a_lost_session_leaves_a_submitted_batch_unknown_and_restores_the_producer"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_producers.py::test_a_changed_contract_requires_the_producer_to_open_again"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_subscriptions.py::test_a_subscription_reads_typed_rows_with_null_and_withheld_values"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_subscriptions.py::test_rows_read_in_bulk_as_values_offsets_and_the_frame"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_subscriptions.py::test_a_frame_view_keeps_its_event_alive"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_subscriptions.py::test_a_lost_session_interrupts_a_subscription_which_is_then_restored"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_subscriptions.py::test_a_relay_dropped_while_the_session_was_lost_ends_the_subscription"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_subscriptions.py::test_a_relay_redefined_while_the_session_was_lost_ends_the_subscription"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_subscriptions.py::test_a_subscription_the_server_ended_reports_its_end"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_subscriptions.py::test_a_deleted_subscription_frees_its_name_for_a_new_generation"
+tier = "cluster"
