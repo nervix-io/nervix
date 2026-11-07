@@ -1148,7 +1148,6 @@ mod tests {
         assert!(suggestions.contains(&"ARRAY".to_string()));
         assert!(suggestions.contains(&"VEC".to_string()));
         assert!(!suggestions.contains(&"NUMBER".to_string()));
-        assert!(!suggestions.contains(&"OBJECT".to_string()));
     }
 
     #[test]
@@ -1347,7 +1346,7 @@ mod tests {
     fn rejects_empty_and_cross_format_schema_alters() {
         assert!(parse_alter_schema("ALTER SCHEMA events;").is_err());
         assert!(
-            parse_alter_schema("ALTER SCHEMA events ADD FIELD payload OBJECT;").is_err(),
+            parse_alter_schema("ALTER SCHEMA events ADD FIELD payload NUMBER;").is_err(),
             "wire-only type must not leak into internal ALTER"
         );
         assert!(

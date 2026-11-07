@@ -410,8 +410,9 @@ attempt, and the next call tries again. The events are the Rust client's, coales
   `NX_CLOCK_EVENT_ENDED`, `NX_CLOCK_EVENT_INTERRUPTED` or `NX_CLOCK_EVENT_RESTORATION_FAILED` event
   apart, and `nx_clock_event_domain` borrows the name of the domain it concerns. A restoration
   failure reports that the session refused to attach an interrupted clock again, which it tries
-  again after the growing wait the Rust client reports. The event carries only its kind and domain:
-  the binding exposes neither the server's message nor the wait.
+  again after the growing wait the Rust client reports. The event also carries the refusal message
+  as borrowed UTF-8 bytes and that wait in nanoseconds, read with
+  `nx_clock_event_restoration_message` and `nx_clock_event_restoration_retry_after`.
 - `nx_clock_event_generation` reads the `START` generation of a state or tick event,
   `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
   skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
@@ -423,6 +424,15 @@ attempt, and the next call tries again. The events are the Rust client's, coales
   reading an event allocates nothing on the host's side.
 - `nx_clock_event_retain` and `nx_clock_event_release` count references the way `nx_event_retain`
   and `nx_event_release` do, and a reference may be released on any thread.
+
+For C and C++ hosts, `nx_connect_options_new` starts with the Rust client's defaults. The host
+may set basic credentials, a TLS requirement, a copied CA certificate, seed URLs and the four
+deadlines before it calls `nx_session_connect`. The session copies the options, so the host may
+release them after the call. The Rust client validates endpoint origins and the 1 ms to 24 hour
+deadline bounds when connecting, and an HTTPS initial endpoint requires HTTPS for every later
+server. A subscription's `NX_EVENT_RESTORATION_FAILED` carries its refusal message and retry wait
+through `nx_event_restoration_message` and `nx_event_restoration_retry_after`, with the same
+borrowed-byte and nanosecond rules as the clock event. A wrong event kind returns `NX_ERROR_TYPE`.
 
 `nx_session_domain_clock` reads `domain_clock` for a domain the session follows as an
 `nx_domain_clock` reference, and writes NULL for a domain whose clock the session does not follow.
@@ -454,8 +464,9 @@ An attach the server refuses completes as failed with the server's reason, and
 `nx_session_domain_clock` still reads the earlier attachment's clock when the refusal is that the
 session already follows it. An attach whose session was lost is sent again on the next session the
 client opens. An attach cancelled or expired after its request was sent can still attach the
-session: executing the same prepared execution again is answered after the earlier attempt, and
-`nx_session_domain_clock` then tells whether the session follows the clock.
+session: executing the same prepared execution again sends another session-local request, which
+may be refused as already attached even when the first succeeded. `nx_session_domain_clock` tells
+whether the session follows the clock.
 
 ### Through The JVM Library
 

@@ -61,8 +61,12 @@ module Probe
     cancel_new: function('nx_cancel_new', [], VOIDP),
     cancel_with_deadline: function('nx_cancel_with_deadline', [U64, VOIDP], VOIDP),
     cancel_trigger: function('nx_cancel_trigger', [VOIDP], Fiddle::TYPE_VOID),
+    connect_options_new: function('nx_connect_options_new', [], VOIDP),
+    connect_options_free: function('nx_connect_options_free', [VOIDP], Fiddle::TYPE_VOID),
+    connect_options_basic_auth: function('nx_connect_options_basic_auth',
+                                         [VOIDP, VOIDP, SIZE, VOIDP, SIZE], VOIDP),
     session_connect: function('nx_session_connect',
-                              [VOIDP, SIZE, VOIDP, SIZE, VOIDP, SIZE, VOIDP, SIZE, VOIDP, VOIDP], VOIDP),
+                              [VOIDP, SIZE, VOIDP, SIZE, VOIDP, VOIDP, VOIDP], VOIDP),
     session_free: function('nx_session_free', [VOIDP], Fiddle::TYPE_VOID),
     session_prepare: function('nx_session_prepare', [VOIDP, VOIDP, SIZE, VOIDP, VOIDP], VOIDP),
     execution_free: function('nx_execution_free', [VOIDP], Fiddle::TYPE_VOID),
@@ -477,8 +481,15 @@ module Probe
 
     def initialize(server, domain, username, password)
       out = Probe.slot
-      Probe.check(F[:session_connect].call(server, server.bytesize, domain, domain.bytesize, username,
-                                           username.bytesize, password, password.bytesize, nil, out))
+      options = F[:connect_options_new].call
+      begin
+        Probe.check(F[:connect_options_basic_auth].call(options, username, username.bytesize,
+                                                        password, password.bytesize))
+        Probe.check(F[:session_connect].call(server, server.bytesize, domain, domain.bytesize,
+                                             options, nil, out))
+      ensure
+        F[:connect_options_free].call(options)
+      end
       @handle = Probe.read_pointer(out)
     end
 

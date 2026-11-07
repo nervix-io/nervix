@@ -441,6 +441,11 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - [SIMD Kernels](docs/src/simd-kernels.md): kernel ownership, dispatch or build targets, arithmetic
   or bitmap contracts, byte scanning, typed run execution, scalar/level qualification, SIMD
   performance claims.
+- [Wire Schema Binding](docs/src/wire-schema-binding.md): a wire format's vocabulary and its Models,
+  how a wire type binds internal types, codec `ENCODE` rules, a schemaful codec's decoder, encoder
+  or the value model it decodes through, value fidelity, and the stored shapes and canonical text a
+  wire type reaches. [Schemas And Codecs](docs/src/schemas-and-codecs.md) owns the statements and
+  the public binding table.
 - [Resource Versions And Bindings](docs/src/resource-versions.md): the resource catalog, upload
   installation or replication, version resolution, how a binding is validated, classified, pinned or
   loaded, `REBIND RESOURCE`, the HTTPS listener's certificate installation.
@@ -518,6 +523,27 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - Multiple ordinary inputs to one processor reference the same declared schema Model, and they share
   the exact named branch or are all unbranched. Correlators apply the same rule independently to the
   left and right sides.
+
+### Wire schemas
+
+- A wire type names a representation its format actually has, never a Nervix type, and a format
+  declares no wire type that no internal type can bind.
+- A wire type binds exactly the internal types whose every value its representation carries and
+  returns unchanged. The exact-type rule above admits no other binding: AVRO `int` binds only `I32`
+  and `long` only `I64`.
+- A text interchange of a non-text internal type, a `DATETIME` as RFC 3339 text or `BYTES` as
+  base64 text, is an explicit `ENCODE` rule on the codec. The rule declares the representation its
+  pair of wire type and internal type already fixes and selects no alternative; a value the format
+  carries natively takes no rule.
+- An AVRO array declares its item type, `array<item>`, nested exactly as deep as the internal
+  `ARRAY` and `VEC` levels, while JSON and CBOR arrays stay bare. Every element binds by the scalar
+  rule of its innermost type, under the list field's `ENCODE` rule.
+- A format's decoder and encoder work from the validated pair of wire type and internal type, and
+  never read or write a Nervix type name in a payload.
+- A change to a wire type enum or to the encoding rules changes the registry's Model archive header
+  and the consensus keyspace namespace in the same change. A new wire type or rule lands with its
+  binding-matrix entry, a public scenario and its generator, as the checklist in [Wire Schema
+  Binding](docs/src/wire-schema-binding.md#adding-a-wire-type-or-an-encoding-rule) sets out.
 
 ### Construction
 
