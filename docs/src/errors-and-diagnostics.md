@@ -480,6 +480,13 @@ subsections after the boundary table follow this order.
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 | Architecture audit tooling | An incomplete matrix, failed Git operation with its arguments and exit status, malformed UTF-8 text, provenance or candidate projection, unsupported GitHub origin, exhausted GitHub read attempts, or report I/O/JSON failure (`nervix_ratchet::error::Error`) | End the command with a nonzero status. UTF-8, I/O and JSON causes remain beneath typed contexts. Captured Git/GitHub stderr is a typed external diagnostic cause beneath the audit operation, so the CLI's full-chain rendering retains every failed-read diagnostic at the `lint audit` boundary. Suggestions in a completed report are review evidence, not errors or enforcement decisions. |
 
+CLI stream readers classify their typed outcomes before choosing an exit status. A dedicated
+subscription observer completes when its subscription ends; a terminal `SessionClosed` fails it.
+A subscription-reader task failure keeps its `JoinError` beneath the CLI's
+`SubscriptionEventReader` context. A clock read that fails while restoration remains possible
+prints the complete report in its continuation notice and reads again. A terminal clock failure
+keeps the client's report beneath `ClockEventRead`.
+
 Forced ownership installation retires changing relay channels before its dispatch fence waits.
 The remote delivery owner maps a cancelled or unconfirmed admission through its existing typed
 delivery failure and fails the record ACKs it retained, rather than reporting successful processing

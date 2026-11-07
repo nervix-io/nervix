@@ -52,7 +52,7 @@ use nervix_primitives::{
         atomic::{AtomicU64, Ordering},
         blocking::Mutex,
     },
-    task::block_in_place,
+    task::{JoinHandle, block_in_place},
 };
 use nervix_recovery::Discarded as _;
 use reedline::{
@@ -61,7 +61,6 @@ use reedline::{
     Suggestion,
 };
 use thiserror::Error;
-use tokio::signal;
 
 mod backup;
 mod interrupt;
@@ -154,7 +153,7 @@ enum Command {
         /// Target shell
         shell: Shell,
     },
-    /// Subscribe to one relay and print events until interrupted
+    /// Subscribe to one relay and print events until it ends or the observer is interrupted
     Subscribe {
         /// Session-local subscription name
         name: String,
@@ -173,7 +172,7 @@ enum Command {
         #[arg(long = "where")]
         where_clause: Option<String>,
     },
-    /// Follow the selected domain's clock until interrupted
+    /// Follow the selected domain's clock until its attachment ends or the observer is interrupted
     DomainClock,
     /// Remove a node from the cluster membership
     RemoveNode {
@@ -310,6 +309,8 @@ enum ClientError {
     ClockAttachRequest,
     #[error("failed to read the domain clock")]
     ClockEventRead,
+    #[error("the subscription event reader stopped unexpectedly")]
+    SubscriptionEventReader,
     #[error("failed to detach from the domain clock")]
     ClockDetachRequest,
     #[error("invalid backup arguments: {reason}")]
@@ -646,7 +647,11 @@ async fn main() -> Result<RunEnd, StackReport<ClientError>> {
     let (event_sender, mut event_receiver) =
         nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let event_sender = EventLineSender::new(event_sender);
-    spawn_event_collectors(client.clone(), event_sender.clone());
+    drop(spawn_event_collectors(
+        client.clone(),
+        event_sender.clone(),
+        SubscriptionEndPolicy::Continue,
+    ));
     if let Some(command) = args.command {
         return StatementRunner::for_arguments(repetition)
             .run(&client, command)
@@ -819,7 +824,11 @@ async fn run_json_inspection_mode(
             return Err(error.change_context(ClientError::Connect));
         }
     };
-    spawn_event_loggers(client.clone(), EventOutput::Stderr);
+    drop(spawn_event_loggers(
+        client.clone(),
+        EventOutput::Stderr,
+        SubscriptionEndPolicy::Continue,
+    ));
     let outcome = match client.execute(query).await {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -1028,7 +1037,11 @@ async fn run_subscribe_mode(
     )
     .await
     .change_context(ClientError::Connect)?;
-    spawn_event_loggers(client.clone(), EventOutput::Stdout);
+    let subscription = spawn_event_loggers(
+        client.clone(),
+        EventOutput::Stdout,
+        SubscriptionEndPolicy::Finish,
+    );
     let request = subscribe_request(
         &options.name,
         &options.relay,
@@ -1056,8 +1069,10 @@ async fn run_subscribe_mode(
         "listening for events from relay '{}'. Press Ctrl-C to stop.",
         options.relay
     );
-    interrupted().await?;
-    Ok(RunEnd::Completed)
+    match interrupt::unless_interrupted(subscription).await? {
+        Some(ending) => ending.change_context(ClientError::SubscriptionEventReader),
+        None => Ok(RunEnd::Completed),
+    }
 }
 
 async fn run_domain_clock_mode(args: &Args) -> Result<RunEnd, StackReport<ClientError>> {
@@ -1072,27 +1087,81 @@ async fn run_domain_clock_mode(args: &Args) -> Result<RunEnd, StackReport<Client
         .change_context(ClientError::ClockAttachRequest)?;
     println!("{}", clock_attach_message(outcome)?);
 
-    let interrupt = signal::ctrl_c();
+    let mut attachment = ClockStreamState::Attached;
+    let interrupt = interrupted();
     tokio::pin!(interrupt);
     loop {
         nervix_primitives::task::consume_budget().await;
         nervix_primitives::select! {
             event = client.next_domain_clock_event() => {
-                let event = event.change_context(ClientError::ClockEventRead)?;
-                println!("{}", format_domain_clock_event(&event));
-                if let DomainClockEvent::Ended(_) = event {
-                    return Ok(RunEnd::Completed);
+                match event {
+                    Ok(event) => {
+                        attachment.observe(&event);
+                        println!("{}", format_domain_clock_event(&event));
+                        if attachment.is_ended() {
+                            return Ok(RunEnd::Completed);
+                        }
+                    }
+                    Err(error) => {
+                        let failure = EventStream::DomainClocks.failure(&error);
+                        println!("{}", failure.line);
+                        if failure.ended {
+                            return Err(error.change_context(ClientError::ClockEventRead));
+                        }
+                        attachment = ClockStreamState::Interrupted;
+                    }
                 }
             }
             interrupted = &mut interrupt => {
-                interrupted.change_context(ClientError::InterruptSignal)?;
-                let outcome = client
-                    .detach_domain_clock(args.domain.clone())
-                    .await
-                    .change_context(ClientError::ClockDetachRequest)?;
-                clock_detach_completed(outcome)?;
+                interrupted?;
+                attachment.detach(&client, args.domain.clone()).await?;
                 return Ok(RunEnd::Completed);
             }
+        }
+    }
+}
+
+/// The attachment's last reported state. An interrupted observer can stop without opening a
+/// replacement session solely to detach from it.
+enum ClockStreamState {
+    Attached,
+    Interrupted,
+    Ended,
+}
+
+impl ClockStreamState {
+    fn observe(&mut self, event: &DomainClockEvent) {
+        match event {
+            DomainClockEvent::Observed(_) | DomainClockEvent::Ticked(_) => {
+                *self = Self::Attached;
+            }
+            DomainClockEvent::Interrupted(_) | DomainClockEvent::RestorationFailed(_) => {
+                *self = Self::Interrupted;
+            }
+            DomainClockEvent::Ended(_) => {
+                *self = Self::Ended;
+            }
+        }
+    }
+
+    fn is_ended(&self) -> bool {
+        matches!(self, Self::Ended)
+    }
+
+    async fn detach(
+        self,
+        client: &Client,
+        domain: DomainName,
+    ) -> Result<(), StackReport<ClientError>> {
+        match self {
+            Self::Attached => {
+                let outcome = client
+                    .detach_domain_clock(domain)
+                    .await
+                    .change_context(ClientError::ClockDetachRequest)?;
+                clock_detach_completed(outcome)
+            }
+            Self::Interrupted | Self::Ended => Ok(()),
         }
     }
 }
@@ -1248,9 +1317,52 @@ fn print_event_gap(dropped: u64, output: EventOutput) {
     }
 }
 
-fn spawn_event_collectors(client: Client, sender: EventLineSender) {
-    for stream in EventStream::ALL {
-        nervix_primitives::task::spawn(stream.collect(client.clone(), sender.clone()));
+fn spawn_event_collectors(
+    client: Client,
+    sender: EventLineSender,
+    subscription_end: SubscriptionEndPolicy,
+) -> JoinHandle<RunEnd> {
+    let subscription = nervix_primitives::task::spawn(EventStream::Subscriptions.collect(
+        client.clone(),
+        sender.clone(),
+        subscription_end,
+    ));
+    for stream in [EventStream::DomainClocks, EventStream::ServerNotices] {
+        nervix_primitives::task::spawn(stream.collect(
+            client.clone(),
+            sender.clone(),
+            SubscriptionEndPolicy::Continue,
+        ));
+    }
+    subscription
+}
+
+/// Whether the caller observes all subscriptions of a session, or follows the one subscription
+/// its dedicated subcommand opened and finishes when that subscription ends.
+#[derive(Debug, Clone, Copy)]
+enum SubscriptionEndPolicy {
+    Continue,
+    Finish,
+}
+
+/// Rendered event lines and the terminal subscription event that a dedicated follower awaits.
+enum EventLines {
+    Observed(Vec<String>),
+    SubscriptionEnded(Vec<String>),
+}
+
+impl EventLines {
+    fn ends_subscription(&self, policy: SubscriptionEndPolicy) -> bool {
+        matches!(
+            (self, policy),
+            (Self::SubscriptionEnded(_), SubscriptionEndPolicy::Finish)
+        )
+    }
+
+    fn into_lines(self) -> Vec<String> {
+        match self {
+            Self::Observed(lines) | Self::SubscriptionEnded(lines) => lines,
+        }
     }
 }
 
@@ -1275,25 +1387,32 @@ struct StreamFailure {
 }
 
 impl EventStream {
-    const ALL: [Self; 3] = [Self::Subscriptions, Self::DomainClocks, Self::ServerNotices];
-
     /// Prints the stream's events for as long as the client can open a session. The client
     /// restores subscriptions and clocks on its next session and notices continue there, so every
     /// other failure is printed and reading goes on.
-    async fn collect(self, client: Client, sender: EventLineSender) {
+    async fn collect(
+        self,
+        client: Client,
+        sender: EventLineSender,
+        subscription_end: SubscriptionEndPolicy,
+    ) -> RunEnd {
         loop {
             nervix_primitives::task::consume_budget().await;
             match self.next_lines(&client).await {
-                Ok(lines) => {
-                    for line in lines {
+                Ok(event) => {
+                    let ended = event.ends_subscription(subscription_end);
+                    for line in event.into_lines() {
                         sender.push(line);
+                    }
+                    if ended {
+                        return RunEnd::Completed;
                     }
                 }
                 Err(error) => {
                     let failure = self.failure(&error);
                     sender.push(failure.line);
                     if failure.ended {
-                        return;
+                        return RunEnd::Failed;
                     }
                 }
             }
@@ -1301,22 +1420,26 @@ impl EventStream {
     }
 
     /// The terminal lines of the stream's next event.
-    async fn next_lines(
-        self,
-        client: &Client,
-    ) -> Result<Vec<String>, StackReport<CoreClientError>> {
+    async fn next_lines(self, client: &Client) -> Result<EventLines, StackReport<CoreClientError>> {
         match self {
             Self::Subscriptions => {
                 let event = client.next_subscription().await?;
-                Ok(format_subscription_event(&event))
+                let lines = format_subscription_event(&event);
+                if let SubscriptionEvent::Ended(_) = event {
+                    Ok(EventLines::SubscriptionEnded(lines))
+                } else {
+                    Ok(EventLines::Observed(lines))
+                }
             }
             Self::DomainClocks => {
                 let event = client.next_domain_clock_event().await?;
-                Ok(vec![format_domain_clock_event(&event)])
+                Ok(EventLines::Observed(vec![format_domain_clock_event(
+                    &event,
+                )]))
             }
             Self::ServerNotices => {
                 let event = client.next_server_event().await?;
-                Ok(vec![format_server_event(&event)])
+                Ok(EventLines::Observed(vec![format_server_event(&event)]))
             }
         }
     }
@@ -1351,11 +1474,15 @@ impl EventStream {
     }
 }
 
-fn spawn_event_loggers(client: Client, output: EventOutput) {
+fn spawn_event_loggers(
+    client: Client,
+    output: EventOutput,
+    subscription_end: SubscriptionEndPolicy,
+) -> JoinHandle<RunEnd> {
     let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let sender = EventLineSender::new(sender);
     let dropped = sender.dropped.clone();
-    spawn_event_collectors(client, sender);
+    let subscription = spawn_event_collectors(client, sender, subscription_end);
     nervix_primitives::task::spawn_blocking(move || {
         while let Some(line) = receiver.blocking_recv() {
             print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
@@ -1363,6 +1490,7 @@ fn spawn_event_loggers(client: Client, output: EventOutput) {
         }
         print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
     });
+    subscription
 }
 
 fn drain_event_queue(

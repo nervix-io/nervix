@@ -55,6 +55,10 @@ mod cluster_status;
 mod byte_pace;
 #[path = "common/cluster/byte_pace_tests.rs"]
 mod byte_pace_tests;
+#[path = "common/cluster/paced_connection.rs"]
+mod paced_connection;
+#[path = "common/cluster/paced_connection_tests.rs"]
+mod paced_connection_tests;
 
 #[path = "common/backup_phase.rs"]
 mod backup_phase;

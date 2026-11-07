@@ -84,6 +84,12 @@ A client that presents notices MUST route each by its `kind`, as [What A Session
 Told](./client-session-protocol.md#what-a-session-is-told) defines the kinds, and MUST NOT derive
 meaning from a notice's text, which is for display only.
 
+A `Membership` notice describes the serving node's observation of a join, leave or incarnation
+change. A command's application progress is internal node-to-node traffic; its client-visible
+completion is the correlated command outcome under
+[Commands And Execution Identity](#commands-and-execution-identity). Notice delivery has its own
+bounded, gap-reporting stream and supplies no command outcome.
+
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
 the download of a backup's archive; see [Backup Downloads](#backup-downloads), and a restore with its
 archive; see [Restore Streams](#restore-streams).
@@ -594,6 +600,13 @@ payload, infinity, and nullable and sensitive branch key fields.
   session still holds the attachment, as after a leader redirect, the client MUST move the
   attachment without a gap: it keeps the newest tick of a clock that stays paced in the same
   generation, and ignores a tick of the new session that does not advance it.
+
+The Rust-backed CLI applies these lifecycle rules to its dedicated observers. Its `subscribe`
+process finishes after the terminal subscription event, including one discovered while restoring.
+Its `domain-clock` process keeps reading after a recoverable session-opening failure; one expired
+retry budget does not end the attachment. Ctrl-C closes an interrupted observer without reopening
+a session solely to detach. [CLI streaming](client-tools-cli.md#streaming-a-relay) owns their exit
+statuses and operator-facing output.
 
 ## Producers
 

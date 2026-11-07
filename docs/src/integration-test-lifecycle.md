@@ -11,6 +11,13 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+`just test-cli-streams` selects the one- and three-node CLI stream recovery and termination
+examples in `cli_session.feature`. It prepares the in-process server assets and CLI, without
+building unrelated language probes. The outage case observes a failed restoration after the
+client's ordinary retry deadline, then verifies that the same process resumes its clock. The
+termination cases check process exit after a subscription ends and after Ctrl-C during an outage.
+The ordinary scenario runner, deadlines and parallel execution remain in force.
+
 `just test-domain-clock-delivery` runs the one- and three-node receiver attachment scenarios:
 clock installation while gossip exchanges are blocked, session tick delivery and receiver restart.
 It prepares the console assets, WASM guests and ONNX runtime required by the in-process nodes;
@@ -45,6 +52,15 @@ the scenarios' public commands, fault controls, startup budgets, deadlines and p
 This focused check covers incarnation-bound progress, completion through a push or query and
 clock delivery after attachment changes; the complete ordinary and mode suites remain separate
 qualification evidence.
+
+The held-query case keeps the sampled revision replies outstanding while reports complete the
+command. The held-report-and-query case releases either path explicitly and measures completion
+from that release. Clock cases exercise receiver attachment ahead of graph readiness. These are
+separate witnesses for the [completion barrier](./command-completion.md#all-live-node-barriers)
+and [authority delivery](./domain-clock.md#tick-production-and-progress-delivery); membership gossip
+remains available for topology and subscription interest. The measured nine- and twenty-second
+control-probe budgets and their margins are recorded under
+[Product Deadlines And Harness Deadlines](#product-deadlines-and-harness-deadlines).
 
 ## Focused Native Command Recovery
 
@@ -150,6 +166,11 @@ fixture cannot survive its node specification.
 A scenario can release the byte cadence once. That wakes every delayed chunk and leaves existing
 sockets, buffered bytes and the reserved listener intact; future connections also run without
 pacing. A release does not parse the stream, fabricate a product response or replace a connection.
+
+Both proxy sockets preserve the interconnect's `TCP_NODELAY` policy. The accepted socket and the
+connection to the private listener disable Nagle coalescing before forwarding, so small writes
+follow the fixture's explicit byte cadence and its release. Focused socket-owner tests check both
+options and preserve request and response bytes across the two distinct connection legs.
 
 The rate-limited case transfers leadership to node-2 while the stopped follower has only its
 initial log, making the new leader recover an unconfirmed previous-log boundary. The scenario

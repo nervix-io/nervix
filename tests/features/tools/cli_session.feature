@@ -311,8 +311,9 @@ Feature: CLI public session dispatch
     When the CLI clock process receives Ctrl-C
     Then the CLI clock process exits successfully
 
-  Scenario: The CLI reports the end of a subscription whose relay was dropped while it reconnected
-    Given a 1 node nervix cluster is started
+  @cli_stream_termination
+  Scenario Outline: The CLI reports the end of a subscription whose relay was dropped while it reconnected
+    Given a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -331,6 +332,86 @@ Feature: CLI public session dispatch
       """
     And the TCP forwarder at "127.0.0.1" restarts
     Then the CLI subscription output eventually contains "[events] subscription [watch] notice: the subscription ended because its relay no longer exists: stream 'watched' does not exist in domain '{{domain}}'"
+    And the CLI subscription process exits successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @cli_stream_termination
+  Scenario Outline: The CLI finishes when its subscription is <ending>
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA watched_record ( value STRING );
+      CREATE SCHEMA replacement_record ( replacement I64 );
+      CREATE RELAY watched SCHEMA watched_record UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI subscribes to relay "watched" on node "{{leader}}"
+    Then the CLI subscription output eventually contains "listening for events from relay 'watched'"
+    When these Plexus commands are executed on the leader node
+      """
+      <change>
+      """
+    Then the CLI subscription output eventually contains "[events] subscription [watch] notice: the subscription ended"
+    And the CLI subscription process exits successfully
+
+    Examples:
+      | cluster_size | ending    | change                                             |
+      | 1            | redefined | ALTER RELAY watched SET SCHEMA replacement_record; |
+      | 3            | redefined | ALTER RELAY watched SET SCHEMA replacement_record; |
+      | 1            | removed   | DROP RELAY watched;                                |
+      | 3            | removed   | DROP RELAY watched;                                |
+
+  @cli_stream_recovery @long_running
+  Scenario Outline: The CLI follows a clock after its restoration retry deadline expires
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
+      """
+    Given the CLI clock connection to node "node-1" is forwarded
+    When the CLI follows the clock of domain "{{domain}}" through its TCP forwarder
+    Then within "10s" the CLI clock output has 2 increasing ticks for generation 1 of domain "{{domain}}"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "20s" the CLI clock output contains "[events] domain clock [{{domain}}] notice: the session was interrupted"
+    And within "150s" the CLI clock output contains "[events] notice: domain clock events could not resume yet:"
+    When the TCP forwarder at "127.0.0.1" restarts
+    Then within "30s" the CLI clock output has a fresh state for generation 1 after interruption of domain "{{domain}}"
+    And within "30s" the CLI clock output has a tick for generation 1 after its state of domain "{{domain}}"
+    When the CLI clock process receives Ctrl-C
+    Then the CLI clock process exits successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @cli_stream_termination
+  Scenario Outline: The CLI clock can be interrupted while its session is unavailable
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
+      """
+    Given the CLI clock connection to node "node-1" is forwarded
+    When the CLI follows the clock of domain "{{domain}}" through its TCP forwarder
+    Then within "10s" the CLI clock output has 2 increasing ticks for generation 1 of domain "{{domain}}"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "20s" the CLI clock output contains "[events] domain clock [{{domain}}] notice: the session was interrupted"
+    When the CLI clock process receives Ctrl-C
+    Then the CLI clock process exits successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: The CLI exits with the status of each outcome
     Given a <cluster_size> node nervix cluster is started

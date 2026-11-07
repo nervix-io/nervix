@@ -1090,8 +1090,15 @@ reports, so a client routes notices by kind and never by their text:
 
 A membership notice reports only a change of the live set. Model changes, subscriptions opening or
 closing and domain starts change what members publish through gossip, not which members are live,
-so none of them produces one. A session that falls behind the node's notice bus skips the notices it missed; the node
-logs how many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
+so none of them produces one. The serving node still refreshes routes, prerequisites and subscription
+interest when those published values change. A notice carries no acknowledgement of a particular
+command: [command completion](./command-completion.md#application-progress) follows that command's
+terminal outcome. The [CLI](./client-tools-cli.md#asynchronous-output) labels all notice kinds; the
+[console](./client-tools-web-console.md#following-cluster-events) routes membership and leadership
+to its event panel and the other kinds to its transcript.
+
+A session that falls behind the node's notice bus skips the notices it missed; the node logs how
+many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
 notice that does not fit drops the ones held, and the caller's next read reports that gap before
 the notices that follow it. Notices end with the session that delivered them, and the client's
 notice stream continues with the next session it opens.
@@ -1647,8 +1654,18 @@ attachment it was restoring when a new session answers it so, as it does after
 
 The CLI's `domain-clock` subcommand uses the Rust client's typed attach reply and clock event
 stream. It prints the reply and then the same state, tick, interruption, and end lines as its REPL,
-including the fresh state after the client restores an attachment. Ctrl-C sends a detach request
-before the process exits; an attach refusal exits nonzero with its typed reason.
+including the fresh state after the client restores an attachment. A read that cannot restore a
+session within one retry deadline prints the same continuation notice as the REPL and reads
+again. A permanent attachment end exits with status `0`; a terminal `SessionClosed` exits with
+status `1`. Ctrl-C detaches an attachment last reported held; while an interruption or failed
+restoration is outstanding it exits without reconnecting solely to detach. An attach refusal
+exits nonzero with its typed reason.
+
+The dedicated `subscribe` subcommand observes the completion of its existing event reader, so it
+does not compete with that reader for events. It prints the final end notice and exits with status
+`0` when the server ends its subscription, including a permanent end discovered during
+restoration. Other CLI modes keep observing unrelated subscriptions and server notices. Their
+bounded terminal queue, line limits and dropped-line notices are unchanged.
 
 ## Producers
 

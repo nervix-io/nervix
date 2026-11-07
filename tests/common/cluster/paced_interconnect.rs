@@ -19,7 +19,7 @@ use nervix_primitives::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-use super::{Cluster, byte_pace::BytePace};
+use super::{Cluster, byte_pace::BytePace, paced_connection::PacedConnection};
 
 #[derive(Debug, Default)]
 struct TransferCounts {
@@ -149,7 +149,9 @@ async fn forward(
     observed: Arc<TransferCounts>,
     released: CancellationToken,
 ) -> io::Result<()> {
-    let outgoing = TcpStream::connect(target).await.inspect_err(|_| {
+    let PacedConnection { incoming, outgoing } = PacedConnection::connect(incoming, target)
+        .await
+        .inspect_err(|_| {
         observed.connect_failures.fetch_add(1, Ordering::Relaxed);
     })?;
     observed.connected.fetch_add(1, Ordering::Relaxed);

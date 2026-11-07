@@ -178,6 +178,17 @@ violates instead of softening the contract to match today's imports.
   replication mechanisms.
 - The registry validates domains, references, schemas, branches, capabilities and execution
   contracts before a graph becomes active.
+- Gossip carries only membership-scoped state: identities and endpoints, prerequisites, admission
+  verdicts, cluster parameters, termination and subscription interest. Application progress stays
+  in one incarnation-bound local record and travels by typed interconnect reports and queries;
+  no per-command or per-revision progress fact becomes a gossip key. An application revision barrier
+  judges progress only from its local record, received reports and query replies, under its fixed
+  revision, deadline, leader tenure and required-incarnation checks. Availability determines its
+  participants, never their readiness.
+- A membership event reports only a node joining, leaving or changing incarnation. A live-state
+  key-version change still refreshes interests, prerequisites and routes without offering a
+  membership event. Every server notice carries its semantic kind, and clients and bindings route
+  notices by that kind; notice text is display-only.
 - Runtime execution is materialized per concrete branch; branch-local state, scheduling, buffering
   and materialized views stay visibly branch-local in types and ownership.
 - Server endpoint definitions and bound intakes form one immutable host-and-path publication. A
@@ -403,7 +414,7 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   the shared connector contract, connector planning or composition, host ingestor and emitter
   execution.
 - [Cluster Interconnect](docs/src/interconnect.md): interconnect code and every node-to-node
-  operation.
+  operation, including application progress reports, queries and completion-participant views.
 - [Name Resolution](docs/src/name-resolution.md): `nervix-dns`; how a node or a native client loads
   its resolver; a path that resolves a host name, or the hook, budget or dialling policy it uses; a
   dependency feature that selects a resolver; the DNS checks and fixtures.
@@ -412,6 +423,7 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   implementation must do changes: client protocol code (the session schema and wire crate, the
   session service and its transports, the Row encoder, the Rust client, the shared binding, and the
   session handling of the web console and the CLI) and every client-to-node operation.
+  This includes server-notice kinds and their routing through every client and binding.
 - [Errors And Diagnostics](docs/src/errors-and-diagnostics.md): error types, error or diagnostic
   propagation, failure classification, reporting at a layer or public boundary.
 - [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md): consensus
@@ -422,7 +434,7 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   report persistence, inspection presentation.
 - [Domain Clock](docs/src/domain-clock.md): the domain-clock architecture, domain architecture that
   changes how time is established, propagated or consumed, and how a client session attaches to and
-  follows a domain clock.
+  follows a domain clock, including a receiver node's attachment to its clock authority.
 - [Execution Primitives](docs/src/execution-primitives.md): the primitive boundary's governed
   families, backend selection, feature propagation, target capabilities, authored-source scope,
   permissions, build contracts, and the distinction between API, graph, compiler and execution
