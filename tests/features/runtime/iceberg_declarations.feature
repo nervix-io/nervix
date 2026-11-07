@@ -192,7 +192,7 @@ Feature: Iceberg declarations
       CREATE HTTP ENDPOINT notification_ingress
       ON edge
       PATH '/notifications';
-      CREATE HTTP ENDPOINT INGESTOR notification_source
+      CREATE HTTP ENDPOINT INGESTOR notification_ingestor
       FROM notification_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO notifications
@@ -289,7 +289,7 @@ Feature: Iceberg declarations
       CREATE HTTP ENDPOINT notification_ingress
       ON edge
       PATH '/notifications';
-      CREATE HTTP ENDPOINT INGESTOR notification_source
+      CREATE HTTP ENDPOINT INGESTOR notification_ingestor
       FROM notification_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO notifications

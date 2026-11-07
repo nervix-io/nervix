@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The HTTP client Model and transport declaration, the polled request source with its delivery mode, the source
+//! - **Owns.** The HTTP client Model and transport declaration, the polled request ingestor with its delivery mode, the ingestor
 //!   that reads an HTTP endpoint this cluster serves, the request emitter Model, and what each entity
 //!   declares.
 //!   Client declarations also own public configuration keys, types and confidentiality, and a polled
 //!   request owns how its headers read them.
-//! - **Depends on.** The shared source and emitter declarations, expressions, the domain clock's
+//! - **Depends on.** The shared ingestor and emitter declarations, expressions, the domain clock's
 //!   period and the names a body references.
 //! - **Must not know.** The HTTP client library, how a request is built,
 //!   sent or classified, or how an endpoint is published, routed to or served.
@@ -349,6 +349,7 @@ const HTTP_REQUEST_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecla
 
 impl IngestorDeclaration for HttpRequestIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         // An HTTP response's fields, as the client's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
@@ -455,6 +456,7 @@ const HTTP_ENDPOINT_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecl
 
 impl IngestorDeclaration for HttpEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         // An HTTP request's fields, as the server's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
@@ -604,11 +606,11 @@ impl crate::IngestorEntityChange for HttpEndpointIngestorChange {
 
 connector_ingestors! {
     connector Http = "HTTP";
-    /// What an HTTP source reads.
+    /// What an HTTP ingestor reads.
     pub enum HttpIngestor;
     /// The alterations of the ingestors that read an HTTP entity.
     pub enum HttpRequestIngestorAlteration;
-    /// The entities an HTTP source reads.
+    /// The entities an HTTP ingestor reads.
     pub enum HttpIngestorEntity {
         Request(HttpRequestIngestor => HttpRequestIngestorChange) = "REQUEST", "HTTP polling";
         Endpoint(HttpEndpointIngestor => HttpEndpointIngestorChange) = "ENDPOINT", "HTTP endpoint";

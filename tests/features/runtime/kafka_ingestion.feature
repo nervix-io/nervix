@@ -86,7 +86,7 @@ Feature: Kafka ingestion
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR kafka_forwarding_source
+      CREATE KAFKA TOPIC INGESTOR kafka_forwarding_ingestor
         FROM kafka_main TOPIC 'forwarding_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_forwarding_{{test_id}}' START AT EARLIEST
         MODE NO ACK
@@ -145,7 +145,7 @@ Feature: Kafka ingestion
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR grouped_event_source
+      CREATE KAFKA TOPIC INGESTOR grouped_event_ingestor
         FROM kafka_main TOPIC 'grouped_program_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_grouped_program_{{test_id}}' START AT EARLIEST
         MODE NO ACK
@@ -198,7 +198,7 @@ Feature: Kafka ingestion
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR mixed_event_source
+      CREATE KAFKA TOPIC INGESTOR mixed_event_ingestor
         FROM kafka_main TOPIC 'mixed_group_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_mixed_group_{{test_id}}' START AT EARLIEST
         MODE NO ACK
@@ -250,7 +250,7 @@ Feature: Kafka ingestion
         matrix <matrix_type>
       );
       CREATE WIRE <wire_format> SCHEMA nested_event_wire MODE STRICT (
-        tenant string,
+        tenant <tenant_wire_type>,
         matrix array
       );
       CREATE CODEC nested_event_codec
@@ -263,7 +263,7 @@ Feature: Kafka ingestion
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR nested_event_source
+      CREATE KAFKA TOPIC INGESTOR nested_event_ingestor
         FROM kafka_main TOPIC 'nested_group_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_nested_group_{{test_id}}' START AT EARLIEST
         MODE NO ACK
@@ -297,11 +297,11 @@ Feature: Kafka ingestion
     And the relay subscription does not receive a payload within "1s"
 
     Examples:
-      | cluster_size | wire_format | matrix_type  |
-      | 1            | JSON        | VEC<VEC<U8>> |
-      | 3            | JSON        | VEC<VEC<U8>> |
-      | 1            | CBOR        | VEC<VEC<U8>> |
-      | 3            | CBOR        | VEC<VEC<U8>> |
+      | cluster_size | wire_format | tenant_wire_type | matrix_type  |
+      | 1            | JSON        | string           | VEC<VEC<U8>> |
+      | 3            | JSON        | string           | VEC<VEC<U8>> |
+      | 1            | CBOR        | text             | VEC<VEC<U8>> |
+      | 3            | CBOR        | text             | VEC<VEC<U8>> |
 
   @decode_rejection
   Scenario Outline: A Kafka <mode_name> ingestor consumes a payload its codec refuses, reports its record and delivers the next one
@@ -330,7 +330,7 @@ Feature: Kafka ingestion
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR poison_source
+      CREATE KAFKA TOPIC INGESTOR poison_ingestor
         FROM kafka_main TOPIC 'poison_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_poison_{{test_id}}' START AT EARLIEST
         MODE <mode>
@@ -358,17 +358,17 @@ Feature: Kafka ingestion
       """
     And within "30s" the active session observes a server error containing
       """
-      ingestor 'poison_source' general error in domain '{{domain}}': decode rejection
+      ingestor 'poison_ingestor' general error in domain '{{domain}}': decode rejection
       """
     And the last server error contains
       """
       codec 'poison_event_codec' refused the payload from Kafka topic 'poison_input_{{test_id}}' partition 0 offset 0: codec 'poison_event_codec' failed to parse field 'user_id'
       """
-    And within "30s" DESCRIBE INGESTOR "poison_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "poison_ingestor" on the leader node contains
       """
       nervix_ingestor_decode_rejections_total: 1
       """
-    And within "30s" DESCRIBE INGESTOR "poison_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "poison_ingestor" on the leader node contains
       """
       codec 'poison_event_codec' refused the payload from Kafka topic 'poison_input_{{test_id}}' partition 0 offset 0
       """
@@ -408,7 +408,7 @@ Feature: Kafka ingestion
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR ignored_poison_source
+      CREATE KAFKA TOPIC INGESTOR ignored_poison_ingestor
         FROM kafka_main TOPIC 'ignored_poison_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_ignored_poison_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -434,11 +434,11 @@ Feature: Kafka ingestion
       """
       "tenant":"acme","user_id":2
       """
-    And within "30s" DESCRIBE INGESTOR "ignored_poison_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "ignored_poison_ingestor" on the leader node contains
       """
       nervix_ingestor_decode_rejections_total: 1
       """
-    And within "30s" DESCRIBE INGESTOR "ignored_poison_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "ignored_poison_ingestor" on the leader node contains
       """
       codec 'poison_event_codec' refused the payload from Kafka topic 'ignored_poison_input_{{test_id}}' partition 0 offset 0
       """
@@ -469,7 +469,7 @@ Feature: Kafka ingestion
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR unfolded_source
+      CREATE KAFKA TOPIC INGESTOR unfolded_ingestor
         FROM kafka_main TOPIC 'unfolded_input_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_unfolded_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
@@ -500,11 +500,11 @@ Feature: Kafka ingestion
       """
       "user_id":42
       """
-    And within "30s" DESCRIBE INGESTOR "unfolded_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "unfolded_ingestor" on the leader node contains
       """
       nervix_ingestor_decode_rejections_total: 0
       """
-    And within "30s" DESCRIBE INGESTOR "unfolded_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "unfolded_ingestor" on the leader node contains
       """
       last decode rejection: -
       """
@@ -555,7 +555,7 @@ Feature: Kafka ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "kafka_notifications" leaves fault mode
     And Kafka message is published to topic "notifications_reconnect_{{test_id}}"
@@ -595,7 +595,7 @@ Feature: Kafka ingestion
         'bootstrap.servers' = '{{mock_kafka_addr}}',
         'socket.timeout.ms' = '500'
       };
-      CREATE KAFKA TOPIC INGESTOR down_source
+      CREATE KAFKA TOPIC INGESTOR down_ingestor
         FROM down_kafka TOPIC 'no_ack_down_{{test_id}}'
         OFFSET BY DOMAIN MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING down_codec
@@ -606,7 +606,7 @@ Feature: Kafka ingestion
       """
     # Without a declared retry policy the ingestor waits 250 ms after its first failure and doubles
     # the wait after each one, so the wait reaches two seconds after four failures.
-    Then within "60s" DESCRIBE INGESTOR "down_source" on the leader node reports a reconnect backoff of at least "2s"
+    Then within "60s" DESCRIBE INGESTOR "down_ingestor" on the leader node reports a reconnect backoff of at least "2s"
     When the mock Kafka broker comes back up
     And mock Kafka message is published to topic "no_ack_down_{{test_id}}"
       """
@@ -641,7 +641,7 @@ Feature: Kafka ingestion
       CREATE KAFKA CLIENT refused_commit_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR refused_commit_source
+      CREATE KAFKA TOPIC INGESTOR refused_commit_ingestor
         FROM refused_commit_kafka TOPIC 'refused_commit_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'refused_commit_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -661,14 +661,14 @@ Feature: Kafka ingestion
       """
       "event_id":1
       """
-    And within "30s" DESCRIBE INGESTOR "refused_commit_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "refused_commit_ingestor" on the leader node contains
       """
       transient error: GroupAuthorizationFailed (Broker: Group authorization failed)
       """
     And within "2s" mock Kafka consumer group "refused_commit_group_{{test_id}}" next offset for topic "refused_commit_{{test_id}}" partition 0 is "below 1"
     When the mock Kafka broker accepts offset commits again
     Then within "30s" mock Kafka consumer group "refused_commit_group_{{test_id}}" next offset for topic "refused_commit_{{test_id}}" partition 0 is "at least 1"
-    And within "30s" DESCRIBE INGESTOR "refused_commit_source" on the leader node contains
+    And within "30s" DESCRIBE INGESTOR "refused_commit_ingestor" on the leader node contains
       """
       transient error: -
       """
@@ -697,7 +697,7 @@ Feature: Kafka ingestion
       CREATE KAFKA CLIENT retiring_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR retiring_source
+      CREATE KAFKA TOPIC INGESTOR retiring_ingestor
         FROM retiring_kafka TOPIC 'retired_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'retired_group_{{test_id}}' START AT EARLIEST INSTANCES 8
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -708,7 +708,7 @@ Feature: Kafka ingestion
         ON GENERAL ERROR LOG;
       CREATE VHOST edge retire-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR healthy_source
+      CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
         FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
         TO retired_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -727,11 +727,11 @@ Feature: Kafka ingestion
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "ingestor" "retiring_source" is saved as placeholder "kafka_owner"
+    Then the last cluster status owner for scheduled "ingestor" "retiring_ingestor" is saved as placeholder "kafka_owner"
     Given the mock Kafka broker holds every answer
     When these Plexus statements are executed on the leader node
       """
-      DROP INGESTOR retiring_source;
+      DROP INGESTOR retiring_ingestor;
       """
     Then within "30s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually reaches at least 1
       """
@@ -795,7 +795,7 @@ Feature: Kafka ingestion
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-        CREATE KAFKA TOPIC INGESTOR event_source
+        CREATE KAFKA TOPIC INGESTOR event_ingestor
         FROM kafka_main TOPIC 'events_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         FILTER WHERE input.level > 0
@@ -888,7 +888,7 @@ Feature: Kafka ingestion
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR sourced_event_source
+      CREATE KAFKA TOPIC INGESTOR sourced_event_ingestor
         FROM kafka_main TOPIC 'sourced_events_{{test_id}}'
         OFFSET BY CONSUMER GROUP 'nervix_cucumber_sourced_{{test_id}}' START AT EARLIEST
         MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s

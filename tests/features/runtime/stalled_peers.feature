@@ -543,7 +543,7 @@ Feature: Stalled peers
       CREATE RELAY errors SCHEMA error_event UNBRANCHED;
       CREATE VHOST edge stalled-sentry-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
-      CREATE HTTP ENDPOINT INGESTOR error_source
+      CREATE HTTP ENDPOINT INGESTOR error_ingestor
         FROM error_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING error_event_codec
         TO errors INHERIT ALL UNBRANCHED

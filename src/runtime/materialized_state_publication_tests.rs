@@ -31,7 +31,7 @@ fn placement() -> RuntimeStatePlacement {
         },
         kind: ModelKind::Relay,
         identifier: ModelName::parse("profiles").assured("valid test relay"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     }
 }

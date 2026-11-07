@@ -1220,6 +1220,7 @@ mod tests {
         );
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let relay_index = graph.add_node(ActiveNode {
+            ingestor_units: None,
             identifier: named("events"),
             kind: ModelKind::Relay,
             config: Arc::new(relay("events", "event_schema")),
@@ -1539,7 +1540,9 @@ mod tests {
                                             group: named("cg"),
                                             start_at: nervix_models::IngestStartPosition::Earliest,
                                         },
-                                        instances: nonzero!(1u64),
+                                        instances: nervix_models::IngestorInstances::Count(
+                                            nonzero!(1u64),
+                                        ),
                                         mode: KafkaIngestMode::AckSequential {
                                             timeout: "30s".to_string(),
                                             retry_policy: nervix_models::RetryPolicy {

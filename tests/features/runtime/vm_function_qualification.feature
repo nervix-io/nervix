@@ -16,7 +16,7 @@ Feature: VM functions remain valid through public graph changes
       CREATE RELAY function_outputs SCHEMA function_output UNBRANCHED;
       CREATE VHOST edge vm-replan-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/functions';
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING function_codec
         TO function_inputs
@@ -98,7 +98,7 @@ Feature: VM functions remain valid through public graph changes
       CREATE RELAY pattern_outputs SCHEMA pattern_output UNBRANCHED;
       CREATE VHOST edge vm-pattern-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/patterns';
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING pattern_codec
         TO pattern_inputs

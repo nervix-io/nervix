@@ -43,7 +43,7 @@ Feature: Tolerant conversions
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge tolerant-conversions-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_reading_batch_codec
         TO raw_readings
@@ -149,7 +149,7 @@ Feature: Tolerant conversions
       CREATE RELAY conversion_errors SCHEMA conversion_error UNBRANCHED;
       CREATE VHOST edge owned-conversion-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT conversion_ingress ON edge PATH '/conversions';
-      CREATE HTTP ENDPOINT INGESTOR conversion_source
+      CREATE HTTP ENDPOINT INGESTOR conversion_ingestor
         FROM conversion_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conversion_input_batch_codec
         TO conversion_inputs
@@ -226,7 +226,7 @@ Feature: Tolerant conversions
       CREATE RELAY routed_errors SCHEMA routed_error UNBRANCHED;
       CREATE VHOST edge conversion-arms-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT routed_ingress ON edge PATH '/routed-values';
-      CREATE HTTP ENDPOINT INGESTOR routed_value_source
+      CREATE HTTP ENDPOINT INGESTOR routed_value_ingestor
         FROM routed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_value_batch_codec
         TO routed_values
@@ -337,7 +337,7 @@ Feature: Tolerant conversions
       CREATE RELAY inferred_measurements SCHEMA inferred_measurement UNBRANCHED;
       CREATE VHOST edge infer-tolerant-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/measurements';
-      CREATE HTTP ENDPOINT INGESTOR raw_measurement_source
+      CREATE HTTP ENDPOINT INGESTOR raw_measurement_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_measurement_batch_codec
         TO raw_measurements

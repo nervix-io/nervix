@@ -361,7 +361,7 @@ run_stale_follower() {
         surviving_owners_ready "${follower_host}" "${case_dir}" "${survivor_leader_host}"
     local output_during
     output_during="$(topic_end_offset chaos_output)"
-    wait_for 'sink output advanced while the follower was offline' 60 \
+    wait_for 'emitter output advanced while the follower was offline' 60 \
         topic_progressed chaos_output "${output_during}" \
         || recovery_fail product 'the survivors did not deliver output while the follower was offline'
 
@@ -477,9 +477,9 @@ EOF
     local settled_ms="$(( $(epoch_ms) - start_requested_ms ))"
     local output_at_restart
     output_at_restart="$(topic_end_offset chaos_output)"
-    wait_for 'sink output advanced after the restart' "${stale_delivery_bound}" \
+    wait_for 'emitter output advanced after the restart' "${stale_delivery_bound}" \
         topic_progressed chaos_output "${output_at_restart}" \
-        || recovery_fail product 'sink output did not advance after the restart'
+        || recovery_fail product 'emitter output did not advance after the restart'
     outcome="$(configuration_change "${case_dir}" chaos_stale_after "${follower_host}" chaos_baseline \
         'CREATE RESOURCE chaos_stale_after;' "created resource 'chaos_stale_after'")"
     [[ "${outcome}" == acknowledged ]] \

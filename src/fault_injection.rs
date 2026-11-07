@@ -46,11 +46,13 @@ use nervix_recovery::NoReceiver as _;
 
 use crate::registry::SchedulerMode;
 
+mod application_progress;
 mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
 mod command_pause_point;
+mod command_reconciliation;
 mod command_reply;
 mod consensus;
 mod domain_clock;
@@ -60,6 +62,7 @@ mod entity_drain;
 #[cfg(test)]
 mod entity_drain_tests;
 mod execution;
+mod explicit_commit;
 mod handoff_gate_link;
 mod interest_visibility;
 mod listener_accept;
@@ -92,11 +95,14 @@ mod runtime_installation;
 mod session_backpressure;
 mod shutdown_handoff;
 mod standalone_transaction;
+mod subscription_response;
 #[cfg(test)]
 mod syslog_tests;
 mod transaction_cleanup;
 mod wasm_reset_publication;
 
+pub(crate) use application_progress::ApplicationProgressQuery;
+pub use application_progress::ApplicationProgressQueryError;
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
 use command_pause_point::CommandPausePoint;
@@ -221,10 +227,10 @@ struct FaultInjectionState {
     /// One-shot waits, keyed by a stopping node, that the leader spends before it releases the
     /// cordon that node's own graceful shutdown drain set.
     delayed_shutdown_cordon_releases: DashMap<ClusterNodeName, Duration, RandomState>,
-    /// Waits, keyed by an ingestor, that its source hosts spend between learning that a batch was
-    /// acknowledged through the graph and letting the source confirm the batch's positions on its
+    /// Waits, keyed by an ingestor, that its ingestor hosts spend between learning that a batch was
+    /// acknowledged through the graph and letting the connector confirm the batch's positions on its
     /// transport, as a transport slow to answer an acknowledgement would.
-    delayed_source_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
+    delayed_ingestor_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
     /// Waits, keyed by the node whose state is written, that a snapshot task spends before the last
     /// write it makes as that state stops, as storage slow to take a large checkpoint would: the
     /// snapshot task of each branch of a deduplicator or window processor once the branch stopped,
@@ -373,6 +379,9 @@ struct FaultInjectionState {
     leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
     wasm_state_reset_coordinators:
         DashMap<ClusterNodeName, mpsc::Sender<WasmStateResetRequest>, RandomState>,
+    /// Each running node's responder to the scenario's application progress queries.
+    application_progress_queries:
+        DashMap<ClusterNodeName, mpsc::Sender<ApplicationProgressQuery>, RandomState>,
 }
 
 pub(crate) struct WasmStateResetRequest {
@@ -528,7 +537,7 @@ impl Default for FaultInjection {
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 delayed_shutdown_cordon_releases: DashMap::default(),
-                delayed_source_confirmations: DashMap::default(),
+                delayed_ingestor_confirmations: DashMap::default(),
                 delayed_stopped_state_writes: DashMap::default(),
                 delayed_materialized_dependency_reads: DashMap::default(),
                 materialized_snapshot_fetch_holds: DashMap::default(),
@@ -587,6 +596,7 @@ impl Default for FaultInjection {
                 scheduler_mode: RwLock::new(SchedulerMode::default()),
                 leadership_transfers,
                 wasm_state_reset_coordinators: DashMap::default(),
+                application_progress_queries: DashMap::default(),
             }),
         }
     }
@@ -1215,13 +1225,13 @@ impl FaultInjection {
             .insert(stopping_node, delay);
     }
 
-    /// Makes every source host of `ingestor` wait `delay` after a batch was acknowledged through
-    /// the graph before its source confirms the batch's positions on its transport, as a transport
+    /// Makes every ingestor host of `ingestor` wait `delay` after a batch was acknowledged through
+    /// the graph before its connector confirms the batch's positions on its transport, as a transport
     /// slow to answer an acknowledgement would. A host reads the delay as it starts, so a scenario
     /// arms it before the ingestor starts.
-    pub fn delay_source_confirmation(&self, ingestor: DomainNodeRef, delay: Duration) {
+    pub fn delay_ingestor_confirmation(&self, ingestor: DomainNodeRef, delay: Duration) {
         self.inner
-            .delayed_source_confirmations
+            .delayed_ingestor_confirmations
             .insert(ingestor, delay);
     }
 
@@ -1263,42 +1273,6 @@ impl FaultInjection {
             },
             Arc::new(TestPause::default()),
         );
-    }
-
-    /// Holds every revision-query reply from this node until the scenario releases it. Local
-    /// revision publication and gossip continue while the replies retain their sampled values.
-    pub fn pause_application_revision_responses_from(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::ApplicationRevisionResponse(node_id));
-    }
-
-    pub async fn wait_for_application_revision_response_pause(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
-            node_id.clone(),
-        ))
-        .await;
-    }
-
-    pub fn release_application_revision_responses_from(&self, node_id: &ClusterNodeName) {
-        self.release_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
-            node_id.clone(),
-        ));
-    }
-
-    pub(crate) async fn pause_application_revision_response_if_armed(
-        &self,
-        node_id: &ClusterNodeName,
-    ) {
-        let point = CommandPausePoint::ApplicationRevisionResponse(node_id.clone());
-        let Some(pause) = self
-            .inner
-            .command_pauses
-            .get(&point)
-            .map(|pause| pause.value().clone())
-        else {
-            return;
-        };
-        pause.reach();
-        pause.wait_until_released().await;
     }
 
     pub fn fail_health_responses_from(&self, responding_node: ClusterNodeName) {
@@ -1472,21 +1446,6 @@ impl FaultInjection {
 
     pub fn release_relocation_publication_pause(&self, domain: &DomainName) {
         self.release_command_pause(&CommandPausePoint::RelocationPublication(domain.clone()));
-    }
-
-    /// Holds the next completed command after its result exists but before either public session
-    /// transport can deliver it.
-    pub fn pause_command_response_delivery_on(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::ResponseDelivery(node_id));
-    }
-
-    pub async fn wait_for_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()))
-            .await;
-    }
-
-    pub fn release_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
-        self.release_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()));
     }
 
     pub fn release_all_command_pauses(&self) {
@@ -2210,8 +2169,8 @@ impl FaultInjection {
         Some(delay)
     }
 
-    pub(crate) fn source_confirmation_delay(&self, ingestor: &DomainNodeRef) -> Option<Duration> {
-        let delay = self.inner.delayed_source_confirmations.get(ingestor)?;
+    pub(crate) fn ingestor_confirmation_delay(&self, ingestor: &DomainNodeRef) -> Option<Duration> {
+        let delay = self.inner.delayed_ingestor_confirmations.get(ingestor)?;
         Some(*delay)
     }
 
@@ -2265,11 +2224,6 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::ReferenceLookup(node_id.clone()))
-            .await;
-    }
-
-    pub(crate) async fn pause_command_response_delivery_if_armed(&self, node_id: &ClusterNodeName) {
-        self.pause_command_if_armed(CommandPausePoint::ResponseDelivery(node_id.clone()))
             .await;
     }
 

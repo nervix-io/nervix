@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Kafka consumer configuration, polling, headers and metadata, partition assignment,
 //!   offset acknowledgement, partition inspection, consumer retirement, and the opaque services
-//!   through which a ingestor reads and advances host-owned domain offsets.
+//!   through which an ingestor reads and advances host-owned domain offsets.
 //! - **Depends on.** The connector contract, Kafka vocabulary values, the bounded executor,
 //!   the primitive boundary, `error-stack` and `rust-rdkafka`.
 //! - **Must not know.** Runtime offset-state types, domain execution maps, relays, branches,
@@ -147,6 +147,14 @@ pub trait KafkaDomainOffsetServices: Send + Sync + 'static {
     /// Accepts the explicit generation start through persistence and its replica boundary.
     /// An already accepted start retains its canonical positions. Subsequent initialization of
     /// that same generation returns `Resume` with those recorded positions.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an explicit start is selected and made durable before the driver polls \
+                      records; normal acknowledgements call commit instead"
+        )
+    )]
     async fn reset(
         &self,
         generation: u64,
@@ -185,7 +193,7 @@ impl KafkaDomainOffsetHost {
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
-            "Kafka resume installs its exact domain-offset placement before polling; the source \
+            "Kafka resume installs its exact domain-offset placement before polling; the ingestor \
              retains the resulting position",
             self.inner.services.initialization(partitions)
         )
@@ -197,7 +205,13 @@ impl KafkaDomainOffsetHost {
         generation: u64,
         positions: Vec<KafkaOffsetPosition>,
     ) -> KafkaDomainOffsetResult<()> {
-        self.inner.services.reset(generation, positions).await
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "Kafka initialization selects one explicit starting cut before polling; recurring \
+             record acknowledgements call commit instead",
+            self.inner.services.reset(generation, positions)
+        )
+        .await
     }
 
     pub async fn commit(&self, position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()> {
@@ -295,9 +309,9 @@ pub struct KafkaTopicIngestorPlan {
 
 #[derive(Debug, Error)]
 pub enum KafkaTopicIngestorError {
-    #[error("the {connector} source cannot admit its control call", connector = ConnectorKind::Kafka)]
+    #[error("the {connector} ingestor cannot admit its control call", connector = ConnectorKind::Kafka)]
     ControlAdmission,
-    #[error("the {connector} source control call could not run", connector = ConnectorKind::Kafka)]
+    #[error("the {connector} ingestor control call could not run", connector = ConnectorKind::Kafka)]
     ControlExecution,
     #[error("the {connector} control call did not finish within socket.timeout.ms {bound}", connector = ConnectorKind::Kafka, bound = humantime::format_duration(*timeout))]
     ControlTimeout { timeout: Duration },
@@ -1100,7 +1114,8 @@ enum DomainStart {
         offsets: BTreeMap<i32, i64>,
         unrecorded: BTreeSet<i32>,
     },
-    /// A new start point places every partition of the topic, replacing the domain offsets.
+    /// A new start point places every topic partition in one canonical cut before any instance
+    /// consumes its assigned slice.
     Reset { offsets: BTreeMap<i32, i64> },
 }
 
@@ -1123,9 +1138,13 @@ impl DomainStart {
                 Self::resume(consumer, scheduled, positions, &unrecorded_start, budget)
             }
             KafkaDomainOffsetStart::At(timestamp) => {
-                let partitions = scheduled.partitions.iter().copied().collect();
-                let offsets =
-                    offsets_at(consumer, scheduled.topic, &partitions, timestamp, budget)?;
+                let offsets = offsets_at(
+                    consumer,
+                    scheduled.topic,
+                    &scheduled.partitions.iter().copied().collect(),
+                    timestamp,
+                    budget,
+                )?;
                 Ok(Self::Reset { offsets })
             }
         }

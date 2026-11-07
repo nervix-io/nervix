@@ -48,7 +48,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE RELAY shipment_facts SCHEMA shipment_fact UNBRANCHED;
       CREATE VHOST edge membership-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT shipment_ingress ON edge PATH '/shipments';
-      CREATE HTTP ENDPOINT INGESTOR shipment_source
+      CREATE HTTP ENDPOINT INGESTOR shipment_ingestor
         FROM shipment_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shipment_batch_codec
         TO shipments
@@ -132,7 +132,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE RELAY routed_parcels SCHEMA parcel UNBRANCHED;
       CREATE VHOST edge parcel-filters-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT parcel_ingress ON edge PATH '/parcels';
-      CREATE HTTP ENDPOINT INGESTOR parcel_source
+      CREATE HTTP ENDPOINT INGESTOR parcel_ingestor
         FROM parcel_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parcel_batch_codec
         FILTER WHERE input.id NOT IN ('heartbeat', 'ping')
@@ -229,7 +229,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE RELAY meter_errors SCHEMA meter_error UNBRANCHED;
       CREATE VHOST edge extrema-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT meter_ingress ON edge PATH '/meters';
-      CREATE HTTP ENDPOINT INGESTOR meter_source
+      CREATE HTTP ENDPOINT INGESTOR meter_ingestor
         FROM meter_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING meter_batch_codec
         TO meters
@@ -346,7 +346,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
         DECODE USING tier_codec;
       CREATE VHOST edge tiers-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT order_ingress ON edge PATH '/orders';
-      CREATE HTTP ENDPOINT INGESTOR order_source
+      CREATE HTTP ENDPOINT INGESTOR order_ingestor
         FROM order_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_line_batch_codec
         TO order_lines
@@ -422,7 +422,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE RELAY inference_results SCHEMA inference_result UNBRANCHED;
       CREATE VHOST edge infer-membership-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/values';
-      CREATE HTTP ENDPOINT INGESTOR banded_value_source
+      CREATE HTTP ENDPOINT INGESTOR banded_value_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING banded_value_batch_codec
         TO banded_values

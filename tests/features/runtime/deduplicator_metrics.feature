@@ -28,7 +28,7 @@ Feature: Deduplicator metrics
         CREATE RELAY deduped_txns SCHEMA transaction BRANCHED BY by_dedup_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT dedup_metrics_ingress ON edge PATH '/dedup-metrics';
-        CREATE HTTP ENDPOINT INGESTOR dedup_metrics_source
+        CREATE HTTP ENDPOINT INGESTOR dedup_metrics_ingestor
         FROM dedup_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO raw_txns

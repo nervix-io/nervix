@@ -75,12 +75,12 @@ Feature: Interconnection observability
       };
       CREATE VHOST edge observability-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR source
+      CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+      CREATE ZEROMQ PUSH EMITTER emitter_output FROM input
         TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

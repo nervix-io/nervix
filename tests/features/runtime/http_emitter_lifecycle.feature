@@ -1,6 +1,6 @@
 Feature: HTTP REQUEST emitter lifecycle
   A configuration change drains requests with the client and request fields that admitted them.
-  A stopped emitter retains no prepared HTTP request; an attached source decides redelivery.
+  A stopped emitter retains no prepared HTTP request; an attached ingestor decides redelivery.
 
   @http_emitter_lifecycle
   Scenario Outline: ALTER drains an admitted HTTP request before changing its destination
@@ -26,7 +26,7 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-lifecycle-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -104,7 +104,7 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-drain-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -184,7 +184,7 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE RELAY rejected_requests SCHEMA rejected UNBRANCHED;
       CREATE VHOST edge http-body-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -371,7 +371,7 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE RELAY backup SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-impact-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -482,7 +482,7 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR source
+      CREATE KAFKA TOPIC INGESTOR ingestor
         FROM kafka_main TOPIC 'http_recovery_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'http_recovery_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
@@ -543,7 +543,7 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-shutdown-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -599,7 +599,7 @@ Feature: HTTP REQUEST emitter lifecycle
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR source
+      CREATE KAFKA TOPIC INGESTOR ingestor
         FROM kafka_main TOPIC 'http_stop_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'http_stop_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s

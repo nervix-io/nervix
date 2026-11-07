@@ -48,6 +48,7 @@ fn unresponsive_task() -> JoinHandle<()> {
 fn idle_execution(domain: &DomainName) -> DomainExecution {
     let (shutdown, _) = watch::channel(false);
     DomainExecution {
+        mqtt_ingestor_clients: HashMap::default(),
         revision: test_execution_revision(domain, Vec::new()),
         start_version: 0,
         domain_clock: test_domain_clock(domain),
@@ -305,7 +306,7 @@ impl PublishedWindow {
             },
             kind: ModelKind::WindowProcessor,
             identifier: named("latency_window"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let state = runtime
@@ -623,7 +624,7 @@ impl AppliedRelay {
             },
             kind: ModelKind::Relay,
             identifier: named("latest_orders"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let schema = test_schema(&[("status", ParseAsType::String)]);

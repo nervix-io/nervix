@@ -126,7 +126,7 @@ Feature: Reingestor repartitioning
           'bind' = 'false'
         };
 
-      CREATE ZEROMQ PUSH EMITTER source_notifications_out FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE ZEROMQ PUSH EMITTER ingestor_notifications_out FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -218,7 +218,7 @@ Feature: Reingestor repartitioning
           'bind' = 'false'
         };
 
-      CREATE ZEROMQ PUSH EMITTER source_notifications_out FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE ZEROMQ PUSH EMITTER ingestor_notifications_out FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -492,7 +492,7 @@ Feature: Reingestor repartitioning
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_reading_sensor;
       CREATE VHOST edge http-{{test_id}}-reingestor-filters.example.com;
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings

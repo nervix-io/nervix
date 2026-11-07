@@ -249,7 +249,7 @@ Feature: Relay partitions
       """
       capacity: 3
       """
-    When these Plexus commands fail with "is divided into partitions that each have their own owner"
+    When these Plexus commands fail with "has multiple execution units; RELOCATE requires a member with one owner"
       """
       RELOCATE RELAY notifications ONTO NODE node-1 IGNORE PREFERENCES;
       """

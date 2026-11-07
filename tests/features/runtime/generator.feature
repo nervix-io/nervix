@@ -168,7 +168,7 @@ Feature: Generator node
       CREATE RELAY generated_notifications SCHEMA generated_notification BRANCHED BY tenant_branch;
       CREATE VHOST edge generator-lru-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR notification_source FROM ingress MODE NO ACK
+      CREATE HTTP ENDPOINT INGESTOR notification_ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TIMESTAMP NOW
         TO notifications INHERIT ALL BRANCHED BY tenant_branch
           SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -604,7 +604,7 @@ Feature: Generator node
       CREATE RELAY generated_values SCHEMA generated_value UNBRANCHED;
       CREATE VHOST edge generator-snapshot-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT generator_source_endpoint ON edge PATH '/values';
-      CREATE HTTP ENDPOINT INGESTOR generator_source
+      CREATE HTTP ENDPOINT INGESTOR generator_ingestor
         FROM generator_source_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_source_codec
         TIMESTAMP NOW

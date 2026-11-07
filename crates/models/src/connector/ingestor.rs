@@ -2,16 +2,16 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The union of transport source Models and the kind that names every source pair,
-//!   the declaration each source entity makes whatever its statement says, the contract the body
-//!   of a source statement fulfils, the union of the alterations an `ALTER … INGESTOR` statement
+//! - **Owns.** The union of transport ingestor Models and the kind that names every ingestor pair,
+//!   the declaration each ingestor entity makes whatever its statement says, the contract the body
+//!   of an ingestor statement fulfils, the union of the alterations an `ALTER … INGESTOR` statement
 //!   holds, and the quiesce, delivery and acknowledgement vocabulary those bodies share.
 //! - **Depends on.** The connector modules' entity Models and alterations, the metadata
 //!   namespaces, the shapes a declaration is written in, and the names a body references.
-//! - **Must not know.** How a source is opened, polled, quiesced or acknowledged at run time.
+//! - **Must not know.** How an ingestor is opened, polled, quiesced or acknowledged at run time.
 //!
 //! The head of an ingestor statement names the pair it reads, so an alteration holds the
-//! operations of one pair's entity Model and can set no source of another pair.
+//! operations of one pair's entity Model and can set no ingestor of another pair.
 
 #![cfg_attr(
     nervix_lint,
@@ -23,7 +23,11 @@ use std::{
     num::{NonZeroU16, NonZeroU64},
 };
 
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use meticulous::OptionExt as _;
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
+    primitive::ArchivedU64, rancor::Fallible,
+};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter};
 
@@ -46,6 +50,94 @@ use crate::{
     AlterIngestorError, ClientName, ConnectorKind, EndpointName, EndpointType, IngestorInput,
     IngestorMetadataDeclaration, Model, ModelKind, ModelName, RetryPolicy,
 };
+
+/// How an entity may instantiate its intake. Partition-following entities also accept a fixed
+/// count; a single ingestor has no `INSTANCES` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum IngestorInstancingCapability {
+    Single,
+    Instances,
+    PerPartition,
+}
+
+impl IngestorInstancingCapability {
+    pub const fn permits(self, instances: IngestorInstances) -> bool {
+        matches!(
+            (self, instances),
+            (
+                Self::Instances | Self::PerPartition,
+                IngestorInstances::Count(_)
+            ) | (Self::PerPartition, IngestorInstances::PerPartition)
+        )
+    }
+}
+
+/// The intake units an instance-capable ingestor declares. Fixed counts retain their full-width
+/// positive count; a partition declaration takes the constructed branch's cardinality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IngestorInstances {
+    Count(NonZeroU64),
+    PerPartition,
+}
+
+impl IngestorInstances {
+    pub const ONE: Self = Self::Count(NonZeroU64::MIN);
+
+    pub const fn choice(self) -> &'static str {
+        match self {
+            Self::Count(_) => "<count>",
+            Self::PerPartition => "PER PARTITION",
+        }
+    }
+
+    /// Zero encodes the partition-following form; every positive value encodes its exact count.
+    fn archive_count(self) -> u64 {
+        match self {
+            Self::Count(count) => count.get(),
+            Self::PerPartition => 0,
+        }
+    }
+}
+
+impl Archive for IngestorInstances {
+    type Archived = ArchivedU64;
+    type Resolver = <u64 as Archive>::Resolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        self.archive_count().resolve(resolver, out);
+    }
+}
+
+impl<S: Fallible + ?Sized> RkyvSerialize<S> for IngestorInstances
+where
+    u64: RkyvSerialize<S>,
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        RkyvSerialize::serialize(&self.archive_count(), serializer)
+    }
+}
+
+impl<D: Fallible + ?Sized> RkyvDeserialize<IngestorInstances, D> for ArchivedU64 {
+    fn deserialize(&self, _deserializer: &mut D) -> Result<IngestorInstances, D::Error> {
+        let count = self.to_native();
+        Ok(match count {
+            0 => IngestorInstances::PerPartition,
+            _ => IngestorInstances::Count(
+                NonZeroU64::new(count).verified("the partition-following zero case returned above"),
+            ),
+        })
+    }
+}
+
+impl Display for IngestorInstances {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Count(count) => count.fmt(f),
+            Self::PerPartition => f.write_str("PER PARTITION"),
+        }
+    }
+}
 
 #[derive(
     Debug,
@@ -146,7 +238,7 @@ impl IngestQuiesceKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeclaredQuiesce {
     pub kind: IngestQuiesceKind,
-    /// The choices of the entity's options a statement must make for its source to honor this
+    /// The choices of the entity's options a statement must make for its ingestor to honor this
     /// mode, such as the persistent session at QoS 1 an MQTT broker keeps messages for.
     pub requires: &'static [ChoiceRequirement],
 }
@@ -259,10 +351,10 @@ impl DeclaredDelivery {
     }
 }
 
-/// The acknowledgement a source's delivery mode declares, with its durations as written.
+/// The acknowledgement an ingestor's delivery mode declares, with its durations as written.
 ///
 /// Every delivery mode states its acknowledgement through this one shape, so validating a mode and
-/// parsing it into the policy a source runs read the same declaration.
+/// parsing it into the policy an ingestor runs read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestAcknowledgement<'a> {
     /// No message waits on an acknowledgement.
@@ -283,7 +375,7 @@ pub enum IngestAcknowledgement<'a> {
     },
 }
 
-/// What kind of model the body of a source statement names to read from.
+/// What kind of model the body of an ingestor statement names to read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IngestorReferenceKind {
     /// A configured client of one connector.
@@ -350,7 +442,7 @@ impl IngestAcknowledgement<'_> {
     }
 }
 
-/// Where a source starts when the position it keeps on its broker holds nothing it can use: an
+/// Where an ingestor starts when the position it keeps on its broker holds nothing it can use: an
 /// owned Pulsar subscription's new cursor, or a Kafka consumer group's partition without a usable
 /// committed offset. A usable position prevails.
 #[derive(
@@ -394,7 +486,7 @@ impl EndpointIngestMode {
     }
 }
 
-/// The model the body of one transport source names to read from.
+/// The model the body of one transport ingestor names to read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestorReference<'a> {
     Client(&'a ClientName),
@@ -410,14 +502,14 @@ impl IngestorReference<'_> {
     }
 }
 
-/// What a source's message positions still mean once the connection that delivered them is gone,
+/// What an ingestor's message positions still mean once the connection that delivered them is gone,
 /// and so what a host does with an acknowledgement or a rejection it could not complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum PositionClass {
-    /// A position names a place in a log the source can seek back to on any connection, such as
+    /// A position names a place in a log the ingestor can seek back to on any connection, such as
     /// a Kafka offset. A rejection that failed is retried with the same positions after the
-    /// source reconnects, before it reads again.
+    /// ingestor reconnects, before it reads again.
     Replayable,
     /// A position names one delivery on one connection, such as a RabbitMQ delivery tag, an SQS
     /// receipt handle or an MQTT packet identifier. Once that connection is lost the broker
@@ -425,12 +517,12 @@ pub enum PositionClass {
     /// acknowledgement or a rejection still pending for it is discarded and counted as a
     /// transport redelivery.
     BrokerRedelivered,
-    /// The source keeps no position: nothing is acknowledged or rejected on the transport, so
+    /// The ingestor keeps no position: nothing is acknowledged or rejected on the transport, so
     /// nothing is ever pending.
     None,
 }
 
-/// How far a source's transport has confirmed its positions once acknowledging them returns.
+/// How far an ingestor's transport has confirmed its positions once acknowledging them returns.
 ///
 /// The host reports no progress for an acknowledged batch until acknowledging it returns, so this
 /// is what that progress means on the transport.
@@ -444,18 +536,20 @@ pub enum AcknowledgementConfirmation {
     /// The protocol does not answer an acknowledgement, and acknowledging returns once it is
     /// written to the connection, such as a RabbitMQ `basic.ack` or an MQTT `PUBACK`.
     Written,
-    /// The source acknowledges nothing on its transport.
+    /// The ingestor acknowledges nothing on its transport.
     None,
 }
 
-/// What every source of one entity declares, whatever its statement says: everything a statement
+/// What every ingestor of one entity declares, whatever its statement says: everything a statement
 /// can say about it, and what it does with what a statement says.
 ///
 /// This lives in the vocabulary so the registry can validate an ingestor, and a host can prepare
-/// one, without naming the connector crate that implements its source. The grammar, completion,
+/// one, without naming the connector crate that implements its ingestor. The grammar, completion,
 /// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestorEntityCapabilities {
+    /// The instancing forms its intake can honor.
+    pub instancing: IngestorInstancingCapability,
     /// How its messages carry the transport headers that `read_header` and `read_headers` read,
     /// or `None` where they carry none.
     pub headers: Option<HeaderModel>,
@@ -514,7 +608,7 @@ impl IngestorEntityCapabilities {
             .find(|option| option.keywords == keywords)
     }
 
-    /// What a statement can make every source of the entity do at run time: deliver in each
+    /// What a statement can make every ingestor of the entity do at run time: deliver in each
     /// declared mode, write each option or choice, read each typed metadata field, and report a
     /// stalled peer within each deadline key its waits name.
     pub fn runtime_capabilities(&self) -> Vec<RuntimeCapability> {
@@ -532,7 +626,7 @@ impl IngestorEntityCapabilities {
         capabilities
     }
 
-    /// Whether a source of this entity whose body is `body` can honor `quiesce`: the entity
+    /// Whether an ingestor of this entity whose body is `body` can honor `quiesce`: the entity
     /// declares the mode, and the body makes every option choice the declaration requires for
     /// it.
     pub fn honors_quiesce(
@@ -540,10 +634,18 @@ impl IngestorEntityCapabilities {
         quiesce: &IngestQuiesceMode,
         body: &dyn IngestorEntityBody,
     ) -> bool {
-        if !body.acknowledgement().kind().allows_quiesce(quiesce.kind()) {
+        self.honors_quiesce_kind(quiesce.kind(), body)
+    }
+
+    pub fn honors_quiesce_kind(
+        &self,
+        kind: IngestQuiesceKind,
+        body: &dyn IngestorEntityBody,
+    ) -> bool {
+        if !body.acknowledgement().kind().allows_quiesce(kind) {
             return false;
         }
-        let Some(declared) = self.declared_quiesce(quiesce.kind()) else {
+        let Some(declared) = self.declared_quiesce(kind) else {
             return false;
         };
         ChoiceRequirement::all_met(declared.requires, &|option| body.chosen(option))
@@ -601,7 +703,7 @@ pub struct UnmetDeliveryRequirement {
     pub written: Vec<WrittenChoice>,
 }
 
-/// The declaration one source entity's Model makes for every statement of that entity.
+/// The declaration one ingestor entity's Model makes for every statement of that entity.
 pub trait IngestorDeclaration {
     const CAPABILITIES: IngestorEntityCapabilities;
 
@@ -611,7 +713,7 @@ pub trait IngestorDeclaration {
     /// it reads one way, or by none.
     const ALTERNATIVE_LOCATORS: &'static [LocatorDeclaration] = &[];
 
-    /// Whether this source can honor `quiesce`, as its entity declares.
+    /// Whether this ingestor can honor `quiesce`, as its entity declares.
     fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool
     where
         Self: IngestorEntityBody + Sized,
@@ -619,7 +721,7 @@ pub trait IngestorDeclaration {
         Self::CAPABILITIES.honors_quiesce(quiesce, self)
     }
 
-    /// The requirement of this source's delivery mode its statement leaves unmet, as its entity
+    /// The requirement of this ingestor's delivery mode its statement leaves unmet, as its entity
     /// declares the mode.
     fn unmet_delivery(&self) -> Option<UnmetDeliveryRequirement>
     where
@@ -630,9 +732,14 @@ pub trait IngestorDeclaration {
     }
 }
 
-/// What the body of one transport source statement states: what it reads through, how it behaves
+/// What the body of one transport ingestor statement states: what it reads through, how it behaves
 /// while its ingestor is quiesced, and what its delivery mode acknowledges.
 pub trait IngestorEntityBody {
+    /// The declared instance units, absent for an entity that executes as one ingestor.
+    fn instances(&self) -> Option<IngestorInstances> {
+        None
+    }
+
     /// The client or endpoint the body names.
     fn reference(&self) -> IngestorReference<'_>;
 
@@ -647,8 +754,11 @@ pub trait IngestorEntityBody {
     /// The name of the choice this body makes, or holds by default, for the declared option its
     /// entity opens with `option`. A body answers for the options a declared requirement names;
     /// its entity's declaration states which those are.
-    fn chosen(&self, _option: &str) -> Option<&'static str> {
-        None
+    fn chosen(&self, option: &str) -> Option<&'static str> {
+        match option {
+            "INSTANCES" => self.instances().map(IngestorInstances::choice),
+            _ => None,
+        }
     }
 
     /// The client the body reads through, for an entity that reads through one: what
@@ -658,7 +768,7 @@ pub trait IngestorEntityBody {
     }
 }
 
-/// The pair one entity Model is a source of, which the head of its ingestor's statements names.
+/// The connector/entity pair this Model implements, named by its statement head.
 pub trait IngestorEntityModel {
     const KIND: IngestorEntityKind;
 
@@ -687,32 +797,32 @@ pub trait IngestorEntityChange {
     fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError>;
 }
 
-/// A source Model an alteration's `SET FROM` states, and how the alteration reaches the stored
+/// An ingestor Model an alteration's `SET FROM` states, and how the alteration reaches the stored
 /// input of the ingestor it changes, which reads this Model's pair.
 ///
 /// The enclosing alteration compares the stored pair with the pair its head names before it
 /// applies any operation, so the stored input always holds a Model of this pair.
 pub(crate) trait AlteredIngestorEntity: IngestorEntityModel + Clone {
-    /// The source Model `input` reads.
+    /// The ingestor Model `input` reads.
     fn entity_of_mut(input: &mut IngestorInput) -> &mut Self;
 
-    /// Makes this Model the source `input` reads.
+    /// Makes this Model the ingestor `input` reads.
     fn set_into(&self, input: &mut IngestorInput) {
         *Self::entity_of_mut(input) = self.clone();
     }
 
-    /// Sets the quiesce mode of the source `input` reads. Whether its pair honors the mode beside
+    /// Sets the quiesce mode of the ingestor `input` reads. Whether its pair honors the mode beside
     /// the rest of the body is a question for the complete result, once every operation applied.
     fn set_quiesce_of(
         input: &mut IngestorInput,
         quiesce: IngestQuiesceMode,
     ) -> error_stack::Result<(), AlterIngestorError>;
 
-    /// The client the source `input` reads through, where its pair reads through one.
+    /// The client the ingestor `input` reads through, where its pair reads through one.
     fn client_of_mut(input: &mut IngestorInput) -> Option<&mut ClientName>;
 }
 
-/// What the kind of one connector's source entities answers for each of them.
+/// What the kind of one connector's ingestor entities answers for each of them.
 pub trait IngestorEntityMetadata {
     fn connector(&self) -> ConnectorKind;
 
@@ -722,7 +832,7 @@ pub trait IngestorEntityMetadata {
     /// The name of the pair: the connector's keyword, then the entity's.
     fn phrase(&self) -> &'static str;
 
-    /// The label a form shows for a source of this entity.
+    /// The label a form shows for an ingestor of this entity.
     fn form_label(&self) -> &'static str;
 
     fn capabilities(&self) -> IngestorEntityCapabilities;
@@ -736,10 +846,10 @@ entity_union! {
     /// An external transport an ingestor reads, nested by the connector that serves it and the
     /// entity it consumes.
     ///
-    /// A client source is not one of these: its batches need no codec, so
+    /// A client ingestor is not one of these: its batches need no codec, so
     /// [`IngestorInput`](crate::IngestorInput) holds it beside the transport contract instead.
     pub enum IngestorEntity as IngestorEntityBody;
-    /// The connector and entity of a source, as capability decisions read them before an
+    /// The connector and entity of an ingestor, as capability decisions read them before an
     /// ingestor is fully parsed.
     pub enum IngestorEntityKind as IngestorEntityMetadata;
     kinds {
@@ -763,7 +873,7 @@ entity_union! {
 
 ingestor_alteration_union! {
     /// The operations of one `ALTER <CONNECTOR> <ENTITY> INGESTOR` statement, nested by the pair
-    /// its head names, so its `SET FROM` can only state a source of that pair.
+    /// its head names, so its `SET FROM` can only state an ingestor of that pair.
     pub enum IngestorAlteration;
     Client(ClientIngestorAlteration),
     Http(HttpRequestIngestorAlteration),
@@ -788,12 +898,12 @@ impl Display for IngestorEntityKind {
 }
 
 impl IngestorEntityKind {
-    /// The connector that serves this source.
+    /// The connector that serves this ingestor.
     pub fn connector(self) -> ConnectorKind {
         self.entity().connector()
     }
 
-    /// The keyword that names the entity this source consumes.
+    /// The keyword that names the entity this ingestor consumes.
     pub fn entity_keyword(self) -> &'static str {
         self.entity().keyword()
     }
@@ -803,7 +913,7 @@ impl IngestorEntityKind {
         self.entity().phrase()
     }
 
-    /// What every source of this pair declares.
+    /// What every ingestor of this pair declares.
     pub fn capabilities(self) -> IngestorEntityCapabilities {
         self.entity().capabilities()
     }
@@ -834,7 +944,7 @@ impl IngestorEntityKind {
         self.capabilities().reads_headers()
     }
 
-    /// The connector a client this source reads through must configure. A source that names an
+    /// The connector a client this ingestor reads through must configure. An ingestor that names an
     /// endpoint or a schema reads through no client.
     pub fn client_connector(self) -> Option<ConnectorKind> {
         self.capabilities().reference.client_connector()
@@ -842,7 +952,11 @@ impl IngestorEntityKind {
 }
 
 impl IngestorEntity {
-    /// The connector that serves this source.
+    pub fn instances(&self) -> Option<IngestorInstances> {
+        self.body().instances()
+    }
+
+    /// The connector that serves this ingestor.
     pub fn connector(&self) -> ConnectorKind {
         self.kind().connector()
     }
@@ -851,12 +965,12 @@ impl IngestorEntity {
         self.kind().capabilities().executes_on_every_cluster_node
     }
 
-    /// The client or endpoint this source's body names.
+    /// The client or endpoint this ingestor's body names.
     pub fn reference(&self) -> IngestorReference<'_> {
         self.body().reference()
     }
 
-    /// The name of the client or endpoint this source reads through.
+    /// The name of the client or endpoint this ingestor reads through.
     pub fn source_ref(&self) -> ModelName {
         self.reference().name()
     }
@@ -866,13 +980,13 @@ impl IngestorEntity {
         self.kind().capabilities().reference.model_kind()
     }
 
-    /// Whether the messages this source reads carry transport headers that `read_header` and
+    /// Whether the messages this ingestor reads carry transport headers that `read_header` and
     /// `read_headers` can read.
     pub fn reads_headers(&self) -> bool {
         self.kind().reads_headers()
     }
 
-    /// The acknowledgement this source's delivery mode declares. A source whose statement declares
+    /// The acknowledgement this ingestor's delivery mode declares. An ingestor whose statement declares
     /// no delivery mode acknowledges nothing.
     pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         self.body().acknowledgement()
@@ -882,7 +996,7 @@ impl IngestorEntity {
         self.body().quiesce()
     }
 
-    /// Whether this source can honor `quiesce`: its entity declares the mode, and this source's
+    /// Whether this ingestor can honor `quiesce`: its entity declares the mode, and this ingestor's
     /// statement makes every option choice the declaration requires for it.
     pub fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
         self.kind()
@@ -890,7 +1004,13 @@ impl IngestorEntity {
             .honors_quiesce(quiesce, self.body())
     }
 
-    /// The requirement of this source's delivery mode its statement leaves unmet: its entity
+    pub fn supports_quiesce_kind(&self, kind: IngestQuiesceKind) -> bool {
+        self.kind()
+            .capabilities()
+            .honors_quiesce_kind(kind, self.body())
+    }
+
+    /// The requirement of this ingestor's delivery mode its statement leaves unmet: its entity
     /// declares option choices the mode needs written beside it, and the statement does not make
     /// every one.
     pub fn unmet_delivery(&self) -> Option<UnmetDeliveryRequirement> {
@@ -900,13 +1020,13 @@ impl IngestorEntity {
             .unmet_delivery(kind, delivery, &|option| self.chosen(option))
     }
 
-    /// The choice this source's statement makes, or holds by default, for the declared option
+    /// The choice this ingestor's statement makes, or holds by default, for the declared option
     /// opened by `option`.
     pub fn chosen(&self, option: &str) -> Option<&'static str> {
         self.body().chosen(option)
     }
 
-    /// Makes `quiesce` the mode this source holds while its ingestor is paused. Whether the source
+    /// Makes `quiesce` the mode this ingestor holds while it is paused. Whether the ingestor
     /// honors it beside the rest of its body is checked on the complete Model.
     pub fn set_quiesce(&mut self, quiesce: IngestQuiesceMode) {
         *self.body_mut().quiesce_mut() = quiesce;

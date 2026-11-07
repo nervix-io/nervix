@@ -336,7 +336,7 @@ Feature: Cluster scheduling
           'bootstrap.servers' = '{{kafka_addr}}'
         };
 
-      CREATE KAFKA TOPIC INGESTOR source_logs
+      CREATE KAFKA TOPIC INGESTOR ingestor_logs
         FROM kafka_main TOPIC 'deduplicator_describe_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_deduplicator_describe_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
@@ -438,7 +438,7 @@ Feature: Cluster scheduling
           'bootstrap.servers' = '{{kafka_addr}}'
         };
 
-      CREATE KAFKA TOPIC INGESTOR source_logs
+      CREATE KAFKA TOPIC INGESTOR ingestor_logs
         FROM kafka_main TOPIC 'scheduled_dedup_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_scheduled_dedup_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
@@ -457,7 +457,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      - domain={{domain}} kind=ingestor name=ingestor_logs unit=instance:0 owner=node-2
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -481,7 +481,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      - domain={{domain}} kind=ingestor name=ingestor_logs unit=instance:0 owner=node-2
       """
     And the last command output contains
       """
@@ -715,7 +715,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-1
+      - domain={{domain}} kind=ingestor name=kafka_notifications unit=instance:0 owner=node-1
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -725,7 +725,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-2
+      - domain={{domain}} kind=ingestor name=kafka_notifications unit=instance:0 owner=node-2
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -756,7 +756,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-2
+      - domain={{domain}} kind=ingestor name=kafka_notifications unit=instance:0 owner=node-2
       """
     And the last command output contains
       """
@@ -806,7 +806,7 @@ Feature: Cluster scheduling
     And the last command output contains
       """
       quiesce level: ENTITY_PAUSE
-      - kind=ingestor name=kafka_notifications from=node-2 to=
+      - kind=ingestor name=kafka_notifications unit=instance:0 from=node-2 to=
       """
     When these Plexus commands are executed on the leader node
       """
@@ -814,7 +814,7 @@ Feature: Cluster scheduling
       """
     Then the last command output does not contain
       """
-      - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-2
+      - domain={{domain}} kind=ingestor name=kafka_notifications unit=instance:0 owner=node-2
       """
     And the relay subscription does not receive a payload within "1s"
     And the observed broker does not receive a payload within "1s"
@@ -865,7 +865,7 @@ Feature: Cluster scheduling
           'bootstrap.servers' = '{{kafka_addr}}'
         };
 
-      CREATE KAFKA TOPIC INGESTOR source_logs
+      CREATE KAFKA TOPIC INGESTOR ingestor_logs
         FROM kafka_main TOPIC 'moved_dedup_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_moved_dedup_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
@@ -884,7 +884,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      - domain={{domain}} kind=ingestor name=ingestor_logs unit=instance:0 owner=node-2
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -934,7 +934,7 @@ Feature: Cluster scheduling
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      - domain={{domain}} kind=ingestor name=ingestor_logs unit=instance:0 owner=node-2
       """
     And the last command output contains
       """

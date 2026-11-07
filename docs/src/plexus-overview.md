@@ -38,6 +38,19 @@ transition checks and bootstrap seed rules.
 
 Core create statements:
 
+The `<json_type>` in a declared JSON wire schema is one of `string`, `number`, `integer`, `boolean`,
+or `array`. `DATETIME` uses `string` with an `RFC3339` codec rule, and `BYTES` uses `string` with a
+`BASE64` codec rule.
+
+The `<avro_type>` in a declared AVRO wire schema is one of `boolean`, `int`, `long`, `float`,
+`double`, `string`, `bytes`, or `array<avro_type>`, which names its item type at every depth. A JSON
+or CBOR `array` is bare; the codec's `ENCODE <field> AS ...` rule on a list field governs its
+innermost elements.
+
+The `<cbor_type>` in a declared CBOR wire schema is one of `integer`, `float`, `boolean`, `text`,
+`bytes`, or `array`. `DATETIME` uses `text` with an `RFC3339` codec rule, and `BYTES` uses native
+CBOR byte strings.
+
 ```plexus,ignore
 CREATE [IF NOT EXISTS] USER <name> WITH PASSWORD '<password>';
 
@@ -283,6 +296,10 @@ Completion offers each composed head as one item. Inspection and addressing use 
 kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`.
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
+
+`CREATE INFERENCER` may declare model-carried `STATE` between `INPUTS` and `OUTPUT SCHEMA`.
+The [Inferencer](processors.md#state-tensors) section defines its port pairs, fixed tensor shapes,
+initial expressions, per-branch invocation order and reset behavior.
 
 Domain creation may declare a placement default, and named placement rules may overlay paths in
 the active domain. Omission means `NEUTRAL`, which preserves ordinary scheduler heuristics. See

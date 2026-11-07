@@ -10,13 +10,19 @@
     nervix::context(outside, reason = "owns private keys of testing-only command pauses")
 )]
 
-use nervix_models::{ClusterNodeName, DomainName, DomainNodeRef, RestoreStep};
+use nervix_models::{
+    ClusterNodeName, CommandExecutionReference, DomainName, DomainNodeRef, RestoreStep,
+};
 
 use super::{DomainResumeBoundary, StandaloneTransactionBoundary};
 
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum CommandPausePoint {
+    ExplicitCommitFailure {
+        node: ClusterNodeName,
+        transaction_id: String,
+    },
     TransactionCleanup {
         node: ClusterNodeName,
         domain: DomainName,
@@ -38,11 +44,17 @@ pub(super) enum CommandPausePoint {
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ApplicationRevisionResponse(ClusterNodeName),
+    ApplicationProgressReport(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
+    Reconciliation {
+        node: ClusterNodeName,
+        reference: CommandExecutionReference,
+    },
     Finalization(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
+    SubscriptionResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
     ResourceSourceDiscovery(ClusterNodeName),
     RestoreStep {

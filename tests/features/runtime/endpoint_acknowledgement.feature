@@ -240,12 +240,12 @@ Feature: Acknowledged endpoint intake
       CREATE RELAY second_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge fanout-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR first_source
+      CREATE HTTP ENDPOINT INGESTOR first_ingestor
         FROM intake MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO first_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR second_source
+      CREATE HTTP ENDPOINT INGESTOR second_ingestor
         FROM intake MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO second_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

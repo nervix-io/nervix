@@ -69,12 +69,12 @@ use nervix_models::{
     ClusterNodeName, CodecName, CommandExecutionReference, CoordinationIdentity,
     CorrelationTimeoutAction, CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig,
     DomainName, DomainNodeRef, DomainNodeUnitRef, DomainState, EmitterName, EndpointName,
-    EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy,
-    GeneratorName, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestTimestampSource, IngestorName, KafkaPartitionSchedule,
-    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
-    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    EndpointType, EntityGateTargets, ErrorPolicies, FieldName, FieldPath, FlushPolicy,
+    GeneralErrorPolicy, GeneratorName, InferencerExecutionMode, InferencerTensorDeclaration,
+    IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource, IngestorName,
+    KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
+    MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef,
+    NodeUnitRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     OwnershipStateResetCause, ParseAsType, PartitionSeed, RelayName, RemoteAckOutcome,
     RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId,
     ResourceName, RetryPolicy, RouteConstruction, SchemaFingerprint, SignalingProtocolName,
@@ -264,6 +264,7 @@ mod ingestor_start;
 mod ingestors;
 mod kafka_offset_state;
 mod kafka_offset_transfer;
+mod kafka_start;
 mod local_drain;
 mod lookup_hash_map;
 mod lsm_sequence;
@@ -318,6 +319,10 @@ mod remote_ack_watch_charge;
 mod remote_dispatch;
 mod reorderer;
 mod resources;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod revision_index_inspection;
+mod stateful_inferencer;
 pub(crate) use resources::RuntimeResourceError;
 mod runtime_lifecycle;
 mod runtime_settings;
@@ -500,7 +505,7 @@ pub(in crate::runtime) use ingestor_quiesce::{
     IngestorQuiesceIntake, MemoryPressurePause,
 };
 use ingestor_quiesce::{
-    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, IngestorStatus,
+    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorInstanceReadiness, IngestorStatus,
     RuntimeReconnectStatus,
 };
 use ingestor_start::IngestorRuntime;

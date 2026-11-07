@@ -30,7 +30,7 @@ Feature: Domain-paced branch buffering
       CREATE HTTP ENDPOINT fast_buffering_endpoint
         ON edge
         PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR fast_buffering_source
+      CREATE HTTP ENDPOINT INGESTOR fast_buffering_ingestor
         FROM fast_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
@@ -117,7 +117,7 @@ Feature: Domain-paced branch buffering
       CREATE HTTP ENDPOINT fast_buffering_endpoint
         ON edge
         PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR fast_buffering_source
+      CREATE HTTP ENDPOINT INGESTOR fast_buffering_ingestor
         FROM fast_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
@@ -202,7 +202,7 @@ Feature: Domain-paced branch buffering
       CREATE HTTP ENDPOINT immediate_buffering_endpoint
         ON edge
         PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR immediate_buffering_source
+      CREATE HTTP ENDPOINT INGESTOR immediate_buffering_ingestor
         FROM immediate_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
@@ -278,7 +278,7 @@ Feature: Domain-paced branch buffering
       CREATE HTTP ENDPOINT collect_buffering_endpoint
         ON edge
         PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR collect_buffering_source
+      CREATE HTTP ENDPOINT INGESTOR collect_buffering_ingestor
         FROM collect_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
@@ -353,7 +353,7 @@ Feature: Domain-paced branch buffering
       CREATE HTTP ENDPOINT gate_buffering_endpoint
         ON edge
         PATH '/gate';
-      CREATE HTTP ENDPOINT INGESTOR held_buffering_source
+      CREATE HTTP ENDPOINT INGESTOR held_buffering_ingestor
         FROM held_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
@@ -364,7 +364,7 @@ Feature: Domain-paced branch buffering
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR gate_buffering_source
+      CREATE HTTP ENDPOINT INGESTOR gate_buffering_ingestor
         FROM gate_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
@@ -396,7 +396,7 @@ Feature: Domain-paced branch buffering
       """
     When these Plexus commands are executed
       """
-      DESCRIBE INGESTOR held_buffering_source;
+      DESCRIBE INGESTOR held_buffering_ingestor;
       """
     Then the last command output contains
       """
@@ -408,7 +408,7 @@ Feature: Domain-paced branch buffering
       """
     When these Plexus commands are executed
       """
-      ALTER HTTP ENDPOINT INGESTOR gate_buffering_source SET QUIESCE BUFFER MAX SIZE 2MiB;
+      ALTER HTTP ENDPOINT INGESTOR gate_buffering_ingestor SET QUIESCE BUFFER MAX SIZE 2MiB;
       """
     Then within "10s" the relay subscription receives payloads
       """

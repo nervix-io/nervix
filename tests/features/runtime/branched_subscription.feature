@@ -43,7 +43,7 @@ Feature: Branched session subscriptions
         ON edge
         PATH '/ingest';
 
-      CREATE HTTP ENDPOINT INGESTOR sensitive_branch_source
+      CREATE HTTP ENDPOINT INGESTOR sensitive_branch_ingestor
         FROM sensitive_branch_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_notification_codec
         TO public_notifications

@@ -88,7 +88,7 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING payment_codec TO payments \
          INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE \
          ERROR LOG ON GENERAL ERROR LOG;
-         CREATE HTTP ENDPOINT INGESTOR metric_source FROM metric_ingress MODE NO ACK ON QUIESCE \
+         CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK ON QUIESCE \
          BUFFER MAX SIZE 2MiB DECODE USING metric_codec TO metrics INHERIT ALL BRANCHED BY \
          by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;

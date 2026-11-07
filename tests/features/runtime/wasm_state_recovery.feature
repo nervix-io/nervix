@@ -29,7 +29,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR limited_source
+      CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
@@ -128,7 +128,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR limited_source
+      CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
@@ -226,7 +226,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR limited_source
+      CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events

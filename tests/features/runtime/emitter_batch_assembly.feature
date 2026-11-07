@@ -29,14 +29,14 @@ Feature: Emitter payload assembly across Arrow carriers
       CREATE VHOST edge assembled-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT source_a_ingress ON edge PATH '/a';
       CREATE HTTP ENDPOINT source_b_ingress ON edge PATH '/b';
-      CREATE HTTP ENDPOINT INGESTOR source_a
+      CREATE HTTP ENDPOINT INGESTOR ingestor_a
         FROM source_a_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO source_a_events
           INHERIT ALL BRANCHED BY by_source_a SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR source_b
+      CREATE HTTP ENDPOINT INGESTOR ingestor_b
         FROM source_b_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO source_b_events
@@ -69,7 +69,7 @@ Feature: Emitter payload assembly across Arrow carriers
       {"seq":3,"tenant":"acme","source":"a"}
       """
     # HTTP admission does not order independent relay queues at the emitter. Establish the
-    # intended source run there before allowing another source to become ready.
+    # intended ingestor run there before allowing another ingestor to become ready.
     Then within "10s" DESCRIBE EMITTER "assembled" on the leader node reports "messages_total" "received" relay "source_a_events" totalling "3"
     When http payload is posted to host "assembled-{{test_id}}.example.com" path "/b"
       """

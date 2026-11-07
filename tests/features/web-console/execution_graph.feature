@@ -155,7 +155,7 @@ Feature: Web console execution graph
       CREATE RELAY validated_notifications SCHEMA notification BRANCHED BY by_tenant_user;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT notifications_ingress ON edge PATH '/notifications';
-      CREATE HTTP ENDPOINT INGESTOR notifications_source
+      CREATE HTTP ENDPOINT INGESTOR notifications_ingestor
         FROM notifications_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -181,7 +181,7 @@ Feature: Web console execution graph
     And branch group "by_tenant_user" contains graph item "notifications"
     And branch group "by_tenant_user" contains graph item "notification_forwarder"
     And branch group "by_tenant_user" contains graph item "validated_notifications"
-    And branch group "by_tenant_user" does not contain graph item "notifications_source"
+    And branch group "by_tenant_user" does not contain graph item "notifications_ingestor"
     And no graph edge crosses any graph item
 
   Scenario: Execution graph marks a reingestor feedback loop as a return path
@@ -202,7 +202,7 @@ Feature: Web console execution graph
       CREATE RELAY retried SCHEMA retry_record UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT retry_ingress ON edge PATH '/retries';
-      CREATE HTTP ENDPOINT INGESTOR retry_source
+      CREATE HTTP ENDPOINT INGESTOR retry_ingestor
         FROM retry_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_codec
         TO pending

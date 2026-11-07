@@ -1,4 +1,4 @@
-//! Per-delivery settlement of one independently acknowledged source batch.
+//! Per-delivery settlement of one independently acknowledged ingestor batch.
 //!
 //! Layer: data plane.
 //! - **Owns.** Concurrent graph waits, each delivery's confirmation lifetime and unresolved
@@ -8,7 +8,7 @@
 
 #![cfg_attr(
     nervix_lint,
-    nervix::layer(data_plane, reason = "owns individual source settlement")
+    nervix::layer(data_plane, reason = "owns individual ingestor settlement")
 )]
 
 use super::*;
@@ -40,8 +40,10 @@ where
 {
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(reason = "source messages lend payloads and metadata while positions \
-                                   are cloned once into batch-owned recovery storage")
+        nervix::dispatch(
+            reason = "ingestor messages lend payloads and metadata while positions are cloned \
+                      once into batch-owned recovery storage"
+        )
     )]
     pub(super) async fn intake<M>(
         host: &mut IngestorHost,
@@ -93,7 +95,7 @@ where
 
     pub(super) async fn settle<C>(
         mut self,
-        source: &mut C,
+        connector: &mut C,
         host: &mut IngestorHost,
         settlement: BatchSettlement,
     ) -> BatchDisposition<P>
@@ -143,7 +145,8 @@ where
                     outcome: IngestorAcknowledgementOutcome::Ack,
                     acknowledgement,
                 } => {
-                    let disposition = confirm_batch(source, host, settlement, vec![position]).await;
+                    let disposition =
+                        confirm_batch(connector, host, settlement, vec![position]).await;
                     drop(acknowledgement);
                     disposition
                 }
@@ -152,7 +155,8 @@ where
                     acknowledgement,
                 } => {
                     host.handle_ack_failure(reason);
-                    let disposition = reject_batch(source, host, settlement, vec![position]).await;
+                    let disposition =
+                        reject_batch(connector, host, settlement, vec![position]).await;
                     drop(acknowledgement);
                     disposition
                 }
@@ -168,7 +172,7 @@ where
                     return BatchDisposition::Shutdown;
                 }
                 DeliveryOutcome::IntakeRefused => {
-                    reject_batch(source, host, settlement, vec![position]).await
+                    reject_batch(connector, host, settlement, vec![position]).await
                 }
             };
             match disposition {

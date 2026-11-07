@@ -285,6 +285,7 @@ impl Runtime {
         // Their futures stay indirect to bound this coordinator's debug poll frame.
         let retiring =
             self.retiring_ingestor_inputs(domain, revision.as_deref(), Some(local_node_id));
+        Box::pin(self.stop_replaced_ingestor_layouts(domain, revision.as_deref())).await?;
         Box::pin(self.stop_domain_ingestors(domain)).await;
         for retirement in retiring.into_values() {
             nervix_primitives::task::consume_budget().await;
@@ -312,7 +313,7 @@ impl Runtime {
         // A build attempt forgets the start failures its predecessor recorded before it can fail,
         // so an ingestor describes a start failure of its own only when this attempt records one.
         for plan in revision.entrypoints.ingestors() {
-            self.clear_ingestor_transient_error(domain, &plan.ingestor.name);
+            self.clear_ingestor_transient_error(domain, &plan.ingestor.name, plan.ingestor.unit);
         }
         self.install_state_identities(&revision);
         let stopped = self
@@ -377,7 +378,7 @@ impl Runtime {
         let entrypoints = &revision.entrypoints;
         let emitter_plans = &revision.emitters;
         for plan in entrypoints.ingestors() {
-            // A client source's window and durations are already typed in its plan.
+            // A client ingestor's window and durations are already typed in its plan.
             let Some(acknowledgement) = plan.transport_acknowledgement() else {
                 continue;
             };
@@ -387,6 +388,7 @@ impl Runtime {
                 self.record_ingestor_transient_error(
                     domain,
                     &plan.ingestor.name,
+                    plan.ingestor.unit,
                     format!("{report:#}"),
                 );
                 return Err(report.change_context(build()));
@@ -467,7 +469,6 @@ impl Runtime {
         }
 
         let mut placement_tasks = HashMap::<NodeRef, PlacementTasks>::new();
-        let mut kafka_offset_states = HashMap::new();
         let mut materialized_states = HashMap::new();
         for node in revision.nodes.values() {
             nervix_primitives::task::consume_budget().await;
@@ -498,9 +499,6 @@ impl Runtime {
             let placement = self
                 .build_scheduled_node_placement(domain, &shutdown_tx, node, local_node_id, state)
                 .change_context_lazy(build)?;
-            if let Some(state) = placement.kafka_offset_state {
-                kafka_offset_states.insert(RelayName::from(&node.identifier), state);
-            }
             for (unit, state) in placement.materialized_states {
                 materialized_states.insert(
                     RelayUnitRef::new(RelayName::from(&node.identifier), unit),
@@ -618,7 +616,7 @@ impl Runtime {
                 .nodes
                 .get(&identity)
                 .assured("the entrypoint plans were decided from this same schedule");
-            if node.executes_on(local_node_id) {
+            if node.unit_executes_on(plan.ingestor.unit, local_node_id) {
                 local_ingestors.push(plan.clone());
             }
         }
@@ -857,6 +855,7 @@ impl Runtime {
         self.install_domain_execution(
             domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: revision.clone(),
                 start_version: desired_start_version,
                 domain_clock,
@@ -907,7 +906,12 @@ impl Runtime {
         for plan in local_ingestors {
             let ingestor_name = &plan.ingestor.name;
             if let Err(report) = Box::pin(self.start_ingestor(&plan)).await {
-                self.record_ingestor_transient_error(domain, ingestor_name, format!("{report:#}"));
+                self.record_ingestor_transient_error(
+                    domain,
+                    ingestor_name,
+                    plan.ingestor.unit,
+                    format!("{report:#}"),
+                );
                 Box::pin(self.abort_domain_execution_start(domain)).await;
                 return Err(report.change_context(build()));
             }
@@ -1044,6 +1048,7 @@ impl Runtime {
             None => 0,
         };
         Ok(DomainExecution {
+            mqtt_ingestor_clients: HashMap::default(),
             revision,
             start_version,
             domain_clock,

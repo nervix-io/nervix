@@ -39,7 +39,7 @@ Feature: Relay junction
         CREATE HTTP ENDPOINT ingress_two
         ON edge
         PATH '/ingest-b';
-      CREATE HTTP ENDPOINT INGESTOR source_one
+      CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
@@ -49,7 +49,7 @@ Feature: Relay junction
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR source_two
+      CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
@@ -137,7 +137,7 @@ Feature: Relay junction
         CREATE HTTP ENDPOINT ingress_two
         ON edge
         PATH '/branch-b';
-        CREATE HTTP ENDPOINT INGESTOR source_one
+        CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
@@ -147,7 +147,7 @@ Feature: Relay junction
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_two
+        CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
@@ -235,7 +235,7 @@ Feature: Relay junction
         CREATE HTTP ENDPOINT ingress_two
         ON edge
         PATH '/ingest-b';
-        CREATE HTTP ENDPOINT INGESTOR state_source
+        CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO state_notifications
@@ -245,7 +245,7 @@ Feature: Relay junction
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_one
+        CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
@@ -255,7 +255,7 @@ Feature: Relay junction
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_two
+        CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
@@ -375,7 +375,7 @@ Feature: Relay junction
         CREATE HTTP ENDPOINT ingress
         ON edge
         PATH '/junction-default';
-        CREATE HTTP ENDPOINT INGESTOR source_one
+        CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
@@ -450,7 +450,7 @@ Feature: Relay junction
         CREATE HTTP ENDPOINT ingress
         ON edge
         PATH '/junction-optional';
-        CREATE HTTP ENDPOINT INGESTOR source_one
+        CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1

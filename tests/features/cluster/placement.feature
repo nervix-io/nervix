@@ -543,7 +543,7 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE VHOST edge placement-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT placement_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR endpoint_source
+      CREATE HTTP ENDPOINT INGESTOR endpoint_ingestor
         FROM placement_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING placement_event_codec
         TO placement_input INHERIT ALL UNBRANCHED
@@ -579,13 +579,13 @@ Feature: Placement policies
     When these Plexus commands fail
       """
       CREATE PLACEMENT endpoint_member
-        FROM endpoint_source
+        FROM endpoint_ingestor
         TO corridor_emitter
         REQUIRE COLOCATION;
       """
     Then the last command error contains
       """
-      endpoint_source
+      endpoint_ingestor
       """
     And the last command error contains
       """
@@ -793,7 +793,7 @@ Feature: Placement policies
       CREATE RELAY placement_timeout_output SCHEMA placement_timeout_event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge placement-timeout-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT placement_timeout_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR placement_timeout_source
+      CREATE HTTP ENDPOINT INGESTOR placement_timeout_ingestor
         FROM placement_timeout_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING placement_timeout_codec
         TO placement_timeout_input INHERIT ALL UNBRANCHED

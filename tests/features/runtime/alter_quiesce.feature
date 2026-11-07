@@ -24,7 +24,7 @@ Feature: Model alteration quiesce classification
         };
       CREATE VHOST alter_edge http-{{test_id}}-quiesce.example.com;
       CREATE HTTP ENDPOINT alter_ingress ON alter_edge PATH '/alter-quiesce';
-      CREATE HTTP ENDPOINT INGESTOR alter_source
+      CREATE HTTP ENDPOINT INGESTOR alter_ingestor
         FROM alter_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING alter_event_codec
         TO alter_events

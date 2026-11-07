@@ -27,7 +27,7 @@ Feature: Domain metrics
         CREATE RELAY domain_metrics_deduped SCHEMA transaction BRANCHED BY by_domain_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT domain_metrics_ingress ON edge PATH '/domain-metrics';
-        CREATE HTTP ENDPOINT INGESTOR domain_metrics_source
+        CREATE HTTP ENDPOINT INGESTOR domain_metrics_ingestor
         FROM domain_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO domain_metrics_raw
@@ -50,7 +50,7 @@ Feature: Domain metrics
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE ZEROMQ PUSH EMITTER domain_metrics_sink FROM domain_metrics_deduped TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING transaction_codec
+        CREATE ZEROMQ PUSH EMITTER domain_metrics_emitter FROM domain_metrics_deduped TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING transaction_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

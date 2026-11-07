@@ -1,8 +1,8 @@
-//! The accepted-frame handoff from signaling to ordinary source reads.
+//! The accepted-frame handoff from signaling to ordinary ingestor reads.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** One bounded frame queue, socket backpressure while full, and retained headers.
-//! - **Depends on.** The signaling sink, source messages and execution primitives.
+//! - **Depends on.** The signaling sink, ingestor messages and execution primitives.
 //! - **Must not know.** Sockets, Plexus, registry state, graph admission or retry policy.
 
 #![cfg_attr(
@@ -11,7 +11,7 @@
 )]
 #![cfg_attr(
     nervix_lint,
-    nervix::input(plans, reason = "capacity is validated before the source opens")
+    nervix::input(plans, reason = "capacity is validated before the ingestor opens")
 )]
 
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -127,7 +127,7 @@ impl SignalingDataEmitter for QueuedSignalingDataEmitter {
         self.sender
             .send(message)
             .await
-            .assured("the source owns the receiver throughout its signaling future");
+            .assured("the ingestor owns the receiver throughout its signaling future");
     }
 }
 

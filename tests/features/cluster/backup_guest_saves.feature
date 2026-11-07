@@ -29,7 +29,7 @@ Feature: Guest saves above the bulk budget
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'backup_guest_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s

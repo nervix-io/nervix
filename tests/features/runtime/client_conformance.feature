@@ -70,7 +70,7 @@ Feature: Cross-language client conformance
       CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant;
       CREATE VHOST edge conformance-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT typed_ingress ON edge PATH '/typed';
-      CREATE HTTP ENDPOINT INGESTOR typed_source
+      CREATE HTTP ENDPOINT INGESTOR typed_ingestor
         FROM typed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING typed_row_codec
         TO typed_rows
@@ -198,6 +198,90 @@ Feature: Cross-language client conformance
       | runtime | cluster_size |
       | bun     | 1            |
       | bun     | 3            |
+
+  Scenario Outline: A <runtime> C binding connects through two failed HTTPS endpoints and a live seed, and distinguishes session-local repeats from durable recovery
+    Given client grpc transport is configured with mode "https"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event_row (id U32);
+      CREATE RELAY events SCHEMA event_row UNBRANCHED;
+      START;
+      """
+    When the "<runtime>" client probe connects through a seed after its first gRPC address is unavailable
+    Then within "120s" the client probe reports
+      """
+      CONNECTED seed
+      EVENT wait=deadline
+      ATTACH first=completed replay=failed
+      SUBSCRIBE first=completed replay=failed
+      DELETE first=completed replay=failed
+      CHECKS ok
+      PASS
+      """
+
+    Examples: the C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C over the shared Rust binding
+      | runtime | cluster_size |
+      | c       | 1            |
+      | c       | 3            |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++ over the shared Rust binding
+      | runtime | cluster_size |
+      | c++     | 1            |
+      | c++     | 3            |
+
+  Scenario Outline: A <runtime> C binding exposes a refused subscription restoration's message and retry wait
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA watched_row (value STRING);
+      CREATE RELAY watched SCHEMA watched_row UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    When the "<runtime>" client probe subscribes for restoration through the forwarded gRPC endpoint of node "{{leader}}"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" the client probe prints "INTERRUPTED"
+    When these Plexus commands are executed on the leader node
+      """
+      DROP RELAY watched;
+      """
+    And the TCP forwarder at "127.0.0.1" restarts
+    Then within "120s" the client probe reports
+      """
+      SUBSCRIBED
+      INTERRUPTED
+      RESTORATION message=stream 'watched' does not exist in domain '{{domain}}' wait=positive
+      CHECKS ok
+      PASS
+      """
+
+    Examples: the C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C over the shared Rust binding
+      | runtime | cluster_size |
+      | c       | 1            |
+      | c       | 3            |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++ over the shared Rust binding
+      | runtime | cluster_size |
+      | c++     | 1            |
+      | c++     | 3            |
 
   Scenario Outline: A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart
     # Holding the clock authority's first progress proves which node owns it, and that every live

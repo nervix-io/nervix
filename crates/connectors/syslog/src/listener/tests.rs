@@ -641,14 +641,14 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         |_| bind_addr,
     )
     .expect("the TCP plan is valid");
-    let mut source = SyslogListenerIngestor::open(&plan, 0)
+    let mut ingestor = SyslogListenerIngestor::open(&plan, 0)
         .await
-        .expect("the source opens");
-    source.resume().await.expect("the listener binds");
+        .expect("the ingestor opens");
+    ingestor.resume().await.expect("the listener binds");
     let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
     let (mut client, server) = tokio::io::duplex(128);
-    let Some(SyslogListener::Stream(listener)) = source.listener.as_mut() else {
-        panic!("the source has a stream listener");
+    let Some(SyslogListener::Stream(listener)) = ingestor.listener.as_mut() else {
+        panic!("the ingestor has a stream listener");
     };
     let tx = listener.frame_tx.clone();
     let paused = listener.paused.subscribe();
@@ -662,29 +662,29 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         paused,
     ));
 
-    let failure = source.on_listener_error(Report::new(SyslogListenerError::StreamAccept {
+    let failure = ingestor.on_listener_error(Report::new(SyslogListenerError::StreamAccept {
         source: std::io::Error::other("accept failed"),
     }));
     assert!(failure.contains::<SyslogListenerError>());
-    assert!(source.needs_resume());
+    assert!(ingestor.needs_resume());
 
-    let blocker = TcpListener::bind(&source.bind_addr)
+    let blocker = TcpListener::bind(&ingestor.bind_addr)
         .await
         .expect("another listener claims the retired socket's port");
-    let retry_failure = source
+    let retry_failure = ingestor
         .resume()
         .await
         .expect_err("rebinding must report a transient error while the port is busy");
     assert!(retry_failure.contains::<SyslogListenerError>());
-    assert!(source.needs_resume());
+    assert!(ingestor.needs_resume());
 
     client
         .write_all(b"6 second")
         .await
         .expect("the established connection remains writable");
     client.shutdown().await.expect("the client closes cleanly");
-    let Some(SyslogListener::Stream(listener)) = source.listener.as_mut() else {
-        panic!("the source retains its stream state");
+    let Some(SyslogListener::Stream(listener)) = ingestor.listener.as_mut() else {
+        panic!("the ingestor retains its stream state");
     };
     let frame = nervix_primitives::time::timeout(Duration::from_secs(1), listener.frame_rx.recv())
         .await
@@ -692,9 +692,9 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         .expect("the connection keeps its intake channel");
     assert_eq!(frame.payload, b"second");
     drop(blocker);
-    source.resume().await.expect("the listener rebinds");
-    assert!(!source.needs_resume());
-    source.close().await.expect("the source closes");
+    ingestor.resume().await.expect("the listener rebinds");
+    assert!(!ingestor.needs_resume());
+    ingestor.close().await.expect("the ingestor closes");
 }
 
 #[test]

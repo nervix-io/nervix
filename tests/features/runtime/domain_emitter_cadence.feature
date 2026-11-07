@@ -27,7 +27,7 @@ Feature: Domain-paced emitter cadence
       CREATE HTTP ENDPOINT emitter_cadence_endpoint
         ON edge
         PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR emitter_cadence_source
+      CREATE HTTP ENDPOINT INGESTOR emitter_cadence_ingestor
         FROM emitter_cadence_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
@@ -105,7 +105,7 @@ Feature: Domain-paced emitter cadence
       CREATE HTTP ENDPOINT emitter_hold_endpoint
         ON edge
         PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR emitter_hold_source
+      CREATE HTTP ENDPOINT INGESTOR emitter_hold_ingestor
         FROM emitter_hold_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
@@ -133,7 +133,7 @@ Feature: Domain-paced emitter cadence
     Then the observed broker does not receive a payload within "2s"
     When these Plexus commands are executed
       """
-      ALTER HTTP ENDPOINT INGESTOR emitter_hold_source SET QUIESCE BUFFER MAX SIZE 2MiB;
+      ALTER HTTP ENDPOINT INGESTOR emitter_hold_ingestor SET QUIESCE BUFFER MAX SIZE 2MiB;
       """
     Then within "10s" the observed broker receives payloads
       """
@@ -173,7 +173,7 @@ Feature: Domain-paced emitter cadence
       CREATE HTTP ENDPOINT emitter_immediate_endpoint
         ON edge
         PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR emitter_immediate_source
+      CREATE HTTP ENDPOINT INGESTOR emitter_immediate_ingestor
         FROM emitter_immediate_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
@@ -240,7 +240,7 @@ Feature: Domain-paced emitter cadence
       CREATE HTTP ENDPOINT iceberg_cadence_endpoint
         ON edge
         PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR iceberg_cadence_source
+      CREATE HTTP ENDPOINT INGESTOR iceberg_cadence_ingestor
         FROM iceberg_cadence_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW

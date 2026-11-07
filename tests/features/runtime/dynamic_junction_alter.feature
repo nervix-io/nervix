@@ -16,7 +16,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-dynamic-filter.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -79,7 +79,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE RELAY outgoing SCHEMA output_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-dynamic-construction.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING input_event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -139,7 +139,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-dynamic-flush.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -193,7 +193,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE RELAY outgoing SCHEMA output_event BRANCHED BY by_event_source;
       CREATE VHOST edge http-{{test_id}}-dynamic-branch-revision.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING input_event_codec
         TO incoming INHERIT ALL BRANCHED BY by_event_source SET tenant = message.tenant

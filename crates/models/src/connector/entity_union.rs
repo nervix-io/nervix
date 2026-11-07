@@ -1,4 +1,4 @@
-//! The declarations that nest source and emitter Models connector by entity.
+//! The declarations that nest ingestor and emitter Models connector by entity.
 //!
 //! Layer: vocabulary.
 //!
@@ -6,7 +6,7 @@
 //!   data enum over the entity Models, the kind that names each entity, the alterations of the
 //!   ingestors that read each entity, and the conversions from an entity Model or its operations
 //!   into the enums that hold them.
-//! - **Depends on.** The source and emitter declarations each entity Model implements, and the
+//! - **Depends on.** The ingestor and emitter declarations each entity Model implements, and the
 //!   alteration operations an ingestor applies.
 //! - **Must not know.** Any one connector, entity or capability.
 //!
@@ -20,8 +20,8 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-/// Declares the kind that names each source entity of one connector, and the pair each entity
-/// Model is a source of.
+/// Declares the kind that names each ingestor entity of one connector, and the pair each entity
+/// Model implements.
 ///
 /// Each line gives the entity's keyword and the label a form shows for it. What the entity
 /// declares is read from its Model's [`IngestorDeclaration`](crate::IngestorDeclaration) implementation, so the
@@ -47,7 +47,7 @@ macro_rules! connector_ingestor_kinds {
         }
 
         impl $Entity {
-            /// Every source entity of this connector, in declared order.
+            /// Every ingestor entity of this connector, in declared order.
             pub const ALL: &'static [Self] = &[$(Self::$Variant,)+];
         }
 
@@ -104,17 +104,17 @@ pub(crate) const ALTERED_PAIR_CHECKED: &str =
     "apply_alter compared the stored pair with the pair the alteration's head names before \
      applying any operation, and no operation changes the pair an input reads";
 
-/// Declares the sources of one connector: the union of its entity Models, the kind that names each
+/// Declares the ingestors of one connector: the union of its entity Models, the kind that names each
 /// entity, and the alterations of the ingestors that read each entity.
 ///
 /// An alteration of one entity holds operations whose `SET FROM` states that entity's own Model
-/// and whose changes are that entity's own, so it can set no source of another entity, and its
+/// and whose changes are that entity's own, so it can set no ingestor of another entity, and its
 /// operations decode a transport's payloads with the codec `SET DECODE USING` names.
 macro_rules! connector_ingestors {
     (
         connector $Connector:ident = $connector_keyword:literal;
         $(#[$source_meta:meta])*
-        pub enum $Source:ident;
+        pub enum $Ingestor:ident;
         $(#[$alteration_meta:meta])*
         pub enum $Alteration:ident;
         $(#[$entity_meta:meta])*
@@ -137,15 +137,15 @@ macro_rules! connector_ingestors {
             ::rkyv::Serialize,
             ::rkyv::Deserialize,
         )]
-        pub enum $Source {
+        pub enum $Ingestor {
             $(
                 $(#[$variant_meta])*
                 $Variant($Model),
             )+
         }
 
-        impl $Source {
-            /// The entity this source reads.
+        impl $Ingestor {
+            /// The entity this ingestor reads.
             pub const fn entity(&self) -> $Entity {
                 match self {
                     $(Self::$Variant(_) => $Entity::$Variant,)+
@@ -153,48 +153,54 @@ macro_rules! connector_ingestors {
             }
         }
 
-        impl $crate::IngestorEntityBody for $Source {
+        impl $crate::IngestorEntityBody for $Ingestor {
+            fn instances(&self) -> Option<$crate::IngestorInstances> {
+                match self {
+                    $(Self::$Variant(entity) => $crate::IngestorEntityBody::instances(entity),)+
+                }
+            }
+
             fn reference(&self) -> $crate::IngestorReference<'_> {
                 match self {
-                    $(Self::$Variant(source) => $crate::IngestorEntityBody::reference(source),)+
+                    $(Self::$Variant(entity) => $crate::IngestorEntityBody::reference(entity),)+
                 }
             }
 
             fn quiesce(&self) -> &$crate::IngestQuiesceMode {
                 match self {
-                    $(Self::$Variant(source) => $crate::IngestorEntityBody::quiesce(source),)+
+                    $(Self::$Variant(entity) => $crate::IngestorEntityBody::quiesce(entity),)+
                 }
             }
 
             fn quiesce_mut(&mut self) -> &mut $crate::IngestQuiesceMode {
                 match self {
-                    $(Self::$Variant(source) => $crate::IngestorEntityBody::quiesce_mut(source),)+
+                    $(Self::$Variant(entity) => $crate::IngestorEntityBody::quiesce_mut(entity),)+
                 }
             }
 
             fn acknowledgement(&self) -> $crate::IngestAcknowledgement<'_> {
                 match self {
-                    $(Self::$Variant(source) => $crate::IngestorEntityBody::acknowledgement(source),)+
+                    $(Self::$Variant(entity) => $crate::IngestorEntityBody::acknowledgement(entity),)+
                 }
             }
 
             fn chosen(&self, option: &str) -> Option<&'static str> {
                 match self {
-                    $(Self::$Variant(source) => $crate::IngestorEntityBody::chosen(source, option),)+
+                    $(Self::$Variant(entity) => $crate::IngestorEntityBody::chosen(entity, option),)+
                 }
             }
         }
 
         $(
-            impl From<$Model> for $Source {
-                fn from(source: $Model) -> Self {
-                    Self::$Variant(source)
+            impl From<$Model> for $Ingestor {
+                fn from(entity: $Model) -> Self {
+                    Self::$Variant(entity)
                 }
             }
 
             impl From<$Model> for $crate::IngestorEntity {
-                fn from(source: $Model) -> Self {
-                    Self::$Connector($Source::$Variant(source))
+                fn from(entity: $Model) -> Self {
+                    Self::$Connector($Ingestor::$Variant(entity))
                 }
             }
         )+
@@ -273,10 +279,10 @@ macro_rules! connector_ingestors {
 
             impl $crate::connector::ingestor::AlteredIngestorEntity for $Model {
                 fn entity_of_mut(input: &mut $crate::IngestorInput) -> &mut Self {
-                    let source = input.transport_source_mut();
+                    let entity = input.transport_source_mut();
                     let entity = if let Some($crate::IngestorEntity::$Connector(
-                        $Source::$Variant(entity),
-                    )) = source
+                        $Ingestor::$Variant(entity),
+                    )) = entity
                     {
                         Some(entity)
                     } else {

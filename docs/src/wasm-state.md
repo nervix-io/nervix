@@ -327,6 +327,13 @@ runs share the next one, instead of queuing one each. No lock is held across the
 [Bounded Synchronization Outside The Open
 Path](./data-plane-concurrency.md#bounded-synchronization-outside-the-open-path).
 
+Each guest checkpoint replaces the branch's previous one: the state store writes it inline, removes
+the revision-index entry of the checkpoint it supersedes and adds its own in the same batch, so a
+branch's stored state stays one checkpoint and one index entry however many callbacks it has
+checkpointed. A replica installs the checkpoints it receives through the same write. [Generation
+Storage](./backup-and-restore-architecture.md#generation-storage) describes the index the store
+keeps.
+
 A failed synchronization is not retried. The operating system may have dropped the writes it failed
 to flush, and the database refuses every later synchronization, so from then on no write on that
 node is reported durable and every later checkpoint there fails until the node restarts.

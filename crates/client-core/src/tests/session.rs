@@ -1,10 +1,14 @@
 //! The client against an in-process session server over a real gRPC connection.
 //!
-//! The server is a hand-written tonic service that routes the two session methods itself, exactly
+//! The server is a hand-written tonic service that routes the session methods itself, exactly
 //! as a transport integrates the session protocol. Every exchange the client opens is handed to
 //! the test, which plays the server's side inline: it reads the requests the client sends and
 //! answers them in whatever order and shape the behavior under test needs. Uploads are answered by
 //! a fixed handler that installs whatever archive arrives whole.
+
+mod foreign_restore;
+
+mod restore_reply;
 
 use std::{
     convert::Infallible,
@@ -44,6 +48,8 @@ use tonic::{
 use url::Url;
 
 use super::cause_beneath;
+
+mod restore_codec;
 #[cfg(feature = "autocomplete")]
 use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit};
 use crate::{
@@ -56,12 +62,12 @@ use crate::{
         Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
         ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
         DomainInfo, DomainList, DomainPaceChoice, DomainsObserved, EncodedFrame, InspectionOutcome,
-        LeaderRedirect, LeadershipObserved, NodeEndpoints, NoticeLevel, Reply, ReplyBody,
-        ReplyDelivery, RequestId, RowSchema, ServerFrame, ServerNotice, SessionLimitSettings,
-        SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
-        SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
-        SubscriptionType, UploadDisposition, UploadFailure, UploadFrame, UploadMessage,
-        UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireEncodeError,
+        LeaderRedirect, LeadershipObserved, NodeEndpoints, NoticeKind, NoticeLevel, Reply,
+        ReplyBody, ReplyDelivery, RequestId, RowSchema, ServerFrame, ServerNotice,
+        SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
+        SubscriptionEndReason, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
+        SubscriptionRowsEncoder, SubscriptionType, UploadDisposition, UploadFailure, UploadFrame,
+        UploadMessage, UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireEncodeError,
         grpc::{
             EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec, ServerUploadCodec,
             UPLOAD_RESOURCE_PATH,
@@ -195,6 +201,9 @@ struct SessionService {
     uploads: mpsc::Sender<ReceivedUpload>,
     fail_upload_replies: Arc<AtomicU64>,
     upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
+    restore_reply_gate: Arc<Mutex<Option<foreign_restore::RestoreReplyGate>>>,
+
+    restores: Option<mpsc::Sender<restore_reply::ReceivedRestore>>,
 }
 
 enum UploadReplyMode {
@@ -230,6 +239,26 @@ impl Service<http::Request<Body>> for SessionService {
                 };
                 Ok(grpc.streaming(exchange, request).await)
             }),
+            crate::wire::grpc::RESTORE_BACKUP_PATH => Box::pin(async move {
+                if let Some(restores) = service.restores {
+                    let mut grpc = Grpc::new(restore_reply::frames::RawCodec::<
+                        crate::wire::RestoreFrame,
+                    >::new());
+                    Ok(grpc
+                        .client_streaming(restore_reply::ReceiveRestore { restores }, request)
+                        .await)
+                } else {
+                    let mut grpc = Grpc::new(crate::wire::grpc::ServerRestoreCodec::new(limits()));
+                    Ok(grpc
+                        .client_streaming(
+                            foreign_restore::RestoreWithForeignReference {
+                                gate: service.restore_reply_gate,
+                            },
+                            request,
+                        )
+                        .await)
+                }
+            }),
             UPLOAD_RESOURCE_PATH => Box::pin(async move {
                 let mut grpc = Grpc::new(ServerUploadCodec::new(limits()));
                 let upload = InstallUpload {
@@ -239,9 +268,11 @@ impl Service<http::Request<Body>> for SessionService {
                 };
                 Ok(grpc.client_streaming(upload, request).await)
             }),
-            _ => Box::pin(async move {
-                Ok(Status::unimplemented("the session serves two methods").into_http())
-            }),
+            _ => {
+                Box::pin(
+                    async move { Ok(Status::unimplemented("unknown session method").into_http()) },
+                )
+            }
         }
     }
 }
@@ -418,6 +449,9 @@ struct TestServer {
     uploads: mpsc::Receiver<ReceivedUpload>,
     fail_upload_replies: Arc<AtomicU64>,
     upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
+    restore_reply_gate: Arc<Mutex<Option<foreign_restore::RestoreReplyGate>>>,
+
+    restores: mpsc::Receiver<restore_reply::ReceivedRestore>,
     task: JoinHandle<()>,
 }
 
@@ -434,6 +468,31 @@ impl TestServer {
 
     /// Starts a server listening on `address`, a loopback address with a free port or port 0.
     async fn start_at(address: SocketAddr) -> Self {
+        Self::start_service(address, false, |service| service).await
+    }
+
+    async fn start_recording_restores() -> Self {
+        Self::start_service(SocketAddr::from(([127, 0, 0, 1], 0)), true, |service| {
+            service
+        })
+        .await
+    }
+
+    /// Installs a call-specific peer around the same session fixture and its exchange owner.
+    async fn start_service<S>(
+        address: SocketAddr,
+        capture: bool,
+        wrap: impl FnOnce(SessionService) -> S,
+    ) -> Self
+    where
+        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
+            + NamedService
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
         let listener = TcpListener::bind(address)
             .await
             .assured("the loopback interface accepts a listener");
@@ -445,13 +504,20 @@ impl TestServer {
         let (upload_sender, uploads) = mpsc::channel(4);
         let fail_upload_replies = Arc::new(AtomicU64::new(0));
         let upload_reply_mode = Arc::new(Mutex::new(None));
+        let restore_reply_gate = Arc::new(Mutex::new(None));
+
+        let (restore_sender, restores) = mpsc::channel(4);
         let service = SessionService {
             exchanges: exchange_sender,
             exchange_hold: exchange_hold.clone(),
             uploads: upload_sender,
             fail_upload_replies: fail_upload_replies.clone(),
             upload_reply_mode: upload_reply_mode.clone(),
+            restore_reply_gate: restore_reply_gate.clone(),
+
+            restores: capture.then_some(restore_sender),
         };
+        let service = wrap(service);
         let task = nervix_primitives::task::spawn(async move {
             Server::builder()
                 .add_service(service)
@@ -466,6 +532,9 @@ impl TestServer {
             uploads,
             fail_upload_replies,
             upload_reply_mode,
+            restore_reply_gate,
+
+            restores,
             task,
         }
     }
@@ -779,6 +848,7 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
         .send(
             ServerNotice {
                 level: NoticeLevel::Warning,
+                kind: NoticeKind::Runtime,
                 message: "relay 'orders' is behind".to_string(),
             }
             .encode(&limits())
@@ -790,6 +860,7 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
         .assured("the notice task completes")
         .assured("the notice stream continues on the recovered session");
     assert_eq!(notice.level, NoticeLevel::Warning);
+    assert_eq!(notice.kind, NoticeKind::Runtime);
     assert_eq!(notice.message, "relay 'orders' is behind");
     let recovered_requests = client.inner.exchange.lock().await.requests();
     assert!(matches!(
@@ -1883,6 +1954,7 @@ async fn a_reply_larger_than_a_frame_arrives_in_parts() {
                 .send(
                     ServerNotice {
                         level: NoticeLevel::Info,
+                        kind: NoticeKind::Leadership,
                         message: "raft transition: state=Leader".to_string(),
                     }
                     .encode(&limits())
@@ -1902,6 +1974,7 @@ async fn a_reply_larger_than_a_frame_arrives_in_parts() {
         .await
         .assured("the notice between the parts is delivered");
     assert_eq!(notice.level, NoticeLevel::Info);
+    assert_eq!(notice.kind, NoticeKind::Leadership);
     assert_eq!(notice.message, "raft transition: state=Leader");
 }
 
@@ -2773,6 +2846,8 @@ async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
         }
     ));
 
+    // A detach outcome cannot answer an attach: the session ends before the client applies it,
+    // and the attach is sent again on the next session.
     let attaching = client.clone();
     let attach = nervix_primitives::task::spawn(async move {
         attaching.attach_domain_clock(domain("tenant")).await
@@ -2788,15 +2863,27 @@ async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
             &limits(),
         )
         .await;
-    let error = within_deadline(attach)
+    let mut replacement = server.next_exchange().await;
+    let repeated = replacement.next_request().await;
+    assert!(
+        matches!(&repeated.request, ClientRequest::AttachDomainClock(attach) if attach.domain == domain("tenant")),
+        "the attach is sent again on the next session: {:?}",
+        repeated.request
+    );
+    replacement
+        .reply(
+            repeated.request_id,
+            attach_reply(clock_in(1, crate::DomainClockObservedState::Unpaced), ""),
+            &limits(),
+        )
+        .await;
+    let attached = within_deadline(attach)
         .await
         .assured("the attach task completes")
-        .expect_err("a reply of another kind is an error");
+        .assured("the attach succeeds on the next session");
     assert!(matches!(
-        error.current_context(),
-        ClientError::UnexpectedReply {
-            request: crate::RequestKind::AttachDomainClock,
-        }
+        attached.disposition,
+        crate::DomainClockAttachDisposition::Attached { .. }
     ));
 }
 
@@ -3435,13 +3522,7 @@ async fn a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_r
         retry_timeout: Duration::from_secs(1),
         ..ConnectOptions::default()
     };
-    let client = within_deadline(Client::connect_with_options(
-        format!("http://{}", primary.address),
-        Some(domain("tenant")),
-        options,
-    ))
-    .await
-    .assured("the primary accepts the session");
+    let client = primary.connect_with(options).await;
     let mut exchange = primary.next_exchange().await;
     let attaching = client.clone();
     let attach = nervix_primitives::task::spawn(async move {

@@ -45,7 +45,7 @@ Feature: IP address, network and URL functions
       CREATE RELAY url_views SCHEMA url_view UNBRANCHED;
       CREATE VHOST edge network-values-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT endpoint_ingress ON edge PATH '/endpoints';
-      CREATE HTTP ENDPOINT INGESTOR endpoint_source
+      CREATE HTTP ENDPOINT INGESTOR endpoint_ingestor
         FROM endpoint_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_endpoint_batch_codec
         TO raw_endpoints
@@ -139,7 +139,7 @@ Feature: IP address, network and URL functions
       CREATE RELAY internal_clients SCHEMA internal_client UNBRANCHED;
       CREATE VHOST edge network-filter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT client_ingress ON edge PATH '/clients';
-      CREATE HTTP ENDPOINT INGESTOR client_source
+      CREATE HTTP ENDPOINT INGESTOR client_ingestor
         FROM client_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_client_batch_codec
         TO raw_clients
@@ -224,7 +224,7 @@ Feature: IP address, network and URL functions
       CREATE RELAY probe_errors SCHEMA probe_error UNBRANCHED;
       CREATE VHOST edge network-errors-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT probe_ingress ON edge PATH '/probes';
-      CREATE HTTP ENDPOINT INGESTOR probe_source
+      CREATE HTTP ENDPOINT INGESTOR probe_ingestor
         FROM probe_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_probe_batch_codec
         TO raw_probes
@@ -324,7 +324,7 @@ Feature: IP address, network and URL functions
       CREATE RELAY visit_facts SCHEMA visit_facts UNBRANCHED;
       CREATE VHOST edge network-sensitive-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visit_ingress ON edge PATH '/visits';
-      CREATE HTTP ENDPOINT INGESTOR visit_source
+      CREATE HTTP ENDPOINT INGESTOR visit_ingestor
         FROM visit_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING secret_visit_codec
         TO secret_visits

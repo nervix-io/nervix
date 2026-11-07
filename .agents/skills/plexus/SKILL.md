@@ -17,7 +17,7 @@ requirements, metadata types, each side's header model, batching, buffer bounds,
 the reasons ingest and emit differ. Read `Plexus Overview` → `Statement catalog` for connector and
 entity heads, kind-preserving alterations, and name-based inspection. Choose the complete declared
 pair before assembling its body, including when its connector has one entity. Read headers the way
-the source's model records them, such as
+the ingestor's model records them, such as
 lowercase HTTP field names, and on an emitter that keeps one value per header name write each literal
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
@@ -33,32 +33,43 @@ reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured valu
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
 direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
-For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
-delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
-the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
+For MQTT ingestors, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) for the session/QoS/mode
+pairings and the broker's shared-subscription requirement, including with one instance. Read its
+session and identity rules before sharing a client between entities or promising recovery after an
+owner change. Its acknowledgement section distinguishes QoS 0 overflow, acknowledged capacity,
+keep-alive during downstream stalls and the refusal of a broker grant below the declared QoS.
 For MQTT retained publication, typed publish properties and user-property headers, read
 [Emitters → MQTT](../../../docs/src/emitters.md#mqtt) for their exact types, limits and retry contract.
-For Pulsar source identity, keys, redelivery and event-time windows, read
-[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
+For Pulsar topic names, subscription ownership, creation position, TYPE and instances, read
+[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) before choosing the ingestor. Its client
+reference owns the shared authentication and TLS keys, and its metadata table owns message identity,
+keys, redelivery and event-time windows. Choose
 `TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
 event time stays null, while an explicit epoch time is preserved.
+For Pulsar receipt deadlines, event times and delayed delivery, read
+[Emitters → Pulsar](../../../docs/src/emitters.md#pulsar). Check the generated capability mirror
+before carrying an option from one direction to the other.
 
+For NATS consumption, choose `NATS SUBJECT INGESTOR` for a Core NATS queue subscription, which
+reads in `MODE NO ACK` with a required `QUEUE GROUP` and `INSTANCES` and never sees what is
+published while it is not subscribed, or `NATS STREAM INGESTOR` for a JetStream stream and durable
+pull consumer an operator provisioned, which acknowledges each delivery. Read
+[Ingestors → NATS](../../../docs/src/ingestors.md#nats) for the client's authentication and TLS
+keys, the consumer checks, redelivery and what a stream keeps.
 For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
 `NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,
 and `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>` for a JetStream PubAck. The stream
-emitter may set `MESSAGE ID <expression>` for server deduplication across retries. Read
-[Emitters → NATS](../../../docs/src/emitters.md#nats) for the complete clause order, failure
-outcomes and retry boundary.
+emitter may set `MESSAGE ID <expression>`, which JetStream deduplicates across retries within the
+stream's duplicate window. Read [Emitters → NATS](../../../docs/src/emitters.md#nats) for both
+entities' complete clause order, failure outcomes and retry boundary.
 
-For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
-`MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
-Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each delivery settles
-on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
-work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
-Ingestors section for the exact clause order, host admission and recovery limits.
+For RabbitMQ consumption, read [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq)
+before choosing a mode: consumer prefetch and per-delivery settlement differ from publisher
+confirms. Follow its metadata, sorted-header, recovery and shared client sections.
 For RabbitMQ publication, read [Emitters → RabbitMQ](../../../docs/src/emitters.md#rabbitmq) for
-`PERSISTENT`, `TIMESTAMP`, exact AMQP `PROPERTIES` types, targeted envelope alterations and the
-durable-queue requirement; property writes and `write_header` have different contracts.
+the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence, exact AMQP
+`PROPERTIES` types and envelope alterations. Do not promise consumer completion from a publisher
+confirm or message durability from routing alone.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -69,6 +80,9 @@ the CLI's Completion section.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
 Listener certificates are node provisioning, configured outside Plexus statements.
+For authentication refusals and retry behavior, follow
+[Authentication](../../../docs/src/client-session-protocol.md#authentication); a response delay
+does not establish that a user exists.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
@@ -85,7 +99,7 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Domain: paced or unpaced, clock period/skew, start behavior, and default placement policy.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
-- Source and emitter: connector kinds, externally provisioned entity names, whether an operator
+- Ingestor and emitter: connector kinds, externally provisioned entity names, whether an operator
   provisions a Pulsar subscription or its ingestor owns it, the owned subscription's EARLIEST or
   LATEST creation position, the subscription's TYPE, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
@@ -97,10 +111,12 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
+- For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
+  before choosing port bindings, initialization, branch isolation or recovery guarantees.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
-  subscriptions, each ingestor's source-supported quiesce behavior, and whether an existing schema
+  subscriptions, each ingestor's declared quiesce behavior, and whether an existing schema
   must be evolved atomically with its dependents.
 
 Read [references/configuring-nervix.md](references/configuring-nervix.md), then use its routing
@@ -111,7 +127,11 @@ explicit response window and reject-only quiesce with `MODE ACK`; its absolute r
 does not restart on progress. The configuring reference routes the status, signaling and retry
 contracts.
 For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
-retry boundary when explaining source recovery.
+retry boundary when explaining ingestor recovery.
+For intake parallelism, read [Ingestors → Instancing](../../../docs/src/ingestors.md#instancing).
+Check the entity's instancing capability, Pulsar subscription type, Kafka offset mode and constructing
+routes before setting a count or following branch partitions. Use `DESCRIBE INGESTOR` to verify
+the planned instance placement.
 
 ## Assemble the graph
 
@@ -122,6 +142,9 @@ completed, `1` failed, `3` outcome not known, `130` cancelled before admission. 
 same command again with the `--execution-reference` or `--upload-identity` the CLI printed, which
 recovers the outcome; a fresh submission could apply it twice. The CLI guide's Exit Status section
 defines each status.
+For `RESTORE`, retain the same archive bytes as well as the statement and execution reference after
+status `3`, including an invalid reply after upload. Follow the Rust client guide's
+[Restoring](https://docs.nervix.io/client-library.html#restoring) contract when recovering it.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
 URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
@@ -184,6 +207,10 @@ lifecycle, deduplicator keys and windows. `RESUME` precedes the user policy and 
 run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
 
+Keep an uncertain restore's original execution reference, statement and archive across attempts;
+a later local read failure or stream refusal does not settle it. Follow the native-client recovery
+contract in [Restoring](https://docs.nervix.io/client-library.html#restoring).
+
 `BACKUP ... TIMEOUT` bounds each running domain's cut independently. For a cut timeout, inspect its
 active phase and completed phase durations before choosing a new budget; the backup architecture's
 Observability section explains owner-side attribution. Native clients use a separate
@@ -230,6 +257,10 @@ those phases.
 A committed cluster parameter revision invalidates an identified transaction preview even when
 the queued Models still fit its caps or the parameter values later return to their earlier values.
 Inspect the transaction again before committing; a parameter notice does not review a new preview.
+If a `COMMIT` attempt ends while the transaction still commits, keep its execution reference and
+repeat it to recover the outcome. `SHOW TRANSACTIONS` and an attached transaction's status explain
+progress but do not replace the result under that reference. See
+[Client Session Protocol → Transactions Over The Protocol](../../../docs/src/client-session-protocol.md#transactions-over-the-protocol).
 
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
 lookup creation, `START`, `STOP`, placement changes, or `COMMIT` returns `OK`, issue the dependent
@@ -250,6 +281,9 @@ For storage failures or uncertain administrative outcomes, consult `Control Plan
 and recovery` before suggesting a retry, and
 [Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery) for how a retry
 under the same execution reference recovers the recorded outcome instead of repeating the effect.
+An unreadable restore reply leaves its original execution uncertain, even after the server
+completed it. Keep the same statement, archive and execution reference for recovery; CLI status 3
+names that uncertainty. Follow `Client Library` → `Restoring` for the native-client contract.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and
@@ -284,10 +318,11 @@ During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain avail
 
 Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
 for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
-selected domain. Read `Node Settings` for the complete parameter set, positive duration bounds,
-existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
-belong only to the first bootstrap, including when their value equals the default. Later starts,
-including the returning bootstrap node, omit them.
+selected domain. Read `Domains And Time` → `Duration Literals` for duration spelling, and
+`Node Settings` for the complete parameter set, one assignment per parameter, positive duration
+bounds, existing-model cap refusals, live installation and committed-versus-running inspection.
+Seed flags belong only to the first bootstrap, including when their value equals the default.
+Later starts, including the returning bootstrap node, omit them.
 `HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect
 literal HTTP polling headers, at model creation and when a later cap is lowered.
 
@@ -311,12 +346,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `TIME RATE` multiplies projection error. `SKEW` is event-admission tolerance, not a host-sync
   allowance.
 - For ingestion, read `Domains And Time` → `Ingestion Timestamps`: `TIMESTAMP NOW` uses domain
-  time at delivery, including after quiescing; explicit source times remain unchanged.
-  `TIMESTAMP AT metadata.<field>` takes a `DATETIME` metadata field the source's entity declares,
+  time at delivery, including after quiescing; explicit input times remain unchanged.
+  `TIMESTAMP AT metadata.<field>` takes a `DATETIME` metadata field the ingestor's entity declares,
   such as an HTTP poll's `metadata.polled_at`; check the entity's Metadata row in `Ingestors`
   before writing any `metadata.<field>`, because an undeclared field is refused at `CREATE`. Check
   admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
-  of tick notification delivery. Never scale source timestamps by `TIME RATE` or admit against
+  of tick notification delivery. Never scale input timestamps by `TIME RATE` or admit against
   an unreached future center. Rejected or missing timestamps follow the route's message-error
   policy per row with code `validation` and operation `admit`.
 - Treat HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` as domain-clock cadence. HTTP and
@@ -344,7 +379,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   writes microseconds there sends an instant no `DATETIME` holds, so each such record is refused
   wherever a route or `TIMESTAMP AT` reads the field and is ingested everywhere else; under an
   acknowledged mode, send that route's `ON MESSAGE ERROR` to a relay, because `LOG` negatively
-  acknowledges the record and the source reads it again before any later record. Read the
+  acknowledges the record and the ingestor reads it again before any later record. Read the
   [Kafka ingestor contract](../../../docs/src/ingestors.md#kafka).
 - Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
   unit uses the same instant, including filters, construction, keys, correlation and window
@@ -417,22 +452,25 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Read `Schemas And Codecs` → `Wire Schemas` for each format's vocabulary and exact
   binding matrix. Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
-  datetime in a JSON or AVRO `string`, and `ENCODE <field> AS BASE64` for bytes in one.
-  Read `Value Fidelity` before relying on non-finite floats or unsigned Avro list elements.
+  datetime in a JSON or AVRO `string` or a CBOR `text`, and `ENCODE <field> AS BASE64` for bytes
+  in a JSON or AVRO `string`.
+  An AVRO array names its item type (`array<long>`, `array<array<double>>`); a JSON or CBOR
+  `array` is bare. A list field's `ENCODE` rule governs its innermost elements: read `List Fields`.
+  Read `Value Fidelity` before relying on non-finite floats.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
   `ON EMITTING`, or both in that order. At least one direction is required.
 - An `ON INGESTION` program runs once per value a payload holds, and every object it yields becomes
   one message: `.[]` unfolds an array, and a program that yields nothing acknowledges the payload
   without a message. A payload is decoded or rejected as a whole, unfolds into at most 65,536
-  messages, and stays the unit of source acknowledgement. `ON EMITTING` must yield exactly one
+  messages, and stays the unit of ingestor acknowledgement. `ON EMITTING` must yield exactly one
   value per record.
 - A payload its codec refuses is consumed, never redelivered: the ingestor's `ON GENERAL ERROR LOG`
-  reports it as a decode rejection, `IGNORE` only counts it, and an acknowledged source commits past
+  reports it as a decode rejection, `IGNORE` only counts it, and an acknowledged ingestor commits past
   it. Read `Ingestors` → `When The Codec Refuses A Payload` before relying on a broker's
   redelivery or dead-lettering for malformed payloads.
-- Unfolding runs on the node's extension workers. Before relying on a `MODE NO ACK` source to keep
+- Unfolding runs on the node's extension workers. Before relying on a `MODE NO ACK` ingestor to keep
   its payloads while those workers are full, read `Ingestors` → `When The Extension Workers Are
-  Full`: some sources wait for them, and others refuse the payload and count it.
+  Full`: some ingestors wait for them, and others refuse the payload and count it.
 - Give every signaling protocol an explicit `FORMAT` and express the handshake as JAQ:
   `SEND JAQ` programs must each yield exactly one value, and `WAIT JAQ` matchers accept any output
   that is neither null nor false. Match only the fields that matter so acknowledgements carrying
@@ -454,8 +492,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   every create, alter, show, drop, and codec reference must include the exact format.
 - Use `BYTES` for arbitrary octets, including `ARRAY` and `VEC` elements. Keep branch key schemas
   free of `BYTES`. Check the wire representation and required encoding rule in `Schemas And
-  Codecs` → `Codecs`; an AVRO `bytes` field needs no rule. A cast never converts `BYTES`; use the
-  functions of `Expression Functions` → `Bytes, Encodings And Hashes`.
+  Codecs` → `Codecs`; CBOR and AVRO `bytes` fields need no rule. A cast never converts `BYTES`; use
+  the functions of `Expression Functions` → `Bytes, Encodings And Hashes`.
 - Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
   STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
   the same format-qualified ALTER form owns field evolution.
@@ -471,17 +509,18 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
   separation policy exists. Lower `RANK` values are stronger, unranked rules are the weakest rule
   tier, and equal-rank different-policy claims conflict.
-- Treat every relay as a scheduled runtime node with one owner. `CAPACITY` bounds its one owner
-  buffer cluster-wide, while each producer node and remote consumer node contributes one fixed
-  in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
+- Treat every relay unit as scheduled work with one owner. A direct branch's `PARTITIONS n`
+  gives its relay one unit per partition. `CAPACITY` bounds each unit's owner buffer, while each
+  producer node and remote consumer node contributes one fixed in-flight dispatch slot. Materialized
+  state adds state replicas to that relay; it does not add a
   separate runtime-node kind. All relays are valid placement members and corridor hops.
   On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
   creation and alteration preserve the exact capacity through storage, replay, and restart.
 - Treat `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors as cluster-wide
   listeners and exclude them from placement members. Every other ingestor, a `WEBSOCKETS CONNECTION`
-  included, is single-owner and keeps its live assignment across ordinary schedule recomputation;
-  use drain, `RELOCATE`, or a hard
-  colocation requirement when it must move.
+  included, keeps its existing live unit assignments across ordinary schedule recomputation.
+  Instance-capable sources can have several independent owners. Current `RELOCATE` refuses a
+  member with several execution units; automatic drain and failover preserve unit identity.
 - Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
   chosen work onto a named cluster node. The selection is a kind-qualified list or a
   `FROM ... TO ...` corridor, hard colocation groups always move whole, and the whole unit moves in
@@ -490,7 +529,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   same payload schema. Unlike ordinary processors, those inputs may use differently named
   branches. Keep collection separate per source relay and concrete branch, and remember that one
   node-wide materialized dependency or message-error relay must be exact-branch compatible with
-  every source.
+  every source. Check [emitter retention](../../../docs/src/emitters.md#branch-semantics) when
+  combining inputs, long flush intervals or required materialized-state waits.
 - Give every emitter an explicit transport-supported `MODE` as the final emitter subclause before
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
@@ -502,8 +542,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   non-sensitive output field needs `leak_sensitive(...)`. Do not create a `CLIENT` model, codec,
   header operation, or direct `VALUES` body for this emitter. An application opens a competing
   consumer with the Rust client's `subscribe_emitter` or the session protocol, receives native
-  Arrow, then explicitly ACKs, retries, or rejects each attempt. `ATTACHED` holds source ACKs
-  until the application ACKs; `DETACHED` releases the source earlier. Retries preserve the bytes
+  Arrow, then explicitly ACKs, retries, or rejects each attempt. `ATTACHED` holds ingestor ACKs
+  until the application ACKs; `DETACHED` releases them earlier. Retries preserve the bytes
   and delivery identity but use a fresh reference. Consumers are volatile across owner and
   session loss; the Rust client may restore the same handle with a fresh attachment only when the
   domain `START` generation and endpoint contract still match. The first read after a session gap
@@ -686,7 +726,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `FROM` without a connector keyword. Reference a client of the head's connector, and pair
   `HTTP ENDPOINT` with an `HTTP ENDPOINT` declaration and `WEBSOCKETS ENDPOINT` with a
   `WEBSOCKETS ENDPOINT` declaration. The endpoint head selects its fields; see `Ingestors` →
-  `HTTP ENDPOINT And WEBSOCKETS ENDPOINT` for the declarations and optional signaling clause. Write every source's `MODE`, using `MODE NO ACK` where nothing waits on an
+  `HTTP ENDPOINT And WEBSOCKETS ENDPOINT` for the declarations and optional signaling clause.
+  Write every ingestor's `MODE`, using `MODE NO ACK` where nothing waits on an
   acknowledgement and only the modes `Ingestors` → `Delivery Modes` lists for that entity.
 - Write external names as string literals spelled exactly as the external system names them:
   topics, consumer groups, subscriptions, queues, channels, subjects, queue groups, and MQTT topic
@@ -701,7 +742,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   unknown or failed had no effect. The Rust client restores a desired producer across a session gap
   or relocation only while the domain `START` generation and endpoint contract still match; it
   never resends a batch merely because its outcome is missing.
-- End every transport ingestor source body with an explicit source-supported `ON QUIESCE` body
+- End every transport ingestor body with an explicit declared `ON QUIESCE` body
   immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `HTTP ENDPOINT` and
   `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
   `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
@@ -710,7 +751,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   emitter's `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, with `NO ACK` only at `QOS 0` and `ACK` only
   at `QOS 1` or `QOS 2`. Do not invent a default or use a mode offered by another entity.
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
-  its source stops or is replaced, reconnect to use the new source; after signaling, the next
+  its ingestor stops or is replaced, reconnect to use the new ingestor; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live
   intake reject with HTTP 503, while withdrawn routes return 404. A node that has not installed a
   revision since it started answers 503 for every unpublished route, never 404. Another domain
@@ -741,8 +782,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.
-- Declare the error relay with the source route's exact named branch, or unbranched for an
-  unbranched source. See `Runtime Nodes` for the branch and error-record contract.
+- Declare the error relay with the input route's exact named branch, or unbranched for an
+  unbranched input. See `Runtime Nodes` for the branch and error-record contract.
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.
 - Preserve connector configuration as the documented string key/value surface. Do not translate
@@ -751,7 +792,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   connector syntax retained in older examples or configurations as invalid.
 - For syslog, read the dedicated `Common` → `Syslog` documentation entry. Reference the predefined
   singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
-  client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` source
+  client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` ingestor
   and `NO ACK` emitter forms.
 - For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and a positive
   `timeout_ms`, and use a codec that emits one Sentry event JSON object per record. Do not add header

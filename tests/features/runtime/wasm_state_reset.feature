@@ -1036,7 +1036,7 @@ Feature: Coordinated WASM processor state reset
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE VHOST edge guest-reset-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
-      CREATE HTTP ENDPOINT INGESTOR metric_source
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
@@ -1149,7 +1149,7 @@ Feature: Coordinated WASM processor state reset
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE VHOST edge guest-reset-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
-      CREATE HTTP ENDPOINT INGESTOR metric_source
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics

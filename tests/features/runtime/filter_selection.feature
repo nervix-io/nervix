@@ -31,7 +31,7 @@ Feature: Filter selections
       CREATE RELAY filter_failures SCHEMA filter_failure UNBRANCHED;
       CREATE VHOST edge filter-selection-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         FILTER WHERE input.amount / input.divisor > 0

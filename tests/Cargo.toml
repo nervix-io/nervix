@@ -72,7 +72,6 @@ flatbuffers = { workspace = true }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
 h2 = { workspace = true }
-hdrhistogram = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 httparse = { workspace = true }
@@ -97,6 +96,7 @@ nervix-approx-into = { workspace = true }
 nervix-backup = { workspace = true }
 nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-client-ffi = { workspace = true }
+nervix-client-host = { workspace = true }
 nervix-client-wire = { workspace = true, features = ["grpc"] }
 nervix-connector-kafka = { workspace = true }
 nervix-consensus = { workspace = true }

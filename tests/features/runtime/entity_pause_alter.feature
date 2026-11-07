@@ -20,7 +20,7 @@ Feature: Entity-pause model alterations
       CREATE RELAY outgoing SCHEMA routed_event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}-entity-swap.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL
@@ -124,7 +124,7 @@ Feature: Entity-pause model alterations
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge http-{{test_id}}-entity-timeout.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
@@ -135,12 +135,12 @@ Feature: Entity-pause model alterations
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER blocked_sink FROM outgoing
+      CREATE ZEROMQ PUSH EMITTER blocked_emitter FROM outgoing
         TO emitter MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And emitter "blocked_sink" enters stall mode
+    And emitter "blocked_emitter" enters stall mode
     When http payload is posted to node "node-1" with host "http-{{test_id}}-entity-timeout.example.com" path "/events"
       """
       {"seq":1}
@@ -173,7 +173,7 @@ Feature: Entity-pause model alterations
       """
       {"seq":8}
       """
-    Then within "5s" DESCRIBE EMITTER "blocked_sink" on the leader node contains
+    Then within "5s" DESCRIBE EMITTER "blocked_emitter" on the leader node contains
       """
       transient error: fault injector stalled emitter publish
       """
@@ -190,7 +190,7 @@ Feature: Entity-pause model alterations
       """
       CREATE ATTACHED JUNCTION altered_path
       """
-    When emitter "blocked_sink" leaves stall mode
+    When emitter "blocked_emitter" leaves stall mode
     Then within "5s" the observed broker receives payloads
       """
       "seq":1
@@ -236,12 +236,12 @@ Feature: Entity-pause model alterations
       CREATE VHOST disjoint_edge http-{{test_id}}-disjoint-scope.example.com;
       CREATE HTTP ENDPOINT affected_ingress ON affected_edge PATH '/events';
       CREATE HTTP ENDPOINT disjoint_ingress ON disjoint_edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR affected_source
+      CREATE HTTP ENDPOINT INGESTOR affected_ingestor
         FROM affected_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
         TO affected_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR disjoint_source
+      CREATE HTTP ENDPOINT INGESTOR disjoint_ingestor
         FROM disjoint_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
         TO disjoint_input INHERIT ALL UNBRANCHED
@@ -323,7 +323,7 @@ Feature: Entity-pause model alterations
       CREATE VHOST edge http-{{test_id}}-parked-gate.example.com;
       CREATE HTTP ENDPOINT parked_state_ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT parked_input_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR parked_state_source
+      CREATE HTTP ENDPOINT INGESTOR parked_state_ingestor
         FROM parked_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
         TO parked_state
@@ -333,7 +333,7 @@ Feature: Entity-pause model alterations
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR parked_input_source
+      CREATE HTTP ENDPOINT INGESTOR parked_input_ingestor
         FROM parked_input_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
         TO parked_input

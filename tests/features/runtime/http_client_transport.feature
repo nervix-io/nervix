@@ -34,7 +34,7 @@ Feature: HTTP client transport contract
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -109,7 +109,7 @@ Feature: HTTP client transport contract
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -197,7 +197,7 @@ Feature: HTTP client transport contract
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -270,7 +270,7 @@ Feature: HTTP client transport contract
       CREATE RELAY observed SCHEMA routed_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -339,7 +339,7 @@ Feature: HTTP client transport contract
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -402,7 +402,7 @@ Feature: HTTP client transport contract
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -485,7 +485,7 @@ Feature: HTTP client transport contract
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -567,7 +567,7 @@ Feature: HTTP client transport contract
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -645,7 +645,7 @@ Feature: HTTP client transport contract
       CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
       CREATE VHOST edge http-transport-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

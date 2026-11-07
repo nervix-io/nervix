@@ -609,7 +609,7 @@ The expression type surface matches the full Nervix internal schema type set:
 - `F32`, `F64`
 - `BOOL`, `STRING`, `DATETIME`
 
-`DATETIME` is the internal logical timestamp type. JSON or AVRO string wire values require `ENCODE <field> AS RFC3339` on the codec before they can decode into the named `DATETIME` field.
+`DATETIME` is the internal logical timestamp type. JSON or AVRO `string` and CBOR `text` wire values require `ENCODE <field> AS RFC3339` on the codec before they can decode into the named `DATETIME` field.
 
 ### Header Context
 
@@ -705,7 +705,7 @@ Transport-specific schemes and keys:
   client certificate. A plaintext `ws://...` endpoint reads no TLS file, so `CREATE WEBSOCKETS
   CLIENT` refuses all three with it; see [`WEBSOCKETS CONNECTION`](#websockets-connection).
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
-- `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `NATS`: use `tls://...` in `addr`. Nervix trusts the platform's native roots, or only `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client certificate; a `nats://` address uses TLS only when the server requires it. See [NATS](#nats).
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](#pulsar).
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix trusts the host's trust store, or only
@@ -851,6 +851,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: Application batches carry their declared schema; there is no separate transport metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1022,7 +1023,7 @@ applies, by the external system's own rule where it has one:
 | `SQS QUEUE` | `QUEUE` | 1 to 80 ASCII letters, digits, `-`, and `_`, and a FIFO queue's name ends in `.fifo`: SQS's own rule |
 | `REDIS PUBSUB` | `CHANNEL` | 1 to 1,024 bytes of any text; a `*` is the character itself |
 | `REDIS PUBSUB` | `PATTERN` | 1 to 1,024 bytes of any text, which Redis matches against channel names as a glob; see [Redis Pub/Sub](#redis-pubsub) |
-| `NATS SUBJECT` | `SUBJECT` | At most 1,024 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last |
+| `NATS SUBJECT` | `SUBJECT` | At most 1,024 UTF-8 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last. The byte bound and embedded-wildcard refusal are Nervix restrictions, not NATS server limits |
 | `NATS SUBJECT` | `QUEUE GROUP` | 1 to 255 bytes without whitespace or control characters |
 | `NATS STREAM` | `STREAM` | 1 to 255 bytes without whitespace, control characters, `.`, `*`, `>`, `/` or `\`: the JetStream server's rule, stricter only in refusing every whitespace and control character |
 | `NATS STREAM` | `CONSUMER` | The rule of a stream name |
@@ -1082,6 +1083,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -1321,7 +1323,7 @@ polling and emitting alike:
 CREATE KAFKA TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
   (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST | OFFSET BY CONSUMER GROUP 'readers' START AT LATEST)
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1336,8 +1338,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | KAFKA client |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -1345,7 +1348,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Acknowledgement confirmation | answered |
 | Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
-| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
@@ -1532,6 +1535,7 @@ disk staging and transfer chunks, so checkpoint length is independent of the Bul
 Offset recovery details:
 
 - `START AT <timestamp>` and `START AT NOW` apply once per domain start generation across all instances. The first initialization persists the resolved partition positions and the applied generation together before reading. Quiescence, reconnects, rebalances, ownership changes and restarts in that generation resume acknowledged positions; they do not apply the timestamp again. A new partition without a recorded position starts at that generation's original timestamp. A later explicit `START AT` begins a new generation and replaces the positions again.
+- A delayed instance receives the same explicit-start cut after reconnect, placement or a plain `START`; pending positions retain the explicit generation even when the domain's current generation advances. Its own positions become durable before its adoption is confirmed.
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
 - in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts at its earliest retained record, so a plain `START` reads what the topic retains and `START AT NOW` is how an unpaced domain skips it
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
@@ -1554,7 +1558,7 @@ CREATE PULSAR TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
   (SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST | SUBSCRIPTION 'readers' PROVISIONED)
   (TYPE SHARED | TYPE KEY_SHARED | TYPE FAILOVER | TYPE EXCLUSIVE)
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1569,8 +1573,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PULSAR client |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -1583,6 +1588,22 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-ingest).
 <!-- connector-matrix:ingest-pulsar-topic:end -->
+
+#### Pulsar topic names
+
+Both ingestion and emission write a quoted, case-preserving `TOPIC` name. A local name such as
+`TOPIC 'orders'` selects `persistent://<namespace>/orders`, using the client's `namespace`,
+`public/default` when omitted. A fully qualified name such as
+`TOPIC 'persistent://tenant-a/events/Orders'` or
+`TOPIC 'non-persistent://tenant-a/events/Orders'` is sent as written and does not use that default.
+
+A topic name is 1 to 1,024 UTF-8 bytes, without whitespace or control characters. A local name has
+no slash; a qualified name has exactly three nonempty levels after `persistent://` or
+`non-persistent://`: tenant, namespace and topic. `CREATE` and `ALTER` refuse other shapes.
+Provision the topic before starting the ingestor or emitter, and choose its subscription ownership
+separately as described below.
+
+#### Received message metadata
 
 A Pulsar message exposes these nullable metadata fields to routing expressions:
 
@@ -1616,6 +1637,8 @@ and field. A valid prefix already gathered is delivered before that error. Pulsa
 an omitted redelivery count as zero, so the first delivery reports zero and a broker redelivery can
 report one. Every protocol `u32` count fits the declared `I64`.
 
+#### Subscriptions and consumers
+
 Pulsar ingestors read through a durable subscription. Every statement declares who owns the
 subscription, because the broker cannot say later who created one, and the type the ingestor reads
 it as:
@@ -1648,9 +1671,10 @@ required, and a statement writes it after the subscription's owner:
 | `FAILOVER` | One consumer takes messages while the others stand by. When it leaves, a standby continues from what it has not acknowledged. | One |
 | `EXCLUSIVE` | The broker admits one consumer and refuses any other. | One |
 
-`FAILOVER` and `EXCLUSIVE` read through one consumer, so a statement that declares more instances
-is refused at `CREATE` and `ALTER`, as in `PULSAR subscription TYPE EXCLUSIVE reads through one
-consumer, so it refuses INSTANCES 2`. A `FAILOVER` standby is another ingestor or application that
+`FAILOVER` and `EXCLUSIVE` require one fixed instance. A statement that declares more instances or
+`INSTANCES PER PARTITION` is refused at `CREATE` and `ALTER`, as in
+`PULSAR subscription TYPE EXCLUSIVE reads through one consumer, so it refuses INSTANCES 2`.
+A `FAILOVER` standby is another ingestor or application that
 joins the same subscription.
 
 The broker holds one type per subscription while any consumer is connected. It refuses a consumer
@@ -1706,7 +1730,9 @@ on drop; a failure does not prevent starting the replacement. `DESCRIBE INGESTOR
 shows the subscription name, its ownership and declared start position, `TYPE` and `INSTANCES`
 together in the declared `options:` row.
 
-Client config currently supports:
+#### Pulsar client
+
+The same `PULSAR CLIENT` keys configure ingestion and emission:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
 - optional `'auth_token'`: the token the client authenticates with. `DESCRIBE CLIENT` and
@@ -1737,6 +1763,8 @@ A client authenticates with what its keys hold, and both directions connect the 
 handshake. With both, the token names the role and the certificate satisfies a broker that requires
 one on connect. A client with neither presents no credential.
 
+#### Acknowledgements and recovery
+
 The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry.
 An ingestor that loses its broker shows the failure as its transient error and reconnects on its
 `RETRY POLICY`, or on the reconnect policy under `MODE NO ACK`. A consumer of one partition of a
@@ -1763,6 +1791,12 @@ broker it cannot reach, shows `the Pulsar consumer did not confirm sending a red
 and the broker redelivers the messages once the consumer reconnects. `MODE NO ACK` acknowledges
 each message without waiting for the broker's answer.
 
+In `MODE NO ACK`, a payload its codec refuses is consumed through the ingestor's `ON GENERAL ERROR`
+policy and counted as a decode rejection. The source queues its acknowledgement without waiting
+for the broker's answer. See
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload) for reporting and the separate
+contract of a message that decoded but failed in a route.
+
 Under `FAILOVER` and `EXCLUSIVE` the broker does not take one message back: a rejection rewinds the
 consumer to everything it has not acknowledged. The messages behind a rejected one arrive again,
 after those the consumer already received, so delivery stays at least once and neither a single
@@ -1779,11 +1813,16 @@ provisions it again.
 
 ### RabbitMQ
 
+`RABBITMQ QUEUE` consumes an externally provisioned queue. To receive messages from an exchange,
+provision a queue and its exchange bindings first, then consume that queue; an exchange is not an
+ingestor entity. [RabbitMQ emitters](emitters.md#rabbitmq) publish either through the default
+exchange to a queue or through a named exchange and a computed routing key.
+
 <!-- connector-matrix:ingest-rabbitmq-queue:start -->
 ```plexus,ignore
 CREATE RABBITMQ QUEUE INGESTOR <name>
   FROM <client> QUEUE 'orders'
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1798,8 +1837,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | RABBITMQ client |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -1812,6 +1852,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-ingest).
 <!-- connector-matrix:ingest-rabbitmq-queue:end -->
+
+#### Queue names, metadata and headers
 
 `QUEUE` names an existing queue and preserves its spelling, including letter case and Unicode.
 Its string literal must contain 1 to 255 UTF-8 bytes, the AMQP short-string limit; a multibyte
@@ -1834,10 +1876,28 @@ timestamp, a count of whole seconds since the Unix epoch, as that exact `DATETIM
 its message wherever the ingestor's route programs or its `TIMESTAMP AT` read `metadata.timestamp`,
 with code `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
 
+`read_header` and `read_headers` read the AMQP header table, separately from these basic properties.
+The declared model is `sorted_by_name` with exact names: one value per name, visited in ascending
+byte order, with case-sensitive lookup. It does not preserve publisher insertion order or repeated
+entries of the same name. Copy a header or metadata value into a schema field when downstream
+processing needs it; neither is carried through a relay automatically.
+
+#### Consumption and settlement
 
 Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY …`.
 `DESCRIBE INGESTOR` prints the complete selected mode.
+
+| Mode | Consumer prefetch per instance | What completes a transport delivery |
+| --- | --- | --- |
+| `NO ACK` | No prefetch request | The broker sends it; no downstream result can requeue it. |
+| `ACK SEQUENTIAL` | 1 | Its graph outcome decides an individual acknowledgement or requeue. |
+| `ACK PARALLEL MAX n` | `n`, from 1 through 65,535 | Each delivery's graph outcome settles it independently of its siblings. |
+
+`ACK TIMEOUT` bounds the absence of graph acknowledgement progress, not total processing time;
+see [Delivery Modes](#delivery-modes). `BATCH TIMEOUT` bounds gathering after the first delivery of
+a parallel read. Neither replaces consumer prefetch. These are consumer controls; an emitter's
+`ACK` waits for publisher confirms and does not acknowledge queue consumption.
 
 `NO ACK` registers an automatically acknowledging consumer, sends no prefetch request and sends
 no delivery acknowledgements or rejections. RabbitMQ considers a delivery complete when it sends
@@ -1860,6 +1920,8 @@ cannot overtake downstream work from that connection.
 A payload its codec refuses is consumed and acknowledged, and its decode rejection follows
 `ON GENERAL ERROR`; see [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
+#### Suspension and reconnects
+
 Suspension cancels the consumer and RabbitMQ requeues unacknowledged in-flight deliveries. Other
 consumers on the same queue continue. Queue length, message TTL, overflow, and auto-expiry policies
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
@@ -1875,6 +1937,19 @@ again. RabbitMQ then delivers the message again: a delivery that failed in the g
 and one the graph had already acknowledged is ingested a second time, so delivery across a
 reconnect is at least once.
 
+The acknowledgement confirmation is `written`: Nervix waits for its ACK or requeue frame to be
+written, but AMQP sends no acknowledgement of that consumer settlement. A connection lost at that
+boundary can therefore redeliver a message whose graph work completed. Delivery tags are scoped to
+the channel and cannot be used to settle a replay on a replacement channel.
+
+#### RabbitMQ client
+
+One `RABBITMQ CLIENT` configuration serves queue ingestion and both emitter entities. The
+[generated client key reference](connector-capabilities.md#rabbitmq-client) lists every supported
+key, its value constraints, owner, confidentiality and TLS file role. It is an unpooled client:
+consumer instances and emitters open their own connections. Queue names, exchange names, routing,
+persistence and message properties belong to their entity statements, not to client `CONFIG`.
+
 Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
 every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
 addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
@@ -1883,7 +1958,8 @@ handshake, opening the channel, setting the prefetch window and starting the con
 client's `connect_timeout_ms`, 30 seconds when it is left out; the broker certificate must name the
 host `addr` names. A connection that fails or runs out of that deadline, including a name that does
 not resolve, is a source error that `DESCRIBE INGESTOR` shows as the transient error, and the
-instance tries again on its `RETRY POLICY` cadence without acknowledging anything.
+instance tries again on its `RETRY POLICY` cadence, or the host's reconnect policy under
+`MODE NO ACK`, without acknowledging anything.
 
 The client's `addr` is an AMQP URI whose scheme is `amqp` or `amqps`, which names a host, and whose
 port, when it names one, is not 0. Lapin would take `localhost` for an address that names no host,
@@ -1901,7 +1977,8 @@ PKCS #1 or SEC1, to a broker that asks for a client certificate. A file that can
 holds no PEM certificate or no private key, fails the connection as a configuration error. A broker
 that requires a client certificate and receives none, or one it does not accept, ends the TLS
 session with an alert: `DESCRIBE INGESTOR` shows that the broker refused the TLS session, naming the
-alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence.
+alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence, or the
+host's reconnect policy under `MODE NO ACK`.
 `tls_ca_file`, `tls_cert_file` and `tls_key_file` require an `amqps` address, and certificate and
 key must be supplied together. A client that violates either rule is refused before commit,
 naming the key and its required constraint without repeating the address or file path.
@@ -1928,6 +2005,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2041,7 +2119,7 @@ frame. Configure both bounds for the expected payload sizes.
 ```plexus,ignore
 CREATE MQTT TOPIC INGESTOR <name>
   FROM <client> TOPIC 'devices/+/orders'
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   (SESSION CLEAN | SESSION PERSISTENT)
   (QOS 0 | QOS 1 | QOS 2)
   MODE <mode>
@@ -2058,8 +2136,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | MQTT client |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
+| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2073,8 +2152,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-ingest).
 <!-- connector-matrix:ingest-mqtt-topic:end -->
 
+#### MQTT broker and client
+
 The topic filter is a string literal; see [External Names](#external-names) for the levels and
-wildcards it may hold.
+wildcards it may hold. The broker must support MQTT 5 shared subscriptions and permit the
+subscription `$share/<domain>~<ingestor>/<filter>` at the declared QoS. Every instance joins that
+group, including an ingestor with only one instance. Write just the filter in `TOPIC`: Nervix
+adds the share group, and a filter cannot begin with a `$share` level of its own.
 
 The client's `addr` names the broker by its scheme, host and port alone: `mqtt://` or `mqtts://`, a
 host, and a nonzero port, such as `mqtt://broker.example.com:1883`. A connection reads nothing else
@@ -2103,12 +2187,28 @@ interval bounds each acknowledgement write. A broker-supplied zero disables the 
 acknowledgement-write deadline derived from it; it does not make a silent connection fail within a
 fixed time.
 
+#### MQTT sessions and delivery modes
+
 `SESSION CLEAN` starts a fresh broker session on every connection and retains no session after
 disconnect. `SESSION PERSISTENT` resumes the broker session for the same client identity and
 requests the maximum Session Expiry Interval (`0xFFFFFFFF`). The broker's accepted expiry,
 offline-queue limits and eviction policy still govern retention. Plexus exposes no session-expiry
-setting. Nervix keeps delivery attempts and acknowledgements in memory; a persistent broker
-session does not persist that local state.
+setting. An ingestor also accepts a retained broker session when a new owner connects without
+local protocol state; the broker redelivers its unacknowledged QoS 1/2 publishes. Nervix keeps
+delivery attempts and acknowledgements in memory; a persistent broker session does not persist
+that local state. The [emitter's session recovery](emitters.md#mqtt) has a separate boundary.
+
+`SESSION` and `QOS` are required, in that order before `MODE`. The legal combinations are:
+
+| Session | QoS | Mode families | Quiesce choices |
+| --- | --- | --- | --- |
+| `CLEAN` | `0`, `1`, `2` | `NO ACK` | `BUFFER`, `DROP` |
+| `PERSISTENT` | `0` | `NO ACK` | `BUFFER`, `DROP` |
+| `PERSISTENT` | `1`, `2` | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | `SUSPEND`, `BUFFER`, `DROP` |
+
+Use the complete mode and quiesce bodies from the declaration above. `NO ACK` at QoS 1 or 2
+still uses that QoS on the connection, but settles before graph processing; it has no in-flight
+ACK window and never takes `MAX`. `SUSPEND` is valid with persistent QoS 1/2 even under `NO ACK`.
 
 Delivery constraints:
 
@@ -2130,7 +2230,7 @@ Delivery constraints:
   acknowledgements, and a batch above 65,535 gathers at most 65,535 of them before its
   `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
   holds a batch
-- `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages. Every instance subscribes to `$share/<domain>~<ingestor>/<filter>`, so the share group belongs to Nervix and a topic filter cannot begin with a `$share` level of its own
+- `INSTANCES <count>` controls Nervix consumer parallelism within the shared subscription group
 
 A new subscription becomes ready only when the broker grants the declared QoS. A lower grant
 fails through the general error policy and `DESCRIBE INGESTOR` names the requested and granted
@@ -2142,6 +2242,8 @@ retained subscription cannot turn the rejection into a successful resume. Suspen
 pending retirement. Permission granted later permits a fresh subscription attempt. An accepted
 persistent session keeps its original grant across reconnects; changing the filter or QoS retires
 that session.
+
+#### MQTT metadata and user properties
 
 Each publish's packet supplies its metadata and headers:
 
@@ -2169,6 +2271,8 @@ Each publish's packet supplies its metadata and headers:
 
 An `ON QUIESCE BUFFER` retains a publish's metadata and user properties with its payload, and its
 `MAX SIZE` counts the payload alone.
+
+#### MQTT acknowledgement and keep-alive
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for,
 and every `PUBREC` its QoS 2 publishes ask for, is written to the connection, within one keep-alive
@@ -2214,6 +2318,8 @@ Cancellation retains any discard acknowledgement and its original keep-alive dea
 next read. An ordinary partial batch ahead of a discard is returned and acknowledged first,
 preserving MQTT acknowledgement order. The following read starts the discard acknowledgement's
 deadline and reports its size exactly once after that acknowledgement has been written.
+
+#### MQTT identities, suspension and retirement
 
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
@@ -2263,12 +2369,24 @@ again on its declared `RETRY POLICY`, or on the host's reconnect cadence in `MOD
 
 ### NATS
 
+NATS has two ingestor entities, one for each way a NATS server hands out messages, and both read
+through a `NATS CLIENT`. `NATS SUBJECT` subscribes to a subject through Core NATS as a member of a
+queue group: the server hands each message to one member of the group as it arrives and retains
+nothing, so the entity reads in `MODE NO ACK` and quiesces with `BUFFER` or `DROP`. `NATS STREAM`
+reads a JetStream stream through a durable pull consumer: the stream stores what is published to
+its subjects and keeps it for as long as its operator's retention policy and limits allow, and the
+consumer keeps the position, so the entity acknowledges each delivery in `MODE ACK SEQUENTIAL` or
+`MODE ACK PARALLEL` and can also quiesce with `SUSPEND`. A stream stores a Core publication to one
+of its subjects as it stores a JetStream one, and a subscription receives a JetStream publication
+to its subject as it receives a Core one, so either entity reads what either
+[NATS emitter](emitters.md#nats) publishes to a subject it reads.
+
 <!-- connector-matrix:ingest-nats-subject:start -->
 ```plexus,ignore
 CREATE NATS SUBJECT INGESTOR <name>
   FROM <client> SUBJECT 'orders.created'
   (QUEUE GROUP 'workers')
-  (INSTANCES 2)
+  (INSTANCES 2 | INSTANCES PER PARTITION)
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -2283,8 +2401,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | NATS client |
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |
+| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); required |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2307,7 +2426,11 @@ subject of the delivered message, including when the subscription uses a wildcar
 Header reads retain the wire order, including interleaved repeated names, with exact name matching.
 
 `NATS SUBJECT` ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
-are mandatory; use `INSTANCES 1` for a single queue member.
+are mandatory. `INSTANCES <n>` creates that many queue-group members across the cluster; use
+`INSTANCES 1` for one member. `INSTANCES PER PARTITION` creates one member for each partition index,
+placed with the corresponding partitions of its destination relays, under the
+[Instancing](#instancing) rules. Every member subscribes to the same subject and queue group;
+Core NATS chooses the member that receives each message.
 
 The NATS client accepts one optional authentication key: `token`, `nkey_seed` for a user NKey
 seed, or `credentials_file` for a NATS user credentials file containing its JWT and signing seed.
@@ -2317,7 +2440,11 @@ Mount a resource containing a credentials file and write its resolved path, such
 inspection. URL user information remains delegated to the NATS driver.
 
 Ingestors and emitters use the same authentication and TLS options. A `tls://` address requires
-TLS on both sides, with the configured CA and optional paired client certificate and key.
+TLS on every connection the client makes, reconnections and servers the cluster announces
+included, whichever direction it serves; a `nats://` address uses TLS only when the server
+announces that it requires it. The client verifies the server's certificate against the
+platform's native roots, or only against `tls_ca_file` when it is set, and presents
+`tls_cert_file` with `tls_key_file` as its client certificate.
 An unreadable or malformed credentials file is a configuration failure; a broker refusing the
 identity is a connection failure reported by the boundary's existing general error policy and
 retry cadence. Nervix does not create accounts or users on the broker.
@@ -2360,6 +2487,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `CONSUMER 'nervix'` (string literal checked by nats_consumer); required |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2375,7 +2503,8 @@ See the [NATS STREAM capability and mirror reference](connector-capabilities.md#
 
 `NATS STREAM` reads a JetStream stream through one durable pull consumer of it, and both belong to
 an operator: Nervix creates neither. `STREAM` and `CONSUMER` are string literals Nervix names
-exactly as written within the [external name rules](#external-names).
+exactly as written within the [external name rules](#external-names). This entity runs one instance
+and accepts no `INSTANCES` clause.
 
 The instance connects, looks the consumer up, and refuses a consumer it cannot read as it declares:
 a push consumer, which delivers to a subject of its own, and a consumer whose acknowledgement policy
@@ -2397,11 +2526,11 @@ bounds how often the consumer delivers a message, and JetStream stops delivering
 it.
 
 `SUSPEND` lets the instance's pull go: the instance unsubscribes the inbox its pull requests
-deliver to, so the consumer delivers nothing to it while it is suspended and the stream keeps
-everything published meanwhile for the consumer. A delivery the instance had received but not yet
-read when it suspends is negatively acknowledged, so the consumer delivers it again once the
-instance resumes, and one still on its way is delivered again once the consumer's `AckWait`
-passes. Under `BUFFER` and `DROP` the instance keeps pulling while it is quiesced and
+deliver to, so the consumer delivers nothing to it while it is suspended. What is published
+meanwhile waits in the stream for the consumer, unless the stream's own limits, such as a maximum
+age, discard it first. A delivery the instance had received but not yet read when it suspends is
+negatively acknowledged, so the consumer delivers it again once the instance resumes, and one
+still on its way is delivered again once the consumer's `AckWait` passes. Under `BUFFER` and `DROP` the instance keeps pulling while it is quiesced and
 acknowledges each delivery once the host buffered or dropped it, as every acknowledged source does
 in those modes.
 
@@ -2455,6 +2584,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | Not offered: The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -2536,6 +2666,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.peer_addr: STRING OPTIONAL<br>metadata.transport: STRING OPTIONAL<br>metadata.tls_peer: STRING OPTIONAL |
 | Every live node | yes |
@@ -2568,7 +2699,7 @@ diagnostic. These failures do not acknowledge a message; Syslog has no applicati
 ```plexus,ignore
 CREATE SQS QUEUE INGESTOR <name>
   FROM <client> QUEUE 'orders'
-  [INSTANCES 2]
+  [INSTANCES 2 | INSTANCES PER PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -2583,8 +2714,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | SQS client |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2733,6 +2865,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |
 | Headers | Not offered: An HTTP response's headers describe a whole answer rather than one of its samples, and each sample's labels travel in its payload under metric, so a query source reads no transport headers. |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -2955,6 +3088,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL |
 | Every live node | yes |
@@ -2990,6 +3124,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL |
 | Every live node | yes |
@@ -3201,12 +3336,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `HEADERS { 'authorization' = 'Bearer token' }` (composed clause); optional; omitted when unset |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| Instancing | single |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | metadata.frame_type: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
+| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
 | Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
@@ -3516,15 +3652,55 @@ decode failure to reject a frame.
 The following entities declare `INSTANCES`; presence and defaults follow the vocabulary.
 
 <!-- connector-matrix:instancing:start -->
-| Entity | INSTANCES |
-| --- | --- |
-| KAFKA TOPIC | optional; default 1 |
-| PULSAR TOPIC | optional; default 1 |
-| MQTT TOPIC | optional; default 1 |
-| NATS SUBJECT | required |
-| RABBITMQ QUEUE | optional; default 1 |
-| SQS QUEUE | optional; default 1 |
+| Entity | Capability | INSTANCES |
+| --- | --- | --- |
+| KAFKA TOPIC | per_partition | optional; default 1 |
+| PULSAR TOPIC | per_partition | optional; default 1 |
+| MQTT TOPIC | per_partition | optional; default 1 |
+| NATS SUBJECT | per_partition | required |
+| RABBITMQ QUEUE | per_partition | optional; default 1 |
+| SQS QUEUE | per_partition | optional; default 1 |
 <!-- connector-matrix:instancing:end -->
+
+`Single`, `Instances`, and `PerPartition` are entity capabilities. A `Single` entity accepts no
+`INSTANCES` clause. `Instances` permits a fixed count; `PerPartition` also permits the partition
+form. The six broker entities in the table declare `PerPartition`. Polling, connection, listener,
+and client-producer entities declare `Single`.
+
+`INSTANCES <n>` uses a positive 64-bit count (1 through 18,446,744,073,709,551,615). Before
+placement, Nervix refuses a count whose execution-unit entries cannot be addressed on the target.
+The declaration and its encodings retain the complete count. Nervix schedules each global index `0..n-1` as an
+independent execution unit with its own primary, replicas, readiness, intake buffer, ACK roots,
+branch lifecycle and metric checkpoints. Eligible nodes share the primary work; when fewer nodes
+are available, several instances can run on one node. A hard whole-entity colocation rule can
+require all its units to share an owner. Connector identities retain the global index when a unit
+moves; an owner never renumbers its local instances. Broker competition retains the transport's
+own subscription and delivery guarantees.
+
+`INSTANCES PER PARTITION` creates one instance per partition of the branch its routes construct.
+Every constructing route must target the same ordered key-field contract and partition count.
+Branch names and retention settings may differ. At least one route must construct a branch;
+additional unbranched routes do not define its partition structure. Instance `p` is colocated with
+partition `p` of every constructed relay. A branch with one partition places instance `0` with the
+relay's `Single` unit. The current form follows direct branch partitions; shard inheritance and
+topology epochs are separate features.
+
+For Kafka, `PER PARTITION` requires `OFFSET BY DOMAIN`. Each unit owns the offsets of the topic
+partitions dealt to its global index, and commits through the originator on that unit's primary.
+Changing a domain-offset ingestor's unit count preserves its recorded positions while running or
+stopped. Nervix drains the affected units and prepares their redistributed state on the new
+primaries and replicas before publishing the layout. A failed preparation retains the preceding
+layout. Changing the broker topic's partition set with a fixed instance count retains its existing
+rebalance and checkpoint contract.
+
+`DESCRIBE INGESTOR <name>` reports every instance with its node, running state and readiness.
+`SHOW INGESTORS` and `SHOW CLUSTER STATUS` list the unit-qualified owners. Generic edge metrics and
+source-specific intake metrics carry the `instance` label; see
+[Metrics And Observability](metrics-and-observability.md#metric-labels). Moving or stopping one
+instance ends its exact source lifetime and leaves sibling source tasks, ACK roots and readiness
+handles installed. A count change retains complete metric histories exactly once, with their
+original instance and physical-node labels. A retired instance's history remains visible while
+one of the current units owns its checkpoint.
 
 The instances of a `KAFKA TOPIC` ingestor under `OFFSET BY CONSUMER GROUP` are members of one group
 and share its `START AT`: whichever instance takes a partition the group holds no usable offset for

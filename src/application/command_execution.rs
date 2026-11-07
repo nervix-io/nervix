@@ -481,8 +481,18 @@ impl SessionServiceImpl {
             .command_execution_reconciliation(finished_before, retry_fence)
             .await;
         let maintenance_due = reconciliation.maintenance_due;
+        #[cfg(feature = "testing")]
+        let deferred = self
+            .inner
+            .runtime
+            .fault_injection()
+            .deferred_command_reconciliations(self.inner.consensus.local_node_id());
         for reference in reconciliation.applying {
             nervix_primitives::task::consume_budget().await;
+            #[cfg(feature = "testing")]
+            if deferred.contains(&reference) {
+                continue;
+            }
             let Some(execution_guard) = self.inner.command_executions.try_lock(reference.clone())
             else {
                 continue;

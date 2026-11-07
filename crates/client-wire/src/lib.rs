@@ -89,7 +89,8 @@ pub use domain_clock::{
     DomainClockObserved, DomainClockTicked,
 };
 pub use event::{
-    Leadership, LeadershipObserved, NoticeLevel, ServerNotice, SessionEndReason, SessionEnding,
+    Leadership, LeadershipObserved, NoticeKind, NoticeLevel, ServerNotice, SessionEndReason,
+    SessionEnding,
 };
 pub use frame::{
     BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, FrameError,
@@ -122,7 +123,7 @@ pub use row::{
     CellView, CellWriter, CellsView, EmptyBranchKey, RowBatchView, RowBranch, RowConformanceError,
     RowLocation, RowSchema,
 };
-pub use server::{Reply, ReplyBody, ReplyDelivery, ServerEvent, ServerMessage};
+pub use server::{Reply, ReplyBody, ReplyBodyKind, ReplyDelivery, ServerEvent, ServerMessage};
 pub use subscription::{
     RowsSkippedCause, SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded,
     SubscriptionHandle, SubscriptionRows, SubscriptionRowsEncoder, SubscriptionRowsSkipped,

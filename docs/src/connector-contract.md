@@ -120,7 +120,7 @@ connector crate.
 | Decision and composition | Convert a validated Model into a typed source or emitter start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define ingestor and emitter operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the ingestor contract, the emitter contract, or both. |
-| Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse Plexus or read a Model during data-plane execution. |
+| Host data plane | Own tasks, intake and Arrow decoding, branch routing and retention of held emitter work, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse Plexus or read a Model during data-plane execution. |
 
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
@@ -961,6 +961,23 @@ behavior. That change also supplies its generated conformance and runtime scenar
 The declaration describes the product a user can execute; plans for additional connector clauses
 remain in their owning work records until that delivery.
 
+The declaration crosses each boundary once, without becoming runtime graph policy:
+
+| Reader | What it takes from the declaration |
+| --- | --- |
+| Plexus grammar and completion | The connector/entity head, locator and option forms, mode bodies, header and metadata names, and valid choices. |
+| Registry and planner | Reference kinds, exact value and option requirements, legal modes, envelopes and batching; validation produces a typed plan before execution. |
+| Connector host | The validated plan and declared metadata, bounds and waits; the host owns routing, retry, quiesce, flush and acknowledgements. |
+| Console and inspection | Entity choices, confidential client keys, effective defaults and the canonical or descriptive presentation. |
+| Manuals and checks | The generated capability matrix, conformance tests and scenario inventory described below. |
+
+Three evidence layers hold this boundary to its declaration. Generated Plexus conformance tests
+check parsing, completion and accepted or refused construction; the test-only fake connector checks
+host policy and value retention, including registered Shuttle interleavings; production-owner tests
+and public scenarios through the real transport establish each connector's delivery and declared
+runtime capabilities. The matrix and inventory checks catch a missing or stale documentation row
+or scenario registration, but neither substitutes for observing the transport.
+
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
@@ -1087,12 +1104,10 @@ statement that names a mode without the choices it requires is refused at `CREAT
 with the vocabulary's typed `UnmetDeliveryRequirement`, which names every required choice and what
 the statement writes for each. A publishing mode declares its choices the same way: an MQTT topic's
 `NO ACK` requires `QOS 0` and its `ACK` requires `QOS 1` or `QOS 2`, the destination answers which
-choice its statement made, and `UnmetPublishingRequirement` is the refusal. Whether a source can
-honor a quiesce mode, whether
-an emitter accepts a publishing mode, whether its body needs a codec, and the batching contract with its
-maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
-registry, the planner and the console keep their own copies of some of these facts until the work
-that owns those layers reads the declaration instead.
+choice its statement made, and `UnmetPublishingRequirement` is the refusal. Whether an ingestor can
+honor a quiesce mode, whether an emitter accepts a publishing mode, whether its body needs a codec,
+and the batching contract with its maximum and refusal are all read from the declaration. The
+registry, planner and console consume those facts without another allowed-value table.
 
 `REDIS PUBSUB` shares one channel-name rule between ingestion and emission: a nonempty literal
 of at most 1,024 UTF-8 bytes, passed through without normalization or wildcard interpretation.
@@ -1136,7 +1151,10 @@ declaration scenarios qualify these facts together.
 `.`-separated tokens, none empty, without whitespace or control characters, kept exactly as
 written. A subscription may write `*` for one token and `>` for every remaining token, each only
 as a whole token and `>` only last; a publication subject admits neither, since a message is
-published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
+published to one literal subject. The vocabulary owns the isolated parser for this NATS server
+2.11 subject contract; its 1,024-byte bound and refusal of embedded wildcard characters are
+Nervix restrictions, rather than server limits. The queue-group name has a separate rule because
+it has no subject-token grammar. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
 `INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
 acknowledgement for a subscriber. Both directions retain every header pair in wire order, including
 interleaved repeated names, and match names exactly. The ingestor declares `metadata.subject` and
@@ -1149,9 +1167,14 @@ authentication keys `token`, `credentials_file` and `nkey_seed`. Its schema decl
 three mutually exclusive and confidential, and identifies `credentials_file` as a mounted file.
 Both sides build authentication and TLS options through one connector-owned builder, then attach
 their own connection-loss notifications or reconnect policy. Token authentication uses the driver;
-nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The connector validates
-the fixed-size user seed's base32, user prefix and transcription checksum, and reads a mounted
-credentials file through the node's filesystem workers. Its immutable mounted length is charged to
+nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The maintained
+format-only [NKey fork](https://github.com/nervix-io/nkeys) validates the fixed-size user seed's
+canonical base32, exact user prefix and transcription checksum, and encodes its public key.
+The maintained [NATS driver fork](https://github.com/nervix-io/nats.rs) parses credentials into
+borrowed JWT and seed sections without enabling its signing backend. Parsing preserves LF/CRLF,
+trimmed lines, either section order, explanatory text and an end marker at EOF, without allocating
+or caching a regular expression. Public-key encoding allocates only its returned string.
+The connector reads a mounted credentials file through the node's filesystem workers. Its immutable mounted length is charged to
 credentials memory before allocation or reading, and that charge stays until the temporary bytes
 are cleared. Cancellation is checked before and after the bounded file read. Admission or execution
 refusal judges no credential and remains a retryable initialization failure, distinct from invalid
@@ -1461,7 +1484,7 @@ type of a typed model, or `headers: none`, and the per-entity tables of the
 
 ### Shared entity presentation
 
-The vocabulary's `EntityPresentation` projects each configured source or sink once from its
+The vocabulary's `EntityPresentation` projects each configured ingestor or emitter once from its
 current Model. Its declaration supplies the connector/entity phrase, locator keywords, option
 order and effective defaults. Canonical Plexus and `DESCRIBE` consume that projection; canonical
 text preserves omitted optional Model fields, while inspection includes their effective defaults.
@@ -1490,9 +1513,23 @@ domain offsets all read those same plans; none of them reads the ingestor's Mode
 ingestor binds its codec, node filter, routes and branched entrypoints against the installed domain
 surfaces and parses its declared acknowledgement before any connector instance opens, so a start
 that fails leaves nothing running.
-The current ingestor schedule places one `Single` execution unit; Kafka's transport partition
-assignments remain inside that unit. Its domain-offset plan reads the unit's primary, and the
-host keys its replicated offset checkpoint by that same unit.
+Instance-capable entities declare `Count(NonZeroU64)` or `PerPartition` in the vocabulary. The
+registry resolves that declaration into exact `Instance(i)` unit placements and per-unit start
+plans; `Single` entities retain their single unit. Each host opens only its plan's global index.
+Connector configuration still carries the total count where the transport needs it. A handoff
+changes one unit's primary and state originator without restarting its siblings.
+
+The vocabulary declares `Single | Instances | PerPartition` once per entity. Grammar, validation,
+console drafts, inspection and capability exports consume that declaration. Per-partition sources
+bind instance `p` to each constructing destination's partition `p`; Kafka requires domain offsets.
+Before placement materializes fixed instances, the registry refuses a count whose execution-unit
+entry layout is unaddressable on the target. The connector receives only its validated unit plan.
+All constructing routes agree on key fields and partition count. A count change freezes the
+complete preceding intake layout, captures and persists each source unit once, and projects
+those exact checkpoints into disjoint target slices. It redistributes positions and complete metric
+histories and prepares every target primary and replica before committing the replacement. A retained unit on
+the same physical node takes that prepared state too. Ordinary ownership moves still leave
+unaffected sibling intake tasks running.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, whether quiesce is supported, the
@@ -1677,8 +1714,10 @@ Each source host retains its exact instance readiness handle. Poll success and s
 publish through that scalar, without looking up the ingestor registry. Replacing an ingestor retires
 its preceding handles before installing the new instances; host drop also retires its own handle.
 Retirement is final, so late polling or teardown cannot mark a replacement ready or unready.
-Readiness observers aggregate the installed instance handles. Quiescence and ACK/commit ownership
-remain with the host's existing loop and controls.
+Readiness, transient status, ACK roots and quiesce controls are registered under `DomainNodeUnitRef`.
+Every host retains one scalar readiness handle and one intake buffer. Whole-entity operations
+select every current unit; ownership handoffs select only the units they transfer. Retiring a
+handle or buffer cannot modify a successor's lifetime.
 
 The host runs three source loop families, with a listener using the broker loop:
 
@@ -1717,7 +1756,7 @@ when its transport stays connected with bounded memory while nothing reads it:
 | Source | Unacknowledged admission | The transport while its loop is held |
 | --- | --- | --- |
 | HTTP polling, Prometheus | Waits for a place | Nothing is read. The next poll is delayed, and the domain cadence coalesces the occurrences it missed. |
-| NATS | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
+| NATS SUBJECT | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
 | ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
 | Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
 | MQTT | Refused and counted | The connection's driver task keeps the event loop, and with it the keep-alive, running while the loop is held, but under `NO ACK` reads only 64 publishes ahead of it. Once those fill, the driver stops reading, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
@@ -1895,7 +1934,7 @@ as an oversized outcome; no payload is counted twice.
 The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` once per ingestor and physical
 node and passes its counter handle to the connector. The driver increments it at each overflow,
 including while the host waits for downstream acknowledgement. Prometheus exposes the count with
-`domain`, `ingestor` and `physical_node_id` labels; a reconnect does not reset it. It is separate
+`domain`, `ingestor`, `physical_node_id` and `instance` labels; a reconnect does not reset it. It is separate
 from codec rejections, oversized payloads, quiesce drops and transport redeliveries.
 
 Every MQTT subscription checks the successful `SUBACK` grant against its declared QoS before
@@ -2058,8 +2097,9 @@ it in the subscription. The plan carries it, and the connector passes it to ever
 builds: the data consumers, the non-durable existence probe and the removal consumer. Subscription
 identity ignores it, like ownership and the start position, so `SET TYPE` and a `SET FROM` that
 changes only the type retain the subscription. The registry refuses `FAILOVER` and `EXCLUSIVE` with
-more than one instance at `CREATE` and on every alteration, because those types read through one
-consumer. The rule holds until the partitioning epic defines how instances and these types combine.
+a count other than one or with `INSTANCES PER PARTITION` at `CREATE` and on every alteration,
+because those types require one fixed consumer. `SHARED` and `KEY_SHARED` accept both fixed counts
+and partition-following instances; every unit opens its own consumer with its stable global index.
 
 A Pulsar ingestor's client gives the driver one attempt at an operation. The driver would otherwise
 repeat a subscribe the broker answers with `ConsumerBusy` or `ServiceNotReady` without limit, which
@@ -2420,7 +2460,7 @@ librdkafka's flush without waiting and polls in between, so on a loaded node the
 that instant and the records linger past the deadline. The Kafka finish therefore waits inside
 librdkafka's flush itself, in steps of at most a second, while the producer's polling thread takes
 the delivery reports that end the flush. The flush holds a handle of its own, so a flush its finish's
-caller stopped waiting for keeps the producer until it returns, and then retires it if the sink is
+caller stopped waiting for keeps the producer until it returns, and then retires it if the emitter is
 gone, as [Kafka client retirement](#kafka-client-retirement) describes.
 
 The Kafka emitter counts the records its producer holds itself. librdkafka's out-queue length adds
@@ -2674,8 +2714,8 @@ the byte limit halved and measured again with the rest returned to the front, an
 still exceeds it rejected alone. A row over `MAX SIZE` is a `validation` error of the `encode`
 operation; a row within it that the destination could never take is the destination's `external`
 rejection of the row. Every request answers for the rows it carried, and a failed request leaves its
-rows and every later request's unresolved for the host to retry, so a retry packs the same rows into
-the same requests again.
+rows and every later request's unresolved for the host to retry. The host retains per-row outcomes,
+while the connector divides the unresolved rows on the next attempt.
 
 The database emitters divide the whole run. ClickHouse measures the `JSONEachRow` body of an insert,
 each row's line encoded once and sent as a slice of one buffer, before its driver compresses the body
@@ -2696,6 +2736,13 @@ waits for the shared pool again during isolation. Postgres also runs a write's m
 its first insert's connection, and the lookup and the insert quote each declared table part as one
 identifier, so they name the same relation. Both release the connection before the next bounded
 insert or retry backoff. MongoDB answers per document, so it needs no isolation pass.
+
+An infrastructure failure during SQL row isolation preserves the outcomes already returned for
+individual rows. The interrupted row and the unanswered suffix are divided again on retry, so an
+unanswered single-row INSERT can be retried inside a new multi-row INSERT. The interrupted
+isolation pass's request boundaries are not retained. A destination can already have applied the
+unanswered row; its conflict policy must account for that uncertainty. The
+[Postgres manual](emitters.md#postgres) describes the resulting retry behavior.
 
 A Postgres client's optional `timeout_ms` is validated as positive whole milliseconds within the
 server's `statement_timeout` range, at most `2147483647`. Its connection options and typed statement
@@ -2985,7 +3032,14 @@ sequenceDiagram
   instances. A later resume uses recorded positions and the original timestamp for an unrecorded
   partition. The reset and a retry after interrupted persistence complete their persistence and
   replica boundary before the source polls. Native replication and backups preserve the exact
-  optional applied-start generation.
+  optional applied-start generation. Instance zero retains the canonical cut's pending positions;
+  each other instance persists its own slice before acknowledging adoption. Its pending slice is
+  then released. A delayed initializer can adopt these positions after a plain start advances the
+  domain generation. The canonical start remains distinct from subsequent per-unit progress.
+  A one-unit source keeps the direct native reset and durability path; it encodes no distributed
+  candidate and sends no coordination request. Cold startup admission shares a mutex with ownership capture and the final offset write; a
+  captured or stopped unit cannot admit a later initialization. The complete start-coordination
+  request, including its mutex wait, has a sixty-second deadline.
   After submitting an explicit start, the connector rereads the host's canonical positions and
   assigns from them before polling. A late initializer's independently resolved timestamp lookup
   cannot substitute its own positions for the start another instance already accepted.
@@ -3061,14 +3115,17 @@ sequenceDiagram
   The one retry left in the driver is a partitioned topic's: a consumer of one partition whose
   single reconnect fails ends, and the multi-topic consumer resubscribes it at its 30-second topic
   refresh while the other partitions keep flowing.
-- **NATS source.** Each source instance owns one client and its queue subscription. The client
-  reports a lost connection through its event callback, and the instance ends the subscription
-  with a read failure once it has handed over every message the client received before the loss,
-  so the host shows the loss as a transient error and resumes the instance on its reconnect
-  cadence, which connects and subscribes again. The client never reconnects in the background:
-  the driver cannot be told to make no attempt of its own, so it makes one, which only lets its
-  connection task end. Core NATS retains nothing for a subscription that is not connected, so
-  messages published while the instance reconnects never reach it.
+- **NATS sources.** Each source instance owns one client and its queue subscription or its pull
+  of a durable consumer. The client reports a lost connection through its event callback, and the
+  instance ends the subscription or pull with a read failure once it has handed over every message
+  the client received before the loss, so the host shows the loss as a transient error and resumes
+  the instance: a `NATS SUBJECT` instance on its reconnect cadence, which connects and subscribes
+  again, and a `NATS STREAM` instance on its `RETRY POLICY`, which connects, looks its consumer up
+  and pulls again. The client never reconnects in the background: the driver cannot be told to
+  make no attempt of its own, so it makes one, which only lets its connection task end. Core NATS
+  retains nothing for a subscription that is not connected, so messages published while a
+  `NATS SUBJECT` instance reconnects never reach it, while a stream keeps them for its consumer as
+  long as its retention and limits allow.
 - **Syslog stream listener.** Each accepted TCP or TLS connection has one task that owns its frame
   buffer and reads into it directly, at most 8 KiB per read and never beyond the connection's
   frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its
@@ -3356,6 +3413,10 @@ sequenceDiagram
 
 ## Failure and observation
 
+The source host resolves its interaction counter children once at startup for its exact execution
+unit. The retained group preserves each instance's counters, including decode rejections, without
+resolving labels or looking up a shared registry while recording a payload outcome.
+
 The emitter host observes one publish or due staged-commit attempt through retained metric
 children. Its existing typed result selects `succeeded`, `transient`, `misconfigured` or
 `violation`; cancellation before a definitive answer is transient. A settled record rejection
@@ -3373,8 +3434,9 @@ no MongoDB document can hold, fail the whole publish. Infrastructure and batch f
 contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
 classification contract; these annotations do not change acknowledgement or retry policy.
 
-An ingestor opens all source instances before registration, so a failed source start leaves no
-running ingestor. An invalid emitter declaration or expression fails planning before its new
+Each ingestor unit opens its source before registration, so a failed unit start leaves no running
+intake for that unit; its sibling units retain their own lifecycles. An invalid emitter declaration
+or expression fails planning before its new
 execution plan is published. A emitter initialization failure is reported as an emitter initialization error;
 the emitter remains unavailable and retries opening on its configured backoff. Invalid settings
 and missing external topics, queues, tables, namespaces, or other required entities surface as
@@ -3555,6 +3617,17 @@ That evidence supports the current ingestor and emitter behavior; it does not cl
 Its Kafka A/B measurements found lower bounded-pressure rates and a separate 16-partition commit
 failure that require owner investigation. An integration must preserve its own transport and
 delivery semantics rather than assuming a generic envelope or exactly-once external outcome.
+
+### Shared instance configuration
+
+The host prepares MQTT's connector plan, rendered client entries and resource mounts once per
+logical ingestor and installed declaration on each node. The connector checks the rendered client
+identities once in that prepared plan. Unit plans share immutable entry arrays and retain their own
+read-ahead counter; an executing unit retains only its selected instance's mount. Input replacement
+compares external sessions once per local logical input and retires only the explicitly ending
+global indices. This keeps preparation
+and retirement proportional to the declared instance count. A declaration change invalidates the
+prepared entry; no mutable driver or source task is shared between units.
 
 ## Committed Host Bounds
 

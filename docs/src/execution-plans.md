@@ -45,11 +45,29 @@ apply anything. The revision holds:
   schedule; and
 - the ownership-handoff fingerprint computed from the committed schedule's unit placements.
 
-Each scheduled node owns a map of `Unit::Single`, `Unit::Partition(p)`, or `Unit::Instance(i)`
+Each scheduled node owns a map of `Unit` identities with `Single`, `Partition(p)`, or `Instance(i)`
 placements. The unit carries its primary, assigned nodes, ownership transition, and WASM guest
 generations. The revision and planned resource assignments preserve those unit keys, and schedule
 reassignments name the node and unit together. A relay branched by a branch of several partitions
-emits one `Partition` unit per partition, and every other node emits one `Single` unit.
+emits one `Partition` unit per partition. An instance-capable ingestor emits one `Instance` unit
+per resolved intake index; other nodes emit one `Single` unit.
+
+Ingestor entrypoints are keyed by `NodeUnitRef`. Planning lowers the common input declaration and
+routes once, then binds each unit's identity and Kafka primary into its start plan. Validation
+requires the complete declared unit set before a plan can run. The runtime registers sources,
+quiesce controls, ACK roots, readiness and status under `DomainNodeUnitRef`; `AlreadyRunning` names
+that exact unit. Each source owns its route runtimes and `BranchLru`/`BranchAggregated` placements.
+Schedule application stops lost units, rebinds retained state originators and starts gained units
+without rebuilding unaffected sibling intake tasks. A changed ingestor unit set is one layout
+transition: each preceding unit contributes one persisted frozen cut. The coordinator retains
+its checkpoint descriptors and asks the source to project those exact bytes for each target,
+without checkpointing the full source again. Every target primary and replica receives prepared
+state before publication. Installation stops and joins the preceding intake
+layout before activating those cuts, including units retained on the same node. Kafka assignments
+are dealt for the target count in the same committed schedule. Offset joins retain the newest
+canonical start, prefer the actual preceding owner's progress over a pending seed, and retain
+seeds for an instance that had not initialized. Metric series retain their complete origin labels
+and values, with one checkpoint owner for each historical instance.
 
 The source digest identifies which schedule produced the installed revision. A planned change
 also carries its predecessor digest, so an incremental application is attempted only when the
@@ -91,6 +109,15 @@ both use the same schedule-to-revision planning boundary.
 | Resources | Pinned lookup file and codec, UDF program, generator source and ordered routes, WASM module file and scheduled assignment | Load the named local version, build lookup indexes, prepare modules, and start branch-local generator or processor work |
 | Emitters | Typed emitter and optional connector client or codec, ordered source relays and predicates, construction, request, ordering and envelope expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the emitter |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
+
+An inferencer's state specification records its validated port pairs, fixed element counts,
+initial expressions and static tensor bytes per branch. Node-local binding materializes the initial
+tensors before publishing the processor template. Each concrete branch starts with that immutable
+initial generation and exclusively owns its successors. Stateful admission runs the model once per
+row before output-route buffering; native state outputs become the next invocation's inputs without
+an Arrow round trip. Route flushes dispatch already-computed output. The stateless inferencer keeps
+its existing flush-time execution. These tensor generations are volatile and are recreated from
+the prepared initial generation after restart, owner change or eviction.
 
 Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT and SQS
 alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only
@@ -334,7 +361,9 @@ publication and relocation.
 ## Sources, Emitters, And Error Routes
 
 An ingestor start uses the scheduled source class, client configuration, codec, ACK boundary,
-and bound ordered routes from its entrypoint plan. A Pulsar plan retains the owned subscription's
+and bound ordered routes from its entrypoint plan. The registry validates a fixed instance count's
+native conversion and execution-unit entry layout before the schedule materializes those units.
+A Pulsar plan retains the owned subscription's
 required creation position alongside its ownership, and the subscription's required type;
 composition passes those typed choices to the connector without inventing a position for a
 provisioned cursor. A reingestor binds its source predicates and
@@ -349,7 +378,10 @@ tasks stop. `IngestorStartPlan` decides whether the source changed, independentl
 changes. Runtime installation snapshots locally owned retiring inputs before withdrawing the
 installed revision, and the composition root dispatches retirement. Passive revisions retain the
 same plans, so removing an ingestor after `STOP` can still release its MQTT sessions. The MQTT
-connector compares validated session identities and subscriptions, cleans up obsolete identities
+host prepares its rendered client configurations, connector plan and resource mounts once
+per logical declaration on a node. Unit starts clone that immutable plan with their own read-ahead
+metric handle, preserving the global instance indices and avoiding repeated identity scans.
+Its connector compares validated session identities and subscriptions, cleans up obsolete identities
 best-effort, and prepares changed sessions at the replacement endpoint before its source starts.
 No Model, source driver, or registry guard is retained across this transition. Ordinary shutdown
 and ownership transfer with an unchanged input preserve external sessions. For Pulsar, a changed
@@ -392,10 +424,12 @@ error taxonomy and public reporting contract.
 
 Each typed node carries its branch and schema fingerprint and the state components it may own.
 Each unit carries its scheduled primary, assigned nodes, ownership transition, and guest-state
-generations. State placement and restoration use the node and unit together. Relays currently have
-one `Single` owner; only their optional materialized state has scheduler-selected replicas. A
-configured listener is
+generations. State placement and restoration use the node and unit together. Each relay unit has
+one execution owner; its optional materialized state has scheduler-selected replicas. A configured listener is
 different: it runs on every live server node even when its graph node is not the local primary.
+Each executing listener installs its own node-local metric checkpoint writer and restores that
+checkpoint on restart. A spread ingestor instead captures the metrics of its exact instance unit,
+including the physical-node contributions retained through ownership handoff.
 Remote relay-consumer edges are derived from the same planned nodes and inputs as local tasks.
 
 Planned handoff prepares state against the exact committed-schedule fingerprint. Reassignment

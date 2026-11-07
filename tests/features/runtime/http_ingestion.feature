@@ -82,7 +82,7 @@ Feature: HTTP endpoint ingestion
         ON edge
         PATH '/metrics';
 
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor
         FROM raw_metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics

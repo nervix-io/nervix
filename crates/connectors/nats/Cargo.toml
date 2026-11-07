@@ -1,5 +1,5 @@
 [package]
-description = "The NATS source and sink connector for Nervix"
+description = "The NATS ingestor and emitter connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-nats"
@@ -20,8 +20,6 @@ shuttle = [
 async-nats = { workspace = true }
 async-trait = { workspace = true }
 aws-lc-rs = { workspace = true }
-crc = { workspace = true }
-data-encoding = { workspace = true }
 error-stack = { workspace = true }
 futures-util = { workspace = true }
 meticulous = { workspace = true }
@@ -30,12 +28,15 @@ nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
+nkeys-codec = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
 bytes = { workspace = true }
+crc = { workspace = true }
+data-encoding = { workspace = true }
 nervix-arbitrary = { workspace = true }
 nkeys = { workspace = true }
 serde_json = { workspace = true }

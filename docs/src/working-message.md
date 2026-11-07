@@ -66,6 +66,12 @@ Generated inferencer and WASM routes are set-only. Bare reads resolve against im
 state until a same-named output field has been initialized. Generated state is independently
 visible to every route and never initializes route output automatically.
 
+An inferencer's `STATE` pairs carry native model tensors between admitted rows of a branch. They
+are separate from the immutable fields declared in `OUTPUT SCHEMA` and introduce no expression
+namespace. Each route sees the same result of one stateful invocation; its construction cannot
+change another route's generated fields or the next invocation's state. See
+[State tensors](processors.md#state-tensors) for initialization, error and reset behavior.
+
 Error routes expose the original eligible `input`, or `left` and `right` for correlators; the exact
 captured `relay_state` snapshot; structured `error`; and the all-optional `partial_output` view.
 Their ordered assignments may read values initialized by earlier error-record assignments. They do

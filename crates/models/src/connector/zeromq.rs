@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The ZeroMQ client Model, the pull source and push emitter Models with their delivery
+//! - **Owns.** The ZeroMQ client Model, the pull ingestor and push emitter Models with their delivery
 //!   mode, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The ZeroMQ driver, or how a socket is bound,
 //!   connected, read or written.
 
@@ -111,6 +111,7 @@ const ZEROMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for ZeroMqPullIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,
@@ -200,11 +201,11 @@ impl crate::IngestorEntityChange for ZeroMqPullIngestorChange {
 
 connector_ingestors! {
     connector ZeroMq = "ZEROMQ";
-    /// What a ZeroMQ source reads.
+    /// What a ZeroMQ ingestor reads.
     pub enum ZeroMqIngestor;
     /// The alterations of the ingestors that read a ZeroMQ entity.
     pub enum ZeroMqPullIngestorAlteration;
-    /// The entities a ZeroMQ source reads.
+    /// The entities a ZeroMQ ingestor reads.
     pub enum ZeroMqIngestorEntity {
         Pull(ZeroMqPullIngestor => ZeroMqPullIngestorChange) = "PULL", "ZeroMQ";
     }

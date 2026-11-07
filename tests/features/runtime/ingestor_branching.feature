@@ -80,7 +80,7 @@ Feature: Ingestor branching
       CREATE RELAY branch_failures SCHEMA branch_failure UNBRANCHED;
       CREATE VHOST edge ingestor-branch-error-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TO readings

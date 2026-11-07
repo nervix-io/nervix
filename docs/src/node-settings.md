@@ -22,6 +22,10 @@ cadence owned by `RuntimeAdmission`. This remains an internal policy constant pe
 adoption; installation does not introduce another numeric policy or an operator option. Committed
 schedule and domain updates can wake an installation retry sooner, and success ends that cadence.
 
+Canonical Kafka start admission derives its deadline from the interconnect checkpoint-transfer
+contract. Selecting and durably adopting a start cut waits for that transfer, so it shares the
+existing transfer budget rather than defining another numeric policy or operator option.
+
 Changes to the server's command line, startup settings and initialization contract keep the shipped
 Kubernetes operator's generated startup command, chart and example current in the same delivery.
 The server-image [deployment checks](installation-kubernetes.md#deployment-qualification) qualify
@@ -371,9 +375,18 @@ Plexus, the Nervix graph definition language:
 ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
 ```
 
+Duration assignments accept [multi-span duration literals](domains-and-time.md#duration-literals),
+including the text canonical Plexus renders:
+
+```plexus
+ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s;
+```
+
 The statement runs outside domain transactions and needs no selected domain. Its assignments
-form one transition: either every assignment is committed or none is. A duplicate parameter,
-an invalid value, or a cap that an existing model exceeds refuses the transition with the
+form one transition: either every assignment is committed or none is. A statement assigns each
+parameter at most once, so completion offers only the parameters it has not assigned yet, and a
+parameter written a second time is refused at the name that repeats it, naming the parameter.
+An invalid value, or a cap that an existing model exceeds, refuses the transition with the
 parameter and owning model identified. Timings that drive repeated work or retained validity
 must be greater than zero and no longer than `u32::MAX` whole seconds, with nanosecond precision
 within that range. Counts used by a wire or native count fit its current representation. HTTP
@@ -425,7 +438,7 @@ transition, even when a later command has changed another parameter.
 
 `DESCRIBE CLUSTER` reports committed values and each node's running revision and values. A node
 that has not applied the current record remains visibly behind. Sessions receive an informational
-notice after their node successfully installs a parameter revision. The installation supervisor
+`ClusterParameters` notice after their node successfully installs a parameter revision. The installation supervisor
 retries a failed graph installation; a retry of the same revision sends no additional parameter
 notice. A joining or returning node obtains the
 live cluster's published record before activating services that consume it and verifies that

@@ -67,8 +67,8 @@ A site that uses a non-approved hash records its non-security purpose where it i
 register lists it with the site and the hash. The count recognises no recorded BLAKE3 purpose yet,
 so it holds every BLAKE3 site as unclassified.
 
-The NATS authentication wire codec in
-`crates/connectors/nats/src/client/authentication.rs` uses CRC-16/XMODEM only to detect transcription
+The maintained format-only [NKey fork](https://github.com/nervix-io/nkeys), called by
+`crates/connectors/nats/src/client/authentication.rs`, uses CRC-16/XMODEM only to detect transcription
 errors in a seed or public-key encoding, as the [NATS nkeys format](https://github.com/nats-io/nkeys/blob/main/strkey.go)
 requires. It makes no authenticity decision from the checksum; AWS-LC signs the server nonce.
 
@@ -151,7 +151,7 @@ use that reaches a counted crate only through another file's re-export counts at
 **Product dependencies.** The gate reads Cargo's resolved graph of `nervix-server` for both release
 targets with `cargo tree`, which resolves features for the product alone, as the release build does.
 Each normal or build dependency edge onto a crate on the list is one site, so a further dependent of
-a crate the product already links counts too. The list, declared once in `scripts/ratchet.py`,
+a crate the product already links counts too. The list, declared once in `nervix-ratchet gate`,
 names crates implementing digests, message authentication, key derivation and password hashing,
 ciphers and authenticated encryption, public-key algorithms and cryptographic random generators, and
 complete cryptography libraries such as `ring` and OpenSSL. Crates that only define traits or
@@ -169,7 +169,7 @@ a graph was not read correctly.
 `just ratchet --show non_aws_lc_crypto` lists every site. An authored site shows its file, line and
 source line, marked `(authored)`. A graph site points at the dependent's `Cargo.lock` entry and
 shows the edge, marked `(graph)`. The baseline was measured when the rule landed, and a change may
-lower the count but never raise it. `scripts/tests/test_ratchet.py` pins both parts and the gate,
+lower the count but never raise it. `tools/nervix-lint/ratchet` tests pin both parts and the gate,
 including an added dependency on `sha2` or `argon2`, a dependency that brings `ring`, and a second
 AWS-LC module, whether a second version, the FIPS crate beside the default one or a module that
 differs on one release target. The registered `typed-non-aws-lc-crypto` property checks every
@@ -179,9 +179,13 @@ generated authored location and the complete source and site representations.
 
 NATS nkey and credentials-file authentication signs the server's nonce through AWS-LC Ed25519.
 The connector uses async-nats' authentication callback, and the product does not enable that
-driver's `nkeys` feature. The independent `nkeys` signer is a test-only interoperability oracle
-and scenario fixture, outside the release product graph. Adding the callback therefore adds no
-non-AWS-LC cryptography edge and leaves the count unchanged.
+driver's `nkeys` feature. The organization-owned NKey fork is consumed with default features
+disabled: only its format codec is present, with no signing, hashing or random backend. The driver
+fork exposes borrowed credentials parsing independently of nonce signing. Both dependencies are
+pinned to immutable commits. The published `nkeys` signer remains an independent test-only
+interoperability oracle and scenario fixture, outside the release product graph. This arrangement
+adds no non-AWS-LC cryptography edge. Seed decoding clears both its intermediate record and its
+returned bytes; neither the codec nor credentials parser includes secret values in refusals.
 
 The signing operation currently lives in `crates/connectors/nats/src/client/authentication.rs`
 while `nervix-crypto` is still a target. FIPS Prep 02 moves it into the boundary; wire decoding
@@ -203,3 +207,8 @@ onto AWS-LC: password authentication through the MongoDB, Postgres and MySQL dri
 SCRAM while librdkafka draws its client nonce from `rd_jitter`, SQS and object-storage request
 signing, RabbitMQ PKCS#12 client identities and Parquet encryption in Iceberg. Non-security uses,
 the register's entries and the inventory's non-security and unused rows, are not refused.
+
+Runtime checkpoint digests also identify retained Kafka start offers and immutable pending-seed
+projections. Their purpose is non-security content checking: detecting changed, truncated or
+mismatched transfer bodies inside authenticated node requests. The existing checkpoint digest
+owner computes and verifies them under bounded execution and memory admission.

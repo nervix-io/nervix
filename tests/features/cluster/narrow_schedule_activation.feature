@@ -54,7 +54,7 @@ Feature: Narrow schedule activation on ownership change
         ON edge
         PATH '/narrow';
 
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
@@ -234,7 +234,7 @@ Feature: Narrow schedule activation on ownership change
         ON edge
         PATH '/gauge';
 
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
@@ -380,7 +380,7 @@ Feature: Narrow schedule activation on ownership change
         ON edge
         PATH '/wait-ingest';
 
-      CREATE HTTP ENDPOINT INGESTOR state_source
+      CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO tenant_state
@@ -391,7 +391,7 @@ Feature: Narrow schedule activation on ownership change
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming
@@ -554,7 +554,7 @@ Feature: Narrow schedule activation on ownership change
         ON edge
         PATH '/window';
 
-      CREATE HTTP ENDPOINT INGESTOR metric_source
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
@@ -692,7 +692,7 @@ Feature: Narrow schedule activation on ownership change
         ON edge
         PATH '/group';
 
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
@@ -889,7 +889,7 @@ Feature: Narrow schedule activation on ownership change
         ON edge
         PATH '/move-ingest';
 
-      CREATE HTTP ENDPOINT INGESTOR state_source
+      CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO tenant_state
@@ -900,7 +900,7 @@ Feature: Narrow schedule activation on ownership change
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming
@@ -1015,7 +1015,7 @@ Feature: Narrow schedule activation on ownership change
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'offset_replica_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
@@ -1032,8 +1032,8 @@ Feature: Narrow schedule activation on ownership change
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "ingestor" "metric_source" is saved as placeholder "offset_owner"
-    And the first replica for scheduled "ingestor" "metric_source" in the last cluster status is saved as placeholder "offset_replica"
+    Then the last cluster status owner for scheduled "ingestor" "metric_ingestor" is saved as placeholder "offset_owner"
+    And the first replica for scheduled "ingestor" "metric_ingestor" in the last cluster status is saved as placeholder "offset_replica"
     When these Plexus commands are executed on node "{{offset_owner}}"
       """
       CREATE SUBSCRIPTION raw_metrics_subscription TO raw_metrics;
@@ -1048,8 +1048,8 @@ Feature: Narrow schedule activation on ownership change
       """
     When node "{{offset_replica}}" is stopped
     Then node "{{offset_owner}}" eventually observes a stable leader
-    And within "30s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_source" replicas without placeholder "offset_replica"
-    And within "5s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_source" owner equals placeholder "offset_owner"
+    And within "30s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_ingestor" replicas without placeholder "offset_replica"
+    And within "5s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_ingestor" owner equals placeholder "offset_owner"
     When Kafka message is published to topic "offset_replica_{{test_id}}"
       """
       {"value":2,"tenant":"alpha"}
@@ -1066,4 +1066,4 @@ Feature: Narrow schedule activation on ownership change
     When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{offset_owner}}" into "offsets.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When the CLI describes backup archive "offsets.nvxb" as json through node "{{offset_owner}}"
-    Then the described backup records Kafka domain offset 3 for ingestor "metric_source"
+    Then the described backup records Kafka domain offset 3 for ingestor "metric_ingestor"

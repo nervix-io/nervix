@@ -114,7 +114,7 @@ Feature: Drain node
       CREATE RELAY control_output SCHEMA drain_event UNBRANCHED;
       CREATE VHOST edge drain-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT drain_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR drain_source
+      CREATE HTTP ENDPOINT INGESTOR drain_ingestor
         FROM drain_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING drain_event_codec
         TO stalled_output INHERIT ALL UNBRANCHED
@@ -223,7 +223,7 @@ Feature: Drain node
         ON edge
         PATH '/dedup';
 
-      CREATE HTTP ENDPOINT INGESTOR source_txns
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
@@ -305,7 +305,7 @@ Feature: Drain node
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR event_source
+      CREATE KAFKA TOPIC INGESTOR event_ingestor
         FROM wait_kafka TOPIC 'wait_events_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_events_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -317,7 +317,7 @@ Feature: Drain node
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR state_source
+      CREATE KAFKA TOPIC INGESTOR state_ingestor
         FROM wait_kafka TOPIC 'wait_state_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_state_{{test_id}}' START AT EARLIEST
           MODE NO ACK
@@ -336,11 +336,11 @@ Feature: Drain node
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_waiting_ack_local
-        FROM event_source
+        FROM event_ingestor
         TO wait_for_state
         REQUIRE COLOCATION;
       CREATE PLACEMENT keep_waiting_state_local
-        FROM state_source
+        FROM state_ingestor
         TO wait_for_state
         REQUIRE COLOCATION;
       START;
@@ -353,7 +353,7 @@ Feature: Drain node
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=event_source owner=node-1
+      - domain={{domain}} kind=ingestor name=event_ingestor unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -388,7 +388,7 @@ Feature: Drain node
       """
     And the last command output contains
       """
-      - kind=ingestor name=event_source from=node-1 to=
+      - kind=ingestor name=event_ingestor unit=instance:0 from=node-1 to=
       """
     And the last command output contains
       """

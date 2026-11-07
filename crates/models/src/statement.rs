@@ -1980,11 +1980,11 @@ impl BranchPartitions {
     /// otherwise, in partition order.
     pub fn units(self) -> Vec<Unit> {
         if !self.is_partitioned() {
-            return vec![Unit::Single];
+            return vec![Unit::SINGLE];
         }
         let count = self.count().get();
         (0..count)
-            .map(|partition| Unit::Partition(u32::from(partition)))
+            .map(|partition| Unit::partition(u32::from(partition)))
             .collect()
     }
 
@@ -1992,11 +1992,11 @@ impl BranchPartitions {
     /// partition, and `Partition(seed mod n)` of a branch of n partitions.
     pub fn unit_of(self, seed: PartitionSeed) -> Unit {
         if !self.is_partitioned() {
-            return Unit::Single;
+            return Unit::SINGLE;
         }
         let count = u64::from(self.count().get());
         let partition = seed.get() % count;
-        Unit::Partition(
+        Unit::partition(
             u32::try_from(partition)
                 .assured("a remainder modulo a 16-bit count is below that count"),
         )
@@ -2167,7 +2167,7 @@ impl ResolvedBranching {
     /// otherwise.
     pub fn units(&self) -> Vec<Unit> {
         match self {
-            Self::Unbranched => vec![Unit::Single],
+            Self::Unbranched => vec![Unit::SINGLE],
             Self::Branched { partitions, .. } => partitions.units(),
         }
     }
@@ -2401,7 +2401,7 @@ pub enum AlterIngestorOperation<Source: crate::IngestorEntityModel> {
     Change {
         change: Source::Change,
     },
-    /// `SET CLIENT <client>`: the client the source reads through.
+    /// `SET CLIENT <client>`: the client the ingestor reads through.
     SetClient {
         client: ClientName,
     },

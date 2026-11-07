@@ -3,9 +3,9 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The client's closed configuration schema and signaling reference, the connection's
-//!   literal upgrade fields and frame kind, the endpoint source Model, and their declarations.
+//!   literal upgrade fields and frame kind, the endpoint ingestor Model, and their declarations.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** Shared source/client declarations, HTTP field rules and referenced names.
+//! - **Depends on.** Shared ingestor/client declarations, HTTP field rules and referenced names.
 //! - **Must not know.** Drivers, sockets, TLS file contents, signaling execution, or how endpoints
 //!   are published, routed to or served.
 
@@ -100,7 +100,7 @@ pub struct WebsocketsConnectionIngestor {
 const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
-            holds: "accepted signaling frames retained for source reads",
+            holds: "accepted signaling frames retained for ingestor reads",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(
                     "handshake_buffer_capacity messages (default 16), each at most \
@@ -202,6 +202,7 @@ const WEBSOCKETS_CONNECTION_METADATA: IngestorMetadataDeclaration =
 
 impl IngestorDeclaration for WebsocketsConnectionIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: WEBSOCKETS_CONNECTION_METADATA,
         executes_on_every_cluster_node: false,
@@ -283,6 +284,7 @@ const WEBSOCKETS_ENDPOINT_METADATA: IngestorMetadataDeclaration =
 
 impl IngestorDeclaration for WebsocketsEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         // The opening HTTP upgrade request's fields, as the server's header map keeps them: names in
         // lowercase, every value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
@@ -407,11 +409,11 @@ impl crate::IngestorEntityChange for WebsocketsEndpointIngestorChange {
 
 connector_ingestors! {
     connector Websockets = "WEBSOCKETS";
-    /// What a WebSockets source reads.
+    /// What a WebSockets ingestor reads.
     pub enum WebsocketsIngestor;
     /// The alterations of the ingestors that read a WebSockets entity.
     pub enum WebsocketsIngestorAlteration;
-    /// The entities a WebSockets source reads.
+    /// The entities a WebSockets ingestor reads.
     pub enum WebsocketsIngestorEntity {
         Connection(WebsocketsConnectionIngestor => WebsocketsConnectionIngestorChange) = "CONNECTION", "WebSocket client";
         Endpoint(WebsocketsEndpointIngestor => WebsocketsEndpointIngestorChange) = "ENDPOINT", "WebSocket endpoint";

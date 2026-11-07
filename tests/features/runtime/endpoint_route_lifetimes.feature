@@ -15,7 +15,7 @@ Feature: Published endpoint route lifetimes
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge shared-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -31,7 +31,7 @@ Feature: Published endpoint route lifetimes
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge shared-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -81,7 +81,7 @@ Feature: Published endpoint route lifetimes
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge lifetime-{{test_id}}.example.com;
       CREATE WEBSOCKETS ENDPOINT ingress ON edge PATH '/events';
-      CREATE WEBSOCKETS ENDPOINT INGESTOR event_source
+      CREATE WEBSOCKETS ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -142,7 +142,7 @@ Feature: Published endpoint route lifetimes
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge restart-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

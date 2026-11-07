@@ -12,6 +12,8 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
+use std::fmt;
+
 use ahash::{HashMap, HashMapExt};
 use error_stack::Report;
 use nervix_jaq::CompiledJaqProgram;
@@ -20,7 +22,7 @@ use nervix_models::{
     CodecWireFormat, CreateAvroWireSchema, CreateCborWireSchema, CreateCodec, CreateJsonWireSchema,
     CreateLookup, CreateRelay, CreateSchema, CreateWireSchema, DomainName, FieldName,
     IngestorInput, JsonType, LookupName, Model, ModelIndex, ModelKind, ModelName, ParseAsType,
-    RelayName, ResolvedCodecWireFormat, WireSchemaLookup, WireSchemaName,
+    RelayName, ResolvedCodecWireFormat, WireSchemaField, WireSchemaLookup, WireSchemaName,
 };
 
 use crate::registry::{error::RegistryError, validation::schema::expect_schema_model};
@@ -187,7 +189,7 @@ pub(in crate::registry) fn schema_for_codec_model<'a>(
 }
 
 /// The input schema of an ingestor: what its codec decodes a transport's payloads into, or the
-/// schema a client source's batches carry. Filters, routes and timestamps read this schema.
+/// schema a client ingestor's batches carry. Filters, routes and timestamps read this schema.
 pub(in crate::registry) fn ingestor_input_schema<'a>(
     domain: &DomainName,
     identifier: &ModelName,
@@ -264,16 +266,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
         ResolvedCodecWireFormat::Json(json) => ensure_wire_field_set_matches(
             domain,
             identifier,
-            &json
-                .fields
-                .iter()
-                .map(|field| WireFieldCompatibility {
-                    name: field.name.as_str(),
-                    optional: field.optional,
-                    wire_type: field.ty.as_ref().to_string(),
-                    compatibility: WireTypeCompatibility::Json(field.ty),
-                })
-                .collect::<Vec<_>>(),
+            &json.fields,
             schema,
             "json",
             &field_encodings,
@@ -281,16 +274,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
         ResolvedCodecWireFormat::Cbor(cbor) => ensure_wire_field_set_matches(
             domain,
             identifier,
-            &cbor
-                .fields
-                .iter()
-                .map(|field| WireFieldCompatibility {
-                    name: field.name.as_str(),
-                    optional: field.optional,
-                    wire_type: field.ty.as_ref().to_string(),
-                    compatibility: WireTypeCompatibility::Cbor(field.ty),
-                })
-                .collect::<Vec<_>>(),
+            &cbor.fields,
             schema,
             "cbor",
             &field_encodings,
@@ -298,16 +282,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
         ResolvedCodecWireFormat::Avro(avro) => ensure_wire_field_set_matches(
             domain,
             identifier,
-            &avro
-                .fields
-                .iter()
-                .map(|field| WireFieldCompatibility {
-                    name: field.name.as_str(),
-                    optional: field.optional,
-                    wire_type: field.ty.as_ref().to_string(),
-                    compatibility: WireTypeCompatibility::Avro(field.ty),
-                })
-                .collect::<Vec<_>>(),
+            &avro.fields,
             schema,
             "avro",
             &field_encodings,
@@ -431,18 +406,19 @@ fn ensure_supported_codec_encoding_rules(
             }));
         };
 
+        // A rule on a list field governs its innermost scalar elements.
         let expected = match rule.encoding {
             CodecEncoding::Rfc3339 => ParseAsType::Datetime,
             CodecEncoding::Base64 => ParseAsType::Bytes,
         };
-        if schema_field.ty != expected {
+        if *schema_field.ty.innermost_element() != expected {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "codec encoding rule field '{}' must be {}, found {:?}",
+                    "codec encoding rule field '{}' must be {expected} or a list of {expected} \
+                     elements, found {}",
                     rule.field.as_str(),
-                    expected,
                     schema_field.ty
                 ),
             }));
@@ -465,33 +441,236 @@ fn ensure_supported_codec_encoding_rules(
     Ok(field_encodings)
 }
 
-struct WireFieldCompatibility<'a> {
-    name: &'a str,
-    optional: bool,
-    wire_type: String,
-    compatibility: WireTypeCompatibility,
-}
-
+/// Why one wire field cannot carry an internal field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WireTypeCompatibility {
-    Json(JsonType),
-    Cbor(CborType),
-    Avro(AvroType),
+enum WireBindingRefusal {
+    /// The wire type holds another kind of value than the internal type.
+    Type,
+    /// The AVRO arrays nest to another depth than the internal `ARRAY` and `VEC` levels.
+    Depth { wire: usize, internal: usize },
+    /// The innermost internal values travel as text only under this rule, which the codec does
+    /// not declare for the field.
+    EncodingRequired(CodecEncoding),
+    /// The codec declares this text rule for bytes the wire type carries natively.
+    EncodingRefused(CodecEncoding),
 }
 
-fn ensure_wire_field_set_matches(
+impl WireBindingRefusal {
+    /// The refusal as the reason of an incompatible schema relationship, naming the field and
+    /// both types.
+    fn reason(
+        self,
+        wire_kind: &str,
+        field: &FieldName,
+        wire: &dyn fmt::Display,
+        internal: &ParseAsType,
+    ) -> String {
+        let field = field.as_str();
+        match self {
+            Self::Type => {
+                format!(
+                    "{wire_kind} field '{field}' type mismatch: wire {wire}, internal {internal}"
+                )
+            }
+            Self::Depth {
+                wire: wire_depth,
+                internal: internal_depth,
+            } => {
+                let levels = if wire_depth == 1 { "level" } else { "levels" };
+                format!(
+                    "{wire_kind} field '{field}' array depth mismatch: wire {wire} has \
+                     {wire_depth} array {levels}, internal {internal} has {internal_depth}"
+                )
+            }
+            Self::EncodingRequired(encoding) => {
+                let values = if internal.list_depth() == 0 {
+                    "value"
+                } else {
+                    "elements"
+                };
+                format!(
+                    "{wire_kind} field '{field}' needs ENCODE {field} AS {} for its {} {values}",
+                    encoding.as_ref(),
+                    internal.innermost_element()
+                )
+            }
+            Self::EncodingRefused(encoding) => format!(
+                "{wire_kind} field '{field}' carries {} natively, so ENCODE {field} AS {} does \
+                 not apply",
+                internal.innermost_element(),
+                encoding.as_ref()
+            ),
+        }
+    }
+}
+
+/// The internal types one format's wire type carries, and under which codec rule.
+trait WireTypeBinding: fmt::Display {
+    /// Why this wire type cannot carry an internal value of type `ty` whose field declares
+    /// `encoding`, or `None` when it carries it exactly.
+    fn refusal(
+        &self,
+        ty: &ParseAsType,
+        encoding: Option<CodecEncoding>,
+    ) -> Option<WireBindingRefusal>;
+}
+
+/// JSON's `array` is bare: an element is written as a scalar field of its type would be.
+impl WireTypeBinding for JsonType {
+    fn refusal(
+        &self,
+        ty: &ParseAsType,
+        encoding: Option<CodecEncoding>,
+    ) -> Option<WireBindingRefusal> {
+        match self {
+            Self::String => text_refusal(ty, encoding),
+            Self::Number => refused_unless(ty_is_float(ty)),
+            Self::Integer => refused_unless(ty_is_integer(ty)),
+            Self::Boolean => refused_unless(*ty == ParseAsType::Bool),
+            Self::Array => {
+                if ty.list_depth() == 0 {
+                    return Some(WireBindingRefusal::Type);
+                }
+                match ty.innermost_element() {
+                    ParseAsType::Datetime => required_encoding(encoding, CodecEncoding::Rfc3339),
+                    ParseAsType::Bytes => required_encoding(encoding, CodecEncoding::Base64),
+                    _ => None,
+                }
+            }
+        }
+    }
+}
+
+/// CBOR's `array` is bare: an element is written as a scalar field of its type would be, bytes as
+/// native byte strings.
+impl WireTypeBinding for CborType {
+    fn refusal(
+        &self,
+        ty: &ParseAsType,
+        encoding: Option<CodecEncoding>,
+    ) -> Option<WireBindingRefusal> {
+        match self {
+            Self::Text => match ty {
+                ParseAsType::String => None,
+                ParseAsType::Datetime => required_encoding(encoding, CodecEncoding::Rfc3339),
+                _ => Some(WireBindingRefusal::Type),
+            },
+            Self::Bytes => native_bytes_refusal(ty, encoding),
+            Self::Float => refused_unless(ty_is_float(ty)),
+            Self::Integer => refused_unless(ty_is_integer(ty)),
+            Self::Boolean => refused_unless(*ty == ParseAsType::Bool),
+            Self::Array => {
+                if ty.list_depth() == 0 {
+                    return Some(WireBindingRefusal::Type);
+                }
+                match ty.innermost_element() {
+                    ParseAsType::Datetime => required_encoding(encoding, CodecEncoding::Rfc3339),
+                    element @ ParseAsType::Bytes => native_bytes_refusal(element, encoding),
+                    _ => None,
+                }
+            }
+        }
+    }
+}
+
+/// An AVRO array names its item type, so it binds a list nested exactly as deep whose innermost
+/// element its innermost item binds as a field of that type would.
+impl WireTypeBinding for AvroType {
+    fn refusal(
+        &self,
+        ty: &ParseAsType,
+        encoding: Option<CodecEncoding>,
+    ) -> Option<WireBindingRefusal> {
+        let wire = self.array_depth();
+        let internal = ty.list_depth();
+        if wire != internal && wire > 0 && internal > 0 {
+            return Some(WireBindingRefusal::Depth { wire, internal });
+        }
+        avro_item_refusal(self, ty, encoding)
+    }
+}
+
+/// Binds an AVRO type to an internal type one level at a time: an array binds a list whose
+/// elements its items bind, and a primitive type binds the scalar it names.
+fn avro_item_refusal(
+    wire: &AvroType,
+    ty: &ParseAsType,
+    encoding: Option<CodecEncoding>,
+) -> Option<WireBindingRefusal> {
+    match (wire, ty) {
+        (
+            AvroType::Array(item),
+            ParseAsType::Array { element, .. } | ParseAsType::Vec { element },
+        ) => avro_item_refusal(item, element, encoding),
+        (AvroType::Boolean, ParseAsType::Bool)
+        | (AvroType::Int, ParseAsType::I32)
+        | (AvroType::Long, ParseAsType::I64)
+        | (AvroType::Float, ParseAsType::F32)
+        | (AvroType::Double, ParseAsType::F64) => None,
+        (AvroType::String, element) => text_refusal(element, encoding),
+        (AvroType::Bytes, element) => native_bytes_refusal(element, encoding),
+        _ => Some(WireBindingRefusal::Type),
+    }
+}
+
+/// A text wire type carries `STRING` as it is, `DATETIME` under `RFC3339` and `BYTES` under
+/// `BASE64`.
+fn text_refusal(ty: &ParseAsType, encoding: Option<CodecEncoding>) -> Option<WireBindingRefusal> {
+    match ty {
+        ParseAsType::String => None,
+        ParseAsType::Datetime => required_encoding(encoding, CodecEncoding::Rfc3339),
+        ParseAsType::Bytes => required_encoding(encoding, CodecEncoding::Base64),
+        _ => Some(WireBindingRefusal::Type),
+    }
+}
+
+/// A native byte type carries `BYTES` as its own octets, under no text rule.
+fn native_bytes_refusal(
+    ty: &ParseAsType,
+    encoding: Option<CodecEncoding>,
+) -> Option<WireBindingRefusal> {
+    match (ty, encoding) {
+        (ParseAsType::Bytes, None) => None,
+        (ParseAsType::Bytes, Some(encoding)) => Some(WireBindingRefusal::EncodingRefused(encoding)),
+        _ => Some(WireBindingRefusal::Type),
+    }
+}
+
+fn required_encoding(
+    declared: Option<CodecEncoding>,
+    required: CodecEncoding,
+) -> Option<WireBindingRefusal> {
+    if declared == Some(required) {
+        None
+    } else {
+        Some(WireBindingRefusal::EncodingRequired(required))
+    }
+}
+
+fn refused_unless(binds: bool) -> Option<WireBindingRefusal> {
+    if binds {
+        None
+    } else {
+        Some(WireBindingRefusal::Type)
+    }
+}
+
+fn ensure_wire_field_set_matches<T: WireTypeBinding>(
     domain: &DomainName,
     identifier: &ModelName,
-    wire_fields: &[WireFieldCompatibility<'_>],
+    wire_fields: &[WireSchemaField<T>],
     schema: &CreateSchema,
     wire_kind: &str,
     field_encodings: &HashMap<FieldName, CodecEncoding>,
 ) -> Result<(), Report<RegistryError>> {
+    let mut wire_fields_by_name = HashMap::with_capacity(wire_fields.len());
+    for wire_field in wire_fields {
+        wire_fields_by_name
+            .entry(&wire_field.name)
+            .or_insert(wire_field);
+    }
     for schema_field in &schema.fields {
-        let Some(wire_field) = wire_fields
-            .iter()
-            .find(|wire_field| wire_field.name == schema_field.name.as_str())
-        else {
+        let Some(wire_field) = wire_fields_by_name.get(&schema_field.name) else {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -502,18 +681,16 @@ fn ensure_wire_field_set_matches(
             }));
         };
 
-        if !wire_field.compatibility.supports(
-            &schema_field.ty,
-            field_encodings.get(&schema_field.name).copied(),
-        ) {
+        let encoding = field_encodings.get(&schema_field.name).copied();
+        if let Some(refusal) = wire_field.ty.refusal(&schema_field.ty, encoding) {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "{wire_kind} field '{}' type mismatch: wire {}, internal {:?}",
-                    schema_field.name.as_str(),
-                    wire_field.wire_type,
-                    schema_field.ty
+                reason: refusal.reason(
+                    wire_kind,
+                    &schema_field.name,
+                    &wire_field.ty,
+                    &schema_field.ty,
                 ),
             }));
         }
@@ -545,100 +722,11 @@ fn ensure_wire_field_set_matches(
     Ok(())
 }
 
-impl WireTypeCompatibility {
-    fn supports(self, ty: &ParseAsType, encoding: Option<CodecEncoding>) -> bool {
-        match self {
-            Self::Json(wire) => json_type_matches_parse_as(wire, ty, encoding),
-            Self::Cbor(wire) => cbor_type_matches_parse_as(wire, ty, encoding),
-            Self::Avro(wire) => avro_type_matches_parse_as(wire, ty, encoding),
-        }
-    }
+fn ty_is_float(ty: &ParseAsType) -> bool {
+    matches!(ty, ParseAsType::F32 | ParseAsType::F64)
 }
 
-fn json_type_matches_parse_as(
-    wire: JsonType,
-    ty: &ParseAsType,
-    encoding: Option<CodecEncoding>,
-) -> bool {
-    match wire {
-        JsonType::String => text_wire_type_matches(ty, encoding),
-        JsonType::Number => *ty == ParseAsType::F32 || *ty == ParseAsType::F64,
-        JsonType::Integer => parse_as_is_integer(ty),
-        JsonType::Boolean => *ty == ParseAsType::Bool,
-        JsonType::Array => parse_as_is_list(ty),
-    }
-}
-
-fn text_wire_type_matches(ty: &ParseAsType, encoding: Option<CodecEncoding>) -> bool {
-    matches!(
-        (ty, encoding),
-        (ParseAsType::String, None)
-            | (ParseAsType::Datetime, Some(CodecEncoding::Rfc3339))
-            | (ParseAsType::Bytes, Some(CodecEncoding::Base64))
-    )
-}
-
-fn cbor_type_matches_parse_as(
-    wire: CborType,
-    ty: &ParseAsType,
-    encoding: Option<CodecEncoding>,
-) -> bool {
-    let encodes_datetime_as_rfc3339 = encoding == Some(CodecEncoding::Rfc3339);
-    match wire {
-        CborType::String => {
-            *ty == ParseAsType::String
-                || encodes_datetime_as_rfc3339 && *ty == ParseAsType::Datetime
-        }
-        CborType::Bytes => *ty == ParseAsType::Bytes && encoding.is_none(),
-        CborType::Number => *ty == ParseAsType::F32 || *ty == ParseAsType::F64,
-        CborType::Integer => parse_as_is_integer(ty),
-        CborType::Boolean => *ty == ParseAsType::Bool,
-        CborType::Array => parse_as_is_list(ty),
-        // An exact wire type names the one internal type it binds, so a DATETIME wire field needs
-        // no text encoding rule: its RFC 3339 text is the wire type itself.
-        CborType::U8 => *ty == ParseAsType::U8,
-        CborType::I8 => *ty == ParseAsType::I8,
-        CborType::U16 => *ty == ParseAsType::U16,
-        CborType::I16 => *ty == ParseAsType::I16,
-        CborType::U32 => *ty == ParseAsType::U32,
-        CborType::I32 => *ty == ParseAsType::I32,
-        CborType::U64 => *ty == ParseAsType::U64,
-        CborType::I64 => *ty == ParseAsType::I64,
-        CborType::F32 => *ty == ParseAsType::F32,
-        CborType::F64 => *ty == ParseAsType::F64,
-        CborType::Datetime => *ty == ParseAsType::Datetime,
-        CborType::Object | CborType::Null => false,
-    }
-}
-
-fn avro_type_matches_parse_as(
-    wire: AvroType,
-    ty: &ParseAsType,
-    encoding: Option<CodecEncoding>,
-) -> bool {
-    match wire {
-        AvroType::Boolean => *ty == ParseAsType::Bool,
-        AvroType::Int => *ty == ParseAsType::I32,
-        AvroType::Long => *ty == ParseAsType::I64,
-        AvroType::Float => *ty == ParseAsType::F32,
-        AvroType::Double => *ty == ParseAsType::F64,
-        AvroType::String => text_wire_type_matches(ty, encoding),
-        AvroType::Bytes => *ty == ParseAsType::Bytes && encoding.is_none(),
-        AvroType::Array => parse_as_is_list(ty),
-    }
-}
-
-fn parse_as_is_list(ty: &ParseAsType) -> bool {
-    if let ParseAsType::Array { .. } = ty {
-        return true;
-    }
-    if let ParseAsType::Vec { .. } = ty {
-        return true;
-    }
-    false
-}
-
-fn parse_as_is_integer(ty: &ParseAsType) -> bool {
+fn ty_is_integer(ty: &ParseAsType) -> bool {
     matches!(
         ty,
         ParseAsType::U8
@@ -1028,14 +1116,38 @@ mod tests {
         let _ = fs::remove_dir_all(path);
     }
 
+    /// One wire field type of any declared format.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum WireCase {
+        Json(JsonType),
+        Cbor(CborType),
+        Avro(AvroType),
+    }
+
     #[derive(Debug)]
     struct CodecBindingCase {
-        wire: WireTypeCompatibility,
+        wire: WireCase,
         internal: ParseAsType,
         rules: Vec<CodecEncodingRule>,
     }
 
     impl CodecBindingCase {
+        /// A field `value` of `internal` type, bound by `wire`, whose codec declares `encoding`.
+        fn new(wire: WireCase, internal: ParseAsType, encoding: Option<CodecEncoding>) -> Self {
+            let rules = encoding
+                .into_iter()
+                .map(|encoding| CodecEncodingRule {
+                    field: named("value"),
+                    encoding,
+                })
+                .collect();
+            Self {
+                wire,
+                internal,
+                rules,
+            }
+        }
+
         fn validate(&self) -> Result<(), Report<RegistryError>> {
             let schema = CreateSchema {
                 name: named("binary_schema"),
@@ -1067,10 +1179,10 @@ mod tests {
                     )
                 };
             }
-            match self.wire {
-                WireTypeCompatibility::Json(ty) => validate_binding!(Json, ty),
-                WireTypeCompatibility::Cbor(ty) => validate_binding!(Cbor, ty),
-                WireTypeCompatibility::Avro(ty) => validate_binding!(Avro, ty),
+            match &self.wire {
+                WireCase::Json(ty) => validate_binding!(Json, *ty),
+                WireCase::Cbor(ty) => validate_binding!(Cbor, *ty),
+                WireCase::Avro(ty) => validate_binding!(Avro, ty.clone()),
             }
         }
     }
@@ -1078,14 +1190,14 @@ mod tests {
     #[test]
     fn validates_every_json_and_avro_field_binding() {
         struct BindingRow {
-            wire: WireTypeCompatibility,
+            wire: WireCase,
             types: Vec<ParseAsType>,
             encoding: Option<CodecEncoding>,
         }
         use ParseAsType::{
             Bool, Bytes, Datetime, F32, F64, I8, I16, I32, I64, String, U8, U16, U32, U64,
         };
-        use WireTypeCompatibility::{Avro, Json};
+        use WireCase::{Avro, Json};
         let lists = vec![
             ParseAsType::Vec {
                 element: Box::new(String),
@@ -1177,8 +1289,13 @@ mod tests {
                 encoding: None,
             },
             BindingRow {
-                wire: Avro(AvroType::Array),
-                types: lists.clone(),
+                wire: Avro(AvroType::array_of(AvroType::String)),
+                types: vec![lists[0].clone()],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Avro(AvroType::array_of(AvroType::Long)),
+                types: vec![lists[1].clone()],
                 encoding: None,
             },
         ];
@@ -1197,31 +1314,23 @@ mod tests {
             Avro(AvroType::Double),
             Avro(AvroType::String),
             Avro(AvroType::Bytes),
-            Avro(AvroType::Array),
+            Avro(AvroType::array_of(AvroType::String)),
+            Avro(AvroType::array_of(AvroType::Long)),
         ];
-        for wire in wires {
+        for wire in &wires {
             for internal in &types {
                 for encoding in [
                     None,
                     Some(CodecEncoding::Rfc3339),
                     Some(CodecEncoding::Base64),
                 ] {
-                    // The oracle is this finite public matrix: 17 rows, each with at most eight types.
+                    // The oracle is this finite public matrix: 18 rows, each with at most eight types.
                     let accepted = rows.iter().any(|row| {
-                        row.wire == wire && row.encoding == encoding && row.types.contains(internal)
+                        row.wire == *wire
+                            && row.encoding == encoding
+                            && row.types.contains(internal)
                     });
-                    let rules = encoding
-                        .into_iter()
-                        .map(|encoding| CodecEncodingRule {
-                            field: named("value"),
-                            encoding,
-                        })
-                        .collect();
-                    let case = CodecBindingCase {
-                        wire,
-                        internal: internal.clone(),
-                        rules,
-                    };
+                    let case = CodecBindingCase::new(wire.clone(), internal.clone(), encoding);
                     let result = case.validate();
                     assert_eq!(result.is_ok(), accepted, "{case:?}: {result:?}");
                     if let Err(error) = result {
@@ -1238,7 +1347,7 @@ mod tests {
     fn base64_rules_reject_unknown_and_duplicate_fields() {
         for fields in [&["missing"][..], &["value", "value"][..]] {
             let case = CodecBindingCase {
-                wire: WireTypeCompatibility::Json(JsonType::String),
+                wire: WireCase::Json(JsonType::String),
                 internal: ParseAsType::Bytes,
                 rules: fields
                     .iter()
@@ -1259,6 +1368,281 @@ mod tests {
             let rendered = format!("{error:#}");
             assert!(rendered.contains("binary_codec"), "{rendered}");
             assert!(rendered.contains(fields[0]), "{rendered}");
+        }
+    }
+
+    /// The list `element` wrapped in `depth` levels, alternating `VEC` and three-element `ARRAY`.
+    fn listed(element: &ParseAsType, depth: usize) -> ParseAsType {
+        let mut internal = element.clone();
+        for level in 0..depth {
+            internal = if level % 2 == 0 {
+                ParseAsType::Vec {
+                    element: Box::new(internal),
+                }
+            } else {
+                ParseAsType::Array {
+                    element: Box::new(internal),
+                    len: nonzero_ext::nonzero!(3u32),
+                }
+            };
+        }
+        internal
+    }
+
+    /// The AVRO `item` inside `depth` arrays.
+    fn avro_array(item: &AvroType, depth: usize) -> AvroType {
+        let mut wire = item.clone();
+        for _ in 0..depth {
+            wire = AvroType::array_of(wire);
+        }
+        wire
+    }
+
+    #[test]
+    fn avro_array_items_bind_the_elements_their_scalar_fields_bind_at_every_depth() {
+        let encodings = [
+            None,
+            Some(CodecEncoding::Rfc3339),
+            Some(CodecEncoding::Base64),
+        ];
+        for item in AvroType::scalar_variants() {
+            for element in ParseAsType::scalar_variants() {
+                for encoding in encodings {
+                    let scalar = CodecBindingCase::new(
+                        WireCase::Avro(item.clone()),
+                        element.clone(),
+                        encoding,
+                    )
+                    .validate();
+                    for depth in 1..=3 {
+                        let case = CodecBindingCase::new(
+                            WireCase::Avro(avro_array(item, depth)),
+                            listed(element, depth),
+                            encoding,
+                        );
+                        let result = case.validate();
+                        assert_eq!(
+                            result.is_ok(),
+                            scalar.is_ok(),
+                            "{case:?}: {result:?}, while the scalar binding gives {scalar:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_avro_array_nested_to_another_depth_than_its_list_is_refused() {
+        for (wire, internal, reason) in [
+            (
+                avro_array(&AvroType::Long, 1),
+                ParseAsType::Array {
+                    element: Box::new(ParseAsType::Array {
+                        element: Box::new(ParseAsType::I64),
+                        len: nonzero_ext::nonzero!(3u32),
+                    }),
+                    len: nonzero_ext::nonzero!(2u32),
+                },
+                "avro field 'value' array depth mismatch: wire array<long> has 1 array level, \
+                 internal ARRAY<ARRAY<I64, 3>, 2> has 2",
+            ),
+            (
+                avro_array(&AvroType::Long, 2),
+                listed(&ParseAsType::I64, 1),
+                "avro field 'value' array depth mismatch: wire array<array<long>> has 2 array \
+                 levels, internal VEC<I64> has 1",
+            ),
+            (
+                avro_array(&AvroType::Long, 1),
+                ParseAsType::I64,
+                "avro field 'value' type mismatch: wire array<long>, internal I64",
+            ),
+            (
+                AvroType::Long,
+                listed(&ParseAsType::I64, 1),
+                "avro field 'value' type mismatch: wire long, internal VEC<I64>",
+            ),
+            (
+                avro_array(&AvroType::Long, 1),
+                listed(&ParseAsType::I32, 1),
+                "avro field 'value' type mismatch: wire array<long>, internal VEC<I32>",
+            ),
+        ] {
+            let error = CodecBindingCase::new(WireCase::Avro(wire), internal, None)
+                .validate()
+                .err()
+                .assured("each case pairs an AVRO array with a list it cannot carry");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    RegistryError::IncompatibleSchema { identifier, .. } if identifier == "binary_codec"
+                ),
+                "{error:#}"
+            );
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains(reason), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn list_elements_bind_through_the_fields_encode_rule_in_every_format() {
+        use CodecEncoding::{Base64, Rfc3339};
+        use ParseAsType::{Bytes, Datetime};
+        let nested_bytes = listed(&Bytes, 2);
+        let cases = [
+            (
+                WireCase::Json(JsonType::Array),
+                listed(&Datetime, 1),
+                None,
+                Err("json field 'value' needs ENCODE value AS RFC3339 for its DATETIME elements"),
+            ),
+            (
+                WireCase::Json(JsonType::Array),
+                listed(&Datetime, 1),
+                Some(Rfc3339),
+                Ok(()),
+            ),
+            (
+                WireCase::Json(JsonType::Array),
+                nested_bytes.clone(),
+                None,
+                Err("json field 'value' needs ENCODE value AS BASE64 for its BYTES elements"),
+            ),
+            (
+                WireCase::Json(JsonType::Array),
+                nested_bytes.clone(),
+                Some(Base64),
+                Ok(()),
+            ),
+            (
+                WireCase::Json(JsonType::String),
+                Datetime,
+                None,
+                Err("json field 'value' needs ENCODE value AS RFC3339 for its DATETIME value"),
+            ),
+            (
+                WireCase::Cbor(CborType::Array),
+                listed(&Datetime, 1),
+                None,
+                Err("cbor field 'value' needs ENCODE value AS RFC3339 for its DATETIME elements"),
+            ),
+            (
+                WireCase::Cbor(CborType::Array),
+                listed(&Datetime, 1),
+                Some(Rfc3339),
+                Ok(()),
+            ),
+            (
+                WireCase::Cbor(CborType::Array),
+                nested_bytes.clone(),
+                None,
+                Ok(()),
+            ),
+            (
+                WireCase::Cbor(CborType::Array),
+                nested_bytes.clone(),
+                Some(Base64),
+                Err(
+                    "cbor field 'value' carries BYTES natively, so ENCODE value AS BASE64 does \
+                     not apply",
+                ),
+            ),
+            (
+                WireCase::Cbor(CborType::Bytes),
+                Bytes,
+                Some(Base64),
+                Err(
+                    "cbor field 'value' carries BYTES natively, so ENCODE value AS BASE64 does \
+                     not apply",
+                ),
+            ),
+            (
+                WireCase::Avro(avro_array(&AvroType::String, 1)),
+                listed(&Datetime, 1),
+                None,
+                Err("avro field 'value' needs ENCODE value AS RFC3339 for its DATETIME elements"),
+            ),
+            (
+                WireCase::Avro(avro_array(&AvroType::String, 1)),
+                listed(&Datetime, 1),
+                Some(Rfc3339),
+                Ok(()),
+            ),
+            (
+                WireCase::Avro(avro_array(&AvroType::String, 2)),
+                nested_bytes.clone(),
+                Some(Base64),
+                Ok(()),
+            ),
+            (
+                WireCase::Avro(avro_array(&AvroType::Bytes, 2)),
+                nested_bytes.clone(),
+                None,
+                Ok(()),
+            ),
+            (
+                WireCase::Avro(avro_array(&AvroType::Bytes, 2)),
+                nested_bytes,
+                Some(Base64),
+                Err(
+                    "avro field 'value' carries BYTES natively, so ENCODE value AS BASE64 does \
+                     not apply",
+                ),
+            ),
+        ];
+        for (wire, internal, encoding, expected) in cases {
+            let case = CodecBindingCase::new(wire, internal, encoding);
+            let result = case.validate();
+            match expected {
+                Ok(()) => {
+                    result.unwrap_or_else(|error| panic!("{case:?} must bind: {error:#}"));
+                }
+                Err(reason) => {
+                    let error = result
+                        .err()
+                        .assured("this case pairs a list element with a rule it cannot use");
+                    assert!(
+                        matches!(
+                            error.current_context(),
+                            RegistryError::IncompatibleSchema { .. }
+                        ),
+                        "{case:?}: {error:#}"
+                    );
+                    let rendered = format!("{error:#}");
+                    assert!(rendered.contains(reason), "{case:?}: {rendered}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_rule_on_a_list_field_needs_its_innermost_elements_to_be_the_rules_type() {
+        for (internal, encoding, reason) in [
+            (
+                listed(&ParseAsType::String, 1),
+                CodecEncoding::Rfc3339,
+                "codec encoding rule field 'value' must be DATETIME or a list of DATETIME \
+                 elements, found VEC<STRING>",
+            ),
+            (
+                listed(&ParseAsType::Datetime, 2),
+                CodecEncoding::Base64,
+                "codec encoding rule field 'value' must be BYTES or a list of BYTES elements, \
+                 found ARRAY<VEC<DATETIME>, 3>",
+            ),
+        ] {
+            let error =
+                CodecBindingCase::new(WireCase::Json(JsonType::Array), internal, Some(encoding))
+                    .validate()
+                    .err()
+                    .assured("the rule names a field whose elements are of another type");
+            assert!(
+                matches!(error.current_context(), RegistryError::InvalidModel { .. }),
+                "{error:#}"
+            );
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains(reason), "{rendered}");
         }
     }
 

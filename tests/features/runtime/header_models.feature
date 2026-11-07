@@ -115,7 +115,7 @@ Feature: Header models
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge header-models-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT events_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR events_source
+      CREATE HTTP ENDPOINT INGESTOR events_ingestor
         FROM events_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing
@@ -142,7 +142,7 @@ Feature: Header models
           ENCODE USING event_codec
         INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      DESCRIBE INGESTOR events_source;
+      DESCRIBE INGESTOR events_ingestor;
       """
     Then the last command output contains
       """

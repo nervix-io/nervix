@@ -1,7 +1,7 @@
-//! The source host's retained interaction counters.
+//! The ingestor host's retained interaction counters.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** One registration of the source host's existing counter children.
+//! - **Owns.** One registration of the ingestor host's existing counter children.
 //! - **Depends on.** Vocabulary identities and the node metric registry.
 //! - **Must not know.** Connector drivers, intake lifetimes, decoding policy or acknowledgements.
 
@@ -10,7 +10,7 @@
     nervix::layer(engine, reason = "owns the infrastructure boundary declared above")
 )]
 
-use nervix_models::{ClusterNodeName, DomainName, IngestorName};
+use nervix_models::{ClusterNodeName, DomainName, IngestorName, Unit};
 use prometheus::IntCounter;
 
 use super::RuntimeMetrics;
@@ -34,30 +34,44 @@ impl RuntimeMetrics {
         nervix_lint,
         nervix::context(
             lifecycle,
-            reason = "resolves the source host's children once at startup"
+            reason = "resolves the ingestor host's children once at startup"
         )
     )]
     pub(crate) fn register_ingestor_interactions(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         physical_node: Option<&ClusterNodeName>,
     ) -> (IngestorInteractionMetrics, IntCounter) {
         let interactions = IngestorInteractionMetrics {
-            unfolding_refused: self.ingestor_unfolding_refused(domain, ingestor, physical_node),
+            unfolding_refused: self.ingestor_unfolding_refused(
+                domain,
+                ingestor,
+                unit,
+                physical_node,
+            ),
             transport_redeliveries: self.ingestor_transport_redeliveries(
                 domain,
                 ingestor,
+                unit,
                 physical_node,
             ),
-            oversized_payloads: self.ingestor_oversized_payloads(domain, ingestor, physical_node),
+            oversized_payloads: self.ingestor_oversized_payloads(
+                domain,
+                ingestor,
+                unit,
+                physical_node,
+            ),
             header_values_dropped: self.ingestor_header_values_dropped(
                 domain,
                 ingestor,
+                unit,
                 physical_node,
             ),
         };
-        let decode_rejections = self.ingestor_decode_rejections(domain, ingestor, physical_node);
+        let decode_rejections =
+            self.ingestor_decode_rejections(domain, ingestor, unit, physical_node);
         (interactions, decode_rejections)
     }
 }

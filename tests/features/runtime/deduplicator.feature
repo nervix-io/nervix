@@ -27,7 +27,7 @@ Feature: Relay deduplication
         CREATE HTTP ENDPOINT ingress
         ON edge
         PATH '/dedup';
-        CREATE HTTP ENDPOINT INGESTOR source_txns
+        CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
@@ -97,7 +97,7 @@ Feature: Relay deduplication
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT ingress ON edge PATH '/dedup-expire';
-        CREATE HTTP ENDPOINT INGESTOR source_txns
+        CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
@@ -182,7 +182,7 @@ Feature: Relay deduplication
         CREATE HTTP ENDPOINT ingress
         ON edge
         PATH '/dedup-functions';
-        CREATE HTTP ENDPOINT INGESTOR source_txns
+        CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
@@ -260,7 +260,7 @@ Feature: Relay deduplication
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT ingress ON edge PATH '/dedup-describe';
-        CREATE HTTP ENDPOINT INGESTOR source_txns
+        CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
@@ -361,7 +361,7 @@ Feature: Relay deduplication
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_txns
+        CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
@@ -480,7 +480,7 @@ Feature: Relay deduplication
         CREATE HTTP ENDPOINT ingress
         ON edge
         PATH '/dedup-default';
-        CREATE HTTP ENDPOINT INGESTOR source_txns
+        CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1

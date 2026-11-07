@@ -40,7 +40,7 @@ Feature: Web console visual client, vhost and endpoint creation
     Then selector ".terminal" contains "CREATE HTTP ENDPOINT visual_ingest ON visual_edge PATH '/ingest'"
     When these Plexus commands are executed on the leader node
       """
-      CREATE HTTP ENDPOINT INGESTOR visual_source FROM visual_ingest MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR visual_ingestor FROM visual_ingest MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And http payload is posted to host "visual-{{test_id}}.example.com" path "/ingest"

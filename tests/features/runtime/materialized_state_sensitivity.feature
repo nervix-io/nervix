@@ -24,7 +24,7 @@ Feature: Materialized state inspection respects schema sensitivity
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge materialized-sensitive-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL

@@ -464,7 +464,7 @@ mod tests {
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
                     name: named::<FieldName>("value"),
-                    ty: CborType::String,
+                    ty: CborType::Text,
                     optional: false,
                 }],
             }),

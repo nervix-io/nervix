@@ -19,13 +19,13 @@ Feature: Altering an ingestor or an emitter in place
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
       CREATE KAFKA CLIENT primary_broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA CLIENT audit_broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
-      CREATE KAFKA TOPIC INGESTOR order_source
+      CREATE KAFKA TOPIC INGESTOR order_ingestor
         FROM primary_broker TOPIC 'Orders' OFFSET BY DOMAIN
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING order_event_codec
         TO orders INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      ALTER KAFKA TOPIC INGESTOR order_source
+      ALTER KAFKA TOPIC INGESTOR order_ingestor
         SET CLIENT audit_broker,
         SET TOPIC 'Orders.Audit',
         SET OFFSET BY CONSUMER GROUP 'auditors' START AT LATEST,
@@ -40,11 +40,11 @@ Feature: Altering an ingestor or an emitter in place
         ALTER ROUTE TO orders ADD SET seq = input.seq,
         ALTER ROUTE TO orders SET WHERE input.seq > 0,
         SET GENERAL ERROR IGNORE;
-      SHOW CREATE INGESTOR order_source;
+      SHOW CREATE INGESTOR order_ingestor;
       """
     Then the last command output contains
       """
-      CREATE KAFKA TOPIC INGESTOR order_source
+      CREATE KAFKA TOPIC INGESTOR order_ingestor
         FROM audit_broker TOPIC 'Orders.Audit' OFFSET BY CONSUMER GROUP 'auditors' START AT EARLIEST
       """
     And the last command output contains
@@ -66,7 +66,7 @@ Feature: Altering an ingestor or an emitter in place
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER KAFKA TOPIC INGESTOR order_source
+      ALTER KAFKA TOPIC INGESTOR order_ingestor
         SET OFFSET BY DOMAIN,
         ALTER ROUTE TO orders DROP WHERE,
         ALTER ROUTE TO orders SET INHERIT ALL,
@@ -74,33 +74,33 @@ Feature: Altering an ingestor or an emitter in place
       """
     And these Plexus commands fail with "found BUFFER"
       """
-      ALTER KAFKA TOPIC INGESTOR order_source
+      ALTER KAFKA TOPIC INGESTOR order_ingestor
         SET QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST;
       """
     And these Plexus commands fail with "the construction writes `note` more than once, so DROP SET cannot tell which"
       """
-      ALTER KAFKA TOPIC INGESTOR order_source ALTER ROUTE TO orders DROP SET note;
+      ALTER KAFKA TOPIC INGESTOR order_ingestor ALTER ROUTE TO orders DROP SET note;
       """
     And these Plexus commands fail with "route target `audit` is not configured"
       """
-      ALTER KAFKA TOPIC INGESTOR order_source ALTER ROUTE TO audit SET INHERIT ALL;
+      ALTER KAFKA TOPIC INGESTOR order_ingestor ALTER ROUTE TO audit SET INHERIT ALL;
       """
     And these Plexus commands fail with "INVOKE is only available to emitters"
       """
-      ALTER KAFKA TOPIC INGESTOR order_source
+      ALTER KAFKA TOPIC INGESTOR order_ingestor
         ALTER ROUTE TO orders ADD INVOKE write_header('X-Audit', 'altered');
       """
     And these Plexus commands fail with "the construction makes 0 invocations, so it has no invocation 1"
       """
-      ALTER KAFKA TOPIC INGESTOR order_source ALTER ROUTE TO orders DROP INVOKE 1;
+      ALTER KAFKA TOPIC INGESTOR order_ingestor ALTER ROUTE TO orders DROP INVOKE 1;
       """
     And these Plexus commands fail with "cannot set START AT on a KAFKA ingestor whose domain owns its offsets"
       """
-      ALTER KAFKA TOPIC INGESTOR order_source SET START AT LATEST;
+      ALTER KAFKA TOPIC INGESTOR order_ingestor SET START AT LATEST;
       """
     And these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR order_source;
+      SHOW CREATE INGESTOR order_ingestor;
       """
     Then the last command output contains
       """
@@ -131,7 +131,7 @@ Feature: Altering an ingestor or an emitter in place
       CREATE CODEC order_event_codec FROM WIRE JSON SCHEMA order_event_wire TO SCHEMA order_event;
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
-      CREATE NATS SUBJECT INGESTOR order_source
+      CREATE NATS SUBJECT INGESTOR order_ingestor
         FROM nats_main SUBJECT 'orders.created' QUEUE GROUP 'workers' INSTANCES 1
         MODE NO ACK ON QUIESCE DROP DECODE USING order_event_codec
         TO orders INHERIT ALL UNBRANCHED
@@ -139,16 +139,16 @@ Feature: Altering an ingestor or an emitter in place
       """
     When these Plexus commands fail with "found ACK"
       """
-      ALTER NATS SUBJECT INGESTOR order_source
+      ALTER NATS SUBJECT INGESTOR order_ingestor
         SET MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 1s MAX 30s;
       """
     And these Plexus commands are executed on the leader node
       """
-      ALTER NATS SUBJECT INGESTOR order_source
+      ALTER NATS SUBJECT INGESTOR order_ingestor
         SET SUBJECT 'orders.audited',
         SET QUEUE GROUP 'auditors',
         SET QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST;
-      SHOW CREATE INGESTOR order_source;
+      SHOW CREATE INGESTOR order_ingestor;
       """
     Then the last command output contains
       """
@@ -350,7 +350,7 @@ Feature: Altering an ingestor or an emitter in place
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE HTTP ENDPOINT INGESTOR altered_source
+      CREATE HTTP ENDPOINT INGESTOR altered_ingestor
         FROM altered_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING altered_event_codec
         TO altered_events INHERIT ALL UNBRANCHED
@@ -371,7 +371,7 @@ Feature: Altering an ingestor or an emitter in place
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER HTTP ENDPOINT INGESTOR altered_source
+      ALTER HTTP ENDPOINT INGESTOR altered_ingestor
         ALTER ROUTE TO altered_events DROP INHERIT,
         ALTER ROUTE TO altered_events ADD SET seq = input.seq + 100;
       """

@@ -133,7 +133,7 @@ Feature: Interconnect health coordination
     Then node "node-1" eventually observes a stable leader
 
   @command_completion @slots_2
-  Scenario: Gossip completes mutations while revision replies and a peer health response are held
+  Scenario: Progress reports complete mutations while revision replies and a peer health response are held
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" eventually reports leader "node-1"

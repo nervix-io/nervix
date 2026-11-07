@@ -13,7 +13,7 @@ Feature: Sentry emission
       CREATE RELAY errors SCHEMA declared_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
-      CREATE HTTP ENDPOINT INGESTOR error_source
+      CREATE HTTP ENDPOINT INGESTOR error_ingestor
         FROM error_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING declared_codec
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -128,7 +128,7 @@ Feature: Sentry emission
       CREATE HTTP ENDPOINT error_ingress
       ON edge
       PATH '/errors';
-      CREATE HTTP ENDPOINT INGESTOR error_source
+      CREATE HTTP ENDPOINT INGESTOR error_ingestor
       FROM error_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING error_event_codec
       TIMESTAMP NOW
@@ -196,7 +196,7 @@ Feature: Sentry emission
       CREATE RELAY errors SCHEMA retry_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
-      CREATE HTTP ENDPOINT INGESTOR error_source
+      CREATE HTTP ENDPOINT INGESTOR error_ingestor
         FROM error_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -263,7 +263,7 @@ Feature: Sentry emission
       CREATE RELAY errors SCHEMA retry_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
-      CREATE HTTP ENDPOINT INGESTOR error_source
+      CREATE HTTP ENDPOINT INGESTOR error_ingestor
         FROM error_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

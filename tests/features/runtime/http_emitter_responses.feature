@@ -27,7 +27,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -110,7 +110,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -202,7 +202,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -272,7 +272,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -339,7 +339,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+      CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

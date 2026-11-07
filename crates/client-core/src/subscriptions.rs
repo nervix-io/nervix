@@ -40,14 +40,14 @@ pub struct SubscriptionInterruption {
     pub subscription: SubscriptionHandle,
 }
 
-/// An attempt to open an interrupted subscription again that the current session refused or did
-/// not answer. The subscription stays interrupted, and the client tries again after `retry_after`
-/// for as long as the subscription is desired and the session stays open.
+/// An attempt to reopen an interrupted subscription that failed while the session stayed open.
+/// The client retries after `retry_after` while the subscription is desired and the session is open.
+/// An unanswered reopening ends the session at its request timeout instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionRestorationFailure {
     /// The generation the restoration would replace, which ended with its session.
     pub subscription: SubscriptionHandle,
-    /// The server's refusal, or why the request got no answer.
+    /// The server's refusal or the local failure of the reopening.
     pub message: String,
     /// How long the client waits before its next attempt.
     pub retry_after: Duration,

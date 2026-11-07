@@ -33,7 +33,7 @@ fn placement(
         state,
         kind,
         identifier: named(identifier),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key,
     }
 }
@@ -339,7 +339,7 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
     );
     publish_current_assignment(&runtime, &aggregated);
     let aggregated_state = runtime
-        .replicated_branch_aggregated_state(aggregated.clone(), None, named("node-1"))
+        .replicated_branch_aggregated_state(aggregated.clone(), None)
         .expect("branch-aggregated state initializes");
     acknowledge(&runtime, &replica, &aggregated);
     assert_eq!(

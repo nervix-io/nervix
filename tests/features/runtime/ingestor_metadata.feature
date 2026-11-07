@@ -33,126 +33,126 @@ Feature: Typed ingestor metadata
       CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       """
-    When these Plexus statements fail with "ingestor 'http_request_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP REQUEST ingestors declare only metadata.status and metadata.polled_at"
+    When these Plexus statements fail with "ingestor 'http_request_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP REQUEST ingestors declare only metadata.status and metadata.polled_at"
       """
-      CREATE HTTP REQUEST INGESTOR http_request_source
+      CREATE HTTP REQUEST INGESTOR http_request_ingestor
         FROM http_main METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'http_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP ENDPOINT ingestors declare only metadata.method, metadata.path, metadata.query, metadata.remote_addr and metadata.host"
+    When these Plexus statements fail with "ingestor 'http_endpoint_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP ENDPOINT ingestors declare only metadata.method, metadata.path, metadata.query, metadata.remote_addr and metadata.host"
       """
-      CREATE HTTP ENDPOINT INGESTOR http_endpoint_source
+      CREATE HTTP ENDPOINT INGESTOR http_endpoint_ingestor
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'ws_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS ENDPOINT ingestors declare only metadata.frame_type, metadata.remote_addr and metadata.path"
+    When these Plexus statements fail with "ingestor 'ws_endpoint_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS ENDPOINT ingestors declare only metadata.frame_type, metadata.remote_addr and metadata.path"
       """
-      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_source
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor
         FROM ws_ingress MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'ws_connection_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS CONNECTION ingestors declare only metadata.frame_type"
+    When these Plexus statements fail with "ingestor 'ws_connection_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS CONNECTION ingestors declare only metadata.frame_type"
       """
-      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_source
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_ingestor
         FROM ws_main MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'kafka_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition, metadata.offset, metadata.key, metadata.timestamp, metadata.timestamp_type and metadata.tombstone"
+    When these Plexus statements fail with "ingestor 'kafka_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition, metadata.offset, metadata.key, metadata.timestamp, metadata.timestamp_type and metadata.tombstone"
       """
-      CREATE KAFKA TOPIC INGESTOR kafka_source
+      CREATE KAFKA TOPIC INGESTOR kafka_ingestor
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'pulsar_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PULSAR TOPIC ingestors declare only metadata.topic, metadata.message_id, metadata.publish_time, metadata.event_time, metadata.key, metadata.ordering_key, metadata.producer_name, metadata.sequence_id and metadata.redelivery_count"
+    When these Plexus statements fail with "ingestor 'pulsar_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PULSAR TOPIC ingestors declare only metadata.topic, metadata.message_id, metadata.publish_time, metadata.event_time, metadata.key, metadata.ordering_key, metadata.producer_name, metadata.sequence_id and metadata.redelivery_count"
       """
-      CREATE PULSAR TOPIC INGESTOR pulsar_source
+      CREATE PULSAR TOPIC INGESTOR pulsar_ingestor
         FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'rabbitmq_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but RABBITMQ QUEUE ingestors declare only metadata.exchange, metadata.routing_key, metadata.delivery_tag, metadata.redelivered, metadata.content_type, metadata.content_encoding, metadata.message_id, metadata.correlation_id, metadata.reply_to, metadata.type, metadata.app_id, metadata.user_id, metadata.priority, metadata.expiration and metadata.timestamp"
+    When these Plexus statements fail with "ingestor 'rabbitmq_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but RABBITMQ QUEUE ingestors declare only metadata.exchange, metadata.routing_key, metadata.delivery_tag, metadata.redelivered, metadata.content_type, metadata.content_encoding, metadata.message_id, metadata.correlation_id, metadata.reply_to, metadata.type, metadata.app_id, metadata.user_id, metadata.priority, metadata.expiration and metadata.timestamp"
       """
-      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_source
+      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_ingestor
         FROM rabbit_main QUEUE 'Orders'
         MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'redis_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but REDIS PUBSUB ingestors declare only metadata.channel and metadata.pattern"
+    When these Plexus statements fail with "ingestor 'redis_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but REDIS PUBSUB ingestors declare only metadata.channel and metadata.pattern"
       """
-      CREATE REDIS PUBSUB INGESTOR redis_source
+      CREATE REDIS PUBSUB INGESTOR redis_ingestor
         FROM redis_main CHANNEL 'Orders' MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'mqtt_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but MQTT TOPIC ingestors declare only metadata.topic, metadata.retain, metadata.qos, metadata.duplicate, metadata.content_type, metadata.response_topic, metadata.correlation_data and metadata.message_expiry"
+    When these Plexus statements fail with "ingestor 'mqtt_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but MQTT TOPIC ingestors declare only metadata.topic, metadata.retain, metadata.qos, metadata.duplicate, metadata.content_type, metadata.response_topic, metadata.correlation_data and metadata.message_expiry"
       """
-      CREATE MQTT TOPIC INGESTOR mqtt_source
+      CREATE MQTT TOPIC INGESTOR mqtt_ingestor
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'nats_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but NATS SUBJECT ingestors declare only metadata.subject and metadata.reply"
+    When these Plexus statements fail with "ingestor 'nats_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but NATS SUBJECT ingestors declare only metadata.subject and metadata.reply"
       """
-      CREATE NATS SUBJECT INGESTOR nats_source
+      CREATE NATS SUBJECT INGESTOR nats_ingestor
         FROM nats_main SUBJECT 'orders.*' QUEUE GROUP 'Readers' INSTANCES 1
         MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'nats_stream_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but NATS STREAM ingestors declare only metadata.subject, metadata.reply, metadata.stream, metadata.consumer, metadata.sequence, metadata.timestamp and metadata.delivered"
+    When these Plexus statements fail with "ingestor 'nats_stream_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but NATS STREAM ingestors declare only metadata.subject, metadata.reply, metadata.stream, metadata.consumer, metadata.sequence, metadata.timestamp and metadata.delivered"
       """
-      CREATE NATS STREAM INGESTOR nats_stream_source
+      CREATE NATS STREAM INGESTOR nats_stream_ingestor
         FROM nats_main STREAM 'Orders' CONSUMER 'Readers'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 1s MAX 30s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'sqs_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SQS QUEUE ingestors declare only metadata.message_id, metadata.sent_at, metadata.receive_count, metadata.first_received_at, metadata.group_id, metadata.deduplication_id, metadata.sequence_number and metadata.sender_id"
+    When these Plexus statements fail with "ingestor 'sqs_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SQS QUEUE ingestors declare only metadata.message_id, metadata.sent_at, metadata.receive_count, metadata.first_received_at, metadata.group_id, metadata.deduplication_id, metadata.sequence_number and metadata.sender_id"
       """
-      CREATE SQS QUEUE INGESTOR sqs_source
+      CREATE SQS QUEUE INGESTOR sqs_ingestor
         FROM sqs_main QUEUE 'Orders.fifo'
         MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'zeromq_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but ZEROMQ PULL ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'zeromq_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but ZEROMQ PULL ingestors declare no metadata field"
       """
-      CREATE ZEROMQ PULL INGESTOR zeromq_source
+      CREATE ZEROMQ PULL INGESTOR zeromq_ingestor
         FROM zmq_main MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'syslog_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SYSLOG LISTENER ingestors declare only metadata.peer_addr, metadata.transport and metadata.tls_peer"
+    When these Plexus statements fail with "ingestor 'syslog_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SYSLOG LISTENER ingestors declare only metadata.peer_addr, metadata.transport and metadata.tls_peer"
       """
-      CREATE SYSLOG LISTENER INGESTOR syslog_source
+      CREATE SYSLOG LISTENER INGESTOR syslog_ingestor
         FROM syslog_main MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'prometheus_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PROMETHEUS QUERY ingestors declare only metadata.query and metadata.evaluated_at"
+    When these Plexus statements fail with "ingestor 'prometheus_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PROMETHEUS QUERY ingestors declare only metadata.query and metadata.evaluated_at"
       """
-      CREATE PROMETHEUS QUERY INGESTOR prometheus_source
+      CREATE PROMETHEUS QUERY INGESTOR prometheus_ingestor
         FROM prom_main QUERY 'up' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'client_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but CLIENT PRODUCER ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'client_ingestor' in domain '{{domain}}' reads metadata.missing in its route to 'events', but CLIENT PRODUCER ingestors declare no metadata field"
       """
-      CREATE CLIENT PRODUCER INGESTOR client_source
+      CREATE CLIENT PRODUCER INGESTOR client_ingestor
         FROM SCHEMA event MODE ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE

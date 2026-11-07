@@ -1302,7 +1302,7 @@ impl SessionServiceImpl {
                         prepared_schedule.as_ref(),
                     )
                     .into_iter()
-                    .map(|moved| moved.entity);
+                    .map(|moved| nervix_models::NodeUnitRef::new(moved.entity, moved.unit));
                     EntityGatePlan::for_ownership_handoff(
                         expected_schedule.as_ref(),
                         prepared_schedule.as_ref(),
@@ -1381,14 +1381,14 @@ impl SessionServiceImpl {
             }
             if !is_noop && !model_gate.affected_entities().is_empty() {
                 let relays = model_gate.relays();
-                let affected_entities = model_gate.affected_entities();
+                let affected_entities = model_gate.targets();
                 let deadline = nervix_primitives::time::Instant::now()
                     + self.inner.runtime.entity_gate_deadline();
                 let gate = match Box::pin(self.engage_cluster_entity_gates(
                     ClusterEntityGateScope {
                         domain: &domain,
                         relays,
-                        affected_entities,
+                        targets: affected_entities,
                         purpose: EntityGatePurpose::ModelAlteration,
                         participants: EntityGateParticipants::EveryAvailableNode,
                     },

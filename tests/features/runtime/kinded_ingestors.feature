@@ -31,74 +31,74 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1', 'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret' };
       CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
       CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
-      CREATE HTTP REQUEST INGESTOR http_request_source
+      CREATE HTTP REQUEST INGESTOR http_request_ingestor
         FROM http_main METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR http_endpoint_source
+      CREATE HTTP ENDPOINT INGESTOR http_endpoint_ingestor
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_source
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor
         FROM ws_ingress MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_source
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_ingestor
         FROM ws_main MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC INGESTOR kafka_source
+      CREATE KAFKA TOPIC INGESTOR kafka_ingestor
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE PULSAR TOPIC INGESTOR pulsar_source
+      CREATE PULSAR TOPIC INGESTOR pulsar_ingestor
         FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_source
+      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_ingestor
         FROM rabbit_main QUEUE 'Orders'
         MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE REDIS PUBSUB INGESTOR redis_source
+      CREATE REDIS PUBSUB INGESTOR redis_ingestor
         FROM redis_main CHANNEL 'Orders' MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE MQTT TOPIC INGESTOR mqtt_source
+      CREATE MQTT TOPIC INGESTOR mqtt_ingestor
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE NATS SUBJECT INGESTOR nats_source
+      CREATE NATS SUBJECT INGESTOR nats_ingestor
         FROM nats_main SUBJECT 'orders.*' QUEUE GROUP 'Readers' INSTANCES 1
         MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SQS QUEUE INGESTOR sqs_source
+      CREATE SQS QUEUE INGESTOR sqs_ingestor
         FROM sqs_main QUEUE 'Orders.fifo'
         MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ZEROMQ PULL INGESTOR zeromq_source
+      CREATE ZEROMQ PULL INGESTOR zeromq_ingestor
         FROM zmq_main MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SYSLOG LISTENER INGESTOR syslog_source
+      CREATE SYSLOG LISTENER INGESTOR syslog_ingestor
         FROM syslog_main MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE PROMETHEUS QUERY INGESTOR prometheus_source
+      CREATE PROMETHEUS QUERY INGESTOR prometheus_ingestor
         FROM prom_main QUERY 'up' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT PRODUCER INGESTOR client_source
+      CREATE CLIENT PRODUCER INGESTOR client_ingestor
         FROM SCHEMA event MODE ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -107,151 +107,151 @@ Feature: Ingestors name their connector and entity in the statement head
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR http_request_source;
+      SHOW CREATE INGESTOR http_request_ingestor;
       """
     Then the last command output contains
       """
-      CREATE HTTP REQUEST INGESTOR http_request_source
+      CREATE HTTP REQUEST INGESTOR http_request_ingestor
         FROM http_main METHOD 'GET' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR http_endpoint_source;
+      SHOW CREATE INGESTOR http_endpoint_ingestor;
       """
     Then the last command output contains
       """
-      CREATE HTTP ENDPOINT INGESTOR http_endpoint_source
+      CREATE HTTP ENDPOINT INGESTOR http_endpoint_ingestor
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR ws_endpoint_source;
+      SHOW CREATE INGESTOR ws_endpoint_ingestor;
       """
     Then the last command output contains
       """
-      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_source
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor
         FROM ws_ingress MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR ws_connection_source;
+      SHOW CREATE INGESTOR ws_connection_ingestor;
       """
     Then the last command output contains
       """
-      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_source
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_connection_ingestor
         FROM ws_main MODE NO ACK ON QUIESCE DROP
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR kafka_source;
+      SHOW CREATE INGESTOR kafka_ingestor;
       """
     Then the last command output contains
       """
-      CREATE KAFKA TOPIC INGESTOR kafka_source
+      CREATE KAFKA TOPIC INGESTOR kafka_ingestor
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR pulsar_source;
+      SHOW CREATE INGESTOR pulsar_ingestor;
       """
     Then the last command output contains
       """
-      CREATE PULSAR TOPIC INGESTOR pulsar_source
+      CREATE PULSAR TOPIC INGESTOR pulsar_ingestor
         FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR rabbitmq_source;
+      SHOW CREATE INGESTOR rabbitmq_ingestor;
       """
     Then the last command output contains
       """
-      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_source
+      CREATE RABBITMQ QUEUE INGESTOR rabbitmq_ingestor
         FROM rabbit_main QUEUE 'Orders' MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR redis_source;
+      SHOW CREATE INGESTOR redis_ingestor;
       """
     Then the last command output contains
       """
-      CREATE REDIS PUBSUB INGESTOR redis_source
+      CREATE REDIS PUBSUB INGESTOR redis_ingestor
         FROM redis_main CHANNEL 'Orders' MODE NO ACK ON QUIESCE DROP
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR mqtt_source;
+      SHOW CREATE INGESTOR mqtt_ingestor;
       """
     Then the last command output contains
       """
-      CREATE MQTT TOPIC INGESTOR mqtt_source
+      CREATE MQTT TOPIC INGESTOR mqtt_ingestor
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR nats_source;
+      SHOW CREATE INGESTOR nats_ingestor;
       """
     Then the last command output contains
       """
-      CREATE NATS SUBJECT INGESTOR nats_source
+      CREATE NATS SUBJECT INGESTOR nats_ingestor
         FROM nats_main SUBJECT 'orders.*' QUEUE GROUP 'Readers' INSTANCES 1 MODE NO ACK ON QUIESCE DROP
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR sqs_source;
+      SHOW CREATE INGESTOR sqs_ingestor;
       """
     Then the last command output contains
       """
-      CREATE SQS QUEUE INGESTOR sqs_source
+      CREATE SQS QUEUE INGESTOR sqs_ingestor
         FROM sqs_main QUEUE 'Orders.fifo' MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR zeromq_source;
+      SHOW CREATE INGESTOR zeromq_ingestor;
       """
     Then the last command output contains
       """
-      CREATE ZEROMQ PULL INGESTOR zeromq_source
+      CREATE ZEROMQ PULL INGESTOR zeromq_ingestor
         FROM zmq_main MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR syslog_source;
+      SHOW CREATE INGESTOR syslog_ingestor;
       """
     Then the last command output contains
       """
-      CREATE SYSLOG LISTENER INGESTOR syslog_source
+      CREATE SYSLOG LISTENER INGESTOR syslog_ingestor
         FROM syslog_main MODE NO ACK ON QUIESCE DROP
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR prometheus_source;
+      SHOW CREATE INGESTOR prometheus_ingestor;
       """
     Then the last command output contains
       """
-      CREATE PROMETHEUS QUERY INGESTOR prometheus_source
+      CREATE PROMETHEUS QUERY INGESTOR prometheus_ingestor
         FROM prom_main QUERY 'up' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE INGESTOR client_source;
+      SHOW CREATE INGESTOR client_ingestor;
       """
     Then the last command output contains
       """
-      CREATE CLIENT PRODUCER INGESTOR client_source
+      CREATE CLIENT PRODUCER INGESTOR client_ingestor
         FROM SCHEMA event MODE ACK PARALLEL MAX 64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s ON QUIESCE SUSPEND
         TIMESTAMP NOW
       """
@@ -275,18 +275,18 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE KAFKA TOPIC INGESTOR kafka_source
+      CREATE KAFKA TOPIC INGESTOR kafka_ingestor
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT PRODUCER INGESTOR client_source
+      CREATE CLIENT PRODUCER INGESTOR client_ingestor
         FROM SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s
         ON QUIESCE SUSPEND
         TIMESTAMP NOW
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      DESCRIBE INGESTOR kafka_source;
+      DESCRIBE INGESTOR kafka_ingestor;
       """
     Then the last command output contains
       """
@@ -297,7 +297,7 @@ Feature: Ingestors name their connector and entity in the statement head
       """
     When these Plexus commands are executed on the leader node
       """
-      DESCRIBE INGESTOR client_source;
+      DESCRIBE INGESTOR client_ingestor;
       """
     Then the last command output contains
       """
@@ -312,11 +312,11 @@ Feature: Ingestors name their connector and entity in the statement head
       """
     Then the last command output contains
       """
-      kafka_source from=KAFKA TOPIC codec=event_codec
+      kafka_ingestor from=KAFKA TOPIC codec=event_codec
       """
     And the last command output contains
       """
-      client_source from=CLIENT PRODUCER schema=event
+      client_ingestor from=CLIENT PRODUCER schema=event
       """
 
     Examples:
@@ -340,25 +340,25 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE VHOST edge http-{{test_id}}-kinded-alter.example.com;
       CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
       CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
-      CREATE HTTP ENDPOINT INGESTOR web_source
+      CREATE HTTP ENDPOINT INGESTOR web_ingestor
         FROM ingress_a MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "the stored ingestor reads HTTP ENDPOINT, so ALTER KAFKA TOPIC INGESTOR cannot alter it"
       """
-      ALTER KAFKA TOPIC INGESTOR web_source SET GENERAL ERROR IGNORE;
+      ALTER KAFKA TOPIC INGESTOR web_ingestor SET GENERAL ERROR IGNORE;
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER HTTP ENDPOINT INGESTOR web_source
+      ALTER HTTP ENDPOINT INGESTOR web_ingestor
         SET FROM ingress_b MODE NO ACK ON QUIESCE REJECT RETRY AFTER 3s,
         SET GENERAL ERROR IGNORE;
-      SHOW CREATE INGESTOR web_source;
+      SHOW CREATE INGESTOR web_ingestor;
       """
     Then the last command output contains
       """
-      CREATE HTTP ENDPOINT INGESTOR web_source
+      CREATE HTTP ENDPOINT INGESTOR web_ingestor
         FROM ingress_b MODE NO ACK ON QUIESCE REJECT RETRY AFTER 3s
       """
     And the last command output contains
@@ -389,23 +389,23 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE WEBSOCKETS ENDPOINT ws_ingress ON edge PATH '/stream';
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
       """
-    When these Plexus commands fail with "HTTP ENDPOINT ingestor 'web_source' in domain '{{domain}}' requires a HTTP ENDPOINT, but endpoint 'ws_ingress' is WEBSOCKETS ENDPOINT"
+    When these Plexus commands fail with "HTTP ENDPOINT ingestor 'web_ingestor' in domain '{{domain}}' requires a HTTP ENDPOINT, but endpoint 'ws_ingress' is WEBSOCKETS ENDPOINT"
       """
-      CREATE HTTP ENDPOINT INGESTOR web_source
+      CREATE HTTP ENDPOINT INGESTOR web_ingestor
         FROM ws_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these Plexus commands fail with "WEBSOCKETS ENDPOINT ingestor 'stream_source' in domain '{{domain}}' requires a WEBSOCKETS ENDPOINT, but endpoint 'http_ingress' is HTTP ENDPOINT"
+    When these Plexus commands fail with "WEBSOCKETS ENDPOINT ingestor 'stream_ingestor' in domain '{{domain}}' requires a WEBSOCKETS ENDPOINT, but endpoint 'http_ingress' is HTTP ENDPOINT"
       """
-      CREATE WEBSOCKETS ENDPOINT INGESTOR stream_source
+      CREATE WEBSOCKETS ENDPOINT INGESTOR stream_ingestor
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these Plexus commands fail with "KAFKA TOPIC ingestor 'kafka_source' in domain '{{domain}}' requires a KAFKA client, but client 'redis_main' is a REDIS client"
+    When these Plexus commands fail with "KAFKA TOPIC ingestor 'kafka_ingestor' in domain '{{domain}}' requires a KAFKA client, but client 'redis_main' is a REDIS client"
       """
-      CREATE KAFKA TOPIC INGESTOR kafka_source
+      CREATE KAFKA TOPIC INGESTOR kafka_ingestor
         FROM redis_main TOPIC 'orders' OFFSET BY DOMAIN
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -468,7 +468,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR orders_source
+      CREATE KAFKA TOPIC INGESTOR orders_ingestor
         FROM kafka_main TOPIC 'Orders_{{test_id}}' OFFSET BY CONSUMER GROUP 'Readers_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec

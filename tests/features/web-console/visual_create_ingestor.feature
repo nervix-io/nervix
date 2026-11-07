@@ -19,7 +19,7 @@ Feature: Web console visual ingestor creation
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
-    And selector ".create-name" is filled with "visual_ingest_source"
+    And selector ".create-name" is filled with "visual_ingest_ingestor"
     And selector ".create-ingestor-source [data-source='http-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_ingest_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_ingest_endpoint']" exists
@@ -38,7 +38,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-flush [data-flush='immediate']" is clicked
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_ingest_source FROM visual_ingest_endpoint"
+    Then selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_ingest_ingestor FROM visual_ingest_endpoint"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -143,7 +143,7 @@ Feature: Web console visual ingestor creation
     And selector ".prompt-row input" is pressed with "Enter"
     And selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
-    And selector ".create-name" is filled with "visual_tx_source"
+    And selector ".create-name" is filled with "visual_tx_ingestor"
     And selector ".create-ingestor-source [data-source='http-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_tx_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_tx_endpoint']" exists
@@ -162,7 +162,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-flush [data-flush='immediate']" is clicked
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_tx_source FROM visual_tx_endpoint"
+    Then selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_tx_ingestor FROM visual_tx_endpoint"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Queued in transaction"
     And selector ".create-status" contains "position 2"
@@ -174,9 +174,9 @@ Feature: Web console visual ingestor creation
     And selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".transaction-indicator" eventually disappears
-    When selector ".prompt-row input" is filled with "SHOW CREATE INGESTOR visual_tx_source;"
+    When selector ".prompt-row input" is filled with "SHOW CREATE INGESTOR visual_tx_ingestor;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE HTTP ENDPOINT INGESTOR visual_tx_source"
+    Then selector ".terminal" contains "CREATE HTTP ENDPOINT INGESTOR visual_tx_ingestor"
 
   @visual_ingestor_reconnect
   Scenario: An ingestor draft submits after the console follows a new leader
@@ -200,7 +200,7 @@ Feature: Web console visual ingestor creation
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
-    And selector ".create-name" is filled with "visual_reconnected_source"
+    And selector ".create-name" is filled with "visual_reconnected_ingestor"
     And selector ".create-ingestor-source [data-source='http-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_reconnect_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_reconnect_endpoint']" exists
@@ -222,13 +222,13 @@ Feature: Web console visual ingestor creation
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
-    And selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_reconnected_source"
+    And selector ".create-preview" contains "CREATE HTTP ENDPOINT INGESTOR visual_reconnected_ingestor"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And selector ".prompt-row input" is filled with "SHOW CREATE INGESTOR visual_reconnected_source;"
+    And selector ".prompt-row input" is filled with "SHOW CREATE INGESTOR visual_reconnected_ingestor;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE HTTP ENDPOINT INGESTOR visual_reconnected_source"
+    Then selector ".terminal" contains "CREATE HTTP ENDPOINT INGESTOR visual_reconnected_ingestor"
 
   @visual_ingestor_branch
   Scenario: A visual route constructs a branch and leaks one selected sensitive field explicitly
@@ -330,7 +330,7 @@ Feature: Web console visual ingestor creation
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
-    And selector ".create-name" is filled with "visual_http_source"
+    And selector ".create-name" is filled with "visual_http_ingestor"
     And selector ".create-ingestor-source [data-source='http-request']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_http_client"
     Then selector ".create-ingestor-source-ref [data-value='visual_http_client']" exists
@@ -358,7 +358,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-flush [data-flush='immediate']" is clicked
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE HTTP REQUEST INGESTOR visual_http_source FROM visual_http_client METHOD 'GET'"
+    Then selector ".create-preview" contains "CREATE HTTP REQUEST INGESTOR visual_http_ingestor FROM visual_http_client METHOD 'GET'"
     And selector ".create-preview" contains "HEADERS { 'x-nervix-poll' = 'visual', 'authorization' = CLIENT SECRET 'secret.visual_token' } MAX BODY SIZE 1MiB"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"

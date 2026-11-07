@@ -141,6 +141,7 @@ fn requirements(requirements: &[ChoiceRequirement]) -> String {
 
 fn ingestor(kind: IngestorEntityKind) -> Value {
     let IngestorEntityCapabilities {
+        instancing,
         headers,
         metadata,
         executes_on_every_cluster_node,
@@ -195,6 +196,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
     );
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
+        "instancing": instancing.as_ref(),
         "reference": reference, "locator": locators(&declared_locators), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
         "headers": header_model(headers), "every_node": executes_on_every_cluster_node,

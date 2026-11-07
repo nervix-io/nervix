@@ -109,7 +109,7 @@ Feature: Relay capacity
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_capacity_source CAPACITY 2;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE HTTP ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity'; CREATE HTTP ENDPOINT INGESTOR relay_capacity_source
+      CREATE HTTP ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity'; CREATE HTTP ENDPOINT INGESTOR relay_capacity_ingestor
         FROM relay_capacity_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
@@ -210,7 +210,7 @@ Feature: Relay capacity
       CREATE VHOST edge http-{{test_id}}-shrink.example.com;
       CREATE HTTP ENDPOINT relay_capacity_shrink_ingress ON edge PATH '/relay-capacity-shrink';
 
-      CREATE HTTP ENDPOINT INGESTOR relay_capacity_shrink_source
+      CREATE HTTP ENDPOINT INGESTOR relay_capacity_shrink_ingestor
         FROM relay_capacity_shrink_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications

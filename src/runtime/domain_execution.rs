@@ -210,6 +210,8 @@ impl std::ops::DerefMut for DomainRouting {
 }
 
 pub(super) struct DomainExecution {
+    pub(super) mqtt_ingestor_clients:
+        HashMap<IngestorName, super::ingestors::mqtt::PreparedMqttIngestorClient>,
     pub(super) revision: Arc<ExecutionRevision>,
     pub(super) start_version: u64,
     pub(super) domain_clock: DomainClock,
@@ -246,7 +248,12 @@ impl RelayUnitRef {
 
     /// Every unit of `relay`, as one contiguous range of an ordered map keyed by relay unit.
     fn units_of(relay: &RelayName) -> std::ops::RangeInclusive<Self> {
-        Self::new(relay.clone(), Unit::Single)..=Self::new(relay.clone(), Unit::Instance(u32::MAX))
+        Self::new(relay.clone(), Unit::SINGLE)
+            ..=Self::new(
+                relay.clone(),
+                Unit::try_instance(Unit::MAX_INSTANCE_INDEX)
+                    .assured("the maximum execution-unit index is representable"),
+            )
     }
 }
 
@@ -504,7 +511,7 @@ impl Runtime {
                 .retain(|key, _| key.entity.domain != domain);
             self.inner
                 .in_flight_by_ingestor
-                .retain(|key, _| key.domain != domain);
+                .retain(|key, _| key.entity.domain != domain);
             self.inner.generator_activity_by_domain.remove(&domain);
             if let Some((_, force_flush)) = self.inner.force_flush_by_domain.remove(&domain) {
                 force_flush.close();
@@ -951,6 +958,7 @@ impl Runtime {
         self.install_domain_execution(
             domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision,
                 start_version,
                 domain_clock,
@@ -1028,7 +1036,7 @@ mod tests {
             passive_only: false,
             materialized_stream_owner_nodes: [(
                 relay.clone(),
-                RelayOwnerRoutes::new(BTreeMap::from([(Unit::Single, first_owner.clone())])),
+                RelayOwnerRoutes::new(BTreeMap::from([(Unit::SINGLE, first_owner.clone())])),
             )]
             .into_iter()
             .collect(),
@@ -1040,7 +1048,7 @@ mod tests {
         routing.passive_only = true;
         routing.materialized_stream_owner_nodes.insert(
             relay.clone(),
-            RelayOwnerRoutes::new(BTreeMap::from([(Unit::Single, second_owner.clone())])),
+            RelayOwnerRoutes::new(BTreeMap::from([(Unit::SINGLE, second_owner.clone())])),
         );
 
         let staged_revision = cache.load().clone();
@@ -1050,7 +1058,7 @@ mod tests {
             staged_revision
                 .materialized_stream_owner_nodes
                 .get(&relay)
-                .and_then(|owners| owners.owner_of(Unit::Single)),
+                .and_then(|owners| owners.owner_of(Unit::SINGLE)),
             Some(&first_owner)
         );
 
@@ -1063,7 +1071,7 @@ mod tests {
             second_revision
                 .materialized_stream_owner_nodes
                 .get(&relay)
-                .and_then(|owners| owners.owner_of(Unit::Single)),
+                .and_then(|owners| owners.owner_of(Unit::SINGLE)),
             Some(&second_owner)
         );
     }
