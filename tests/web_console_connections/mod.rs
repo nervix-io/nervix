@@ -66,7 +66,9 @@ pub(super) async fn record_console_connections(
     let gate = HOLD_INITIAL_SESSION
         .replace("__NERVIX_CONSOLE_SESSION_PATH__", &path)
         .replace("__NERVIX_HOLD_INITIAL_SESSION__", initial_hold);
-    let script = format!("{RECORDER}\n{gate}");
+    let request_gate =
+        include_str!("hold_session_requests.js").replace("__NERVIX_CONSOLE_SESSION_PATH__", &path);
+    let script = format!("{RECORDER}\n{gate}\n{request_gate}");
     let script = match initial_session {
         InitialSession::Deliver | InitialSession::Hold => script,
         InitialSession::UnreadableReplies => {
@@ -127,6 +129,44 @@ async fn hold_next_console_session(world: &mut ScenarioWorld) {
         )
         .await
         .assured("the browser arms one bounded replacement-session frame gate");
+}
+
+#[when("the next web console session requests are held")]
+async fn hold_next_console_session_requests(world: &mut ScenarioWorld) {
+    browser_page(world)
+        .evaluate::<(), ()>(
+            "() => window.__nervixSessionRequests.holdNext()",
+            None::<&()>,
+        )
+        .await
+        .assured("the browser arms one bounded outgoing session request gate");
+}
+
+#[then("the replacement web console session requests are held")]
+async fn replacement_session_requests_are_held(world: &mut ScenarioWorld) {
+    assert_graph_probe(
+        browser_page(world),
+        "() => window.__nervixSessionRequests.pending() > 0 ? 'OK' : 'no replacement session \
+         request reached the gate'",
+        "the replacement session requests to reach the browser gate",
+    )
+    .await;
+}
+
+#[when("the held replacement web console session requests are released")]
+async fn release_console_session_requests(world: &mut ScenarioWorld) {
+    let released = browser_page(world)
+        .evaluate::<(), usize>(
+            "() => window.__nervixSessionRequests.release()",
+            None::<&()>,
+        )
+        .await
+        .assured("the bounded request gate releases every request in send order");
+    assert!(released > 0, "the gate held an actual public request");
+    append_cucumber_log_line(&format!(
+        "console session request gate: released {released} requests for domain={}",
+        world.domain
+    ));
 }
 
 #[then("the replacement web console session frames are held")]

@@ -1463,6 +1463,71 @@ Feature: Web console Plexus REPL
       | 1            |
       | 3            |
 
+  @client_wire35
+  Scenario Outline: Web console ends a refused restoration when its relay disappeared or changed
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE SCHEMA changed_metric ( value I64 );
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      START;
+      """
+    And the web console is opened on the leader node
+    Then selector ".graph-hit-layer" contains "raw_metrics"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION live_metrics TO raw_metrics;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When the next web console session requests are held
+    And the web console loses its session connection
+    Then the replacement web console session requests are held
+    When these Plexus commands are executed on the leader node
+      """
+      <change>
+      """
+    And the held replacement web console session requests are released
+    Then selector ".subscription-tab[data-subscription-state='ended']" contains "RAW_METRICS"
+    And selector ".terminal" contains "restoration ended (<cause>)" exactly 1 times
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then selector ".terminal" does not contain "restoration ended"
+    When selector ".subscription-tab:has-text('RAW_METRICS') .tab-close" is clicked
+    Then selector ".repl-toolbar" does not contain "RAW_METRICS"
+
+    Examples:
+      | cluster_size | change                                             | cause         |
+      | 1            | DROP RELAY raw_metrics;                            | RelayNotFound |
+      | 3            | DROP RELAY raw_metrics;                            | RelayNotFound |
+      | 1            | ALTER RELAY raw_metrics SET SCHEMA changed_metric; | RelayChanged  |
+      | 3            | ALTER RELAY raw_metrics SET SCHEMA changed_metric; | RelayChanged  |
+
+  @client_wire35
+  Scenario Outline: Web console reports a transient restoration refusal in its tab and retries it
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      START;
+      """
+    And the web console is opened on the leader node
+    Then selector ".graph-hit-layer" contains "raw_metrics"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION live_metrics TO raw_metrics;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When every node refuses the next subscription it is asked to open as unavailable
+    And the web console loses its session connection
+    Then selector ".terminal" contains "restoration refused (Unavailable); retry in 1s" exactly 1 times
+    And selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then selector ".terminal" does not contain "restoration refused"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire13
   Scenario: Closing an interrupted relay tab cancels its restoration
     Given a 1 node nervix cluster is started
