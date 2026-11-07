@@ -132,6 +132,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/audit/tests/__fuzz__/audit__tests__representations__bolero_complete_audit_report_round_trip/corpus"
+domain_version = 1
+features = []
+id = "typed-audit-report"
+invariant = "Every current audit candidate kind, identity, span, expansion, configuration, nullable context, rule event, rewrite, attribution origin, suggestion and summary survives complete JSON round trips unchanged; deterministic bytes and Markdown remain identical."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/audit/tests/representations.rs"
+test = "audit::tests::representations::bolero_complete_audit_report_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__clickhouse__tests__bolero_clickhouse_tls_pairing_matches_the_transport_contract/corpus"
 domain_version = 1
 features = []

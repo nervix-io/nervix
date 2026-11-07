@@ -3168,11 +3168,14 @@ ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
 # complexity analyzer.
 test-ratchet-units: typed-ratchet-source-build install-cargo-crap
     just ratchet-tests lib
+    just ratchet-tests audit
     just test-typed-ratchet-reports
-    python3 -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
+    python3 -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_clock_boundaries
 
-test-ratchet-audit-caller:
-    python3 -m unittest scripts.tests.test_lint_audit
+# Exercise the audit command boundary without compiling product targets or the analysis driver.
+test-ratchet-audit *args:
+    just ratchet-tests lib audit::tests {{ args }}
+    just ratchet-tests audit {{ args }}
 
 # Structural Rust properties use a stable source parser, without the compiler driver.
 typed-ratchet-source-build:
@@ -3212,7 +3215,13 @@ typed-ratchet-turmoil *args:
 # that introduced it. It reads the complete compiler evidence `just ratchet` uses and writes
 # audit.json and audit.md under target/lint-audit; `--inventory` audits despite open diagnostics.
 lint-audit *args: typed-ratchet-build
-    python3 -m scripts.lint_audit {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    audit=({{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }} audit {{ args }})
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        exec python3 scripts/native_coverage.py exec "${audit[@]}"
+    fi
+    exec "${audit[@]}"
 
 test-typed-ratchet-compiler:
     just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
@@ -3300,7 +3309,7 @@ test-ratchet-runner *args:
 
 # Focused local tooling counters for patch review; the existing native producer collects CI.
 coverage-ratchet-runner *args:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --no-report -- {{ args }}
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --test audit --no-report -- {{ args }}
     just coverage-ratchet-report-owner
 
 [private]
@@ -3370,7 +3379,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap tes
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.rust_source,scripts.check_typed_errors,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.rust_source,scripts.check_typed_errors,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_check_typed_errors scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 

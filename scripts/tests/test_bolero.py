@@ -155,6 +155,7 @@ class InventoryTests(unittest.TestCase):
             "typed-runner-matrix",
             "typed-gate-baseline",
             "typed-gate-product-graph",
+            "typed-audit-report",
             "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",

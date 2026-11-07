@@ -558,7 +558,7 @@ compares it with the workflows.
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
 | `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
-| `extra-compiler` | Check | Source contracts, compiler diagnostics, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's runners |
+| `extra-compiler` | Check | Source contracts, compiler diagnostics, the Rust runner/gate/audit owners, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's callers |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
 | `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
 | `extra-completion-walk` | Check | The Plexus completion walk |
@@ -632,10 +632,15 @@ just test-typed-ratchet
 just test-typed-ratchet-docs
 just qualify-typed-ratchet-cache
 just lint-audit
+just lint-audit --inventory
+just test-ratchet-audit
 ```
 
 `just lint-audit` reads the same complete evidence and reports review candidates for code shaped
 around an inaccurate lint, each attributed to the commits and debt counts that introduced it.
+It invokes `nervix-ratchet audit`, which calls the matrix runner in-process; `--inventory` and
+`--configuration` use warning levels. `just test-ratchet-audit` exercises the audit owners over
+private Git histories and recorded GitHub pages, plus its CLI, without compiling a product graph.
 [Architecture Rules And The Debt Ratchet](architecture-enforcement.md#auditing-lint-workarounds)
 states the candidates, the attribution and the review contract.
 

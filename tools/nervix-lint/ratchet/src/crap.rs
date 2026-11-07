@@ -390,6 +390,8 @@ pub fn run(options: Options, repository: &Path) -> Result<i32> {
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
+    use meticulous::OptionExt as _;
+
     use super::*;
 
     fn analyzer(target: &Path, version: &str, output: &str, stderr: &str) {
@@ -450,11 +452,12 @@ mod tests {
         ];
         for (json, warning, expected) in cases {
             analyzer(&target, VERSION, json, warning);
+            let refusal = analyze(root, &target, &[])
+                .err()
+                .assured("an invalid analyzer response is refused");
             assert!(
-                analyze(root, &target, &[])
-                    .unwrap_err()
-                    .to_string()
-                    .contains(expected)
+                refusal.to_string().contains(expected),
+                "expected {expected:?}, received {refusal:#}"
             );
         }
         fs::write(root.join(CONFIGURATION), "try-weight = 0.5").unwrap();
