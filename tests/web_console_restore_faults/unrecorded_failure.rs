@@ -89,7 +89,7 @@ async fn then_later_failure_is_substituted(world: &mut ScenarioWorld, placeholde
                 inspected_lost_replies = record.lost_replies;
                 let reply = lost_outcome(&record);
                 let start = captured_start(&record);
-                assert_eq!(reply.request_id, start.request_id);
+                assert_eq!(reply.request_id, Some(start.request_id));
                 if let RestoreDisposition::Outcome(outcome) = &reply.disposition {
                     assert_eq!(outcome.execution_reference, start.execution_reference);
                     if matches!(outcome.disposition, CommandDisposition::OutcomeUnknown(_)) {
