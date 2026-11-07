@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -31,7 +32,9 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 # The recipe that runs the gate, and the command it runs: the gate measures the repository holding
 # the working directory, and an argument such as `--show` or `--root` would replace its verdict.
 GATE_RECIPE = "ratchet"
-GATE_COMMAND = [str(REPOSITORY / "target/typed-ratchet/source/debug/nervix-ratchet"), "gate"]
+# The caller's build directory also owns the instrumented native-coverage runner.
+CARGO_TARGET_DIRECTORY = Path(os.environ.get("CARGO_TARGET_DIR", str(REPOSITORY / "target")))
+GATE_COMMAND = [str(CARGO_TARGET_DIRECTORY / "typed-ratchet/source/debug/nervix-ratchet"), "gate"]
 
 
 class ValidationEntrypointTests(unittest.TestCase):
