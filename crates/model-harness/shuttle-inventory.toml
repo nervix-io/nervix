@@ -127,6 +127,7 @@ checks = [
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
+  "application::resource::upload_executions::tests::shuttle_waiter_cancellation_and_retirement_keep_one_execution_per_upload",
   "application::restore::shuttle_tests::shuttle_a_resumed_restore_never_repeats_a_recorded_effect",
   "application::restore::shuttle_tests::shuttle_an_abandoned_restore_upload_releases_its_quota_exactly_once",
   "application::restore::shuttle_tests::shuttle_concurrent_restore_retries_join_one_execution",

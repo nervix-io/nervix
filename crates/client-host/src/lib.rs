@@ -73,7 +73,7 @@ pub use endpoint::{
 pub use event::{CellState, Event, EventKind};
 pub use failure::{Failure, FailureKind};
 pub use fields::Fields;
-pub use outcome::{Disposition, Outcome, RestoreSummary};
+pub use outcome::{Disposition, Outcome, RestoreSummary, UploadFailure};
 pub use producer::{Admission, Producer};
 pub use schema::{FieldType, Part, Schema, TypeKind, TypeLevels};
 pub use session::{Execution, Session};

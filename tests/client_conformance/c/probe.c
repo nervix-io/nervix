@@ -1980,6 +1980,46 @@ static int run_endpoints(nx_session *session, const char *domain) {
     return 0;
 }
 
+static int run_upload(nx_session *session) {
+    const char *query = env("NERVIX_PROBE_UPLOAD_QUERY");
+    nx_execution *execution = NULL;
+    check(nx_session_prepare(session, text(query), strlen(query), NULL, &execution), "prepare upload");
+    const char *lines[] = {"UPLOAD completed", "RETRY completed"};
+    for (size_t index = 0; index < sizeof lines / sizeof lines[0]; index++) {
+        nx_outcome *outcome = NULL;
+        check(nx_session_execute(session, execution, NULL, &outcome), "execute upload");
+        if (nx_outcome_disposition(outcome) != NX_DISPOSITION_COMPLETED) {
+            fail("upload must complete");
+        }
+        nx_upload_failure failure = NX_UPLOAD_INVALID_STREAM;
+        if (nx_outcome_upload_failure(outcome, &failure)) {
+            fail("a completed upload has no refusal");
+        }
+        puts(lines[index]);
+        nx_outcome_free(outcome);
+    }
+    FILE *file = fopen(env("NERVIX_PROBE_UPLOAD_FILE"), "wb");
+    if (file == NULL) fail("open the upload fixture");
+    const char changed[] = "different archive\n";
+    if (fwrite(changed, 1, sizeof changed - 1, file) != sizeof changed - 1) {
+        fail("write the upload fixture");
+    }
+    if (fclose(file) != 0) fail("close the upload fixture");
+    nx_outcome *outcome = NULL;
+    check(nx_session_execute(session, execution, NULL, &outcome), "execute conflicting upload");
+    nx_upload_failure failure = NX_UPLOAD_INVALID_STREAM;
+    if (nx_outcome_disposition(outcome) != NX_DISPOSITION_FAILED ||
+        !nx_outcome_upload_failure(outcome, &failure) || failure != NX_UPLOAD_IDENTITY_CONFLICT) {
+        fail("the upload must report its typed identity conflict");
+    }
+    puts("CONFLICT IdentityConflict");
+    nx_outcome_free(outcome);
+    nx_execution_free(execution);
+    nx_session_free(session);
+    puts("PASS");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *server = env("NERVIX_PROBE_GRPC_URI");
     const char *username = env("NERVIX_PROBE_USERNAME");
@@ -1992,6 +2032,9 @@ int main(int argc, char **argv) {
                              text(username), strlen(username), text(password), strlen(password),
                              NULL, &session),
           "connect");
+    if (argc > 1 && strcmp(argv[1], "upload") == 0) {
+        return run_upload(session);
+    }
     if (argc > 1 && strcmp(argv[1], "clock") == 0) {
         return run_clock(session, domain);
     }

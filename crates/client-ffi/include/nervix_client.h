@@ -134,6 +134,17 @@ typedef enum nx_disposition {
     NX_DISPOSITION_PREVIEW_STALE = 9
 } nx_disposition;
 
+/* Why a resource upload failed. */
+typedef enum nx_upload_failure {
+    NX_UPLOAD_INVALID_STREAM = 1,
+    NX_UPLOAD_RESOURCE_NOT_DECLARED = 2,
+    NX_UPLOAD_SIZE_MISMATCH = 3,
+    NX_UPLOAD_QUOTA_EXCEEDED = 4,
+    NX_UPLOAD_INSTALLATION_FAILED = 5,
+    /* The identity already names another archive; the retained upload outcome is unchanged. */
+    NX_UPLOAD_IDENTITY_CONFLICT = 6
+} nx_upload_failure;
+
 typedef enum nx_completion_status {
     NX_COMPLETION_READY = 1,
     NX_COMPLETION_MISSING_CONTEXT = 2,
@@ -468,6 +479,9 @@ void nx_suggestions_free(nx_suggestions *suggestions);
 /* ---- Outcomes ----------------------------------------------------------------------------- */
 
 nx_disposition nx_outcome_disposition(const nx_outcome *outcome);
+/* Returns true and writes the typed upload failure when present. Completed uploads and other
+   commands return false without writing `failure`. A null out-parameter is allowed. */
+bool nx_outcome_upload_failure(const nx_outcome *outcome, nx_upload_failure *failure);
 void nx_outcome_message(const nx_outcome *outcome, const uint8_t **message, size_t *message_len);
 bool nx_outcome_execution_reference(const nx_outcome *outcome, const uint8_t **reference,
                                     size_t *reference_len);

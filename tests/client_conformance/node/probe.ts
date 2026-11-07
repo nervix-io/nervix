@@ -814,6 +814,59 @@ function restoreReportLines(report: wire.RestoreReport): string[] {
   return lines;
 }
 
+/** Renders one frame of a resource upload stream. */
+function uploadLines(frame: Uint8Array): string[] {
+  const message = wire.UploadMessage.getRootAsUploadMessage(frameBuffer(frame, 'NXUM'));
+  switch (message.partType()) {
+    case wire.UploadPart.UploadStart: {
+      const start = member(message.part(new wire.UploadStart()) as wire.UploadStart | null);
+      return [`UPLOAD_START request=${start.requestId()} domain=${start.domain()} resource=${start.resource()} identity=${start.uploadIdentity()} total_bytes=${start.totalBytes()}`];
+    }
+    case wire.UploadPart.UploadChunk: {
+      const chunk = member(message.part(new wire.UploadChunk()) as wire.UploadChunk | null);
+      return [`UPLOAD_CHUNK bytes=${hex(member(chunk.bytesArray()))}`];
+    }
+    default:
+      throw new Error(`undeclared upload part ${message.partType()}`);
+  }
+}
+
+/** Renders the typed outcome and all diagnostics of a resource upload. */
+function uploadReplyLines(frame: Uint8Array): string[] {
+  const reply = wire.UploadReply.getRootAsUploadReply(frameBuffer(frame, 'NXUR'));
+  const prefix = `UPLOAD_REPLY ${reply.requestId() ?? 'none'}`;
+  let line: string;
+  switch (reply.dispositionType()) {
+    case wire.UploadDisposition.ResourceInstalled: {
+      const installed = member(reply.disposition(new wire.ResourceInstalled()) as wire.ResourceInstalled | null);
+      line = `${prefix} INSTALLED identity=${installed.uploadIdentity()} version=${installed.version()} origin=${wire.OutcomeOrigin[member(installed.origin())]}`;
+      break;
+    }
+    case wire.UploadDisposition.UploadFailed: {
+      const failed = member(reply.disposition(new wire.UploadFailed()) as wire.UploadFailed | null);
+      line = `${prefix} FAILED identity=${failed.uploadIdentity() ?? 'none'} failure=${wire.UploadFailure[member(failed.failure())]} version=${failed.assignedVersion() ?? 'none'}`;
+      break;
+    }
+    case wire.UploadDisposition.LeaderRedirect: {
+      const redirect = member(reply.disposition(new wire.LeaderRedirect()) as wire.LeaderRedirect | null);
+      const leader = redirect.leader();
+      line = leader === null ? `${prefix} NOT_LEADER leader=none`
+        : `${prefix} NOT_LEADER leader=${leader.node()} grpc=${leader.grpcUri() ?? 'none'} console=${leader.webConsoleUri() ?? 'none'}`;
+      break;
+    }
+    default:
+      throw new Error(`undeclared upload disposition ${reply.dispositionType()}`);
+  }
+  const lines = [`${line} message=${text(bytesOf((encoding) => reply.message(encoding)))}`];
+  for (let index = 0; index < reply.diagnosticsLength(); index += 1) {
+    const diagnostic = member(reply.diagnostics(index));
+    const span = diagnostic.span();
+    const location = span === null ? 'none' : `${span.start()}..${span.end()}`;
+    lines.push(`DIAGNOSTIC span=${location} message=${text(bytesOf((encoding) => diagnostic.message(encoding)))}`);
+  }
+  return lines;
+}
+
 /** Renders one frame of a restore stream. */
 function restoreLines(frame: Uint8Array): string[] {
   const message = wire.RestoreMessage.getRootAsRestoreMessage(frameBuffer(frame, 'NXRM'));
@@ -1389,7 +1442,7 @@ function clientLines(frame: Uint8Array): string[] {
 function corpus(directory: string): void {
   const files = readdirSync(directory)
     .filter((file) =>
-      ['.nxcm', '.nxsm', '.nxbq', '.nxbd', '.nxrm', '.nxrr'].some((extension) => file.endsWith(extension)),
+      ['.nxcm', '.nxsm', '.nxbq', '.nxbd', '.nxrm', '.nxrr', '.nxum', '.nxur'].some((extension) => file.endsWith(extension)),
     )
     .sort();
   const opened = new Uint8Array(readFileSync(join(directory, 'server_subscription_opened.nxsm')));
@@ -1408,6 +1461,10 @@ function corpus(directory: string): void {
       lines = restoreLines(frame);
     } else if (file.endsWith('.nxrr')) {
       lines = restoreReplyLines(frame);
+    } else if (file.endsWith('.nxum')) {
+      lines = uploadLines(frame);
+    } else if (file.endsWith('.nxur')) {
+      lines = uploadReplyLines(frame);
     } else {
       lines = serverLines(frame, schema);
     }

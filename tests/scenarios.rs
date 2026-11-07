@@ -4818,6 +4818,59 @@ async fn start_client_probe(
 }
 
 #[when(
+    expr = "the {string} client probe retries resource {string} from directory {string} on a \
+            follower when available"
+)]
+async fn when_client_probe_retries_resource_upload(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    resource: String,
+    directory: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .assured("the step names a known binding host");
+    let leader = current_leader_node(world).await;
+    let follower = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .find(|node| node != &leader);
+    let node_id = match follower {
+        Some(follower) => follower,
+        None => leader,
+    };
+    let source_path = world
+        .placeholders
+        .get(&directory)
+        .verified("a preceding step created the upload source directory")
+        .clone();
+    let payload = PathBuf::from(&source_path).join("payload.txt");
+    let resource = expand_placeholders(world, &resource);
+    let upload = nervix_models::Statement::UploadResource(nervix_models::UploadResource {
+        identifier: nervix_models::ResourceName::parse(&resource)
+            .assured("the step names a resource"),
+        source_path,
+    });
+    let query = upload
+        .to_canonical_plexus()
+        .assured("the upload has a canonical Plexus command");
+    let target = client_probe_target(
+        world,
+        &node_id,
+        ProbeExercise::ResourceUpload { query, payload },
+    );
+    start_client_probe(
+        world,
+        runtime,
+        &node_id,
+        target,
+        "CONFLICT IdentityConflict",
+    )
+    .await;
+}
+
+#[when(
     expr = "the {string} client probe subscribes as {string} to relay {string} on a follower when \
             available expecting {int} rows"
 )]
@@ -18385,7 +18438,21 @@ async fn when_named_client_resource_upload_fails_with(
         outcome.message
     );
     world.last_command_error = Some(outcome.message.clone());
-    world.last_command_output = Some(outcome.message);
+    world.last_command_output = Some(outcome.message.clone());
+    world.last_client_outcome = Some(outcome);
+}
+
+#[then(expr = "the last client upload refused version {int} with typed failure {string}")]
+async fn then_last_client_upload_refused_with_typed_failure(
+    world: &mut ScenarioWorld,
+    version: u64,
+    expected: String,
+) {
+    let upload = last_client_upload_of_version(world, version);
+    let failure = upload
+        .failure
+        .assured("the refused upload has a typed failure");
+    assert_eq!(format!("{failure:?}"), expected, "{upload:?}");
 }
 
 #[then(expr = "client {string} active domain is {string}")]

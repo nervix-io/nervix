@@ -2599,7 +2599,9 @@ enum UploadFailure : ubyte {
   /// The chunks did not add up to total_bytes.
   SizeMismatch,
   QuotaExceeded,
-  InstallationFailed
+  InstallationFailed,
+  /// The upload identity already names another archive; assigned_version is retained.
+  IdentityConflict
 }
 
 table UploadFailed {

@@ -286,6 +286,15 @@ installed rather than installing another. An error that may hide an installed ve
 both refuse the upload before sending anything, as `execute` refuses every client-local statement:
 a version is never transaction content, so reverting the transaction could not take it back.
 
+`CommandOutcome::resource_upload` retains the upload identity, assigned version, answering call's
+origin and call count, and optional typed `UploadFailure`. `IdentityConflict` means the identity
+already names another archive; its `version` is the version bound to that identity. Preserve the
+original identity and bytes when recovering that upload, and use a fresh identity for a different
+logical upload. The host outcome exposes the failure through `Outcome::upload_failure()`, Python's
+`Outcome.upload_failure`, Java's `Outcome.uploadFailure()` and the C ABI's
+`nx_outcome_upload_failure`. The optional result is absent for a successful upload or any other
+command. These accessors return the typed cause directly, without matching the diagnostic text.
+
 ## Following A Domain Clock
 
 `execute` routes `ATTACH DOMAIN CLOCK;` and `DETACH DOMAIN CLOCK;` the way it routes `USE`: it sends

@@ -179,6 +179,19 @@ caller; the recipe does not expand their contents as shell code. The reuse recip
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
 
+`just test-resource-upload-identity-scenarios` prepares the in-process server's console assets,
+WASM guests and ONNX runtime, then runs the four `@resource_upload_idempotency` examples in
+`resource_describe.feature`, on one and three nodes with two concurrent scenarios and no retries.
+They check the installed and recovered origins, the typed conflict and its assigned version, and
+that a conflicting archive creates no additional version. This focused recipe builds no unrelated
+client tools; broad qualification stays with the ordinary scenario suite.
+
+`just test-client-upload-conflict-conformance` builds the binding probes and runs the twelve
+`@client_upload_failure` examples in `client_conformance.feature`, on one and three nodes with two
+concurrent scenarios and no retries. The C ABI in process, C, C++, Python, Java and Ruby each reuse
+one prepared upload handle, repeat its completed archive and read the typed conflict after changing
+that archive. The full client conformance lane qualifies the remaining client behavior in CI.
+
 `just test-restore-codec-replies` prepares the server assets, CLI and diagnostic reporter and runs
 only the restore reply rejection feature with the ordinary scenario runner. It forwards caller
 arguments by the same quoting rule. The bounded peer forwards the original upload to a real node,

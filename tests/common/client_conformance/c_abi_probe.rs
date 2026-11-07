@@ -1047,6 +1047,9 @@ pub(super) fn run(target: &ProbeTarget, emit: &mut Emit<'_>) -> io::Result<()> {
         ProbeExercise::Endpoints { ingestor, emitter } => {
             super::c_abi_endpoints::run(&session, &target.domain, ingestor, emitter, emit)
         }
+        ProbeExercise::ResourceUpload { query, payload } => {
+            super::c_abi_upload::run(&session, query, payload, emit)
+        }
     }
 }
 

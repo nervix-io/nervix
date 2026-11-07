@@ -333,6 +333,95 @@ func restoreReportLines(report *session.RestoreReport) ([]string, error) {
 	return lines, nil
 }
 
+// uploadLines renders one frame of a resource upload stream.
+func uploadLines(frame []byte) ([]string, error) {
+	if err := frameRoot(frame, "NXUM"); err != nil {
+		return nil, err
+	}
+	message := session.GetRootAsUploadMessage(frame, 0)
+	switch message.PartType() {
+	case session.UploadPartUploadStart:
+		start := new(session.UploadStart)
+		if err := union(message.Part, start); err != nil {
+			return nil, err
+		}
+		return []string{fmt.Sprintf("UPLOAD_START request=%d domain=%s resource=%s identity=%s total_bytes=%d",
+			start.RequestId(), start.Domain(), start.Resource(), start.UploadIdentity(), start.TotalBytes())}, nil
+	case session.UploadPartUploadChunk:
+		chunk := new(session.UploadChunk)
+		if err := union(message.Part, chunk); err != nil {
+			return nil, err
+		}
+		return []string{"UPLOAD_CHUNK bytes=" + hex.EncodeToString(chunk.BytesBytes())}, nil
+	}
+	return nil, fmt.Errorf("undeclared upload part %d", message.PartType())
+}
+
+// uploadReplyLines renders the typed outcome and all diagnostics of a resource upload.
+func uploadReplyLines(frame []byte) ([]string, error) {
+	if err := frameRoot(frame, "NXUR"); err != nil {
+		return nil, err
+	}
+	reply := session.GetRootAsUploadReply(frame, 0)
+	request := "none"
+	if id := reply.RequestId(); id != nil {
+		request = fmt.Sprintf("%d", *id)
+	}
+	prefix := "UPLOAD_REPLY " + request
+	var line string
+	switch reply.DispositionType() {
+	case session.UploadDispositionResourceInstalled:
+		installed := new(session.ResourceInstalled)
+		if err := union(reply.Disposition, installed); err != nil {
+			return nil, err
+		}
+		origin := installed.Origin()
+		if origin == nil {
+			return nil, errors.New("an installed upload has no origin")
+		}
+		line = fmt.Sprintf("%s INSTALLED identity=%s version=%d origin=%s", prefix,
+			installed.UploadIdentity(), installed.Version(), session.EnumNamesOutcomeOrigin[*origin])
+	case session.UploadDispositionUploadFailed:
+		failed := new(session.UploadFailed)
+		if err := union(reply.Disposition, failed); err != nil {
+			return nil, err
+		}
+		failure := failed.Failure()
+		if failure == nil {
+			return nil, errors.New("a refused upload has no reason")
+		}
+		version := "none"
+		if assigned := failed.AssignedVersion(); assigned != nil {
+			version = fmt.Sprintf("%d", *assigned)
+		}
+		line = fmt.Sprintf("%s FAILED identity=%s failure=%s version=%s", prefix,
+			orNone(failed.UploadIdentity()), session.EnumNamesUploadFailure[*failure], version)
+	case session.UploadDispositionLeaderRedirect:
+		redirect := new(session.LeaderRedirect)
+		if err := union(reply.Disposition, redirect); err != nil {
+			return nil, err
+		}
+		line = prefix + " NOT_LEADER leader=none"
+		if leader := redirect.Leader(nil); leader != nil {
+			line = fmt.Sprintf("%s NOT_LEADER leader=%s grpc=%s console=%s", prefix,
+				leader.Node(), orNone(leader.GrpcUri()), orNone(leader.WebConsoleUri()))
+		}
+	default:
+		return nil, fmt.Errorf("undeclared upload disposition %d", reply.DispositionType())
+	}
+	lines := []string{line + " message=" + text(reply.Message())}
+	for index := 0; index < reply.DiagnosticsLength(); index++ {
+		diagnostic := new(session.Diagnostic)
+		reply.Diagnostics(diagnostic, index)
+		span := "none"
+		if location := diagnostic.Span(nil); location != nil {
+			span = fmt.Sprintf("%d..%d", location.Start(), location.End())
+		}
+		lines = append(lines, fmt.Sprintf("DIAGNOSTIC span=%s message=%s", span, text(diagnostic.Message())))
+	}
+	return lines, nil
+}
+
 // restoreLines renders one frame of a restore stream.
 func restoreLines(frame []byte) ([]string, error) {
 	if err := frameRoot(frame, "NXRM"); err != nil {
@@ -1132,7 +1221,7 @@ func corpus(directory string) error {
 	var files []string
 	for _, entry := range entries {
 		switch filepath.Ext(entry.Name()) {
-		case ".nxcm", ".nxsm", ".nxbq", ".nxbd", ".nxrm", ".nxrr":
+		case ".nxcm", ".nxsm", ".nxbq", ".nxbd", ".nxrm", ".nxrr", ".nxum", ".nxur":
 			files = append(files, entry.Name())
 		}
 	}
@@ -1162,6 +1251,10 @@ func corpus(directory string) error {
 			lines, err = restoreLines(frame)
 		case ".nxrr":
 			lines, err = restoreReplyLines(frame)
+		case ".nxum":
+			lines, err = uploadLines(frame)
+		case ".nxur":
+			lines, err = uploadReplyLines(frame)
 		default:
 			lines, err = serverLines(frame, fields, keys)
 		}

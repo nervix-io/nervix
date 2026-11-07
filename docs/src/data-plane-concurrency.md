@@ -99,6 +99,32 @@ three selections on one and three nodes. Its saturated-log counterpart, which ke
 command applying while its transaction commits, adds no tracked acquisition and stays outside
 them; its owner test and public scenario cover it.
 
+## Resource Upload Execution Ownership
+
+Resource installation, imported-version installation, reconciliation and waiting retries share
+one async mutex per typed upload key. The local execution registry counts live attempt leases
+under the same entry guard that registers them. A lease is retained while its attempt waits or
+holds the mutex; cancellation and every return path release it. The async mutex guard drops before
+the lease, and the final lease removes the entry while holding that entry's guard. A later attempt
+therefore either joins the registered mutex or creates one after every earlier attempt ended.
+Cleanup never splits waiting attempts between two owners of the same key.
+
+A recovery probe checks the mutex under its entry guard without waiting. A busy probe performs
+one map lookup and creates no attempt lease; a successful probe registers its lease before the
+entry guard is released. Retirement therefore cannot replace a mutex the probe has acquired.
+
+This registry is a cold control-plane boundary, separate from the durable upload record. A deferred
+or interrupted recovery retains its durable `Applying` state and can obtain a new local owner on
+the next reconciliation. Local entries retain neither outcomes nor archive payloads and live only
+as long as active or waiting attempts. The concurrent-map ledger records their disposal boundary.
+
+The production-owner Shuttle check covers admission racing retirement, mutual exclusion of
+waiting attempts, cancellation and complete removal after the final attempt. Its map and async
+mutex operations are scheduler-visible; it makes no reference-count or weak-memory ordering
+claim. DashMap internals and async synchronization are outside Deloxide's tracked-lock detector.
+The surrounding installation and storage paths keep their existing lifecycle evidence; this owner
+adds no tracked lock.
+
 ## Unit Allowance Transactions
 
 `nervix-rate-limit::Limiter` belongs to one execution unit. Admission takes `&mut self`, and its

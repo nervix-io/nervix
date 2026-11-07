@@ -315,7 +315,7 @@ fn test_session_service(
             transaction_executions: DashMap::with_hasher(RandomState::new()),
             transaction_recovery: Default::default(),
             ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
-            resource_upload_executions: DashMap::with_hasher(RandomState::new()),
+            resource_upload_executions: Default::default(),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             retained_backups: Default::default(),
             captured_backup_sections: Default::default(),
