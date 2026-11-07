@@ -19,8 +19,8 @@ Feature: Domain-paced branch buffering
         sequence integer,
         path string
       );
-      CREATE CODEC timed_event_codec
-        FROM WIRE JSON SCHEMA timed_event_wire
+      CREATE WIRE JSON CODEC timed_event_codec
+        FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
@@ -107,8 +107,8 @@ Feature: Domain-paced branch buffering
         sequence integer,
         path string
       );
-      CREATE CODEC timed_event_codec
-        FROM WIRE JSON SCHEMA timed_event_wire
+      CREATE WIRE JSON CODEC timed_event_codec
+        FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5h;
@@ -193,8 +193,8 @@ Feature: Domain-paced branch buffering
         sequence integer,
         path string
       );
-      CREATE CODEC timed_event_codec
-        FROM WIRE JSON SCHEMA timed_event_wire
+      CREATE WIRE JSON CODEC timed_event_codec
+        FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -270,8 +270,8 @@ Feature: Domain-paced branch buffering
         sequence integer,
         path string
       );
-      CREATE CODEC timed_event_codec
-        FROM WIRE JSON SCHEMA timed_event_wire
+      CREATE WIRE JSON CODEC timed_event_codec
+        FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -343,8 +343,8 @@ Feature: Domain-paced branch buffering
         sequence integer,
         path string
       );
-      CREATE CODEC timed_event_codec
-        FROM WIRE JSON SCHEMA timed_event_wire
+      CREATE WIRE JSON CODEC timed_event_codec
+        FROM WIRE SCHEMA timed_event_wire
         TO SCHEMA timed_event;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;

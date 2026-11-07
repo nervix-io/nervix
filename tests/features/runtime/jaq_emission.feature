@@ -14,8 +14,7 @@ Feature: JAQ emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '{payload: .}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -77,8 +76,7 @@ Feature: JAQ emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '{payload: .}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -140,8 +138,7 @@ Feature: JAQ emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '{payload: .}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -203,8 +200,7 @@ Feature: JAQ emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '{payload: .}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -267,8 +263,7 @@ Feature: JAQ emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '{payload: .}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -329,8 +324,7 @@ Feature: JAQ emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '{payload: .}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -393,8 +387,7 @@ Feature: JAQ emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '{payload: .}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );

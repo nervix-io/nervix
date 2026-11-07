@@ -24,9 +24,9 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event ( seq I64, error_code STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
@@ -106,9 +106,9 @@ Feature: Emitter batch payloads through acknowledgements and retries
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -181,9 +181,9 @@ Feature: Emitter batch payloads through acknowledgements and retries
         operation STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge refused-{{test_id}}.example.com;
@@ -253,7 +253,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE SCHEMA emitter_error ( error_code STRING, source_user_id I64 );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA notification
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;

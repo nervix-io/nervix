@@ -423,8 +423,8 @@ Feature: Session protocol
       """
       CREATE SCHEMA held_event ( seq I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC held_event_codec
-        FROM WIRE JSON SCHEMA held_event_wire
+      CREATE WIRE JSON CODEC held_event_codec
+        FROM WIRE SCHEMA held_event_wire
         TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST held_edge http-{{test_id}}-held.example.com;

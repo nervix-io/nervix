@@ -12,7 +12,7 @@ Feature: Typed bytes and native encoding functions
       """
       CREATE SCHEMA binary_event (id STRING, payload BYTES);
       CREATE WIRE <wire_format> SCHEMA binary_event_wire MODE STRICT (id string, payload string);
-      CREATE CODEC binary_event_codec FROM WIRE <wire_format> SCHEMA binary_event_wire TO SCHEMA binary_event
+      CREATE WIRE <wire_format> CODEC binary_event_codec FROM WIRE SCHEMA binary_event_wire TO SCHEMA binary_event
         ENCODE payload AS BASE64;
       CREATE RELAY binary_events SCHEMA binary_event UNBRANCHED;
       CREATE VHOST edge bytes-base64-{{test_id}}.example.com;
@@ -86,8 +86,8 @@ Feature: Typed bytes and native encoding functions
         id string,
         raw string
       );
-      CREATE CODEC text_input_codec
-        FROM WIRE JSON SCHEMA text_input_wire
+      CREATE WIRE JSON CODEC text_input_codec
+        FROM WIRE SCHEMA text_input_wire
         TO SCHEMA text_input;
       CREATE RELAY text_inputs SCHEMA text_input UNBRANCHED;
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
@@ -145,7 +145,7 @@ Feature: Typed bytes and native encoding functions
       CREATE SCHEMA binary_output (id STRING, prefix BYTES, payload BYTES);
       CREATE SCHEMA binary_error (id STRING, error_code STRING, operation STRING, captured_prefix BYTES OPTIONAL);
       CREATE WIRE JSON SCHEMA encoded_wire MODE STRICT (id string, encoded string);
-      CREATE CODEC encoded_codec FROM WIRE JSON SCHEMA encoded_wire TO SCHEMA encoded_input;
+      CREATE WIRE JSON CODEC encoded_codec FROM WIRE SCHEMA encoded_wire TO SCHEMA encoded_input;
       CREATE RELAY encoded_inputs SCHEMA encoded_input UNBRANCHED;
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
       CREATE RELAY binary_errors SCHEMA binary_error UNBRANCHED;
@@ -202,7 +202,7 @@ Feature: Typed bytes and native encoding functions
       CREATE SCHEMA binary_input (id STRING, payload BYTES);
       CREATE SCHEMA binary_text (id STRING, hexadecimal STRING);
       CREATE WIRE JSON SCHEMA binary_wire MODE STRICT (id STRING, payload string);
-      CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_input ENCODE payload AS BASE64;
+      CREATE WIRE JSON CODEC binary_codec FROM WIRE SCHEMA binary_wire TO SCHEMA binary_input ENCODE payload AS BASE64;
       CREATE RELAY binary_inputs SCHEMA binary_input UNBRANCHED;
       CREATE RELAY binary_texts SCHEMA binary_text UNBRANCHED;
       CREATE VHOST edge bytes-wire-{{test_id}}.example.com;
@@ -253,7 +253,7 @@ Feature: Typed bytes and native encoding functions
       CREATE SCHEMA binary_input (id STRING, secret BYTES SENSITIVE);
       CREATE SCHEMA binary_output (id STRING, encoded STRING SENSITIVE, digest BYTES SENSITIVE, fast_hash U64 SENSITIVE);
       CREATE WIRE JSON SCHEMA binary_wire MODE STRICT (id STRING, secret string);
-      CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_input ENCODE secret AS BASE64;
+      CREATE WIRE JSON CODEC binary_codec FROM WIRE SCHEMA binary_wire TO SCHEMA binary_input ENCODE secret AS BASE64;
       CREATE RELAY binary_inputs SCHEMA binary_input UNBRANCHED;
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
       CREATE VHOST edge bytes-sensitive-{{test_id}}.example.com;

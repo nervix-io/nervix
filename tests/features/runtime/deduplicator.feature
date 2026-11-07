@@ -16,8 +16,8 @@ Feature: Relay deduplication
         transaction_id string,
         amount integer
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
@@ -89,8 +89,8 @@ Feature: Relay deduplication
         transaction_id integer,
         amount integer
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id I64 );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
@@ -172,8 +172,8 @@ Feature: Relay deduplication
         amount integer,
         payload string
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;
@@ -253,8 +253,8 @@ Feature: Relay deduplication
         transaction_id string,
         amount integer
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;
@@ -336,8 +336,8 @@ Feature: Relay deduplication
         amount integer,
         source string
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
@@ -470,8 +470,8 @@ Feature: Relay deduplication
         source string,
         note string OPTIONAL
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
         CREATE IF NOT EXISTS BRANCH by_dedup_default SCHEMA transaction_id_branch TTL 5m;

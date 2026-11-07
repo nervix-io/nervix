@@ -16,8 +16,8 @@ Feature: Attached acknowledgements across consumer moves
       CREATE WIRE JSON SCHEMA moved_sink_wire MODE STRICT (
         event_id string, branch_name string, sequence integer
       );
-      CREATE CODEC moved_sink_codec
-        FROM WIRE JSON SCHEMA moved_sink_wire TO SCHEMA moved_sink_event;
+      CREATE WIRE JSON CODEC moved_sink_codec
+        FROM WIRE SCHEMA moved_sink_wire TO SCHEMA moved_sink_event;
       CREATE SCHEMA moved_sink_key ( branch_name STRING );
       CREATE BRANCH moved_sink_branch SCHEMA moved_sink_key TTL 5m;
       CREATE RELAY moved_sink_records SCHEMA moved_sink_event
@@ -116,8 +116,8 @@ Feature: Attached acknowledgements across consumer moves
       """
       CREATE SCHEMA owner_move_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA owner_move_wire MODE STRICT ( event_id string );
-      CREATE CODEC owner_move_codec
-        FROM WIRE JSON SCHEMA owner_move_wire TO SCHEMA owner_move_event;
+      CREATE WIRE JSON CODEC owner_move_codec
+        FROM WIRE SCHEMA owner_move_wire TO SCHEMA owner_move_event;
       CREATE RELAY owner_move_records SCHEMA owner_move_event UNBRANCHED CAPACITY 1;
       CREATE KAFKA CLIENT owner_move_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'

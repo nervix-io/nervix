@@ -59,8 +59,8 @@ Feature: Relay capacity
         seq integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 3;
@@ -96,8 +96,8 @@ Feature: Relay capacity
         seq integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA tenant_branch (
@@ -195,8 +195,8 @@ Feature: Relay capacity
         seq integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 3;

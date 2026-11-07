@@ -106,8 +106,8 @@ Feature: Drain node
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA drain_event ( seq I64 );
       CREATE WIRE JSON SCHEMA drain_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC drain_event_codec
-        FROM WIRE JSON SCHEMA drain_event_wire
+      CREATE WIRE JSON CODEC drain_event_codec
+        FROM WIRE SCHEMA drain_event_wire
         TO SCHEMA drain_event;
       CREATE RELAY stalled_output SCHEMA drain_event UNBRANCHED CAPACITY 1;
       CREATE RELAY control_input SCHEMA drain_event UNBRANCHED;
@@ -203,8 +203,8 @@ Feature: Drain node
         amount integer
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
@@ -295,8 +295,8 @@ Feature: Drain node
         id integer,
         source string
       );
-      CREATE CODEC wait_event_codec
-        FROM WIRE JSON SCHEMA wait_event_wire
+      CREATE WIRE JSON CODEC wait_event_codec
+        FROM WIRE SCHEMA wait_event_wire
         TO SCHEMA wait_event;
       CREATE RELAY event_state SCHEMA wait_event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -421,8 +421,8 @@ Feature: Drain node
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;

@@ -19,7 +19,7 @@ Feature: Bounded window sketches
         tenant string,
         value integer OPTIONAL
       );
-      CREATE CODEC sketch_codec FROM WIRE JSON SCHEMA sketch_wire TO SCHEMA sketch_input;
+      CREATE WIRE JSON CODEC sketch_codec FROM WIRE SCHEMA sketch_wire TO SCHEMA sketch_input;
       CREATE SCHEMA sketch_branch_schema (tenant STRING);
       CREATE BRANCH sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 4 EVICT LRU;
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
@@ -89,7 +89,7 @@ Feature: Bounded window sketches
       CREATE SCHEMA sketch_input (tenant STRING, value I64);
       CREATE SCHEMA sketch_output (tenant STRING, first_value I64, distinct_values I64);
       CREATE WIRE JSON SCHEMA sketch_wire MODE STRICT (tenant string, value integer);
-      CREATE CODEC sketch_codec FROM WIRE JSON SCHEMA sketch_wire TO SCHEMA sketch_input;
+      CREATE WIRE JSON CODEC sketch_codec FROM WIRE SCHEMA sketch_wire TO SCHEMA sketch_input;
       CREATE SCHEMA sketch_branch_schema (tenant STRING);
       CREATE BRANCH sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
@@ -166,7 +166,7 @@ Feature: Bounded window sketches
       CREATE SCHEMA sketch_input (tenant STRING, value I64);
       CREATE SCHEMA sketch_output (tenant STRING, first_value I64, distinct_values I64);
       CREATE WIRE JSON SCHEMA sketch_wire MODE STRICT (tenant string, value integer);
-      CREATE CODEC sketch_codec FROM WIRE JSON SCHEMA sketch_wire TO SCHEMA sketch_input;
+      CREATE WIRE JSON CODEC sketch_codec FROM WIRE SCHEMA sketch_wire TO SCHEMA sketch_input;
       CREATE SCHEMA sketch_branch_schema (tenant STRING);
       CREATE BRANCH sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;

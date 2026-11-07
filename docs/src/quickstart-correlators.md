@@ -26,8 +26,8 @@ CREATE WIRE JSON SCHEMA payment_wire MODE STRICT (
   amount integer
 );
 
-CREATE CODEC payment_codec
-  FROM WIRE JSON SCHEMA payment_wire
+CREATE WIRE JSON CODEC payment_codec
+  FROM WIRE SCHEMA payment_wire
   TO SCHEMA payment_record;
 
 CREATE RELAY payments SCHEMA payment_record UNBRANCHED;

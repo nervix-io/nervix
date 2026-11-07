@@ -17,7 +17,7 @@ Feature: Practical string search and normalization
       );
       CREATE SCHEMA search_error (source_id STRING, error_code STRING, error_message STRING);
       CREATE WIRE JSON SCHEMA source_wire MODE STRICT (id string, raw string, pattern string);
-      CREATE CODEC source_codec FROM WIRE JSON SCHEMA source_wire TO SCHEMA source_text;
+      CREATE WIRE JSON CODEC source_codec FROM WIRE SCHEMA source_wire TO SCHEMA source_text;
       CREATE RELAY source_texts SCHEMA source_text UNBRANCHED;
       CREATE RELAY searched_texts SCHEMA searched_text UNBRANCHED;
       CREATE RELAY search_errors SCHEMA search_error UNBRANCHED;

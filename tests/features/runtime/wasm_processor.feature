@@ -33,8 +33,8 @@ Feature: WASM processor runtime behavior
         message string,
         occurred_at string
       );
-      CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+      CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event
         ENCODE occurred_at AS RFC3339;
       CREATE SCHEMA tenant_branch ( tenant STRING );
@@ -119,8 +119,8 @@ Feature: WASM processor runtime behavior
       CREATE WIRE JSON SCHEMA wasm_input_wire MODE STRICT (
         value integer
       );
-      CREATE CODEC wasm_input_codec
-        FROM WIRE JSON SCHEMA wasm_input_wire
+      CREATE WIRE JSON CODEC wasm_input_codec
+        FROM WIRE SCHEMA wasm_input_wire
         TO SCHEMA wasm_input_event;
       CREATE RELAY wasm_input_events SCHEMA wasm_input_event UNBRANCHED;
       CREATE RELAY wasm_output_events SCHEMA wasm_output_event UNBRANCHED;
@@ -191,8 +191,8 @@ Feature: WASM processor runtime behavior
       CREATE WIRE JSON SCHEMA required_event_wire MODE STRICT (
         value integer
       );
-      CREATE CODEC required_event_codec
-        FROM WIRE JSON SCHEMA required_event_wire
+      CREATE WIRE JSON CODEC required_event_codec
+        FROM WIRE SCHEMA required_event_wire
         TO SCHEMA required_event;
       CREATE RELAY required_input SCHEMA required_event UNBRANCHED;
       CREATE RELAY required_output SCHEMA required_event UNBRANCHED;
@@ -260,8 +260,8 @@ Feature: WASM processor runtime behavior
         value integer
       );
 
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
 
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
@@ -371,8 +371,8 @@ Feature: WASM processor runtime behavior
         value integer,
         message string
       );
-      CREATE CODEC buffered_metric_codec
-        FROM WIRE JSON SCHEMA buffered_metric_wire
+      CREATE WIRE JSON CODEC buffered_metric_codec
+        FROM WIRE SCHEMA buffered_metric_wire
         TO SCHEMA buffered_metric;
       CREATE RELAY raw_buffered_metrics SCHEMA buffered_metric UNBRANCHED;
       CREATE RELAY filtered_buffered_metrics SCHEMA buffered_metric UNBRANCHED;
@@ -440,8 +440,8 @@ Feature: WASM processor runtime behavior
         tenant string,
         message string
       );
-      CREATE CODEC limited_input_codec
-        FROM WIRE JSON SCHEMA limited_input_wire
+      CREATE WIRE JSON CODEC limited_input_codec
+        FROM WIRE SCHEMA limited_input_wire
         TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
       CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
@@ -523,7 +523,7 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
-      CREATE CODEC limited_input_codec FROM WIRE JSON SCHEMA limited_input_wire TO SCHEMA limited_input_event;
+      CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
       CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
@@ -620,7 +620,7 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
-      CREATE CODEC limited_input_codec FROM WIRE JSON SCHEMA limited_input_wire TO SCHEMA limited_input_event;
+      CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
       CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
@@ -701,7 +701,7 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA secret_input_event ( tenant STRING SENSITIVE, message STRING );
       CREATE SCHEMA secret_output_event ( note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA secret_input_wire MODE STRICT ( tenant string, message string );
-      CREATE CODEC secret_input_codec FROM WIRE JSON SCHEMA secret_input_wire TO SCHEMA secret_input_event;
+      CREATE WIRE JSON CODEC secret_input_codec FROM WIRE SCHEMA secret_input_wire TO SCHEMA secret_input_event;
       CREATE SCHEMA secret_branch_key ( tenant STRING SENSITIVE );
       CREATE BRANCH by_secret_tenant SCHEMA secret_branch_key TTL 5m;
       CREATE RELAY secret_input_events SCHEMA secret_input_event BRANCHED BY by_secret_tenant;
@@ -767,7 +767,7 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
-      CREATE CODEC limited_input_codec FROM WIRE JSON SCHEMA limited_input_wire TO SCHEMA limited_input_event;
+      CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
       CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
@@ -868,8 +868,8 @@ Feature: WASM processor runtime behavior
         tenant string
       );
 
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric_input;
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
@@ -972,8 +972,8 @@ Feature: WASM processor runtime behavior
         value integer
       );
 
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
 
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
@@ -1101,8 +1101,8 @@ Feature: WASM processor runtime behavior
         tenant string
       );
 
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
@@ -1206,7 +1206,7 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA counted_input_event ( tenant STRING, sequence I32 );
       CREATE SCHEMA counted_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA counted_input_wire MODE STRICT ( tenant string, sequence integer );
-      CREATE CODEC counted_input_codec FROM WIRE JSON SCHEMA counted_input_wire TO SCHEMA counted_input_event;
+      CREATE WIRE JSON CODEC counted_input_codec FROM WIRE SCHEMA counted_input_wire TO SCHEMA counted_input_event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY counted_input_events SCHEMA counted_input_event BRANCHED BY by_tenant;
@@ -1351,7 +1351,7 @@ Feature: WASM processor runtime behavior
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
@@ -1474,7 +1474,7 @@ Feature: WASM processor runtime behavior
 
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -1537,7 +1537,7 @@ Feature: WASM processor runtime behavior
 
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -1602,7 +1602,7 @@ Feature: WASM processor runtime behavior
 
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1697,7 +1697,7 @@ Feature: WASM processor runtime behavior
 
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1780,7 +1780,7 @@ Feature: WASM processor runtime behavior
 
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -1843,7 +1843,7 @@ Feature: WASM processor runtime behavior
         source_value I32
       );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY error_stream SCHEMA error_record UNBRANCHED;
@@ -1912,7 +1912,7 @@ Feature: WASM processor runtime behavior
       """
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -1971,7 +1971,7 @@ Feature: WASM processor runtime behavior
       """
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -2030,7 +2030,7 @@ Feature: WASM processor runtime behavior
       """
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -2091,7 +2091,7 @@ Feature: WASM processor runtime behavior
 
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -2141,7 +2141,7 @@ Feature: WASM processor runtime behavior
       """
       CREATE SCHEMA metric ( value I64 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY generated_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -2207,7 +2207,7 @@ Feature: WASM processor runtime behavior
 
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;

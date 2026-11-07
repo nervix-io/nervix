@@ -61,7 +61,7 @@ Feature: Attributing a quiesced backup cut's timeout
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (event_id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-slow-application-{{test_id}}.example.com;

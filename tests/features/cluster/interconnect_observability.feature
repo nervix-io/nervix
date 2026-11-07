@@ -67,7 +67,7 @@ Feature: Interconnection observability
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',

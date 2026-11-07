@@ -19,7 +19,7 @@ Feature: CBOR wire schemas use CBOR values
       CREATE WIRE CBOR SCHEMA event_wire MODE STRICT (
         uid integer, temperature float, occurred_at text, body bytes
       );
-      CREATE CODEC event_codec FROM WIRE CBOR SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE CBOR CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge cbor-wire-{{test_id}}.example.com;

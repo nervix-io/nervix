@@ -85,8 +85,8 @@ Feature: Runtime node error policies
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
@@ -170,8 +170,8 @@ Feature: Runtime node error policies
         numerator integer,
         denominator integer
       );
-      CREATE CODEC calculation_codec
-        FROM WIRE JSON SCHEMA calculation_wire
+      CREATE WIRE JSON CODEC calculation_codec
+        FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE RELAY calculations SCHEMA calculation UNBRANCHED;
       CREATE RELAY accepted_calculations SCHEMA calculation UNBRANCHED;
@@ -230,8 +230,8 @@ Feature: Runtime node error policies
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;

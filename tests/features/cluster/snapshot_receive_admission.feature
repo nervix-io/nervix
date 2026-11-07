@@ -12,7 +12,7 @@ Feature: Snapshot receive decoding under overlapping bulk memory
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( tenant STRING, value I64, source STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, source string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;

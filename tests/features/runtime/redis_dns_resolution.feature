@@ -23,7 +23,7 @@ Feature: Redis name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
@@ -86,7 +86,7 @@ Feature: Redis name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{redis_tls_dns_addr}}',
@@ -129,7 +129,7 @@ Feature: Redis name resolution
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
         'addr' = '{{redis_forwarded_addr}}',

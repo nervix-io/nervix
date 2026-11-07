@@ -9,7 +9,7 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
       CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
@@ -51,7 +51,7 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
       CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
@@ -105,7 +105,7 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
       CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
@@ -140,7 +140,7 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
       CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
@@ -183,7 +183,7 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
       CREATE SIGNALING PROTOCOL ack_frames FORMAT JSON
@@ -236,7 +236,7 @@ Feature: Acknowledged endpoint intake
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY first_events SCHEMA event UNBRANCHED;
       CREATE RELAY second_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge fanout-{{test_id}}.example.com;

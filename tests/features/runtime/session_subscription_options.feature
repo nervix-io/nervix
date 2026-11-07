@@ -18,8 +18,8 @@ Feature: Session subscription delivery options
         active boolean,
         reading integer
       );
-        CREATE CODEC telemetry_codec
-        FROM WIRE JSON SCHEMA telemetry_wire
+        CREATE WIRE JSON CODEC telemetry_codec
+        FROM WIRE SCHEMA telemetry_wire
         TO SCHEMA telemetry;
         CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
         CREATE IF NOT EXISTS BRANCH by_telemetry_http SCHEMA device_branch TTL 5m;
@@ -68,8 +68,8 @@ Feature: Session subscription delivery options
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         value integer
       );
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
       CREATE RELAY metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -120,8 +120,8 @@ Feature: Session subscription delivery options
         reading integer,
         divisor integer
       );
-      CREATE CODEC ratio_codec
-        FROM WIRE JSON SCHEMA ratio_wire
+      CREATE WIRE JSON CODEC ratio_codec
+        FROM WIRE SCHEMA ratio_wire
         TO SCHEMA ratio;
       CREATE RELAY ratios SCHEMA ratio UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -187,8 +187,8 @@ Feature: Session subscription delivery options
         active boolean,
         reading integer
       );
-        CREATE CODEC telemetry_codec
-        FROM WIRE JSON SCHEMA telemetry_wire
+        CREATE WIRE JSON CODEC telemetry_codec
+        FROM WIRE SCHEMA telemetry_wire
         TO SCHEMA telemetry;
         CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
         CREATE IF NOT EXISTS BRANCH by_telemetry_http SCHEMA device_branch TTL 5m;

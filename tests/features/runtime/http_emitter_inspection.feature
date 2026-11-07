@@ -32,11 +32,11 @@ Feature: HTTP REQUEST emitter inspection, errors and metrics
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, token STRING SENSITIVE, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_body (event_id STRING, payload STRING);
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA rejected_request (
         emitter STRING,
         event_id STRING,
@@ -261,7 +261,7 @@ Feature: HTTP REQUEST emitter inspection, errors and metrics
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {

@@ -6,7 +6,7 @@ Feature: Ingestor branching
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
@@ -70,8 +70,7 @@ Feature: Ingestor branching
         error_message STRING,
         captured_amount I64 OPTIONAL
       );
-      CREATE CODEC reading_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC reading_batch_codec
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA bucket_branch (bucket I64);

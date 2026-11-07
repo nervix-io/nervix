@@ -11,8 +11,8 @@ Feature: Altering ingestors
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC event_codec_v2 FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec_v2 FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY audit SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-roundtrip.example.com;
@@ -76,7 +76,7 @@ Feature: Altering ingestors
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-swap.example.com;
       CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
@@ -136,10 +136,10 @@ Feature: Altering ingestors
       """
       CREATE SCHEMA buffered_event ( seq I64 );
       CREATE WIRE JSON SCHEMA buffered_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC buffered_event_codec
-        FROM WIRE JSON SCHEMA buffered_event_wire TO SCHEMA buffered_event;
-      CREATE CODEC buffered_event_codec_v2
-        FROM WIRE JSON SCHEMA buffered_event_wire TO SCHEMA buffered_event;
+      CREATE WIRE JSON CODEC buffered_event_codec
+        FROM WIRE SCHEMA buffered_event_wire TO SCHEMA buffered_event;
+      CREATE WIRE JSON CODEC buffered_event_codec_v2
+        FROM WIRE SCHEMA buffered_event_wire TO SCHEMA buffered_event;
       CREATE RELAY buffered_events SCHEMA buffered_event UNBRANCHED CAPACITY 2;
       CREATE VHOST buffered_edge http-{{test_id}}-buffered-alter.example.com;
       CREATE ENDPOINT buffered_ingress ON buffered_edge PATH '/buffered-alter' TYPE HTTP;
@@ -204,8 +204,8 @@ Feature: Altering ingestors
       """
       CREATE SCHEMA quiesce_event ( seq I64 );
       CREATE WIRE JSON SCHEMA quiesce_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC quiesce_event_codec
-        FROM WIRE JSON SCHEMA quiesce_event_wire TO SCHEMA quiesce_event;
+      CREATE WIRE JSON CODEC quiesce_event_codec
+        FROM WIRE SCHEMA quiesce_event_wire TO SCHEMA quiesce_event;
       CREATE RELAY quiesce_events SCHEMA quiesce_event UNBRANCHED;
       CREATE VHOST quiesce_edge http-{{test_id}}-set-quiesce.example.com;
       CREATE ENDPOINT quiesce_ingress ON quiesce_edge PATH '/set-quiesce' TYPE HTTP;
@@ -274,8 +274,8 @@ Feature: Altering ingestors
 
       CREATE SCHEMA paced_event ( seq I64 );
       CREATE WIRE JSON SCHEMA paced_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC paced_event_codec
-        FROM WIRE JSON SCHEMA paced_event_wire
+      CREATE WIRE JSON CODEC paced_event_codec
+        FROM WIRE SCHEMA paced_event_wire
         TO SCHEMA paced_event;
       CREATE RELAY paced_events SCHEMA paced_event UNBRANCHED;
 

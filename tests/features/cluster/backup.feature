@@ -100,7 +100,7 @@ Feature: Configuration backup into a public archive
       """
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-other-{{test_id}}.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
@@ -149,7 +149,7 @@ Feature: Configuration backup into a public archive
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE NATS CLIENT drop_nats CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR event_source FROM drop_nats
@@ -199,7 +199,7 @@ Feature: Configuration backup into a public archive
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA wait_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
-      CREATE CODEC wait_event_codec FROM WIRE JSON SCHEMA wait_event_wire TO SCHEMA wait_event;
+      CREATE WIRE JSON CODEC wait_event_codec FROM WIRE SCHEMA wait_event_wire TO SCHEMA wait_event;
       CREATE RELAY wait_state SCHEMA wait_event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
@@ -279,7 +279,7 @@ Feature: Configuration backup into a public archive
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA wait_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
-      CREATE CODEC wait_event_codec FROM WIRE JSON SCHEMA wait_event_wire TO SCHEMA wait_event;
+      CREATE WIRE JSON CODEC wait_event_codec FROM WIRE SCHEMA wait_event_wire TO SCHEMA wait_event;
       CREATE RELAY wait_state SCHEMA wait_event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
@@ -349,7 +349,7 @@ Feature: Configuration backup into a public archive
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA held_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( id integer, source string );
-      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE WIRE JSON CODEC held_event_codec FROM WIRE SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE RELAY held_input SCHEMA held_event UNBRANCHED;
       CREATE RELAY held_output SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge backup-held-installation-{{test_id}}.example.com;
@@ -405,7 +405,7 @@ Feature: Configuration backup into a public archive
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (event_id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-stalled-{{test_id}}.example.com;
@@ -465,7 +465,7 @@ Feature: Configuration backup into a public archive
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (event_id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-slow-pause-{{test_id}}.example.com;
@@ -622,7 +622,7 @@ Feature: Configuration backup into a public archive
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -755,7 +755,7 @@ Feature: Configuration backup into a public archive
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5s;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
@@ -858,7 +858,7 @@ Feature: Configuration backup into a public archive
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;

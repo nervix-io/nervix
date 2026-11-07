@@ -136,7 +136,7 @@ Feature: Vhost persistence
       """
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge rotate-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;

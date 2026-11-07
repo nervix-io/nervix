@@ -15,7 +15,7 @@ Feature: Establishing a wide subscription row after a refused input handoff
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA wide_record (sequence I64, note STRING);
       CREATE WIRE JSON SCHEMA wide_record_json MODE STRICT (sequence integer, note string);
-      CREATE CODEC wide_record_codec FROM WIRE JSON SCHEMA wide_record_json TO SCHEMA wide_record;
+      CREATE WIRE JSON CODEC wide_record_codec FROM WIRE SCHEMA wide_record_json TO SCHEMA wide_record;
       CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
       CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;

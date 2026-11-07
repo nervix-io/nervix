@@ -67,8 +67,8 @@ Feature: Explicit branches
         message string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA tenant_branch ( tenant STRING );

@@ -333,8 +333,7 @@ therefore names it.
 ### Protobuf batch messages
 
 ```plexus,ignore
-CREATE CODEC <name>
-  FROM PROTOBUF
+CREATE PROTOBUF CODEC <name>
   USING RESOURCE <resource> VERSION <n> | LATEST
   CONFIG { ... }
   MESSAGE '<message>'
@@ -691,8 +690,7 @@ batch shape does not depend on how many records were available.
 ### An envelope instead of an array
 
 ```plexus,ignore
-CREATE IF NOT EXISTS CODEC notification_envelope
-  FROM JSON
+CREATE IF NOT EXISTS JAQ JSON CODEC notification_envelope
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS
     ON EMITTING '{id: .user_id, action: .action}'
@@ -725,8 +723,7 @@ message NotificationBatch { repeated Notification notifications = 1; }
 ```
 
 ```plexus,ignore
-CREATE CODEC notification_proto
-  FROM PROTOBUF
+CREATE PROTOBUF CODEC notification_proto
   USING RESOURCE proto_bundle VERSION 1
   CONFIG {'file' = 'notification.proto', 'include' = '.'}
   MESSAGE 'nervix.test.Notification'
@@ -766,8 +763,7 @@ the next one.
 ### Sentry
 
 ```plexus,ignore
-CREATE CODEC sentry_batch_codec
-  FROM JSON
+CREATE JAQ JSON CODEC sentry_batch_codec
   TO SCHEMA error_event
   WITH JAQ TRANSFORMATIONS
     ON EMITTING '{message: .message, level: .level, environment: .environment}'

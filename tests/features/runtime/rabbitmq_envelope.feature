@@ -14,7 +14,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge envelope-{{test_id}}.example.com;
       CREATE ENDPOINT incoming ON edge PATH '/events' TYPE HTTP;
@@ -125,7 +125,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge persistent-{{test_id}}.example.com;
       CREATE ENDPOINT incoming ON edge PATH '/events' TYPE HTTP;
@@ -169,7 +169,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = '{{rabbitmq_addr}}' };
       """
@@ -199,7 +199,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA rejected ( seq I64, error_code STRING, operation STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected UNBRANCHED;
       CREATE VHOST edge time-{{test_id}}.example.com;

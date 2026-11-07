@@ -27,9 +27,9 @@ Feature: Batching across broker and message emitters
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge brokers-{{test_id}}.example.com;
@@ -135,9 +135,9 @@ Feature: Batching across broker and message emitters
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         seq integer, tenant string, source string
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
@@ -212,9 +212,9 @@ Feature: Batching across broker and message emitters
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, tenant string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge answered-{{test_id}}.example.com;
@@ -301,9 +301,9 @@ Feature: Batching across broker and message emitters
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge limited-{{test_id}}.example.com;
@@ -394,9 +394,9 @@ Feature: Batching across broker and message emitters
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge policed-{{test_id}}.example.com;
@@ -476,9 +476,9 @@ Feature: Batching across broker and message emitters
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge attributed-{{test_id}}.example.com;

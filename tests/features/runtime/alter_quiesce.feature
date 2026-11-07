@@ -12,8 +12,8 @@ Feature: Model alteration quiesce classification
       """
       CREATE SCHEMA alter_event ( seq I64 );
       CREATE WIRE JSON SCHEMA alter_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC alter_event_codec
-        FROM WIRE JSON SCHEMA alter_event_wire
+      CREATE WIRE JSON CODEC alter_event_codec
+        FROM WIRE SCHEMA alter_event_wire
         TO SCHEMA alter_event;
       CREATE RELAY alter_events SCHEMA alter_event UNBRANCHED CAPACITY 3;
 

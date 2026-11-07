@@ -74,9 +74,8 @@ Feature: Bounded execution and transient memory
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_in FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
-      CREATE CODEC notification_out
-        FROM JSON
+      CREATE WIRE JSON CODEC notification_in FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
+      CREATE JAQ JSON CODEC notification_out
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON EMITTING '{payload: .}';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
@@ -129,9 +128,9 @@ Feature: Bounded execution and transient memory
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retained_event ( seq I64 );
-      CREATE CODEC retained_codec FROM JSON TO SCHEMA retained_event
+      CREATE JAQ JSON CODEC retained_codec TO SCHEMA retained_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
-      CREATE CODEC delivery_codec FROM JSON TO SCHEMA retained_event
+      CREATE JAQ JSON CODEC delivery_codec TO SCHEMA retained_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY retained_events SCHEMA retained_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-retained-unfolding.example.com;
@@ -191,7 +190,7 @@ Feature: Bounded execution and transient memory
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA polled_event ( user_id I64 );
-      CREATE CODEC polled_codec FROM JSON TO SCHEMA polled_event
+      CREATE JAQ JSON CODEC polled_codec TO SCHEMA polled_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY polled_events SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT polled_http CONFIG {

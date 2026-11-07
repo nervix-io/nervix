@@ -11,11 +11,11 @@ Feature: Ingestor quiesce engagement during dispatch
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA quiesce_event ( id I64 );
       CREATE WIRE JSON SCHEMA quiesce_event_wire MODE STRICT ( id integer );
-      CREATE CODEC quiesce_event_codec
-        FROM WIRE JSON SCHEMA quiesce_event_wire
+      CREATE WIRE JSON CODEC quiesce_event_codec
+        FROM WIRE SCHEMA quiesce_event_wire
         TO SCHEMA quiesce_event;
-      CREATE CODEC quiesce_event_codec_alt
-        FROM WIRE JSON SCHEMA quiesce_event_wire
+      CREATE WIRE JSON CODEC quiesce_event_codec_alt
+        FROM WIRE SCHEMA quiesce_event_wire
         TO SCHEMA quiesce_event;
       CREATE RELAY quiesce_output SCHEMA quiesce_event UNBRANCHED;
       CREATE KAFKA CLIENT quiesce_kafka CONFIG {

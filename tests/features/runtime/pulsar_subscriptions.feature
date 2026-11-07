@@ -46,7 +46,7 @@ Feature: Pulsar subscriptions belong to their declared owner
     Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" holds 1 unacknowledged message
     When these Plexus statements are executed
       """
-      CREATE CODEC equivalent_codec FROM WIRE JSON SCHEMA item_wire TO SCHEMA item;
+      CREATE WIRE JSON CODEC equivalent_codec FROM WIRE SCHEMA item_wire TO SCHEMA item;
       ALTER PULSAR TOPIC INGESTOR events SET DECODE USING equivalent_codec;
       """
     Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" holds 1 unacknowledged message

@@ -11,7 +11,7 @@ Feature: RabbitMQ exchange declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (seq I64, category STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer, category string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RABBITMQ CLIENT broker CONFIG {'addr' = 'amqp://127.0.0.1:1'};
       """
@@ -65,7 +65,7 @@ Feature: RabbitMQ exchange declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (seq I64, category STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer, category string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RABBITMQ CLIENT broker CONFIG {'addr' = 'amqp://127.0.0.1:1'};
       """
@@ -106,7 +106,7 @@ Feature: RabbitMQ exchange declarations
       CREATE SCHEMA event (seq I64, category STRING, note STRING OPTIONAL, token STRING SENSITIVE);
       CREATE SCHEMA published (seq I64, category STRING);
       CREATE WIRE JSON SCHEMA published_wire MODE STRICT (seq integer, category string);
-      CREATE CODEC published_codec FROM WIRE JSON SCHEMA published_wire TO SCHEMA published;
+      CREATE WIRE JSON CODEC published_codec FROM WIRE SCHEMA published_wire TO SCHEMA published;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RABBITMQ CLIENT broker CONFIG {'addr' = 'amqp://127.0.0.1:1'};
       """

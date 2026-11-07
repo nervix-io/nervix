@@ -61,8 +61,8 @@ Feature: Cross-language client conformance
         maybe integer OPTIONAL,
         secret string
       );
-      CREATE CODEC typed_row_codec
-        FROM WIRE JSON SCHEMA typed_row_wire
+      CREATE WIRE JSON CODEC typed_row_codec
+        FROM WIRE SCHEMA typed_row_wire
         TO SCHEMA typed_row
         ENCODE at AS RFC3339, raw AS BASE64;
       CREATE SCHEMA tenant_key ( tenant STRING );

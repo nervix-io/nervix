@@ -13,7 +13,7 @@ Feature: Postgres statement deadlines
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge pg-timeout-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
@@ -72,7 +72,7 @@ Feature: Postgres statement deadlines
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge pg-silent-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;

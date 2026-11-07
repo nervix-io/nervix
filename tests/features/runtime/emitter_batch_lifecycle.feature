@@ -22,8 +22,8 @@ Feature: Emitter batch lifecycle
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
@@ -77,8 +77,8 @@ Feature: Emitter batch lifecycle
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge batch-move-{{test_id}}.example.com;
@@ -153,11 +153,11 @@ Feature: Emitter batch lifecycle
       CREATE WIRE JSON SCHEMA output_wire MODE STRICT (
         seq integer, tenant string, label string
       );
-      CREATE CODEC output_codec FROM WIRE JSON SCHEMA output_wire TO SCHEMA output_event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC output_codec FROM WIRE SCHEMA output_wire TO SCHEMA output_event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_configuration ( tenant STRING, label STRING );
-      CREATE CODEC configuration_codec FROM JSON TO SCHEMA tenant_configuration
+      CREATE JAQ JSON CODEC configuration_codec TO SCHEMA tenant_configuration
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
@@ -253,8 +253,8 @@ Feature: Emitter batch lifecycle
       """
       CREATE SCHEMA event ( seq I64, tenant STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, tenant string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 1 EVICT LRU;
@@ -336,8 +336,8 @@ Feature: Emitter batch lifecycle
       """
       CREATE SCHEMA event ( seq I64, tenant STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, tenant string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH first_tenant SCHEMA tenant_key TTL 5m PARTITIONS 2 MAX INSTANCES 1 EVICT LRU;
@@ -435,8 +435,8 @@ Feature: Emitter batch lifecycle
       """
       CREATE SCHEMA event ( seq I64, tenant STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, tenant string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 400s;
@@ -505,11 +505,11 @@ Feature: Emitter batch lifecycle
       CREATE WIRE JSON SCHEMA output_wire MODE STRICT (
         seq integer, tenant string, label string
       );
-      CREATE CODEC output_codec FROM WIRE JSON SCHEMA output_wire TO SCHEMA output_event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC output_codec FROM WIRE SCHEMA output_wire TO SCHEMA output_event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_configuration ( tenant STRING, label STRING );
-      CREATE CODEC configuration_codec FROM JSON TO SCHEMA tenant_configuration
+      CREATE JAQ JSON CODEC configuration_codec TO SCHEMA tenant_configuration
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 400s;
@@ -591,8 +591,8 @@ Feature: Emitter batch lifecycle
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
@@ -714,8 +714,8 @@ Feature: Emitter batch lifecycle
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };

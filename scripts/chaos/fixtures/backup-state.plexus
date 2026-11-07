@@ -45,8 +45,8 @@ CREATE WIRE JSON SCHEMA chaos_window_wire MODE STRICT (
   sequence_sum INTEGER
 );
 
-CREATE CODEC chaos_window_json
-  FROM WIRE JSON SCHEMA chaos_window_wire
+CREATE WIRE JSON CODEC chaos_window_json
+  FROM WIRE SCHEMA chaos_window_wire
   TO SCHEMA chaos_window_summary;
 
 CREATE RELAY chaos_windows SCHEMA chaos_window_summary BRANCHED BY chaos_branch CAPACITY 1;

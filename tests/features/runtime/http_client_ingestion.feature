@@ -14,7 +14,7 @@ Feature: HTTP client ingestion
       CREATE SCHEMA event ( user_id I64 );
       CREATE SCHEMA routed_event ( user_id I64, city STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA routed_event UNBRANCHED;
       CREATE HTTP CLIENT source CONFIG {
         'endpoint' = '{{http_receiver.api}}/poll', 'timeout_ms' = 5000
@@ -52,7 +52,7 @@ Feature: HTTP client ingestion
       CREATE SCHEMA event ( user_id I64 );
       CREATE SCHEMA routed_event ( user_id I64, city STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA routed_event UNBRANCHED;
       CREATE HTTP CLIENT source CONFIG {
         'endpoint' = '{{http_receiver.api}}/poll', 'timeout_ms' = 5000
@@ -92,7 +92,7 @@ Feature: HTTP client ingestion
       CREATE SCHEMA event ( user_id I64 );
       CREATE SCHEMA routed_event ( user_id I64, status U16 OPTIONAL, polled_at DATETIME OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA routed_event UNBRANCHED;
       """
     When these Plexus statements fail with "missing required client config key 'timeout_ms'"
@@ -160,7 +160,7 @@ Feature: HTTP client ingestion
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA user_id_branch (user_id I64);
       CREATE BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
@@ -208,8 +208,8 @@ Feature: HTTP client ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
@@ -261,8 +261,8 @@ Feature: HTTP client ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
@@ -314,7 +314,7 @@ Feature: HTTP client ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT source CONFIG {
         'endpoint' = '{{http_receiver.api}}/poll', 'timeout_ms' = 5000
@@ -355,7 +355,7 @@ Feature: HTTP client ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT source CONFIG {
         'endpoint' = '{{http_receiver.api}}/poll', 'timeout_ms' = 5000
@@ -398,7 +398,7 @@ Feature: HTTP client ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT source CONFIG {
         'endpoint' = '{{http_receiver.api}}/poll', 'timeout_ms' = 5000
@@ -450,7 +450,7 @@ Feature: HTTP client ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT source CONFIG {
         'endpoint' = '{{http_receiver.api}}/poll', 'timeout_ms' = 5000,
@@ -536,7 +536,7 @@ Feature: HTTP client ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT source CONFIG {
         'endpoint' = 'http://polling.nervix.test/poll', 'timeout_ms' = 5000,
@@ -583,7 +583,7 @@ Feature: HTTP client ingestion
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( user_id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT source CONFIG {
         'endpoint' = 'http://polling.nervix.test/poll', 'timeout_ms' = 5000

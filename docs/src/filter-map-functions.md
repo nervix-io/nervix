@@ -2187,8 +2187,8 @@ CREATE WIRE JSON SCHEMA access_wire MODE STRICT (
   latency_ms integer
 );
 
-CREATE CODEC access_codec
-  FROM WIRE JSON SCHEMA access_wire
+CREATE WIRE JSON CODEC access_codec
+  FROM WIRE SCHEMA access_wire
   TO SCHEMA access_event;
 
 CREATE SCHEMA access_summary (

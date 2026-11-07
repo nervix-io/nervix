@@ -21,9 +21,9 @@ Feature: RabbitMQ exchange emission and unroutable messages
       """
       CREATE SCHEMA event ( seq I64, category STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge exchange-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
@@ -89,9 +89,9 @@ Feature: RabbitMQ exchange emission and unroutable messages
       """
       CREATE SCHEMA event ( seq I64, category STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge batched-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
@@ -145,9 +145,9 @@ Feature: RabbitMQ exchange emission and unroutable messages
       """
       CREATE SCHEMA event ( seq I64, category STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge provisioned-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
@@ -213,9 +213,9 @@ Feature: RabbitMQ exchange emission and unroutable messages
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge mandatory-{{test_id}}.example.com;
@@ -294,9 +294,9 @@ Feature: RabbitMQ exchange emission and unroutable messages
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge mandatory-{{test_id}}.example.com;
@@ -367,9 +367,9 @@ Feature: RabbitMQ exchange emission and unroutable messages
         error_message STRING
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge deleted-{{test_id}}.example.com;
@@ -438,9 +438,9 @@ Feature: RabbitMQ exchange emission and unroutable messages
       """
       CREATE SCHEMA event ( seq I64, category STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge dropped-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;

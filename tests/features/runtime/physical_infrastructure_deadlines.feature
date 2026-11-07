@@ -19,8 +19,8 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE WIRE JSON SCHEMA physical_poll_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC physical_poll_codec
-        FROM WIRE JSON SCHEMA physical_poll_wire
+      CREATE WIRE JSON CODEC physical_poll_codec
+        FROM WIRE SCHEMA physical_poll_wire
         TO SCHEMA physical_poll_record;
       CREATE RELAY physical_poll_records SCHEMA physical_poll_record UNBRANCHED;
       CREATE HTTP CLIENT physical_poll_source
@@ -78,8 +78,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         timestamp STRING,
         due STRING
       );
-      CREATE CODEC physical_prometheus_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC physical_prometheus_codec
         TO SCHEMA physical_prometheus_sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE RELAY physical_prometheus_samples
@@ -130,8 +129,8 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE WIRE JSON SCHEMA physical_timeout_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC physical_timeout_codec
-        FROM WIRE JSON SCHEMA physical_timeout_wire
+      CREATE WIRE JSON CODEC physical_timeout_codec
+        FROM WIRE SCHEMA physical_timeout_wire
         TO SCHEMA physical_timeout_record;
       CREATE RELAY physical_timeout_records SCHEMA physical_timeout_record UNBRANCHED;
       CREATE HTTP CLIENT physical_timeout_source
@@ -203,11 +202,11 @@ Feature: Physical infrastructure deadlines under domain pacing
         tenant string,
         theme string
       );
-      CREATE CODEC physical_wait_notification_codec
-        FROM WIRE JSON SCHEMA physical_wait_notification_wire
+      CREATE WIRE JSON CODEC physical_wait_notification_codec
+        FROM WIRE SCHEMA physical_wait_notification_wire
         TO SCHEMA physical_wait_notification;
-      CREATE CODEC physical_wait_preference_codec
-        FROM WIRE JSON SCHEMA physical_wait_preference_wire
+      CREATE WIRE JSON CODEC physical_wait_preference_codec
+        FROM WIRE SCHEMA physical_wait_preference_wire
         TO SCHEMA physical_wait_preference;
       CREATE SCHEMA physical_wait_tenant (
         tenant STRING
@@ -321,8 +320,8 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE WIRE JSON SCHEMA physical_ack_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC physical_ack_codec
-        FROM WIRE JSON SCHEMA physical_ack_wire
+      CREATE WIRE JSON CODEC physical_ack_codec
+        FROM WIRE SCHEMA physical_ack_wire
         TO SCHEMA physical_ack_record;
       CREATE RELAY physical_ack_records SCHEMA physical_ack_record UNBRANCHED;
       CREATE KAFKA CLIENT physical_ack_kafka

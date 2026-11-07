@@ -20,7 +20,7 @@ Feature: Prometheus samples
         value F64,
         timestamp STRING
       );
-      CREATE CODEC sample_codec FROM JSON TO SCHEMA sample
+      CREATE JAQ JSON CODEC sample_codec TO SCHEMA sample
         WITH JAQ TRANSFORMATIONS ON INGESTION
         '{value_label: .metric.value, timestamp_label: .metric.timestamp, value, timestamp}';
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
@@ -59,10 +59,10 @@ Feature: Prometheus samples
       """
       CREATE SCHEMA text_sample ( value STRING );
       CREATE WIRE JSON SCHEMA text_sample_wire MODE LOOSE ( value string );
-      CREATE CODEC text_sample_codec FROM WIRE JSON SCHEMA text_sample_wire TO SCHEMA text_sample;
+      CREATE WIRE JSON CODEC text_sample_codec FROM WIRE SCHEMA text_sample_wire TO SCHEMA text_sample;
       CREATE SCHEMA number_sample ( value F64 );
       CREATE WIRE JSON SCHEMA number_sample_wire MODE LOOSE ( value number );
-      CREATE CODEC number_sample_codec FROM WIRE JSON SCHEMA number_sample_wire TO SCHEMA number_sample;
+      CREATE WIRE JSON CODEC number_sample_codec FROM WIRE SCHEMA number_sample_wire TO SCHEMA number_sample;
       CREATE RELAY text_samples SCHEMA text_sample UNBRANCHED;
       CREATE RELAY number_samples SCHEMA number_sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
@@ -116,7 +116,7 @@ Feature: Prometheus samples
       """
       CREATE SCHEMA sample ( value F64 );
       CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = '{{prometheus_addr}}',
@@ -157,7 +157,7 @@ Feature: Prometheus samples
       """
       CREATE SCHEMA sample ( value F64 );
       CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = '{{prometheus_addr}}',
@@ -196,7 +196,7 @@ Feature: Prometheus samples
       """
       CREATE SCHEMA sample ( value F64 );
       CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = '{{mock_http_addr}}/prometheus-answer/{{test_id}}/native-histogram',
@@ -231,7 +231,7 @@ Feature: Prometheus samples
       """
       CREATE SCHEMA sample ( value F64 );
       CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = '{{prometheus_addr}}',
@@ -266,7 +266,7 @@ Feature: Prometheus samples
       """
       CREATE SCHEMA sample ( value F64 );
       CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = '{{mock_http_addr}}/prometheus-answer/{{test_id}}/proxy-page',
@@ -300,7 +300,7 @@ Feature: Prometheus samples
       """
       CREATE SCHEMA sample ( value F64 );
       CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://reader:not-a-real-secret@127.0.0.1:9/behind-a-proxy',
@@ -348,7 +348,7 @@ Feature: Prometheus samples
       CREATE SCHEMA sample ( value F64 );
       CREATE SCHEMA evaluated_sample ( value F64, query STRING OPTIONAL, evaluated_at DATETIME OPTIONAL );
       CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA evaluated_sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = '{{prometheus_addr}}',
@@ -394,7 +394,7 @@ Feature: Prometheus samples
       CREATE SCHEMA evaluated_sample ( value F64, evaluated_at DATETIME OPTIONAL );
       CREATE SCHEMA summary ( samples I64, evaluated_at DATETIME OPTIONAL );
       CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
-      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA evaluated_sample UNBRANCHED;
       CREATE RELAY summaries SCHEMA summary UNBRANCHED;
       CREATE PROMETHEUS CLIENT prom_main CONFIG {

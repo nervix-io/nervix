@@ -13,8 +13,7 @@ Feature: Reorderer
         sequence I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -102,8 +101,7 @@ Feature: Reorderer
         priority I32,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -228,8 +226,8 @@ Feature: Reorderer
         payload string,
         note string OPTIONAL
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_reorder_default SCHEMA tenant_branch TTL 5m;

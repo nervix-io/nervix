@@ -134,7 +134,7 @@ protocol. It has no user-defined name, `CREATE WIRE` declaration, mode, field li
 `DROP` lifecycle. A codec references it directly:
 
 ```plexus
-CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
 ```
 
 Its fixed field contract is documented in [Syslog](syslog.md).
@@ -202,8 +202,8 @@ ALTER WIRE JSON SCHEMA notification_wire
 ALTER SCHEMA notification
   ALTER FIELD user_id SET TYPE F64;
 DROP CODEC notification_codec;
-CREATE CODEC notification_codec
-  FROM WIRE JSON SCHEMA notification_wire
+CREATE WIRE JSON CODEC notification_codec
+  FROM WIRE SCHEMA notification_wire
   TO SCHEMA notification;
 COMMIT;
 ```
@@ -231,9 +231,27 @@ that they must be recreated against the current schema.
 
 A codec maps one transport payload format to one internal schema.
 
+Its declaration head names the family and format before `CODEC` and the codec's name. Choose
+the head for the payload contract:
+
+| Head after `CREATE [IF NOT EXISTS]` | Body before the shared `TO SCHEMA <schema>` clause |
+| --- | --- |
+| `WIRE JSON CODEC <name>` | `FROM WIRE SCHEMA <json_wire_schema>` |
+| `WIRE CBOR CODEC <name>` | `FROM WIRE SCHEMA <cbor_wire_schema>` |
+| `WIRE AVRO CODEC <name>` | `FROM WIRE SCHEMA <avro_wire_schema>` |
+| `JAQ JSON\|YAML\|TOML\|XML\|CBOR CODEC <name>` | No source clause; directed JAQ transformations follow `TO SCHEMA` |
+| `PROTOBUF CODEC <name>` | `USING RESOURCE <resource> VERSION <n>\|LATEST CONFIG {...} MESSAGE '<message>' [BATCH MESSAGE '<message>']` |
+| `SYSLOG CODEC <name>` | No source clause; the wire contract is predefined |
+
+`WIRE JSON CODEC` binds a declared JSON wire schema and maps its fields directly.
+`JAQ JSON CODEC` reads JSON values and runs the declared JAQ programs. The same distinction applies to
+CBOR. After `FROM WIRE SCHEMA`, completion offers only wire schemas of the format in the head.
+The console's codec form presents these family and format choices and previews the same
+declaration that `SHOW CREATE CODEC <name>` returns.
+
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_codec
-  FROM WIRE JSON SCHEMA notification_wire
+CREATE IF NOT EXISTS WIRE JSON CODEC notification_codec
+  FROM WIRE SCHEMA notification_wire
   TO SCHEMA notification;
 ```
 
@@ -241,8 +259,8 @@ Schemaful codecs are type-strict. A JSON `string` wire field does not implicitly
 into an internal `DATETIME` field. Declare the wire conversion explicitly:
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_codec
-  FROM WIRE JSON SCHEMA notification_wire
+CREATE IF NOT EXISTS WIRE JSON CODEC notification_codec
+  FROM WIRE SCHEMA notification_wire
   TO SCHEMA notification
   ENCODE created_at AS RFC3339;
 ```
@@ -255,7 +273,7 @@ For an internal `BYTES` field carried as a JSON or AVRO `string`, declare its te
 ```plexus
 CREATE SCHEMA binary_event (payload BYTES);
 CREATE WIRE JSON SCHEMA binary_wire MODE STRICT (payload string);
-CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_event
+CREATE WIRE JSON CODEC binary_codec FROM WIRE SCHEMA binary_wire TO SCHEMA binary_event
   ENCODE payload AS BASE64;
 ```
 
@@ -287,13 +305,11 @@ or more JSON objects, and each object is decoded into the internal schema as one
 ([Unfolding Payloads](#unfolding-payloads)):
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_cbor
-  FROM CBOR
+CREATE IF NOT EXISTS JAQ CBOR CODEC notification_cbor
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS ON INGESTION '.';
 
-CREATE IF NOT EXISTS CODEC notification_xml
-  FROM XML
+CREATE IF NOT EXISTS JAQ XML CODEC notification_xml
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS
     ON INGESTION '{user_id: (.c[] | select(.t == "user_id").c[0] | tonumber)}';
@@ -302,8 +318,7 @@ CREATE IF NOT EXISTS CODEC notification_xml
 Protobuf codecs compile `.proto` files from an uploaded resource, decode or encode the selected message with `prost-reflect`, and use JAQ to translate between the protobuf JSON view and the internal schema:
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_proto
-  FROM PROTOBUF
+CREATE IF NOT EXISTS PROTOBUF CODEC notification_proto
   USING RESOURCE proto_bundle VERSION 1
   CONFIG {'file' = 'notification.proto', 'include' = '.'}
   MESSAGE 'nervix.test.Notification'
@@ -319,8 +334,7 @@ A protobuf codec that a [batching emitter](emitters.md#batching) encodes through
 a batch is published as, after `MESSAGE`:
 
 ```plexus,ignore
-CREATE CODEC notification_proto
-  FROM PROTOBUF
+CREATE PROTOBUF CODEC notification_proto
   USING RESOURCE proto_bundle VERSION 1
   CONFIG {'file' = 'notification.proto', 'include' = '.'}
   MESSAGE 'nervix.test.Notification'
@@ -405,8 +419,7 @@ JAQ-backed codecs must declare a JAQ transform. The concise
 Nervix embeds and summarizes the Nervix-specific boundary:
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_codec
-  FROM JSON
+CREATE IF NOT EXISTS JAQ JSON CODEC notification_codec
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS
     ON INGESTION '.payload'
@@ -415,12 +428,14 @@ CREATE IF NOT EXISTS CODEC notification_codec
 
 Semantics:
 
-- no-wire codecs must use `FROM JSON|YAML|TOML|XML|CBOR ... WITH JAQ ...`
+- JAQ-native codecs use a `JAQ JSON|YAML|TOML|XML|CBOR CODEC` head and declare
+  `WITH JAQ TRANSFORMATIONS` after `TO SCHEMA`
 - protobuf codecs must use
-  `FROM PROTOBUF USING RESOURCE ... VERSION <n> | LATEST CONFIG {...} MESSAGE ... [BATCH MESSAGE ...] WITH JAQ ...`
-- codecs using declared wire schemas must use `FROM WIRE JSON|CBOR|AVRO SCHEMA ...` and do not
+  `PROTOBUF CODEC ... USING RESOURCE ... VERSION <n>|LATEST CONFIG {...} MESSAGE ... [BATCH MESSAGE ...] TO SCHEMA ... WITH JAQ TRANSFORMATIONS ...`
+- codecs using declared wire schemas use a `WIRE JSON|CBOR|AVRO CODEC` head with
+  `FROM WIRE SCHEMA ... TO SCHEMA ...` and do not
   carry JAQ transforms
-- codecs using the predefined SYSLOG wire schema must use `FROM SYSLOG TO SCHEMA ...` and do not
+- codecs using the predefined SYSLOG wire schema use `SYSLOG CODEC ... TO SCHEMA ...` and do not
   carry JAQ transformations or field encoding rules
 - `WITH JAQ TRANSFORMATIONS` requires `ON INGESTION`, `ON EMITTING`, or both in that order, and
   `ON EMITTING` may be followed by `ON EMITTING BATCH` ([Batch Transformations](#batch-transformations))
@@ -438,8 +453,7 @@ A JAQ-backed codec — JAQ-native or protobuf — may declare a third transforma
 declare a [batching clause](emitters.md#batching):
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_envelope
-  FROM JSON
+CREATE IF NOT EXISTS JAQ JSON CODEC notification_envelope
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS
     ON EMITTING '{id: .user_id, action: .action}'
@@ -525,8 +539,7 @@ semantics apply unchanged: `.[]` unfolds an array into one message per element, 
 several messages, and `select` or `empty` yields no message for the values it rejects.
 
 ```plexus
-CREATE IF NOT EXISTS CODEC order_lines_codec
-  FROM JSON
+CREATE IF NOT EXISTS JAQ JSON CODEC order_lines_codec
   TO SCHEMA order_line
   WITH JAQ TRANSFORMATIONS ON INGESTION '.lines[] | select(.quantity > 0)';
 ```

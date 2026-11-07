@@ -25,7 +25,7 @@ Feature: Replica catch-up of branch-keyed state
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
@@ -104,8 +104,8 @@ Feature: Replica catch-up of branch-keyed state
         transaction_id string,
         amount integer
       );
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;

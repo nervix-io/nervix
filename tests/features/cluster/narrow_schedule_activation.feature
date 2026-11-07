@@ -32,8 +32,8 @@ Feature: Narrow schedule activation on ownership change
         amount integer
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -213,8 +213,8 @@ Feature: Narrow schedule activation on ownership change
         transaction_id string
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -352,8 +352,8 @@ Feature: Narrow schedule activation on ownership change
         source string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -536,8 +536,8 @@ Feature: Narrow schedule activation on ownership change
         latency integer
       );
 
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -673,8 +673,8 @@ Feature: Narrow schedule activation on ownership change
         transaction_id string
       );
 
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -869,8 +869,8 @@ Feature: Narrow schedule activation on ownership change
         source string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -1018,7 +1018,7 @@ Feature: Narrow schedule activation on ownership change
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'

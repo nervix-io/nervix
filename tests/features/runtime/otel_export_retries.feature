@@ -32,7 +32,7 @@ Feature: OTEL Export requests through unknown outcomes
         error_code STRING,
         operation STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
@@ -119,7 +119,7 @@ Feature: OTEL Export requests through unknown outcomes
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, body STRING );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge otel-timeout-{{test_id}}.example.com;

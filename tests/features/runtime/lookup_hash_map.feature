@@ -57,12 +57,12 @@ Feature: LOOKUP_HASH_MAP filter-map function
         region_name string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
 
-      CREATE CODEC title_lookup_codec
-        FROM WIRE JSON SCHEMA title_lookup_wire
+      CREATE WIRE JSON CODEC title_lookup_codec
+        FROM WIRE SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
       CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
@@ -200,12 +200,12 @@ Feature: LOOKUP_HASH_MAP filter-map function
         normalized_title string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
 
-      CREATE CODEC title_lookup_codec
-        FROM WIRE JSON SCHEMA title_lookup_wire
+      CREATE WIRE JSON CODEC title_lookup_codec
+        FROM WIRE SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
       CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
@@ -334,12 +334,12 @@ Feature: LOOKUP_HASH_MAP filter-map function
         region_name string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
 
-      CREATE CODEC title_lookup_codec
-        FROM WIRE JSON SCHEMA title_lookup_wire
+      CREATE WIRE JSON CODEC title_lookup_codec
+        FROM WIRE SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
       CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
@@ -477,12 +477,12 @@ Feature: LOOKUP_HASH_MAP filter-map function
         region_name string
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
 
-      CREATE CODEC title_lookup_codec
-        FROM WIRE JSON SCHEMA title_lookup_wire
+      CREATE WIRE JSON CODEC title_lookup_codec
+        FROM WIRE SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
       CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;

@@ -23,8 +23,7 @@ Feature: Prometheus TLS resource mounts
         value F64,
         timestamp STRING
       );
-        CREATE CODEC sample_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC sample_codec
         TO SCHEMA sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value, timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );

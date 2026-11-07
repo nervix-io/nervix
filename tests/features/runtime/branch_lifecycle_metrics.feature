@@ -19,8 +19,8 @@ Feature: Branch lifecycle metrics
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA user_id_branch (
@@ -117,8 +117,8 @@ Feature: Branch lifecycle metrics
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA user_id_branch (

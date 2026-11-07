@@ -66,7 +66,7 @@ Feature: Web console visual relay and subscription creation
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string, user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -133,7 +133,7 @@ Feature: Web console visual relay and subscription creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
@@ -186,7 +186,7 @@ Feature: Web console visual relay and subscription creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I64 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
@@ -226,7 +226,7 @@ Feature: Web console visual relay and subscription creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string, user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;

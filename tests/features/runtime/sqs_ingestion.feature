@@ -16,8 +16,8 @@ Feature: SQS ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_sqs_notifications SCHEMA user_id_branch TTL 5m;
@@ -79,8 +79,8 @@ Feature: SQS ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_sqs_notifications SCHEMA user_id_branch TTL 5m;
@@ -144,7 +144,7 @@ Feature: SQS ingestion
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_forwarded_endpoint}}',
@@ -199,7 +199,7 @@ Feature: SQS ingestion
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
@@ -246,8 +246,8 @@ Feature: SQS ingestion
       """
       CREATE SCHEMA held_event (marker STRING);
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT (marker string);
-      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
-      CREATE CODEC held_event_codec_v2 FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE WIRE JSON CODEC held_event_codec FROM WIRE SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE WIRE JSON CODEC held_event_codec_v2 FROM WIRE SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE SCHEMA held_metadata (marker STRING, receive_count U32 OPTIONAL, sent_at DATETIME OPTIONAL);
       CREATE RELAY held_events SCHEMA held_metadata UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
@@ -326,8 +326,8 @@ Feature: SQS ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 16;
         CREATE SQS CLIENT sqs_main
@@ -413,8 +413,8 @@ Feature: SQS ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE RELAY notifications SCHEMA notification UNBRANCHED;
         CREATE SQS CLIENT sqs_main

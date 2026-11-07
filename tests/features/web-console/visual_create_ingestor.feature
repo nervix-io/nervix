@@ -9,7 +9,7 @@ Feature: Web console visual ingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_ingest_event (message STRING);
       CREATE WIRE JSON SCHEMA visual_ingest_wire MODE STRICT (message string);
-      CREATE CODEC visual_ingest_codec FROM WIRE JSON SCHEMA visual_ingest_wire TO SCHEMA visual_ingest_event;
+      CREATE WIRE JSON CODEC visual_ingest_codec FROM WIRE SCHEMA visual_ingest_wire TO SCHEMA visual_ingest_event;
       CREATE RELAY visual_ingest_relay SCHEMA visual_ingest_event UNBRANCHED;
       CREATE VHOST visual_ingest_host ingest-{{test_id}}.example.com;
       CREATE ENDPOINT visual_ingest_endpoint ON visual_ingest_host PATH '/visual-ingest' TYPE HTTP;
@@ -91,7 +91,7 @@ Feature: Web console visual ingestor creation
       CREATE UNPACED DOMAIN {{domain}}_other;
       CREATE SCHEMA visual_scope_event (message STRING);
       CREATE WIRE JSON SCHEMA visual_scope_wire MODE STRICT (message string);
-      CREATE CODEC visual_scope_codec FROM WIRE JSON SCHEMA visual_scope_wire TO SCHEMA visual_scope_event;
+      CREATE WIRE JSON CODEC visual_scope_codec FROM WIRE SCHEMA visual_scope_wire TO SCHEMA visual_scope_event;
       CREATE VHOST visual_scope_host scope-{{test_id}}.example.com;
       CREATE ENDPOINT visual_scope_endpoint ON visual_scope_host PATH '/scope' TYPE HTTP;
       """
@@ -139,7 +139,7 @@ Feature: Web console visual ingestor creation
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".prompt-row" contains "{{domain}} tx"
-    When selector ".prompt-row input" is filled with "CREATE CODEC staged_ingest_codec FROM WIRE JSON SCHEMA visual_tx_wire TO SCHEMA visual_tx_event;"
+    When selector ".prompt-row input" is filled with "CREATE WIRE JSON CODEC staged_ingest_codec FROM WIRE SCHEMA visual_tx_wire TO SCHEMA visual_tx_event;"
     And selector ".prompt-row input" is pressed with "Enter"
     And selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
@@ -187,7 +187,7 @@ Feature: Web console visual ingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_reconnect_event (message STRING);
       CREATE WIRE JSON SCHEMA visual_reconnect_wire MODE STRICT (message string);
-      CREATE CODEC visual_reconnect_codec FROM WIRE JSON SCHEMA visual_reconnect_wire TO SCHEMA visual_reconnect_event;
+      CREATE WIRE JSON CODEC visual_reconnect_codec FROM WIRE SCHEMA visual_reconnect_wire TO SCHEMA visual_reconnect_event;
       CREATE RELAY visual_reconnect_relay SCHEMA visual_reconnect_event UNBRANCHED;
       CREATE VHOST visual_reconnect_host reconnect-{{test_id}}.example.com;
       CREATE ENDPOINT visual_reconnect_endpoint ON visual_reconnect_host PATH '/reconnect' TYPE HTTP;
@@ -243,7 +243,7 @@ Feature: Web console visual ingestor creation
       CREATE SCHEMA visual_branch_error (reason STRING OPTIONAL);
       CREATE BRANCH visual_branch SCHEMA visual_branch_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_branch_wire MODE STRICT (tenant string, secret string);
-      CREATE CODEC visual_branch_codec FROM WIRE JSON SCHEMA visual_branch_wire TO SCHEMA visual_branch_input;
+      CREATE WIRE JSON CODEC visual_branch_codec FROM WIRE SCHEMA visual_branch_wire TO SCHEMA visual_branch_input;
       CREATE RELAY visual_branch_relay SCHEMA visual_branch_output BRANCHED BY visual_branch;
       CREATE RELAY visual_branch_error_relay SCHEMA visual_branch_error UNBRANCHED;
       CREATE VHOST visual_branch_host branch-{{test_id}}.example.com;
@@ -316,7 +316,7 @@ Feature: Web console visual ingestor creation
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_http_event (user_id I64, payload STRING);
-      CREATE CODEC visual_http_codec FROM JSON TO SCHEMA visual_http_event
+      CREATE JAQ JSON CODEC visual_http_codec TO SCHEMA visual_http_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
       CREATE RELAY visual_http_relay SCHEMA visual_http_event UNBRANCHED;
       CREATE HTTP CLIENT visual_http_client CONFIG {
@@ -388,7 +388,7 @@ Feature: Web console visual ingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_pulsar_event (user_id I64);
       CREATE WIRE JSON SCHEMA visual_pulsar_wire MODE STRICT (user_id integer);
-      CREATE CODEC visual_pulsar_codec FROM WIRE JSON SCHEMA visual_pulsar_wire TO SCHEMA visual_pulsar_event;
+      CREATE WIRE JSON CODEC visual_pulsar_codec FROM WIRE SCHEMA visual_pulsar_wire TO SCHEMA visual_pulsar_event;
       CREATE RELAY visual_pulsar_relay SCHEMA visual_pulsar_event UNBRANCHED;
       CREATE PULSAR CLIENT visual_pulsar_client CONFIG { 'addr' = '{{pulsar_addr}}' };
       """

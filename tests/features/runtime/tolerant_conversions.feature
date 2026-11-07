@@ -33,8 +33,7 @@ Feature: Tolerant conversions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC raw_reading_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC raw_reading_batch_codec
         TO SCHEMA raw_reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY raw_readings SCHEMA raw_reading UNBRANCHED;
@@ -140,8 +139,7 @@ Feature: Tolerant conversions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC conversion_input_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC conversion_input_batch_codec
         TO SCHEMA conversion_input
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY conversion_inputs SCHEMA conversion_input UNBRANCHED;
@@ -217,8 +215,7 @@ Feature: Tolerant conversions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC routed_value_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC routed_value_batch_codec
         TO SCHEMA routed_value
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY routed_values SCHEMA routed_value UNBRANCHED;
@@ -329,8 +326,7 @@ Feature: Tolerant conversions
       CREATE SCHEMA inferred_measurement (
         result F32
       );
-      CREATE CODEC raw_measurement_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC raw_measurement_batch_codec
         TO SCHEMA raw_measurement
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY raw_measurements SCHEMA raw_measurement UNBRANCHED;

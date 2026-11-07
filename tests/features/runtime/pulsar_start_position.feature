@@ -17,7 +17,7 @@ Feature: Pulsar subscription start position
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE PULSAR CLIENT pulsar_main CONFIG {'addr' = '{{pulsar_addr}}'};
       CREATE PULSAR TOPIC INGESTOR pulsar_notifications
@@ -58,7 +58,7 @@ Feature: Pulsar subscription start position
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item (user_id I64);
       CREATE WIRE JSON SCHEMA item_wire MODE STRICT (user_id integer);
-      CREATE CODEC item_codec FROM WIRE JSON SCHEMA item_wire TO SCHEMA item;
+      CREATE WIRE JSON CODEC item_codec FROM WIRE SCHEMA item_wire TO SCHEMA item;
       CREATE RELAY output SCHEMA item UNBRANCHED;
       CREATE PULSAR CLIENT broker CONFIG {'addr' = 'pulsar://127.0.0.1:1'};
       CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events'

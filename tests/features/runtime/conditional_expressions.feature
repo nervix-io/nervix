@@ -22,8 +22,8 @@ Feature: Conditional expressions
         divisor integer,
         result integer OPTIONAL
       );
-      CREATE CODEC calculation_codec
-        FROM WIRE JSON SCHEMA calculation_wire
+      CREATE WIRE JSON CODEC calculation_codec
+        FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE RELAY calculations SCHEMA calculation UNBRANCHED;
       CREATE RELAY calculated SCHEMA calculation UNBRANCHED;
@@ -94,8 +94,8 @@ Feature: Conditional expressions
       CREATE WIRE JSON SCHEMA conditional_sample_wire MODE STRICT (
         value integer
       );
-      CREATE CODEC conditional_sample_codec
-        FROM WIRE JSON SCHEMA conditional_sample_wire
+      CREATE WIRE JSON CODEC conditional_sample_codec
+        FROM WIRE SCHEMA conditional_sample_wire
         TO SCHEMA conditional_sample;
       CREATE RELAY conditional_samples SCHEMA conditional_sample UNBRANCHED;
       CREATE RELAY conditional_summaries SCHEMA conditional_summary UNBRANCHED;
@@ -173,8 +173,8 @@ Feature: Conditional expressions
         active boolean,
         score integer
       );
-      CREATE CODEC conditional_input_codec
-        FROM WIRE JSON SCHEMA conditional_input_wire
+      CREATE WIRE JSON CODEC conditional_input_codec
+        FROM WIRE SCHEMA conditional_input_wire
         TO SCHEMA conditional_input;
       CREATE RELAY conditional_inputs SCHEMA conditional_input UNBRANCHED;
       CREATE RELAY conditional_outputs SCHEMA conditional_output UNBRANCHED;
@@ -266,8 +266,8 @@ Feature: Conditional expressions
         raw string,
         pattern string
       );
-      CREATE CODEC routed_text_codec
-        FROM WIRE JSON SCHEMA routed_text_wire
+      CREATE WIRE JSON CODEC routed_text_codec
+        FROM WIRE SCHEMA routed_text_wire
         TO SCHEMA routed_text;
       CREATE RELAY routed_texts SCHEMA routed_text UNBRANCHED;
       CREATE RELAY routed_results SCHEMA routed_result UNBRANCHED;
@@ -392,8 +392,8 @@ Feature: Conditional expressions
         kind string,
         text string
       );
-      CREATE CODEC support_request_codec
-        FROM WIRE JSON SCHEMA support_request_wire
+      CREATE WIRE JSON CODEC support_request_codec
+        FROM WIRE SCHEMA support_request_wire
         TO SCHEMA support_request;
       CREATE RELAY support_requests SCHEMA support_request UNBRANCHED;
       CREATE RELAY support_decisions SCHEMA support_decision UNBRANCHED;
@@ -465,8 +465,8 @@ Feature: Conditional expressions
         id string,
         kind string
       );
-      CREATE CODEC tagged_note_codec
-        FROM WIRE JSON SCHEMA tagged_note_wire
+      CREATE WIRE JSON CODEC tagged_note_codec
+        FROM WIRE SCHEMA tagged_note_wire
         TO SCHEMA tagged_note;
       CREATE RELAY routed_notes SCHEMA routed_note UNBRANCHED;
       CREATE VHOST edge header-arms-{{test_id}}.example.com;

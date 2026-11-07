@@ -19,8 +19,8 @@ Feature: Remote acknowledgements across a producer restart
       CREATE WIRE JSON SCHEMA restart_ack_wire MODE STRICT (
         event_id string, branch_name string, sequence integer
       );
-      CREATE CODEC restart_ack_codec
-        FROM WIRE JSON SCHEMA restart_ack_wire TO SCHEMA restart_ack_event;
+      CREATE WIRE JSON CODEC restart_ack_codec
+        FROM WIRE SCHEMA restart_ack_wire TO SCHEMA restart_ack_event;
       CREATE SCHEMA restart_ack_key ( branch_name STRING );
       CREATE BRANCH restart_ack_branch SCHEMA restart_ack_key TTL 5m;
       CREATE RELAY restart_ack_before_records SCHEMA restart_ack_event

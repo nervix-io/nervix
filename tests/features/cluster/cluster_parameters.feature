@@ -314,7 +314,7 @@ Feature: Committed cluster parameters
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event_schema (id STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (id string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event_schema;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event_schema;
       CREATE RELAY incoming SCHEMA event_schema UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:9', 'timeout_ms' = 60000
@@ -379,7 +379,7 @@ Feature: Committed cluster parameters
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event_schema (id STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (id string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event_schema;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event_schema;
       CREATE RELAY incoming SCHEMA event_schema UNBRANCHED;
       CREATE WEBSOCKETS CLIENT api CONFIG {
         'endpoint' = 'ws://127.0.0.1:9', 'connect_timeout_ms' = 60000
@@ -429,7 +429,7 @@ Feature: Committed cluster parameters
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event_schema (id STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (id string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event_schema;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event_schema;
       CREATE RELAY incoming SCHEMA event_schema UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:9', 'timeout_ms' = 60000

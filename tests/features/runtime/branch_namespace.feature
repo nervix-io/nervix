@@ -30,8 +30,8 @@ Feature: Branch namespace
         amount integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
@@ -167,8 +167,8 @@ Feature: Branch namespace
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );

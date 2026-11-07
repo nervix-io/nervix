@@ -17,7 +17,7 @@ Feature: Materialized state inspection respects schema sensitivity
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         tenant string, zone string, secret string, seq integer
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING SENSITIVE, zone STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitions>;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant

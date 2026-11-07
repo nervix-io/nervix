@@ -13,7 +13,7 @@ Feature: Entity-pause model alterations
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE SCHEMA routed_event ( tenant STRING, seq I64, route STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch_schema TTL 5m;
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
@@ -119,7 +119,7 @@ Feature: Entity-pause model alterations
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge http-{{test_id}}-entity-timeout.example.com;
@@ -227,7 +227,7 @@ Feature: Entity-pause model alterations
       CREATE SCHEMA scoped_event ( seq I64 );
       CREATE SCHEMA scoped_output ( seq I64, route STRING );
       CREATE WIRE JSON SCHEMA scoped_wire MODE STRICT ( seq integer );
-      CREATE CODEC scoped_codec FROM WIRE JSON SCHEMA scoped_wire TO SCHEMA scoped_event;
+      CREATE WIRE JSON CODEC scoped_codec FROM WIRE SCHEMA scoped_wire TO SCHEMA scoped_event;
       CREATE RELAY affected_input SCHEMA scoped_event UNBRANCHED;
       CREATE RELAY affected_output SCHEMA scoped_output UNBRANCHED;
       CREATE RELAY disjoint_input SCHEMA scoped_event UNBRANCHED;
@@ -309,8 +309,8 @@ Feature: Entity-pause model alterations
         value string,
         state string OPTIONAL
       );
-      CREATE CODEC parked_event_codec
-        FROM WIRE JSON SCHEMA parked_event_wire
+      CREATE WIRE JSON CODEC parked_event_codec
+        FROM WIRE SCHEMA parked_event_wire
         TO SCHEMA parked_event;
       CREATE SCHEMA parked_tenant ( tenant STRING );
       CREATE BRANCH by_parked_tenant SCHEMA parked_tenant TTL 5m;

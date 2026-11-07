@@ -10,7 +10,7 @@ Feature: Window statistics
       """
       CREATE SCHEMA overflow_reading (tenant STRING, value F64 OPTIONAL, companion F64 OPTIONAL);
       CREATE SCHEMA overflow_summary (tenant STRING, mean F64 OPTIONAL, variance F64 OPTIONAL, covariance F64 OPTIONAL, companion_mean F64 OPTIONAL);
-      CREATE CODEC overflow_codec FROM JSON TO SCHEMA overflow_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE JAQ JSON CODEC overflow_codec TO SCHEMA overflow_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA overflow_branch_schema (tenant STRING);
       CREATE BRANCH overflow_branch SCHEMA overflow_branch_schema TTL 5m;
       CREATE RELAY overflow_readings SCHEMA overflow_reading BRANCHED BY overflow_branch;
@@ -88,7 +88,7 @@ Feature: Window statistics
       """
       CREATE SCHEMA run_reading (tenant STRING, amount I64 OPTIONAL, reading F64 OPTIONAL, healthy BOOL OPTIONAL, unsafe_text STRING OPTIONAL);
       CREATE SCHEMA run_summary (tenant STRING, total I64 OPTIONAL, samples I64, healthy_samples I64, lowest I64 OPTIONAL, highest I64 OPTIONAL, mean_reading F64 OPTIONAL, variance F64 OPTIONAL, median_bucket F64 OPTIONAL, nan_probe F64 OPTIONAL);
-      CREATE CODEC run_codec FROM JSON TO SCHEMA run_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE JAQ JSON CODEC run_codec TO SCHEMA run_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA run_branch_schema (tenant STRING);
       CREATE BRANCH run_branch SCHEMA run_branch_schema TTL 5m;
       CREATE RELAY run_readings SCHEMA run_reading BRANCHED BY run_branch;
@@ -177,8 +177,8 @@ Feature: Window statistics
         load number,
         healthy boolean
       );
-      CREATE CODEC reading_codec
-        FROM WIRE JSON SCHEMA reading_wire
+      CREATE WIRE JSON CODEC reading_codec
+        FROM WIRE SCHEMA reading_wire
         TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_reading_tenant SCHEMA tenant_branch TTL 5m;
@@ -304,8 +304,8 @@ Feature: Window statistics
         healthy boolean OPTIONAL,
         label string OPTIONAL
       );
-      CREATE CODEC sparse_reading_codec
-        FROM WIRE JSON SCHEMA sparse_reading_wire
+      CREATE WIRE JSON CODEC sparse_reading_codec
+        FROM WIRE SCHEMA sparse_reading_wire
         TO SCHEMA sparse_reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_sparse_tenant SCHEMA tenant_branch TTL 5m;
@@ -429,8 +429,8 @@ Feature: Window statistics
         tenant string,
         reading number
       );
-      CREATE CODEC measurement_codec
-        FROM WIRE JSON SCHEMA measurement_wire
+      CREATE WIRE JSON CODEC measurement_codec
+        FROM WIRE SCHEMA measurement_wire
         TO SCHEMA measurement;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_measurement_tenant SCHEMA tenant_branch TTL 5m;
@@ -574,8 +574,8 @@ Feature: Window statistics
         value integer,
         healthy boolean
       );
-      CREATE CODEC reading_codec
-        FROM WIRE JSON SCHEMA reading_wire
+      CREATE WIRE JSON CODEC reading_codec
+        FROM WIRE SCHEMA reading_wire
         TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_restart_tenant SCHEMA tenant_branch TTL 5m;

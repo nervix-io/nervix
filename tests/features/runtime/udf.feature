@@ -29,8 +29,8 @@ Feature: Roto user-defined functions
         id string,
         value integer
       );
-      CREATE CODEC udf_input_codec
-        FROM WIRE JSON SCHEMA udf_input_wire
+      CREATE WIRE JSON CODEC udf_input_codec
+        FROM WIRE SCHEMA udf_input_wire
         TO SCHEMA udf_input;
       CREATE RELAY udf_inputs SCHEMA udf_input UNBRANCHED;
       CREATE RELAY udf_outputs SCHEMA udf_output UNBRANCHED;
@@ -145,8 +145,8 @@ Feature: Roto user-defined functions
         id string,
         pan string OPTIONAL
       );
-      CREATE CODEC card_event_codec
-        FROM WIRE JSON SCHEMA card_event_wire
+      CREATE WIRE JSON CODEC card_event_codec
+        FROM WIRE SCHEMA card_event_wire
         TO SCHEMA card_event;
       CREATE RELAY card_events SCHEMA card_event UNBRANCHED;
       CREATE RELAY valid_cards SCHEMA card_event UNBRANCHED;

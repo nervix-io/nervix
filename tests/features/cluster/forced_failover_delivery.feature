@@ -16,7 +16,7 @@ Feature: Forced ownership recovery while a former owner holds relay deliveries
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA forced_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA forced_wire MODE STRICT ( event_id string );
-      CREATE CODEC forced_codec FROM WIRE JSON SCHEMA forced_wire TO SCHEMA forced_event;
+      CREATE WIRE JSON CODEC forced_codec FROM WIRE SCHEMA forced_wire TO SCHEMA forced_event;
       CREATE RELAY forced_records SCHEMA forced_event UNBRANCHED;
       CREATE KAFKA CLIENT forced_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'

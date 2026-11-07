@@ -67,8 +67,8 @@ CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (
   event_id string,
   payload string
 );
-CREATE CODEC event_body_codec
-  FROM WIRE JSON SCHEMA event_body_wire
+CREATE WIRE JSON CODEC event_body_codec
+  FROM WIRE SCHEMA event_body_wire
   TO SCHEMA event_body;
 CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
 

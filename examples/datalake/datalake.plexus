@@ -68,8 +68,8 @@ CREATE WIRE JSON SCHEMA edge_site_wire MODE STRICT (
   edge_lon NUMBER
 );
 
-CREATE CODEC edge_site_codec
-  FROM WIRE JSON SCHEMA edge_site_wire
+CREATE WIRE JSON CODEC edge_site_codec
+  FROM WIRE SCHEMA edge_site_wire
   TO SCHEMA edge_site;
 
 CREATE HASH MAP edge_sites_by_id KEY edge_id FROM RESOURCE reference_data VERSION 1 PATH 'edge_sites.jsonl' DECODE USING edge_site_codec;
@@ -91,8 +91,7 @@ CREATE SCHEMA device_activity (
   seq I64
 );
 
-CREATE CODEC device_activity_cbor_codec
-  FROM CBOR
+CREATE JAQ CBOR CODEC device_activity_cbor_codec
   TO SCHEMA device_activity
   WITH JAQ TRANSFORMATIONS ON INGESTION '.'
   ENCODE ts AS RFC3339;
@@ -111,8 +110,8 @@ CREATE SCHEMA edge_activity (
   seq I64
 );
 
-CREATE CODEC edge_activity_protobuf_codec
-  FROM PROTOBUF USING RESOURCE edge_activity_proto VERSION 1
+CREATE PROTOBUF CODEC edge_activity_protobuf_codec
+  USING RESOURCE edge_activity_proto VERSION 1
   CONFIG {
     'file' = 'edge_activity.proto',
     'include' = '.'
@@ -154,8 +153,8 @@ CREATE WIRE JSON SCHEMA auth_activity_wire MODE STRICT (
   seq INTEGER
 );
 
-CREATE CODEC auth_activity_json_codec
-  FROM WIRE JSON SCHEMA auth_activity_wire
+CREATE WIRE JSON CODEC auth_activity_json_codec
+  FROM WIRE SCHEMA auth_activity_wire
   TO SCHEMA auth_activity
   ENCODE ts AS RFC3339;
 
@@ -389,8 +388,8 @@ CREATE WIRE JSON SCHEMA security_event_wire MODE STRICT (
   source_event_id STRING
 );
 
-CREATE CODEC security_event_json_codec
-  FROM WIRE JSON SCHEMA security_event_wire
+CREATE WIRE JSON CODEC security_event_json_codec
+  FROM WIRE SCHEMA security_event_wire
   TO SCHEMA security_event
   ENCODE observed_at AS RFC3339;
 
@@ -430,8 +429,8 @@ CREATE WIRE JSON SCHEMA distance_alert_wire MODE STRICT (
   edge_lon NUMBER OPTIONAL
 );
 
-CREATE CODEC distance_alert_json_codec
-  FROM WIRE JSON SCHEMA distance_alert_wire
+CREATE WIRE JSON CODEC distance_alert_json_codec
+  FROM WIRE SCHEMA distance_alert_wire
   TO SCHEMA distance_alert
   ENCODE observed_at AS RFC3339;
 

@@ -16,7 +16,7 @@ Feature: Interconnect relay admission
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
@@ -41,7 +41,7 @@ Feature: Interconnect relay admission
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
@@ -110,7 +110,7 @@ Feature: Interconnect relay admission
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event BRANCHED BY by_tenant;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
@@ -188,7 +188,7 @@ Feature: Interconnect relay admission
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event BRANCHED BY by_tenant;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
@@ -265,7 +265,7 @@ Feature: Interconnect relay admission
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY active_events SCHEMA event BRANCHED BY by_active_tenant;
       CREATE RELAY idle_events SCHEMA event BRANCHED BY by_idle_tenant;
       CREATE ZEROMQ CLIENT emitter CONFIG {
@@ -363,7 +363,7 @@ Feature: Interconnect relay admission
         tenant string,
         seq integer
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
@@ -429,8 +429,8 @@ Feature: Interconnect relay admission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {

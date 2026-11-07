@@ -6,7 +6,7 @@ Feature: A backup cut reaches every scheduled state owner
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA payment ( tenant STRING, transaction_id STRING, amount I64 );
       CREATE WIRE JSON SCHEMA payment_wire MODE STRICT ( tenant string, transaction_id string, amount integer );
-      CREATE CODEC payment_codec FROM WIRE JSON SCHEMA payment_wire TO SCHEMA payment;
+      CREATE WIRE JSON CODEC payment_codec FROM WIRE SCHEMA payment_wire TO SCHEMA payment;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY payments SCHEMA payment BRANCHED BY by_tenant;

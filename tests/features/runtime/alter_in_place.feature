@@ -15,7 +15,7 @@ Feature: Altering an ingestor or an emitter in place
       """
       CREATE SCHEMA order_event ( seq I64, note STRING );
       CREATE WIRE JSON SCHEMA order_event_wire MODE STRICT ( seq integer, note string );
-      CREATE CODEC order_event_codec FROM WIRE JSON SCHEMA order_event_wire TO SCHEMA order_event;
+      CREATE WIRE JSON CODEC order_event_codec FROM WIRE SCHEMA order_event_wire TO SCHEMA order_event;
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
       CREATE KAFKA CLIENT primary_broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA CLIENT audit_broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
@@ -128,7 +128,7 @@ Feature: Altering an ingestor or an emitter in place
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event ( seq I64 );
       CREATE WIRE JSON SCHEMA order_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC order_event_codec FROM WIRE JSON SCHEMA order_event_wire TO SCHEMA order_event;
+      CREATE WIRE JSON CODEC order_event_codec FROM WIRE SCHEMA order_event_wire TO SCHEMA order_event;
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
       CREATE NATS SUBJECT INGESTOR order_source
@@ -175,7 +175,7 @@ Feature: Altering an ingestor or an emitter in place
       """
       CREATE SCHEMA event ( tenant STRING, value STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:1',
@@ -286,8 +286,8 @@ Feature: Altering an ingestor or an emitter in place
       """
       CREATE SCHEMA event ( tenant STRING, value STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC audit_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC audit_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:1',
@@ -341,8 +341,8 @@ Feature: Altering an ingestor or an emitter in place
       """
       CREATE SCHEMA altered_event ( seq I64 );
       CREATE WIRE JSON SCHEMA altered_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC altered_event_codec
-        FROM WIRE JSON SCHEMA altered_event_wire TO SCHEMA altered_event;
+      CREATE WIRE JSON CODEC altered_event_codec
+        FROM WIRE SCHEMA altered_event_wire TO SCHEMA altered_event;
       CREATE RELAY altered_events SCHEMA altered_event UNBRANCHED;
       CREATE VHOST altered_edge http-{{test_id}}-alter-in-place.example.com;
       CREATE ENDPOINT altered_ingress ON altered_edge PATH '/alter-in-place' TYPE HTTP;

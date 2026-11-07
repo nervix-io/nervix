@@ -20,7 +20,7 @@ Feature: Syslog support
         structured_data STRING OPTIONAL,
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
@@ -60,8 +60,7 @@ Feature: Syslog support
       """
     Then the last command output contains
       """
-      CREATE CODEC syslog_codec
-        FROM SYSLOG
+      CREATE SYSLOG CODEC syslog_codec
         TO SCHEMA syslog_event;
       """
     Then within "5s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
@@ -126,7 +125,7 @@ Feature: Syslog support
     When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener CONFIG {
         'protocol' = 'udp',
@@ -155,7 +154,7 @@ Feature: Syslog support
       """
     Then the last command output contains
       """
-      CREATE CODEC syslog_codec
+      CREATE SYSLOG CODEC syslog_codec
       """
     Then within "5s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
       """
@@ -190,7 +189,7 @@ Feature: Syslog support
         severity U8,
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
@@ -252,7 +251,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT invalid_syslog_listener
         CONFIG {
@@ -302,7 +301,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
@@ -360,7 +359,7 @@ Feature: Syslog support
         message STRING,
         peer_addr STRING OPTIONAL
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA received_syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
@@ -420,8 +419,8 @@ Feature: Syslog support
     When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (message STRING);
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
-      CREATE CODEC syslog_alternate_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_alternate_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED CAPACITY 4;
       CREATE SYSLOG CLIENT syslog_listener CONFIG {
         'protocol' = 'tcp',
@@ -476,8 +475,8 @@ Feature: Syslog support
     When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (message STRING);
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
-      CREATE CODEC syslog_alternate_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_alternate_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED CAPACITY 4;
       CREATE SYSLOG CLIENT syslog_listener CONFIG {
         'protocol' = 'tcp',
@@ -534,7 +533,7 @@ Feature: Syslog support
     When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (message STRING);
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener CONFIG {
         'protocol' = 'tcp',
@@ -592,7 +591,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
@@ -660,7 +659,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
@@ -730,7 +729,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
@@ -795,7 +794,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
@@ -853,7 +852,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
@@ -915,7 +914,7 @@ Feature: Syslog support
         severity U8,
         message STRING
       );
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE SYSLOG CLIENT syslog_listener
         CONFIG {

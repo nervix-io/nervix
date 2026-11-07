@@ -26,8 +26,8 @@ Feature: Processor output routing
         divisor integer,
         result integer OPTIONAL
       );
-      CREATE CODEC routed_event_codec
-        FROM WIRE JSON SCHEMA routed_event_wire
+      CREATE WIRE JSON CODEC routed_event_codec
+        FROM WIRE SCHEMA routed_event_wire
         TO SCHEMA routed_event;
       CREATE RELAY source_events SCHEMA routed_event UNBRANCHED;
       CREATE RELAY successful_events SCHEMA routed_event UNBRANCHED;
@@ -101,8 +101,8 @@ Feature: Processor output routing
         id string,
         route string OPTIONAL
       );
-      CREATE CODEC routed_event_codec
-        FROM WIRE JSON SCHEMA routed_event_wire
+      CREATE WIRE JSON CODEC routed_event_codec
+        FROM WIRE SCHEMA routed_event_wire
         TO SCHEMA routed_event;
       CREATE RELAY incoming_events SCHEMA routed_event UNBRANCHED;
       CREATE RELAY immediate_events SCHEMA routed_event UNBRANCHED;
@@ -182,8 +182,8 @@ Feature: Processor output routing
         raw string
       );
 
-      CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+      CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event_in;
 
       CREATE RELAY error_events SCHEMA event_projection UNBRANCHED;
@@ -266,8 +266,8 @@ Feature: Processor output routing
       CREATE WIRE JSON SCHEMA source_event_wire MODE STRICT (
         id string
       );
-      CREATE CODEC source_event_codec
-        FROM WIRE JSON SCHEMA source_event_wire
+      CREATE WIRE JSON CODEC source_event_codec
+        FROM WIRE SCHEMA source_event_wire
         TO SCHEMA source_event;
       CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
       CREATE VHOST edge sequential-set-{{test_id}}.example.com;
@@ -356,8 +356,8 @@ Feature: Processor output routing
         level string,
         urgent boolean
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
         CREATE IF NOT EXISTS BRANCH by_source_logs_a SCHEMA id_branch TTL 5m;
@@ -487,8 +487,8 @@ Feature: Processor output routing
         amount integer,
         raw string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
@@ -580,8 +580,8 @@ Feature: Processor output routing
         level string,
         legacy string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
         CREATE IF NOT EXISTS BRANCH by_source_logs SCHEMA id_branch TTL 5m;
@@ -700,11 +700,11 @@ Feature: Processor output routing
         theme string,
         hint string OPTIONAL
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
-        CREATE CODEC preference_codec
-        FROM WIRE JSON SCHEMA preference_wire
+        CREATE WIRE JSON CODEC preference_codec
+        FROM WIRE SCHEMA preference_wire
         TO SCHEMA preference;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_branch_state SCHEMA tenant_branch TTL 5m;

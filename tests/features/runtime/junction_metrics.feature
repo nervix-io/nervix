@@ -17,8 +17,8 @@ Feature: Junction metrics
         tenant string,
         sequence integer
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_junction_metrics SCHEMA tenant_branch TTL 5m;

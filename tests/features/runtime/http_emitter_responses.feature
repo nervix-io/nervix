@@ -20,7 +20,7 @@ Feature: HTTP REQUEST emitter response classification
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA rejected_request (event_id STRING, code STRING, operation STRING, message STRING);
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
@@ -105,7 +105,7 @@ Feature: HTTP REQUEST emitter response classification
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
@@ -197,7 +197,7 @@ Feature: HTTP REQUEST emitter response classification
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
@@ -267,7 +267,7 @@ Feature: HTTP REQUEST emitter response classification
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
@@ -334,7 +334,7 @@ Feature: HTTP REQUEST emitter response classification
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;

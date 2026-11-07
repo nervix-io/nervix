@@ -535,8 +535,8 @@ Feature: Placement policies
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA placement_event ( id I64 );
       CREATE WIRE JSON SCHEMA placement_event_wire MODE STRICT ( id integer );
-      CREATE CODEC placement_event_codec
-        FROM WIRE JSON SCHEMA placement_event_wire
+      CREATE WIRE JSON CODEC placement_event_codec
+        FROM WIRE SCHEMA placement_event_wire
         TO SCHEMA placement_event;
       CREATE RELAY placement_input SCHEMA placement_event UNBRANCHED;
       CREATE RELAY placement_stage SCHEMA placement_event UNBRANCHED;
@@ -786,8 +786,8 @@ Feature: Placement policies
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       CREATE SCHEMA placement_timeout_event ( seq I64 );
       CREATE WIRE JSON SCHEMA placement_timeout_wire MODE STRICT ( seq integer );
-      CREATE CODEC placement_timeout_codec
-        FROM WIRE JSON SCHEMA placement_timeout_wire
+      CREATE WIRE JSON CODEC placement_timeout_codec
+        FROM WIRE SCHEMA placement_timeout_wire
         TO SCHEMA placement_timeout_event;
       CREATE RELAY placement_timeout_input SCHEMA placement_timeout_event UNBRANCHED;
       CREATE RELAY placement_timeout_output SCHEMA placement_timeout_event UNBRANCHED CAPACITY 1;

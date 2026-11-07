@@ -17,8 +17,8 @@ Feature: Runtime node input collection
         tenant string,
         sequence integer
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -104,8 +104,8 @@ Feature: Runtime node input collection
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY incoming SCHEMA notification UNBRANCHED;
       CREATE RELAY collected SCHEMA notification UNBRANCHED;

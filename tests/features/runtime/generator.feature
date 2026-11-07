@@ -74,8 +74,8 @@ Feature: Generator node
         amount integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA tenant_branch_schema (
@@ -161,7 +161,7 @@ Feature: Generator node
       CREATE SCHEMA notification (tenant STRING, amount I64);
       CREATE SCHEMA generated_notification (tenant STRING, total I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (tenant string, amount integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA tenant_branch_schema (tenant STRING);
       CREATE BRANCH tenant_branch SCHEMA tenant_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY tenant_branch
@@ -244,8 +244,8 @@ Feature: Generator node
         labels array OPTIONAL
       );
 
-      CREATE CODEC generator_metric_codec
-        FROM WIRE JSON SCHEMA generator_metric_wire
+      CREATE WIRE JSON CODEC generator_metric_codec
+        FROM WIRE SCHEMA generator_metric_wire
         TO SCHEMA generator_metric;
 
       CREATE SCHEMA generator_tenant_branch_schema (
@@ -336,8 +336,8 @@ Feature: Generator node
         amount integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications
@@ -412,8 +412,8 @@ Feature: Generator node
         amount integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications
@@ -497,8 +497,8 @@ Feature: Generator node
         amount integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE SCHEMA tenant_branch_schema (
@@ -599,8 +599,8 @@ Feature: Generator node
         id string,
         value integer
       );
-      CREATE CODEC generator_source_codec
-        FROM WIRE JSON SCHEMA generator_source_wire
+      CREATE WIRE JSON CODEC generator_source_codec
+        FROM WIRE SCHEMA generator_source_wire
         TO SCHEMA generator_source_value;
       CREATE RELAY generator_source_values
         SCHEMA generator_source_value
@@ -679,8 +679,8 @@ Feature: Generator node
         id string,
         divisor integer
       );
-      CREATE CODEC generator_error_codec
-        FROM WIRE JSON SCHEMA generator_error_wire
+      CREATE WIRE JSON CODEC generator_error_codec
+        FROM WIRE SCHEMA generator_error_wire
         TO SCHEMA generator_error_source;
       CREATE RELAY generator_error_sources
         SCHEMA generator_error_source

@@ -12,7 +12,7 @@ Feature: Web console execution graph
         order_id string,
         amount integer
       );
-      CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_record;
+      CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_record;
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
       CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA CLIENT kafka_out CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
@@ -58,7 +58,7 @@ Feature: Web console execution graph
         order_id string,
         amount integer
       );
-      CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_record;
+      CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_record;
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
       CREATE RELAY high_value_orders SCHEMA order_record UNBRANCHED;
       CREATE RELAY routine_orders SCHEMA order_record UNBRANCHED;
@@ -148,7 +148,7 @@ Feature: Web console execution graph
         tenant string,
         user_id integer
       );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA tenant_user_key ( tenant STRING, user_id I64 );
       CREATE BRANCH by_tenant_user SCHEMA tenant_user_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant_user;
@@ -197,7 +197,7 @@ Feature: Web console execution graph
         attempt integer,
         payload string
       );
-      CREATE CODEC retry_codec FROM WIRE JSON SCHEMA retry_wire TO SCHEMA retry_record;
+      CREATE WIRE JSON CODEC retry_codec FROM WIRE SCHEMA retry_wire TO SCHEMA retry_record;
       CREATE RELAY pending SCHEMA retry_record UNBRANCHED;
       CREATE RELAY retried SCHEMA retry_record UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -245,7 +245,7 @@ Feature: Web console execution graph
         order_id string,
         amount integer
       );
-      CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_record;
+      CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_record;
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
       CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR orders_in

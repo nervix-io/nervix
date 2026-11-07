@@ -10,7 +10,7 @@ Feature: Integrated client wire qualification
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA wire_record (tenant STRING, sequence I64);
       CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (tenant string, sequence integer);
-      CREATE CODEC wire_record_codec FROM WIRE JSON SCHEMA wire_record_json TO SCHEMA wire_record;
+      CREATE WIRE JSON CODEC wire_record_codec FROM WIRE SCHEMA wire_record_json TO SCHEMA wire_record;
       CREATE SCHEMA tenant_key (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;

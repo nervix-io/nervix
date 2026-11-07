@@ -17,7 +17,7 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_in CONFIG {
         'addr' = '{{mqtt_auth_addr}}',
@@ -81,7 +81,7 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT anonymous CONFIG {
         'addr' = '{{mqtt_auth_addr}}'
@@ -129,7 +129,7 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       """
       CREATE SCHEMA padded (padding STRING);
       CREATE WIRE JSON SCHEMA padded_wire MODE STRICT (padding string);
-      CREATE CODEC padded_codec FROM WIRE JSON SCHEMA padded_wire TO SCHEMA padded;
+      CREATE WIRE JSON CODEC padded_codec FROM WIRE SCHEMA padded_wire TO SCHEMA padded;
       CREATE RELAY padded_records SCHEMA padded UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG {
         'addr' = '{{mqtt_addr}}',
@@ -175,7 +175,7 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_in CONFIG {
         'addr' = '{{mqtt_addr}}',
@@ -231,7 +231,7 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG {
         'addr' = '{{mqtt_addr}}'
@@ -274,7 +274,7 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_in CONFIG {
         'addr' = '{{mqtt_addr}}',

@@ -14,8 +14,8 @@ Feature: Runtime persistence
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
@@ -80,7 +80,7 @@ Feature: Runtime persistence
       """
       CREATE SCHEMA reading ( tenant STRING, sensor STRING, value I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_restart_tenant SCHEMA tenant_branch TTL 5m;
       CREATE IF NOT EXISTS SCHEMA sensor_branch ( sensor STRING );
@@ -152,7 +152,7 @@ Feature: Runtime persistence
       """
       CREATE SCHEMA reading ( tenant STRING, sensor STRING, value I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_flushed_tenant SCHEMA tenant_branch TTL 5m;
       CREATE IF NOT EXISTS SCHEMA sensor_branch ( sensor STRING );

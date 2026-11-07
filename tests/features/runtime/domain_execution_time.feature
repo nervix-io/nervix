@@ -24,8 +24,8 @@ Feature: Domain execution time
       CREATE WIRE JSON SCHEMA source_event_wire MODE STRICT (
         sequence integer
       );
-      CREATE CODEC source_event_codec
-        FROM WIRE JSON SCHEMA source_event_wire
+      CREATE WIRE JSON CODEC source_event_codec
+        FROM WIRE SCHEMA source_event_wire
         TO SCHEMA source_event;
       CREATE RELAY ingested_events SCHEMA ingested_event UNBRANCHED;
       CREATE RELAY processed_events SCHEMA processed_event UNBRANCHED;
@@ -109,8 +109,8 @@ Feature: Domain execution time
         sequence integer,
         boundary string
       );
-      CREATE CODEC clock_probe_codec
-        FROM WIRE JSON SCHEMA clock_probe_wire
+      CREATE WIRE JSON CODEC clock_probe_codec
+        FROM WIRE SCHEMA clock_probe_wire
         TO SCHEMA clock_probe
         ENCODE boundary AS RFC3339;
       CREATE RELAY clock_probes SCHEMA clock_probe UNBRANCHED;
@@ -185,8 +185,8 @@ Feature: Domain execution time
         numerator integer,
         denominator integer
       );
-      CREATE CODEC calculation_codec
-        FROM WIRE JSON SCHEMA calculation_wire
+      CREATE WIRE JSON CODEC calculation_codec
+        FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE RELAY calculations SCHEMA calculation UNBRANCHED;
       CREATE RELAY calculation_results SCHEMA calculation_result UNBRANCHED;
@@ -272,8 +272,8 @@ Feature: Domain execution time
       CREATE WIRE JSON SCHEMA trigger_event_wire MODE STRICT (
         id integer
       );
-      CREATE CODEC trigger_event_codec
-        FROM WIRE JSON SCHEMA trigger_event_wire
+      CREATE WIRE JSON CODEC trigger_event_codec
+        FROM WIRE SCHEMA trigger_event_wire
         TO SCHEMA trigger_event;
       CREATE RELAY trigger_events SCHEMA trigger_event UNBRANCHED;
       CREATE RELAY generated_events SCHEMA generated_event UNBRANCHED;

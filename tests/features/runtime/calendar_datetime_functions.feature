@@ -36,8 +36,8 @@ Feature: Calendar, time zone and formatted datetime functions
         origin string,
         months integer
       );
-      CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+      CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event
         ENCODE occurred_at AS RFC3339,
                origin AS RFC3339;
@@ -153,8 +153,7 @@ Feature: Calendar, time zone and formatted datetime functions
         route STRING,
         error_message STRING
       );
-      CREATE CODEC reading_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC reading_batch_codec
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY readings SCHEMA reading UNBRANCHED;

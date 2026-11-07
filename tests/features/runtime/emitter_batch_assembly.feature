@@ -20,7 +20,7 @@ Feature: Emitter payload assembly across Arrow carriers
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         seq integer, tenant string, source string
       );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_source_a SCHEMA tenant_branch TTL 5m;
       CREATE BRANCH by_source_b SCHEMA tenant_branch TTL 5m;

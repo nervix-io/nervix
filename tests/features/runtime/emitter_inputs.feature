@@ -20,8 +20,8 @@ Feature: Emitter relay inputs
         tenant string,
         source string
       );
-      CREATE CODEC event_codec
-        FROM WIRE JSON SCHEMA event_wire
+      CREATE WIRE JSON CODEC event_codec
+        FROM WIRE SCHEMA event_wire
         TO SCHEMA event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_source_a SCHEMA tenant_branch TTL 5m;

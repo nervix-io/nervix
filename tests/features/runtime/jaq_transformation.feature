@@ -12,8 +12,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -67,8 +66,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -123,8 +121,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -178,8 +175,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -235,8 +231,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -290,8 +285,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -343,8 +337,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -399,8 +392,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -455,8 +447,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -510,8 +501,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -561,8 +551,7 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-        CREATE CODEC notification_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC notification_codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -612,8 +601,7 @@ Feature: JAQ transformation
         value F64,
         timestamp STRING
       );
-        CREATE CODEC sample_codec
-        FROM JSON
+        CREATE JAQ JSON CODEC sample_codec
         TO SCHEMA sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value: (.value * 2), timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );

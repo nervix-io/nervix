@@ -4149,8 +4149,7 @@ JAQ-native codecs can reshape outbound payloads with `ON EMITTING` before writin
 format:
 
 ```plexus
-CREATE IF NOT EXISTS CODEC notification_codec
-  FROM JSON
+CREATE IF NOT EXISTS JAQ JSON CODEC notification_codec
   TO SCHEMA notification
   WITH JAQ TRANSFORMATIONS ON EMITTING '{payload: .}';
 ```

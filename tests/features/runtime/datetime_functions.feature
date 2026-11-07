@@ -41,8 +41,8 @@ Feature: Datetime functions
         delay_ms integer,
         epoch_ms integer
       );
-      CREATE CODEC reading_codec
-        FROM WIRE JSON SCHEMA reading_wire
+      CREATE WIRE JSON CODEC reading_codec
+        FROM WIRE SCHEMA reading_wire
         TO SCHEMA reading
         ENCODE occurred_at AS RFC3339,
                origin AS RFC3339;
@@ -149,8 +149,7 @@ Feature: Datetime functions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC boundary_event_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC boundary_event_batch_codec
         TO SCHEMA boundary_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY boundary_events SCHEMA boundary_event UNBRANCHED;

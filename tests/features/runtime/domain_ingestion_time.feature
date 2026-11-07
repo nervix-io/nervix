@@ -7,7 +7,7 @@ Feature: Logical ingestion time and admission
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 100ms;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
       CREATE SCHEMA admission_error ( sequence I64, error_code STRING );
-      CREATE CODEC event_batch_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_batch_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY admission_errors SCHEMA admission_error UNBRANCHED;
@@ -69,7 +69,7 @@ Feature: Logical ingestion time and admission
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( sequence integer, occurred_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ingestion-clock-{{test_id}}.example.com;
@@ -133,7 +133,7 @@ Feature: Logical ingestion time and admission
       CREATE SCHEMA summary ( tenant STRING, total I64, samples I64, source_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY summaries SCHEMA summary BRANCHED BY tenants;
@@ -196,7 +196,7 @@ Feature: Logical ingestion time and admission
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 1h;
       CREATE SCHEMA request ( sequence I64, occurred_at DATETIME );
       CREATE WIRE JSON SCHEMA request_wire MODE STRICT ( sequence integer, occurred_at string );
-      CREATE CODEC request_codec FROM WIRE JSON SCHEMA request_wire TO SCHEMA request
+      CREATE WIRE JSON CODEC request_codec FROM WIRE SCHEMA request_wire TO SCHEMA request
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY observations SCHEMA request UNBRANCHED;
       CREATE VHOST edge retained-clock-{{test_id}}.example.com;
@@ -235,9 +235,9 @@ Feature: Logical ingestion time and admission
         sequence I64, occurred_at DATETIME, observed_at DATETIME, samples I64
       );
       CREATE WIRE JSON SCHEMA request_wire MODE STRICT ( sequence integer, occurred_at string );
-      CREATE CODEC request_codec FROM WIRE JSON SCHEMA request_wire TO SCHEMA request
+      CREATE WIRE JSON CODEC request_codec FROM WIRE SCHEMA request_wire TO SCHEMA request
         ENCODE occurred_at AS RFC3339;
-      CREATE CODEC delivery_codec FROM WIRE JSON SCHEMA request_wire TO SCHEMA request
+      CREATE WIRE JSON CODEC delivery_codec FROM WIRE SCHEMA request_wire TO SCHEMA request
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY buffered_events SCHEMA request UNBRANCHED;
       CREATE RELAY observations SCHEMA observation UNBRANCHED;

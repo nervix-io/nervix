@@ -412,6 +412,32 @@ test-client-restore-reply: build-web-console download-onnxruntime build-test-cli
         --input tests/features/runtime/client_restore_reply_validation.feature \
         --concurrency 2 --retry 0
 
+# Prepare codec checks separately so compilation has its own bounded phase.
+build-codec-parser-heads:
+    cargo test --package nervix-plexus --test kinded_codec_heads --no-run
+
+# Unify the native tool graph so each shared vocabulary dependency is prepared once.
+build-codec-tools:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo build --package nervix-plexus-format --bin nervix-plexus-format --package nervix-cli --bin nervix-cli --package nervix-deadlock --features nervix-deadlock/report-tool --bin nervix-deadlock-report
+
+# Real development assets keep focused API checks independent of release optimization.
+build-codec-heads: generate-test-onnx download-onnxruntime build-web-console-dev wasm-processor-guests build-codec-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
+# Public codec-head inspection and completion through the real native session and CLI.
+test-codec-heads: (test-codec-scenarios (justfile_directory() + "/tests/features/runtime/kinded_codec_heads.feature"))
+
+# Select codec round trips or browser cases with the same ordinary runner and prepared tools.
+test-codec-scenarios input *args: build-codec-heads
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input {{ quote(input) }} --concurrency 2 --retry 0 {{ quote(args) }}
+
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
 test-backup-cut-cleanup: build-deps build-test-cli
@@ -3961,6 +3987,13 @@ client *args: build-deps
 
 build-web-console:
     python3 -m scripts.build_web_console
+
+# Real, current console assets for focused local functional checks.
+build-web-console-dev:
+    python3 -m scripts.build_web_console --dev
+
+test-web-console-assets:
+    python3 -m unittest scripts.tests.test_bolero.ConsoleAssetTests
 
 # Keep the console build's wasm-bindgen CLI selection, installation and verification counters
 # beside the other tooling reports.

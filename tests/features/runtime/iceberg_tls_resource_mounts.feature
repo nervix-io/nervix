@@ -23,7 +23,7 @@ Feature: Iceberg TLS resource mounts
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-tls-catalog-{{test_id}}.example.com;
       CREATE ENDPOINT notification_endpoint ON edge PATH '/notifications' TYPE HTTP;
@@ -99,7 +99,7 @@ Feature: Iceberg TLS resource mounts
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-tls-objects-{{test_id}}.example.com;
       CREATE ENDPOINT notification_endpoint ON edge PATH '/notifications' TYPE HTTP;

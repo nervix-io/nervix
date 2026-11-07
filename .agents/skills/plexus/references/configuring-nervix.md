@@ -231,7 +231,7 @@ current connection, retry and deadline limits.
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
   WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`. SYSLOG is a predefined singleton wire
-  schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
+  schema selected by a `SYSLOG CODEC` head; it has no name or model lifecycle.
 - CBOR wire fields use exactly `integer`, `float`, `boolean`, `text`, `bytes`, or `array`. `bytes`
   carries native CBOR byte strings; `DATETIME` binds `text` with `ENCODE field AS RFC3339`.
 - Every codec explicitly declares text interchange with `ENCODE field AS RFC3339` for datetimes
@@ -240,7 +240,7 @@ current connection, retry and deadline limits.
   codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
   order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
-- Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
+- Every codec using the SYSLOG wire schema uses a `SYSLOG CODEC` head and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT` transport,
   use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
   configure TLS identity for the client direction that consumes it, and set a key only one side
