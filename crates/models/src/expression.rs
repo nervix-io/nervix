@@ -168,6 +168,13 @@ impl Expression {
         }
     }
 
+    /// Whether evaluating this expression requires a source branch's typed fields.
+    pub fn reads_branch_fields(&self) -> bool {
+        let mut reads = false;
+        self.visit_fields(&mut |field| reads |= field.scope == FieldScope::Branch);
+        reads
+    }
+
     pub fn visit_fields(&self, visitor: &mut impl FnMut(&FieldReference)) {
         match self {
             Self::Literal(_) => {}

@@ -167,8 +167,10 @@ pub(crate) enum ConnectorDeclarationIssue {
     #[error("{site} requires an exact, non-null, non-sensitive {expected} value")]
     EnvelopeValue {
         site: EnvelopeValueSite,
-        expected: nervix_models::ParseAsType,
+        expected: nervix_models::EnvelopeValueType,
     },
+    #[error("PARTITION FROM BRANCH requires branched input; relay '{relay}' is unbranched")]
+    PartitionRequiresBranch { relay: nervix_models::RelayName },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]

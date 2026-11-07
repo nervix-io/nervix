@@ -266,11 +266,17 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             unlocated(ConnectorKind::Http, &[("METHOD", true), ("PATH", true)])
         }
         EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => EmitterSurface {
-            envelope: &[EnvelopeClauseKind::Timestamp],
+            envelope: &[
+                EnvelopeClauseKind::Key,
+                EnvelopeClauseKind::PartitionFromBranch,
+                EnvelopeClauseKind::Timestamp,
+            ],
             ..located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
         },
         EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => EmitterSurface {
             envelope: &[
+                EnvelopeClauseKind::Key,
+                EnvelopeClauseKind::PartitionFromBranch,
                 EnvelopeClauseKind::Timestamp,
                 EnvelopeClauseKind::DeliverAfter,
             ],
@@ -732,8 +738,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
         ),
         [
             "MODE ACK",
-            "FIFO GROUP <expression>",
-            "FIFO GROUP FROM BRANCH",
+            "FIFO GROUP",
             "SEND SINGLE",
             "SEND BATCH",
             "BATCH",

@@ -154,7 +154,7 @@ fn emitted_attributes_carry_strings_integers_and_bytes_as_their_sqs_data_types()
 }
 
 #[test]
-fn fifo_group_is_an_optional_expression_or_the_branch() {
+fn fifo_group_is_an_optional_expression() {
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
     let [fifo_group, _] = emit.options else {
         panic!("an SQS queue emitter declares its FIFO GROUP, then its SEND");
@@ -165,12 +165,11 @@ fn fifo_group_is_an_optional_expression_or_the_branch() {
         fifo_group.presence,
         OptionPresence::Optional { default: None }
     );
-    let OptionForm::Choice([expression, branch]) = fifo_group.form else {
-        panic!("FIFO GROUP is a choice between an expression and the record's branch");
+    let OptionForm::Value { value, example } = fifo_group.form else {
+        panic!("FIFO GROUP declares an expression");
     };
-    assert_eq!(expression.value, Some(OptionValue::Expression));
-    assert_eq!(branch.name, "FROM BRANCH");
-    assert_eq!(branch.value, None);
+    assert_eq!(value, OptionValue::Expression);
+    assert_eq!(example, "FIFO GROUP branch.tenant");
 }
 
 #[test]
