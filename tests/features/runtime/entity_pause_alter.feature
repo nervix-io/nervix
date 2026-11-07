@@ -188,7 +188,7 @@ Feature: Entity-pause model alterations
       """
     Then the last command output contains
       """
-      CREATE ATTACHED JUNCTION altered_path
+      CREATE JUNCTION altered_path
       """
     When emitter "blocked_emitter" leaves stall mode
     Then within "5s" the observed broker receives payloads
@@ -368,7 +368,7 @@ Feature: Entity-pause model alterations
       """
     Then the last command output contains
       """
-      CREATE ATTACHED JUNCTION enrich_parked
+      CREATE JUNCTION enrich_parked
       """
     When these Plexus commands are executed on the leader node
       """

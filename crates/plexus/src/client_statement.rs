@@ -17,10 +17,10 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_mode, completion_context,
-        completion_tokens, domain_ref, filter_by_prefix, if_not_exists_clause, into_parse_error,
-        junction_name, kw, kw_phrase3, lex_input, relay_ref, schema_name, suggestions_from_errors,
-        tok, wire_schema_name,
+        LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
+        domain_ref, filter_by_prefix, if_not_exists_clause, into_parse_error, junction_name, kw,
+        kw_phrase3, lex_input, relay_ref, schema_name, suggestions_from_errors, tok,
+        wire_schema_name,
     },
 };
 
@@ -304,7 +304,6 @@ pub fn suggest_client_expectations(input: &str, cursor: usize) -> Vec<Completion
 fn junction_input_relay(tokens: &[Token]) -> Option<RelayName> {
     kw(Keyword::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Keyword::Junction))
         .then_ignore(junction_name())
         .then_ignore(kw(Keyword::From))
@@ -350,7 +349,6 @@ fn ingestor_source_kind(tokens: &[Token]) -> Option<IngestorEntityKind> {
 fn emitter_connector_kind(tokens: &[Token]) -> Option<EmitterEntityKind> {
     let create = kw(Keyword::Create)
         .ignore_then(if_not_exists_clause())
-        .ignore_then(ack_mode().or_not())
         .ignore_then(crate::emitter::head_kind());
     let alter = kw(Keyword::Alter).ignore_then(crate::emitter::head_kind());
     choice((create, alter))

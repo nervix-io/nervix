@@ -170,7 +170,8 @@ Feature: Graceful shutdown
         TO handoff_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER handoff_output FROM handoff_records
+      CREATE KAFKA TOPIC EMITTER handoff_output FROM handoff_records
+        ATTACHED
         TO handoff_kafka TOPIC 'shutdown_handoff_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_codec
@@ -253,7 +254,8 @@ Feature: Graceful shutdown
         TO flush_records INHERIT ALL UNBRANCHED
           FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER flush_output FROM flush_records
+      CREATE KAFKA TOPIC EMITTER flush_output FROM flush_records
+        ATTACHED
         TO flush_kafka TOPIC 'shutdown_flush_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING flush_codec

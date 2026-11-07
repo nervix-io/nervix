@@ -111,7 +111,8 @@ Feature: Pulsar emission
       CREATE PULSAR CLIENT pulsar_sink CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
-      CREATE ATTACHED PULSAR TOPIC EMITTER pulsar_boundary FROM notifications
+      CREATE PULSAR TOPIC EMITTER pulsar_boundary FROM notifications
+        ATTACHED
         TO pulsar_sink TOPIC 'pulsar_boundary_out_{{test_id}}'
           MODE <publishing_mode>
           ENCODE USING notification_codec

@@ -366,7 +366,8 @@ Feature: Kafka emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_mode_boundary FROM notifications
+      CREATE KAFKA TOPIC EMITTER kafka_mode_boundary FROM notifications
+        ATTACHED
         TO unavailable_kafka_sink TOPIC 'unavailable_mode_boundary'
           MODE <publishing_mode>
           ENCODE USING notification_codec
@@ -424,8 +425,9 @@ Feature: Kafka emission
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE DETACHED KAFKA TOPIC EMITTER kafka_detached_confirming
+      CREATE KAFKA TOPIC EMITTER kafka_detached_confirming
       FROM notifications
+      DETACHED
       TO kafka_main TOPIC 'detached_confirming_out_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ENCODE USING notification_codec
@@ -497,8 +499,9 @@ Feature: Kafka emission
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE DETACHED KAFKA TOPIC EMITTER kafka_stale_copy
+      CREATE KAFKA TOPIC EMITTER kafka_stale_copy
       FROM notifications
+      DETACHED
       TO kafka_sink TOPIC 'stale_copy_out_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 10s MAX 10s
         ENCODE USING notification_codec

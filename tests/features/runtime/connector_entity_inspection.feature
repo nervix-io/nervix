@@ -321,7 +321,7 @@ Feature: Every connector entity uses the shared inspection rows
       """
     Then the last command output contains
       """
-      CREATE ATTACHED <phrase> EMITTER outgoing
+      CREATE <phrase> EMITTER outgoing
       """
 
     Examples:

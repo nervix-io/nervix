@@ -1,9 +1,21 @@
+//! Plexus inferencer statements.
+//!
+//! Layer: language.
+//! - **Owns.** The inferencer grammar, lowering into Models and grammar-derived completion.
+//! - **Depends on.** Shared parser clauses, tokens and the vocabulary.
+//! - **Must not know.** Registry validation, execution planning or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use std::num::NonZeroU32;
 
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckMode, CreateInferencer, CreateStatement, InferencerStateBinding, InferencerStateInitial,
+    CreateInferencer, CreateStatement, InferencerStateBinding, InferencerStateInitial,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
     RequestedResourceVersion,
@@ -151,11 +163,11 @@ pub fn create_inferencer_parser<'src>() -> impl Parser<
 > + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Identifier::Inferencer))
         .then(inferencer_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(ack_mode().or_not())
         .then(filter_where_clause().or_not())
         .boxed()
         .then_ignore(kw(Identifier::Using))
@@ -187,7 +199,7 @@ pub fn create_inferencer_parser<'src>() -> impl Parser<
                 ),
                 processor_outputs,
             ) = value;
-            let ((((if_not_exists, mode), name), from_input), filter_where) = base;
+            let ((((if_not_exists, name), from_input), mode), filter_where) = base;
             CreateStatement::new(
                 CreateInferencer {
                     name,
@@ -200,7 +212,7 @@ pub fn create_inferencer_parser<'src>() -> impl Parser<
                     inputs,
                     state: state.unwrap_or_default(),
                     output_schema,
-                    mode: mode.unwrap_or(AckMode::Attached),
+                    mode: mode.unwrap_or_default(),
                     filter_where,
                     materialized_state,
                 },
@@ -244,11 +256,25 @@ pub fn suggest_create_inferencer(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::FlushPolicy;
+    use nervix_models::{AckMode, FlushPolicy};
     use nonzero_ext::nonzero;
 
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn input_acknowledgement_clause() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE INFERENCER tested FROM incoming",
+            "USING RESOURCE model VERSION 1 FILE 'model.onnx' INPUTS { 'features' DENSE \
+             TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] } \
+             UNBRANCHED TO outgoing SET value = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG",
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE INFERENCER tested FROM incoming DETACHED ",
+            &["FILTER WHERE", "USING RESOURCE"],
+        );
+    }
 
     #[test]
     fn parses_stateful_inferencer_with_an_initial_tensor() {
@@ -351,8 +377,8 @@ mod tests {
     #[test]
     fn parses_create_inferencer() {
         let input = r#"
-            CREATE DETACHED INFERENCER score_model
-            FROM features FILTER WHERE input.present
+            CREATE INFERENCER score_model
+            FROM features DETACHED FILTER WHERE input.present
             USING RESOURCE fraud_model VERSION 3
             FILE 'models/fraud.onnx'
             INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = input.vector }

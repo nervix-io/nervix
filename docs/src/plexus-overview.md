@@ -415,6 +415,7 @@ source-level filter to `FROM`:
 ```plexus,ignore
 FROM <relay> [WHERE <expr>], ...
 [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
+[ATTACHED | DETACHED]
 [FILTER WHERE <expr>]
 TO <relay>
   [INHERIT ...]
@@ -436,6 +437,13 @@ they may belong to differently named branches; collection remains independent fo
 relay and concrete branch. Generators do not read a `FROM` relay and therefore have no input
 collection clause. The duration is measured on the domain clock and starts when the source and
 branch collector changes from empty to non-empty. A paced domain's `TIME RATE` scales that wait.
+
+Relay-consuming processors and emitters may write `ATTACHED | DETACHED` after their complete
+input list and optional `COLLECT FOR`; correlators place it after `RIGHT FROM` and that side's
+collection policy. The default is `ATTACHED`. Canonical rendering writes the mode explicitly as
+its own body clause, including through `SHOW CREATE`, the formatter and configuration backups.
+See [Processors](processors.md#shared-input-and-branch-contracts) and
+[Emitters](emitters.md#statement-heads-and-external-names) for the complete clause order.
 
 `FROM ... WHERE` runs first. `FILTER WHERE` runs next, before the node accepts rows into its state,
 buffer, inferencer, or guest. Every route then creates a new empty output, performs its own ordered

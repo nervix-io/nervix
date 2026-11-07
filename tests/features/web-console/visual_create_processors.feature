@@ -27,7 +27,7 @@ Feature: Web console visual junction and reingestor creation
     And selector ".create-processor-inherit [data-inherit='all']" is clicked
     And selector ".create-processor-flush [data-flush='immediate']" is clicked
     And selector ".create-processor-message-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE ATTACHED JUNCTION visual_scope_junction"
+    Then selector ".create-preview" contains "CREATE JUNCTION visual_scope_junction"
     When selector ".create-close" is clicked
     And selector ".domain-select" is clicked
     And selector ".domain-menu [data-domain='{{domain}}_other']" is clicked
@@ -74,13 +74,13 @@ Feature: Web console visual junction and reingestor creation
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
-    And selector ".create-preview" contains "CREATE ATTACHED JUNCTION visual_reconnected_junction"
+    And selector ".create-preview" contains "CREATE JUNCTION visual_reconnected_junction"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE JUNCTION visual_reconnected_junction;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE ATTACHED JUNCTION visual_reconnected_junction"
+    Then selector ".terminal" contains "CREATE JUNCTION visual_reconnected_junction"
 
   @visual_processor_staged_order
   Scenario: A junction keeps route order and selects compatible relays staged in its transaction
@@ -208,7 +208,7 @@ Feature: Web console visual junction and reingestor creation
     And selector ".create-processor-assignment-expression" is filled with "input.message"
     And selector ".create-processor-flush [data-flush='immediate']" is clicked
     And selector ".create-processor-message-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE ATTACHED JUNCTION visual_route_junction"
+    Then selector ".create-preview" contains "CREATE JUNCTION visual_route_junction"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
@@ -274,7 +274,7 @@ Feature: Web console visual junction and reingestor creation
     And selector ".create-processor-inherit [data-inherit='all']" is clicked
     And selector ".create-processor-flush [data-flush='immediate']" is clicked
     And selector ".create-processor-message-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE ATTACHED REINGESTOR visual_partition_stage"
+    Then selector ".create-preview" contains "CREATE REINGESTOR visual_partition_stage"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked

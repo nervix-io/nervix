@@ -1413,7 +1413,8 @@ Feature: Window processor runtime behavior
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED WINDOW PROCESSOR detached_window FROM metrics
+        CREATE WINDOW PROCESSOR detached_window FROM metrics
+        DETACHED
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         BRANCHED BY by_kafka_metrics

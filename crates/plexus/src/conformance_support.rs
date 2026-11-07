@@ -16,9 +16,57 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{Model, RequestedResourceVersion, Statement};
 
 use crate::statement::{parse_statement, suggest_statement};
+
+/// Checks the shared input acknowledgement clause through a family's production grammar.
+pub(crate) fn assert_input_acknowledgement_clause(prefix: &str, tail: &str) {
+    for collection in ["", " COLLECT FOR 10ms MAX BATCH SIZE 1MiB"] {
+        let input = format!("{prefix}{collection}");
+        let implicit = parse_statement(&format!("{input} {tail};"))
+            .assured("each family supplies a complete statement with its optional mode omitted");
+        for mode in ["ATTACHED", "DETACHED"] {
+            let source = format!("{input} {mode} {tail};");
+            let explicit =
+                parse_statement(&source).unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+            if mode == "ATTACHED" {
+                assert_eq!(implicit, explicit, "omitting the clause means ATTACHED");
+            } else {
+                assert_ne!(implicit, explicit, "DETACHED is a distinct input contract");
+            }
+            let canonical = explicit
+                .to_canonical_plexus()
+                .assured("these fixtures contain only canonically representable expressions");
+            let lines: Vec<_> = canonical.lines().map(str::trim).collect();
+            assert!(
+                lines.windows(2).any(|pair| {
+                    (pair[0].starts_with("FROM ") || pair[0].starts_with("RIGHT FROM "))
+                        && pair[1] == mode
+                }),
+                "{canonical}\nmust write {mode} after the complete input contract"
+            );
+            assert_reads_back_canonically(&explicit);
+        }
+        assert!(refused(&format!("{input} ATTACHED DETACHED {tail};")));
+        assert!(refused(&format!("{input} DETACHED ATTACHED {tail};")));
+        let completion_prefix = format!("{input} ");
+        let suggestions = suggest_statement(&completion_prefix, completion_prefix.len());
+        for mode in ["ATTACHED", "DETACHED"] {
+            assert!(
+                suggestions.iter().any(|item| item == mode),
+                "{suggestions:?}"
+            );
+        }
+    }
+    let boundary = prefix
+        .find(" LEFT FROM ")
+        .or_else(|| prefix.find(" FROM "))
+        .assured("every fixture declares relay inputs");
+    let (head, inputs) = prefix.split_at(boundary);
+    assert!(refused(&format!("{head} DETACHED{inputs} {tail};")));
+}
 
 /// The Model a generated `CREATE` statement declares, or `None` where the grammar refuses it.
 pub(crate) fn created_model(statement: &str) -> Option<Model<RequestedResourceVersion>> {

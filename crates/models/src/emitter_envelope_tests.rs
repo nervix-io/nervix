@@ -415,7 +415,7 @@ fn an_emitter_statement_writes_its_envelope_after_its_payload() {
     // before the construction a statement would write and the emitter's batching and flush.
     assert_eq!(
         emitter.to_canonical_plexus().expect("the emitter renders"),
-        "CREATE ATTACHED ZEROMQ PUSH EMITTER publish_events\n  FROM events\n  TO zeromq_main\n    \
+        "CREATE ZEROMQ PUSH EMITTER publish_events\n  FROM events\n  ATTACHED\n  TO zeromq_main\n    \
          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s\n    ENCODE USING events_codec\n    \
          PERSISTENT\n    MESSAGE ID 'id'\n    PROPERTIES {\n      'content_type' = \
          'application/json',\n      'priority' = 5\n    }\n  FLUSH IMMEDIATE\n  ON MESSAGE ERROR \

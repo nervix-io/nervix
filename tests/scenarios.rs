@@ -30023,7 +30023,7 @@ fn syslog_tls_sender(
     addr: &str,
     resource_directory: &str,
 ) -> common::syslog_tls::SyslogTlsSender {
-    nervix_interconnect::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let parsed = url::Url::parse(&format!("syslog://{addr}"))
         .unwrap_or_else(|error| panic!("invalid Syslog TLS test address '{addr}': {error}"));
     let server_name = parsed

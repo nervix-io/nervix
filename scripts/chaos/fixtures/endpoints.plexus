@@ -37,8 +37,9 @@ CREATE HTTP ENDPOINT INGESTOR chaos_edge_http_source
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED KAFKA TOPIC EMITTER chaos_edge_http_emitter
+CREATE KAFKA TOPIC EMITTER chaos_edge_http_emitter
   FROM chaos_edge_http
+  ATTACHED
   TO chaos_edge_kafka TOPIC 'chaos_edge_primary_http'
     MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
     ENCODE USING chaos_edge_json

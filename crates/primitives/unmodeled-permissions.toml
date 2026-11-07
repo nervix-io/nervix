@@ -192,11 +192,11 @@ path = "crates/simd-kernels/src/lib.rs"
 reason = "The instruction level is detected once per process and read by every kernel afterwards, in every model execution the process runs."
 
 [[permission]]
-items = ["sync::OnceLock"]
-limit = "Installing the process's cryptography provider is outside every model."
-owner = "The interconnect's TLS configuration."
-path = "crates/interconnect/src/lib.rs"
-reason = "The process installs its default cryptography provider once, for every connection it ever makes."
+items = ["sync::LazyLock"]
+limit = "Provider construction and process initialization stay outside every model; no protocol assertion relies on this cache's ordering."
+owner = "The cryptography boundary's immutable interconnect provider."
+path = "crates/crypto/src/tls.rs"
+reason = "Every TLS bundle shares the same fixed provider for the process lifetime, including across reloads and model executions; rustls owns default installation."
 
 [[permission]]
 items = ["sync::OnceLock"]

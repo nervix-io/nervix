@@ -38,7 +38,8 @@ Feature: Emitter batch lifecycle
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ATTACHED ZEROMQ PUSH EMITTER batched FROM events
+      CREATE ZEROMQ PUSH EMITTER batched FROM events
+        ATTACHED
         TO destination MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL
@@ -92,7 +93,8 @@ Feature: Emitter batch lifecycle
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ATTACHED ZEROMQ PUSH EMITTER batched FROM events
+      CREATE ZEROMQ PUSH EMITTER batched FROM events
+        ATTACHED
         TO destination MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL
@@ -185,7 +187,8 @@ Feature: Emitter batch lifecycle
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ATTACHED ZEROMQ PUSH EMITTER batched FROM events
+      CREATE ZEROMQ PUSH EMITTER batched FROM events
+        ATTACHED
         USING MATERIALIZED STATE settings REQUIRED WAIT
         TO destination MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING output_codec
@@ -272,7 +275,8 @@ Feature: Emitter batch lifecycle
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ATTACHED ZEROMQ PUSH EMITTER batched FROM events
+      CREATE ZEROMQ PUSH EMITTER batched FROM events
+        ATTACHED
         TO destination MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL
@@ -370,8 +374,9 @@ Feature: Emitter batch lifecycle
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ATTACHED ZEROMQ PUSH EMITTER batched
+      CREATE ZEROMQ PUSH EMITTER batched
         FROM plain_events, first_events, second_events
+        ATTACHED
         TO destination MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL
@@ -454,7 +459,8 @@ Feature: Emitter batch lifecycle
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ATTACHED ZEROMQ PUSH EMITTER batched FROM events
+      CREATE ZEROMQ PUSH EMITTER batched FROM events
+        ATTACHED
         TO destination MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL
@@ -537,7 +543,8 @@ Feature: Emitter batch lifecycle
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ATTACHED ZEROMQ PUSH EMITTER batched FROM events
+      CREATE ZEROMQ PUSH EMITTER batched FROM events
+        ATTACHED
         USING MATERIALIZED STATE settings REQUIRED WAIT
         TO destination MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING output_codec
@@ -607,7 +614,8 @@ Feature: Emitter batch lifecycle
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ATTACHED ZEROMQ PUSH EMITTER batched FROM events
+      CREATE ZEROMQ PUSH EMITTER batched FROM events
+        ATTACHED
         TO destination MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL
@@ -731,7 +739,8 @@ Feature: Emitter batch lifecycle
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ATTACHED ZEROMQ PUSH EMITTER batched FROM events
+      CREATE ZEROMQ PUSH EMITTER batched FROM events
+        ATTACHED
         TO destination MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL
