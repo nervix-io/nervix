@@ -1090,8 +1090,15 @@ reports, so a client routes notices by kind and never by their text:
 
 A membership notice reports only a change of the live set. Model changes, subscriptions opening or
 closing and domain starts change what members publish through gossip, not which members are live,
-so none of them produces one. A session that falls behind the node's notice bus skips the notices it missed; the node
-logs how many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
+so none of them produces one. The serving node still refreshes routes, prerequisites and subscription
+interest when those published values change. A notice carries no acknowledgement of a particular
+command: [command completion](./command-completion.md#application-progress) follows that command's
+terminal outcome. The [CLI](./client-tools-cli.md#asynchronous-output) labels all notice kinds; the
+[console](./client-tools-web-console.md#following-cluster-events) routes membership and leadership
+to its event panel and the other kinds to its transcript.
+
+A session that falls behind the node's notice bus skips the notices it missed; the node logs how
+many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
 notice that does not fit drops the ones held, and the caller's next read reports that gap before
 the notices that follow it. Notices end with the session that delivered them, and the client's
 notice stream continues with the next session it opens.

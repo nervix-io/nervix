@@ -85,6 +85,12 @@ raft transition: state=Follower leader=node-2 term=3 last_log_index=41 last_appl
 These events never enter the REPL transcript. Runtime and control-plane failures and committed
 cluster-parameter revisions still appear there as notice lines, beside the command outcomes.
 
+The server-supplied notice kind selects the panel or transcript; its message is display text.
+Creating a model, starting a domain or changing subscription interest alone adds no membership
+event. The command's own outcome reports its completion. The
+[session protocol](./client-session-protocol.md#what-a-session-is-told) defines all five notice
+kinds and the notice stream's bounds.
+
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.
 The **Cluster** footer stays independent of the selected domain: it reports the number of running

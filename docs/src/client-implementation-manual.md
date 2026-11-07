@@ -84,6 +84,12 @@ A client that presents notices MUST route each by its `kind`, as [What A Session
 Told](./client-session-protocol.md#what-a-session-is-told) defines the kinds, and MUST NOT derive
 meaning from a notice's text, which is for display only.
 
+A `Membership` notice describes the serving node's observation of a join, leave or incarnation
+change. A command's application progress is internal node-to-node traffic; its client-visible
+completion is the correlated command outcome under
+[Commands And Execution Identity](#commands-and-execution-identity). Notice delivery has its own
+bounded, gap-reporting stream and supplies no command outcome.
+
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
 the download of a backup's archive; see [Backup Downloads](#backup-downloads), and a restore with its
 archive; see [Restore Streams](#restore-streams).

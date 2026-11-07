@@ -46,6 +46,15 @@ This focused check covers incarnation-bound progress, completion through a push 
 clock delivery after attachment changes; the complete ordinary and mode suites remain separate
 qualification evidence.
 
+The held-query case keeps the sampled revision replies outstanding while reports complete the
+command. The held-report-and-query case releases either path explicitly and measures completion
+from that release. Clock cases exercise receiver attachment ahead of graph readiness. These are
+separate witnesses for the [completion barrier](./command-completion.md#all-live-node-barriers)
+and [authority delivery](./domain-clock.md#tick-production-and-progress-delivery); membership gossip
+remains available for topology and subscription interest. The measured nine- and twenty-second
+control-probe budgets and their margins are recorded under
+[Product Deadlines And Harness Deadlines](#product-deadlines-and-harness-deadlines).
+
 ## Focused Native Command Recovery
 
 `just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
