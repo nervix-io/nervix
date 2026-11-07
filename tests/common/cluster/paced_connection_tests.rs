@@ -47,3 +47,26 @@ async fn a_paced_connection_keeps_both_distinct_socket_legs() -> error_stack::Re
     .map_err(io::Error::other)??;
     Ok(())
 }
+
+#[nervix_primitives::test]
+async fn a_paced_connection_preserves_nodelay_on_both_legs() -> error_stack::Result<(), io::Error> {
+    timeout(Duration::from_secs(10), async {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let _sender = TcpStream::connect(listener.local_addr()?).await?;
+        let (incoming, _) = listener.accept().await?;
+        let connection = PacedConnection::connect(incoming, target.local_addr()?).await?;
+        let _receiver = target.accept().await?;
+        let incoming_nodelay = connection.incoming.nodelay()?;
+        let outgoing_nodelay = connection.outgoing.nodelay()?;
+        assert_eq!(
+            (incoming_nodelay, outgoing_nodelay),
+            (true, true),
+            "the byte cadence must be the only delay the interconnect fixture adds"
+        );
+        Ok::<(), io::Error>(())
+    })
+    .await
+    .map_err(io::Error::other)??;
+    Ok(())
+}
