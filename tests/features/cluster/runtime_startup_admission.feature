@@ -26,8 +26,8 @@ Feature: Runtime startup admission
         sequence integer
       );
 
-      CREATE CODEC admission_event_codec
-        FROM WIRE JSON SCHEMA admission_event_wire
+      CREATE WIRE JSON CODEC admission_event_codec
+        FROM WIRE SCHEMA admission_event_wire
         TO SCHEMA admission_event;
 
       CREATE RELAY admission_input SCHEMA admission_event UNBRANCHED;

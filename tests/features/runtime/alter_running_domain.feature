@@ -18,8 +18,8 @@ Feature: Altering schemas on a running domain
         seq integer
       );
 
-      CREATE CODEC running_event_codec
-        FROM WIRE JSON SCHEMA running_event_wire
+      CREATE WIRE JSON CODEC running_event_codec
+        FROM WIRE SCHEMA running_event_wire
         TO SCHEMA running_event;
 
       CREATE RELAY running_events SCHEMA running_event UNBRANCHED;
@@ -106,8 +106,8 @@ Feature: Altering schemas on a running domain
       """
       CREATE SCHEMA timeout_event ( seq I64 );
       CREATE WIRE JSON SCHEMA timeout_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC timeout_event_codec
-        FROM WIRE JSON SCHEMA timeout_event_wire
+      CREATE WIRE JSON CODEC timeout_event_codec
+        FROM WIRE SCHEMA timeout_event_wire
         TO SCHEMA timeout_event;
       CREATE RELAY timeout_events SCHEMA timeout_event UNBRANCHED;
 
@@ -194,8 +194,8 @@ Feature: Altering schemas on a running domain
         tenant string,
         seq integer
       );
-      CREATE CODEC mutable_event_codec
-        FROM WIRE JSON SCHEMA mutable_event_wire
+      CREATE WIRE JSON CODEC mutable_event_codec
+        FROM WIRE SCHEMA mutable_event_wire
         TO SCHEMA mutable_event;
 
       CREATE SCHEMA stable_event ( tenant STRING, seq I64 );
@@ -203,8 +203,8 @@ Feature: Altering schemas on a running domain
         tenant string,
         seq integer
       );
-      CREATE CODEC stable_event_codec
-        FROM WIRE JSON SCHEMA stable_event_wire
+      CREATE WIRE JSON CODEC stable_event_codec
+        FROM WIRE SCHEMA stable_event_wire
         TO SCHEMA stable_event;
 
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
@@ -322,8 +322,8 @@ Feature: Altering schemas on a running domain
 
       CREATE WIRE JSON SCHEMA rollback_event_wire MODE STRICT ( seq integer );
 
-      CREATE CODEC rollback_event_codec
-        FROM WIRE JSON SCHEMA rollback_event_wire
+      CREATE WIRE JSON CODEC rollback_event_codec
+        FROM WIRE SCHEMA rollback_event_wire
         TO SCHEMA rollback_event;
 
       CREATE RELAY rollback_events SCHEMA rollback_event UNBRANCHED CAPACITY 3;

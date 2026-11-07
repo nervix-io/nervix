@@ -13,8 +13,8 @@ Feature: Kafka ingestor domain pacing
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC resumed_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC resumed_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -122,8 +122,8 @@ Feature: Kafka ingestor domain pacing
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC resumed_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC resumed_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -196,8 +196,8 @@ Feature: Kafka ingestor domain pacing
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC resume_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC resume_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT slow_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
@@ -273,8 +273,8 @@ Feature: Kafka ingestor domain pacing
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -328,8 +328,8 @@ Feature: Kafka ingestor domain pacing
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -389,8 +389,8 @@ Feature: Kafka ingestor domain pacing
         user_id integer,
         occurred_at string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -447,8 +447,8 @@ Feature: Kafka ingestor domain pacing
         user_id integer,
         occurred_at string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -507,8 +507,8 @@ Feature: Kafka ingestor domain pacing
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -582,8 +582,8 @@ Feature: Kafka ingestor domain pacing
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -674,8 +674,8 @@ Feature: Kafka ingestor domain pacing
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -751,8 +751,8 @@ Feature: Kafka ingestor domain pacing
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -832,8 +832,8 @@ Feature: Kafka ingestor domain pacing
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -915,8 +915,8 @@ Feature: Kafka ingestor domain pacing
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
@@ -972,7 +972,7 @@ Feature: Kafka ingestor domain pacing
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA added_event ( seq I64 );
       CREATE WIRE JSON SCHEMA added_wire MODE STRICT ( seq integer );
-      CREATE CODEC added_codec FROM WIRE JSON SCHEMA added_wire TO SCHEMA added_event;
+      CREATE WIRE JSON CODEC added_codec FROM WIRE SCHEMA added_wire TO SCHEMA added_event;
       CREATE RELAY added_events SCHEMA added_event UNBRANCHED;
       CREATE KAFKA CLIENT added_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'

@@ -59,30 +59,29 @@ CREATE [IF NOT EXISTS] WIRE JSON SCHEMA <name> MODE STRICT|LOOSE (<field> <json_
 CREATE [IF NOT EXISTS] WIRE CBOR SCHEMA <name> MODE STRICT|LOOSE (<field> <cbor_type> [OPTIONAL], ...);
 CREATE [IF NOT EXISTS] WIRE AVRO SCHEMA <name> MODE STRICT|LOOSE (<field> <avro_type> [OPTIONAL], ...);
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM WIRE JSON SCHEMA <wire_schema>
+CREATE [IF NOT EXISTS] WIRE JSON CODEC <name>
+  FROM WIRE SCHEMA <wire_schema>
   TO SCHEMA <schema>
   [ENCODE <field> AS RFC3339|BASE64, ...];
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM WIRE CBOR SCHEMA <wire_schema>
+CREATE [IF NOT EXISTS] WIRE CBOR CODEC <name>
+  FROM WIRE SCHEMA <wire_schema>
   TO SCHEMA <schema>
   [ENCODE <field> AS RFC3339, ...];
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM WIRE AVRO SCHEMA <wire_schema>
+CREATE [IF NOT EXISTS] WIRE AVRO CODEC <name>
+  FROM WIRE SCHEMA <wire_schema>
   TO SCHEMA <schema>
   [ENCODE <field> AS RFC3339|BASE64, ...];
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM JSON|YAML|TOML|XML|CBOR
+CREATE [IF NOT EXISTS] JAQ JSON|YAML|TOML|XML|CBOR CODEC <name>
   TO SCHEMA <schema>
   WITH JAQ TRANSFORMATIONS
   [ON INGESTION '<program>']
-  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']];
+  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']]
+  [ENCODE <field> AS RFC3339|BASE64, ...];
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM PROTOBUF
+CREATE [IF NOT EXISTS] PROTOBUF CODEC <name>
   USING RESOURCE <resource> VERSION <n> | LATEST
   CONFIG {'file' = '<path.proto>', 'include' = '.'}
   MESSAGE '<package.Message>'
@@ -90,10 +89,10 @@ CREATE [IF NOT EXISTS] CODEC <name>
   TO SCHEMA <schema>
   WITH JAQ TRANSFORMATIONS
   [ON INGESTION '<program>']
-  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']];
+  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']]
+  [ENCODE <field> AS RFC3339|BASE64, ...];
 
-CREATE [IF NOT EXISTS] CODEC <name>
-  FROM SYSLOG
+CREATE [IF NOT EXISTS] SYSLOG CODEC <name>
   TO SCHEMA <schema>;
 
 CREATE [IF NOT EXISTS] BRANCH <name> SCHEMA <schema> TTL <duration>

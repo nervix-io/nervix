@@ -11,7 +11,7 @@ Feature: Archived branch keys checked against the restored branch declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event ( tenant STRING, shard I32, order_id STRING, amount I64 );
       CREATE WIRE JSON SCHEMA order_wire MODE STRICT ( tenant string, shard integer, order_id string, amount integer );
-      CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_event;
+      CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_event;
       CREATE SCHEMA tenant_shard ( tenant STRING, shard I32 );
       CREATE BRANCH by_tenant_shard SCHEMA tenant_shard TTL 30m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant_shard WITH MATERIALIZED STATE LAST BY TIMESTAMP;

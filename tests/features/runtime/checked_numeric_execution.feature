@@ -25,8 +25,7 @@ Feature: Checked numeric execution
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC operand_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC operand_batch_codec
         TO SCHEMA operand
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY operands SCHEMA operand UNBRANCHED;
@@ -129,8 +128,7 @@ Feature: Checked numeric execution
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC narrow_operand_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC narrow_operand_batch_codec
         TO SCHEMA narrow_operand
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY narrow_operands SCHEMA narrow_operand UNBRANCHED;
@@ -230,8 +228,7 @@ Feature: Checked numeric execution
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC measurement_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC measurement_batch_codec
         TO SCHEMA measurement
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY measurements SCHEMA measurement UNBRANCHED;
@@ -306,11 +303,10 @@ Feature: Checked numeric execution
         left integer,
         divisor integer
       );
-      CREATE CODEC operand_codec
-        FROM WIRE JSON SCHEMA operand_wire
+      CREATE WIRE JSON CODEC operand_codec
+        FROM WIRE SCHEMA operand_wire
         TO SCHEMA operand;
-      CREATE CODEC operand_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC operand_batch_codec
         TO SCHEMA operand
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA operand_id_branch (

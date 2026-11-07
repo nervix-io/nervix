@@ -14,8 +14,8 @@ Feature: HTTP endpoint ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
@@ -70,8 +70,8 @@ Feature: HTTP endpoint ingestion
         value integer
       );
 
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
 
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
@@ -149,8 +149,8 @@ Feature: HTTP endpoint ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
@@ -204,8 +204,8 @@ Feature: HTTP endpoint ingestion
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;

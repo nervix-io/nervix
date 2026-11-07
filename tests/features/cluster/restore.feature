@@ -180,7 +180,7 @@ Feature: Restore configuration, users and resources from a backup archive
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
-      CREATE CODEC zip_code_entry_codec FROM WIRE JSON SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
+      CREATE WIRE JSON CODEC zip_code_entry_codec FROM WIRE SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
       CREATE HASH MAP zip_codes_by_zip KEY zip FROM RESOURCE zip_codes VERSION 3 PATH 'lookup.jsonl' DECODE USING zip_code_entry_codec;
       CREATE VHOST edge restored-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       DESCRIBE RESOURCE zip_codes;
@@ -269,7 +269,7 @@ Feature: Restore configuration, users and resources from a backup archive
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
-      CREATE CODEC zip_code_entry_codec FROM WIRE JSON SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
+      CREATE WIRE JSON CODEC zip_code_entry_codec FROM WIRE SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
       CREATE HASH MAP zip_codes_by_zip KEY zip FROM RESOURCE zip_codes VERSION 1 PATH 'lookup.jsonl' DECODE USING zip_code_entry_codec;
       CREATE RELAY zip_codes_seen SCHEMA zip_code_entry UNBRANCHED;
       """
@@ -422,7 +422,7 @@ Feature: Restore configuration, users and resources from a backup archive
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
-      CREATE CODEC zip_code_entry_codec FROM WIRE JSON SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
+      CREATE WIRE JSON CODEC zip_code_entry_codec FROM WIRE SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
       CREATE HASH MAP zip_codes_by_zip KEY zip FROM RESOURCE zip_codes VERSION 1 PATH 'lookup.jsonl' DECODE USING zip_code_entry_codec;
       """
     Then the current leader node is saved as placeholder "leader"
@@ -567,7 +567,7 @@ Feature: Restore configuration, users and resources from a backup archive
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
-      CREATE CODEC zip_code_entry_codec FROM WIRE JSON SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
+      CREATE WIRE JSON CODEC zip_code_entry_codec FROM WIRE SCHEMA zip_code_entry_wire TO SCHEMA zip_code_entry;
       CREATE HASH MAP zip_codes_by_zip KEY zip FROM RESOURCE zip_codes VERSION 1 PATH 'lookup.jsonl' DECODE USING zip_code_entry_codec;
       """
     Then the current leader node is saved as placeholder "leader"

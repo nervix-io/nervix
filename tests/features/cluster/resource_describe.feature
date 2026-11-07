@@ -256,7 +256,7 @@ Feature: Resource lifecycle
       CREATE RESOURCE zip_codes;
       CREATE SCHEMA zip_entry (zip STRING, city STRING);
       CREATE WIRE JSON SCHEMA zip_wire MODE STRICT (zip string, city string);
-      CREATE CODEC zip_codec FROM WIRE JSON SCHEMA zip_wire TO SCHEMA zip_entry;
+      CREATE WIRE JSON CODEC zip_codec FROM WIRE SCHEMA zip_wire TO SCHEMA zip_entry;
       """
     Given client "uploader" is connected to the leader node
     When client "uploader" selects domain "{{domain}}"

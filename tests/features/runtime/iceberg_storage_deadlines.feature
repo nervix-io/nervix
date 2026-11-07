@@ -16,7 +16,7 @@ Feature: Iceberg storage deadlines and retry ownership
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-storage-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT notification_endpoint ON edge PATH '/notifications';

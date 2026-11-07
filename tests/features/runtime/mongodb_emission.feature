@@ -20,8 +20,8 @@ Feature: MongoDB emission
         user_id integer,
         action string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -104,8 +104,8 @@ Feature: MongoDB emission
         user_id integer,
         action string
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
@@ -187,8 +187,8 @@ Feature: MongoDB emission
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
@@ -270,8 +270,8 @@ Feature: MongoDB emission
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_ingress CONFIG {
@@ -336,8 +336,8 @@ Feature: MongoDB emission
         user_id integer OPTIONAL,
         action string
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
@@ -439,8 +439,8 @@ Feature: MongoDB emission
         user_id integer,
         action string
       );
-      CREATE CODEC notification_codec
-      FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+      FROM WIRE SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_ingress

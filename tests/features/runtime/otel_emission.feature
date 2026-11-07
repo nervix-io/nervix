@@ -32,8 +32,8 @@ Feature: OTEL emission
         user_id integer,
         action string
       );
-      CREATE CODEC audit_event_codec
-      FROM WIRE JSON SCHEMA audit_event_wire
+      CREATE WIRE JSON CODEC audit_event_codec
+      FROM WIRE SCHEMA audit_event_wire
       TO SCHEMA audit_event
       ENCODE event_ts AS RFC3339;
       CREATE RELAY audit_events SCHEMA audit_event UNBRANCHED;
@@ -175,8 +175,8 @@ Feature: OTEL emission
         value integer,
         route string
       );
-      CREATE CODEC request_count_codec
-      FROM WIRE JSON SCHEMA request_count_wire
+      CREATE WIRE JSON CODEC request_count_codec
+      FROM WIRE SCHEMA request_count_wire
       TO SCHEMA request_count
       ENCODE window_start AS RFC3339,
              window_end AS RFC3339;
@@ -302,8 +302,8 @@ Feature: OTEL emission
         bucket_counts array,
         explicit_bounds array
       );
-      CREATE CODEC latency_point_codec
-      FROM WIRE JSON SCHEMA latency_point_wire
+      CREATE WIRE JSON CODEC latency_point_codec
+      FROM WIRE SCHEMA latency_point_wire
       TO SCHEMA latency_point
       ENCODE observed_at AS RFC3339;
       CREATE RELAY latency_points SCHEMA latency_point UNBRANCHED;

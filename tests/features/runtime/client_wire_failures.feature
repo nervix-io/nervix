@@ -137,7 +137,7 @@ Feature: Client wire failure regressions
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA held_record (value I64);
       CREATE WIRE JSON SCHEMA held_wire MODE STRICT (value integer);
-      CREATE CODEC held_codec FROM WIRE JSON SCHEMA held_wire TO SCHEMA held_record;
+      CREATE WIRE JSON CODEC held_codec FROM WIRE SCHEMA held_wire TO SCHEMA held_record;
       CREATE RELAY held_records SCHEMA held_record UNBRANCHED;
       CREATE VHOST held_edge held-binding-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT held_ingress ON held_edge PATH '/records';
@@ -946,8 +946,8 @@ Feature: Client wire failure regressions
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA relocation_record ( sequence I64 );
       CREATE WIRE JSON SCHEMA relocation_wire MODE STRICT ( sequence integer );
-      CREATE CODEC relocation_codec
-        FROM WIRE JSON SCHEMA relocation_wire
+      CREATE WIRE JSON CODEC relocation_codec
+        FROM WIRE SCHEMA relocation_wire
         TO SCHEMA relocation_record;
       CREATE SCHEMA relocation_tenant ( tenant STRING );
       CREATE BRANCH relocation_by_tenant SCHEMA relocation_tenant TTL 5m;
@@ -1022,8 +1022,8 @@ Feature: Client wire failure regressions
         tenant string,
         sequence integer
       );
-      CREATE CODEC wire_record_codec
-        FROM WIRE JSON SCHEMA wire_record_json
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
@@ -1092,8 +1092,8 @@ Feature: Client wire failure regressions
         tenant string,
         sequence integer
       );
-      CREATE CODEC wire_record_codec
-        FROM WIRE JSON SCHEMA wire_record_json
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
@@ -1159,8 +1159,8 @@ Feature: Client wire failure regressions
         tenant string,
         sequence integer
       );
-      CREATE CODEC wire_record_codec
-        FROM WIRE JSON SCHEMA wire_record_json
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
@@ -1277,8 +1277,8 @@ Feature: Client wire failure regressions
         tenant string,
         sequence integer
       );
-      CREATE CODEC wire_record_codec
-        FROM WIRE JSON SCHEMA wire_record_json
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
@@ -1339,8 +1339,8 @@ Feature: Client wire failure regressions
         tenant string,
         sequence integer
       );
-      CREATE CODEC wire_record_codec
-        FROM WIRE JSON SCHEMA wire_record_json
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
@@ -1425,8 +1425,8 @@ Feature: Client wire failure regressions
         sequence integer,
         note string
       );
-      CREATE CODEC wide_record_codec
-        FROM WIRE JSON SCHEMA wide_record_json
+      CREATE WIRE JSON CODEC wide_record_codec
+        FROM WIRE SCHEMA wide_record_json
         TO SCHEMA wide_record;
       CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;

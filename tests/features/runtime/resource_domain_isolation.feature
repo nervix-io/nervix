@@ -148,8 +148,8 @@ Feature: Domain-owned resources
         key string,
         label string
       );
-      CREATE CODEC lookup_entry_codec
-        FROM WIRE JSON SCHEMA lookup_entry_wire
+      CREATE WIRE JSON CODEC lookup_entry_codec
+        FROM WIRE SCHEMA lookup_entry_wire
         TO SCHEMA lookup_entry;
       CREATE HASH MAP entries_by_key
         KEY key
@@ -167,8 +167,8 @@ Feature: Domain-owned resources
         key string,
         label string
       );
-      CREATE CODEC lookup_entry_codec
-        FROM WIRE JSON SCHEMA lookup_entry_wire
+      CREATE WIRE JSON CODEC lookup_entry_codec
+        FROM WIRE SCHEMA lookup_entry_wire
         TO SCHEMA lookup_entry;
       """
     And client "beta" fails to execute these Plexus commands

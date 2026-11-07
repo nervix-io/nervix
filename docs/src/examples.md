@@ -39,8 +39,8 @@ CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
   payload string OPTIONAL
 );
 
-CREATE CODEC notification_codec
-  FROM WIRE JSON SCHEMA notification_wire
+CREATE WIRE JSON CODEC notification_codec
+  FROM WIRE SCHEMA notification_wire
   TO SCHEMA notification
   ENCODE created_at AS RFC3339;
 

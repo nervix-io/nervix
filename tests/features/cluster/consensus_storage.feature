@@ -47,7 +47,7 @@ Feature: Durable consensus storage
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA slow_commit_event ( seq I64 );
       CREATE WIRE JSON SCHEMA slow_commit_wire MODE STRICT ( seq integer );
-      CREATE CODEC slow_commit_codec FROM WIRE JSON SCHEMA slow_commit_wire TO SCHEMA slow_commit_event;
+      CREATE WIRE JSON CODEC slow_commit_codec FROM WIRE SCHEMA slow_commit_wire TO SCHEMA slow_commit_event;
       CREATE RELAY slow_commit_events SCHEMA slow_commit_event UNBRANCHED;
       CREATE KAFKA CLIENT slow_commit_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'

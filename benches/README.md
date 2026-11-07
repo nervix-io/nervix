@@ -45,6 +45,18 @@ client-core API:
 just benchmark-nervix-image nervix:benchmark
 ```
 
+Run all six Nervix graphs as a bounded codec-declaration smoke check against a local image:
+
+```bash
+just benchmark-codec-heads nervix:benchmark
+```
+
+This uses the development-profile harness, two Kafka partitions and one second each of warm-up
+and measured input. Every run retains its manifest's backlog bound and drain deadline and the
+normal output audit. Pass an artifacts directory followed by workload names to select individual
+graphs. These short runs verify graph execution; their timings do not establish performance.
+`extra-bench-smoke` exercises Criterion bodies separately.
+
 Run Vector 0.57.0 from its pinned official Debian image:
 
 ```bash

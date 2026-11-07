@@ -16,8 +16,8 @@ Feature: Reingestor repartitioning
         tenant string,
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
@@ -89,8 +89,8 @@ Feature: Reingestor repartitioning
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
@@ -185,8 +185,8 @@ Feature: Reingestor repartitioning
         user_id integer
       );
 
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
@@ -263,8 +263,8 @@ Feature: Reingestor repartitioning
         tenant string,
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_user_id_branch TTL 5m;
@@ -339,8 +339,8 @@ Feature: Reingestor repartitioning
         tenant string,
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_user_id_branch TTL 5m;
@@ -420,8 +420,8 @@ Feature: Reingestor repartitioning
         user_id integer,
         note string OPTIONAL
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_reingest_default SCHEMA tenant_user_id_branch TTL 5m;
@@ -484,7 +484,7 @@ Feature: Reingestor repartitioning
       """
       CREATE SCHEMA reading ( tenant STRING, sensor STRING, value I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_reading_tenant SCHEMA tenant_branch TTL 5m;
       CREATE IF NOT EXISTS SCHEMA sensor_branch ( sensor STRING );

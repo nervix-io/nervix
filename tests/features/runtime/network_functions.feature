@@ -36,8 +36,7 @@ Feature: IP address, network and URL functions
         search STRING,
         tags <tags_type>
       );
-      CREATE CODEC raw_endpoint_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC raw_endpoint_batch_codec
         TO SCHEMA raw_endpoint
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY raw_endpoints SCHEMA raw_endpoint UNBRANCHED;
@@ -131,8 +130,7 @@ Feature: IP address, network and URL functions
         id STRING,
         client BYTES
       );
-      CREATE CODEC raw_client_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC raw_client_batch_codec
         TO SCHEMA raw_client
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY raw_clients SCHEMA raw_client UNBRANCHED;
@@ -214,8 +212,7 @@ Feature: IP address, network and URL functions
         error_code STRING,
         error_message STRING
       );
-      CREATE CODEC raw_probe_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC raw_probe_batch_codec
         TO SCHEMA raw_probe
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY raw_probes SCHEMA raw_probe UNBRANCHED;
@@ -316,8 +313,7 @@ Feature: IP address, network and URL functions
         referrer_host STRING OPTIONAL SENSITIVE,
         campaign STRING OPTIONAL SENSITIVE
       );
-      CREATE CODEC secret_visit_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC secret_visit_codec
         TO SCHEMA secret_visit
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY secret_visits SCHEMA secret_visit UNBRANCHED;

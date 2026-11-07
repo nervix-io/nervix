@@ -16,7 +16,7 @@ Feature: MQTT publish metadata
       """
       CREATE SCHEMA reading ( user_id I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( user_id integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA delivered_reading (
         user_id I64,
         topic STRING OPTIONAL,
@@ -99,7 +99,7 @@ Feature: MQTT publish metadata
       """
       CREATE SCHEMA reading ( user_id I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( user_id integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE RELAY kitchen_readings SCHEMA reading UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = '{{mqtt_addr}}' };
       CREATE MQTT TOPIC INGESTOR mqtt_readings
@@ -145,7 +145,7 @@ Feature: MQTT publish metadata
       """
       CREATE SCHEMA reading ( user_id I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( user_id integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA tagged_reading (
         user_id I64,
         tenant STRING OPTIONAL,
@@ -218,7 +218,7 @@ Feature: MQTT publish metadata
       """
       CREATE SCHEMA reading ( user_id I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( user_id integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA delivered_reading ( user_id I64, duplicate BOOL OPTIONAL );
       CREATE RELAY readings SCHEMA delivered_reading UNBRANCHED;
       CREATE RELAY forwarded SCHEMA reading UNBRANCHED;
@@ -283,8 +283,8 @@ Feature: MQTT publish metadata
       """
       CREATE SCHEMA reading ( user_id I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( user_id integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
-      CREATE CODEC reading_codec_v2 FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec_v2 FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA delivered_reading (
         user_id I64,
         topic STRING OPTIONAL,

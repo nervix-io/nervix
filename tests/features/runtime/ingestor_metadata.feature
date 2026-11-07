@@ -12,7 +12,7 @@ Feature: Typed ingestor metadata
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA tagged ( seq I64, tag STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA tagged UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-ingestor-metadata.example.com;
       CREATE HTTP ENDPOINT http_ingress ON edge PATH '/events';
@@ -184,7 +184,7 @@ Feature: Typed ingestor metadata
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9/events',
@@ -281,7 +281,7 @@ Feature: Typed ingestor metadata
       CREATE SCHEMA event ( user_id I64 );
       CREATE SCHEMA polled_event ( user_id I64, polled_at DATETIME OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA polled_event UNBRANCHED;
       CREATE HTTP CLIENT source CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}', 'timeout_ms' = 5000

@@ -49,7 +49,7 @@ Feature: Large native restore metadata
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
@@ -209,7 +209,7 @@ Feature: Large native restore metadata
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;

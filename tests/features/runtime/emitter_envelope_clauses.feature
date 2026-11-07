@@ -195,7 +195,7 @@ Feature: Emitters write envelope clauses only where their entity declares them
       );
       CREATE SCHEMA published ( seq I64 );
       CREATE WIRE JSON SCHEMA published_wire MODE STRICT ( seq integer );
-      CREATE CODEC published_codec FROM WIRE JSON SCHEMA published_wire TO SCHEMA published;
+      CREATE WIRE JSON CODEC published_codec FROM WIRE SCHEMA published_wire TO SCHEMA published;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       """
@@ -255,7 +255,7 @@ Feature: Emitters write envelope clauses only where their entity declares them
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE PULSAR CLIENT broker CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
       """

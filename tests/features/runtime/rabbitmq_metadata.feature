@@ -21,7 +21,7 @@ Feature: RabbitMQ delivery metadata
       """
       CREATE SCHEMA order_event ( user_id I64 );
       CREATE WIRE JSON SCHEMA order_wire MODE STRICT ( user_id integer );
-      CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_event;
+      CREATE WIRE JSON CODEC order_codec FROM WIRE SCHEMA order_wire TO SCHEMA order_event;
       CREATE SCHEMA delivered_order (
         user_id I64,
         exchange STRING OPTIONAL,
@@ -124,7 +124,7 @@ Feature: RabbitMQ delivery metadata
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA delivered_notification ( user_id I64, redelivered BOOL OPTIONAL );
       CREATE RELAY notifications SCHEMA delivered_notification UNBRANCHED;
       CREATE RABBITMQ CLIENT rabbit_main CONFIG {
@@ -184,7 +184,7 @@ Feature: RabbitMQ delivery metadata
       CREATE SCHEMA reading ( value I64 );
       CREATE SCHEMA timed_reading ( value I64, published_at DATETIME OPTIONAL );
       CREATE SCHEMA summary ( total I64, samples I64, first_published_at DATETIME OPTIONAL );
-      CREATE CODEC reading_codec FROM JSON TO SCHEMA reading
+      CREATE JAQ JSON CODEC reading_codec TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY readings SCHEMA timed_reading UNBRANCHED;
       CREATE RELAY summaries SCHEMA summary UNBRANCHED;
@@ -240,7 +240,7 @@ Feature: RabbitMQ delivery metadata
       """
       CREATE SCHEMA reading ( value I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( value integer );
-      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA observed_reading ( value I64, source STRING, published_at DATETIME OPTIONAL );
       CREATE SCHEMA refused_reading ( value I64, code STRING, operation STRING, message STRING );
       CREATE RELAY readings SCHEMA observed_reading UNBRANCHED;

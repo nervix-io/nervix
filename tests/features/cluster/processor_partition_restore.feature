@@ -7,10 +7,10 @@ Feature: Partitioned processor state in backup archives
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA payment ( tenant STRING, transaction_id STRING, amount I64 );
       CREATE WIRE JSON SCHEMA payment_wire MODE STRICT ( tenant string, transaction_id string, amount integer );
-      CREATE CODEC payment_codec FROM WIRE JSON SCHEMA payment_wire TO SCHEMA payment;
+      CREATE WIRE JSON CODEC payment_codec FROM WIRE SCHEMA payment_wire TO SCHEMA payment;
       CREATE SCHEMA metric ( tenant STRING, latency I64 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( tenant string, latency integer );
-      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA metric_summary (
         tenant STRING,
         samples I64,

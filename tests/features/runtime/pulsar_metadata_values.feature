@@ -21,7 +21,7 @@ Feature: Pulsar transport metadata values
         redelivery_count I64 OPTIONAL, property STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE PULSAR CLIENT source CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC INGESTOR records FROM source TOPIC 'values_{{test_id}}'
@@ -78,7 +78,7 @@ Feature: Pulsar transport metadata values
       CREATE SCHEMA timed ( tenant STRING, value I64, event_time DATETIME OPTIONAL );
       CREATE SCHEMA summary ( tenant STRING, total I64, event_time DATETIME OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA timed BRANCHED BY by_tenant;
@@ -143,7 +143,7 @@ Feature: Pulsar transport metadata values
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA observed ( seq I64, message_id STRING OPTIONAL, redelivery_count I64 OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE PULSAR CLIENT source CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC INGESTOR records FROM source TOPIC 'redelivery_{{test_id}}'

@@ -23,8 +23,8 @@ Feature: Deduplicator state replication
         transaction_id string,
         amount integer
       );
-        CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+        CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;

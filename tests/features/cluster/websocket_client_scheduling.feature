@@ -9,8 +9,8 @@ Feature: WebSocket client ingestor scheduling
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE WEBSOCKETS CLIENT ws_main
@@ -73,8 +73,8 @@ Feature: WebSocket client ingestor scheduling
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE WEBSOCKETS CLIENT ws_main
@@ -119,8 +119,8 @@ Feature: WebSocket client ingestor scheduling
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE WEBSOCKETS CLIENT ws_main
@@ -169,8 +169,8 @@ Feature: WebSocket client ingestor scheduling
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE WEBSOCKETS CLIENT ws_main

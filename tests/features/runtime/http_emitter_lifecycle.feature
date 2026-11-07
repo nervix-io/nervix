@@ -21,7 +21,7 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (event_id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-lifecycle-{{test_id}}.example.com;
@@ -100,7 +100,7 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (event_id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-drain-{{test_id}}.example.com;
@@ -172,14 +172,14 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA required_body (id STRING);
       CREATE WIRE JSON SCHEMA required_wire MODE STRICT (id string);
-      CREATE CODEC required_codec FROM WIRE JSON SCHEMA required_wire TO SCHEMA required_body;
+      CREATE WIRE JSON CODEC required_codec FROM WIRE SCHEMA required_wire TO SCHEMA required_body;
       CREATE SCHEMA optional_body (id STRING OPTIONAL);
       CREATE WIRE JSON SCHEMA optional_wire MODE STRICT (id string OPTIONAL);
-      CREATE CODEC optional_codec FROM WIRE JSON SCHEMA optional_wire TO SCHEMA optional_body;
+      CREATE WIRE JSON CODEC optional_codec FROM WIRE SCHEMA optional_wire TO SCHEMA optional_body;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY spare SCHEMA event UNBRANCHED;
       CREATE SCHEMA rejected (attempted_id STRING OPTIONAL);
@@ -371,7 +371,7 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY backup SCHEMA event UNBRANCHED;
@@ -482,7 +482,7 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       <cordon>
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
@@ -545,7 +545,7 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       <cordon>
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-shutdown-{{test_id}}.example.com;
@@ -601,7 +601,7 @@ Feature: HTTP REQUEST emitter lifecycle
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
-      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {

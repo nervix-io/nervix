@@ -11,7 +11,7 @@ Feature: MQTT TOPIC declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
       """
@@ -67,7 +67,7 @@ Feature: MQTT TOPIC declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
       """
@@ -133,7 +133,7 @@ Feature: MQTT TOPIC declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
       """
@@ -168,7 +168,7 @@ Feature: MQTT TOPIC declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
       CREATE MQTT TOPIC INGESTOR acknowledged
@@ -213,7 +213,7 @@ Feature: MQTT TOPIC declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
       """
@@ -248,7 +248,7 @@ Feature: MQTT TOPIC declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
       """
@@ -279,7 +279,7 @@ Feature: MQTT TOPIC declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
       """
@@ -314,7 +314,7 @@ Feature: MQTT TOPIC declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
       CREATE MQTT TOPIC EMITTER publishing FROM events TO mqtt_main TOPIC 'devices/orders'

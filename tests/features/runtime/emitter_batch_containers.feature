@@ -36,32 +36,30 @@ Feature: Emitter batch containers
       CREATE WIRE JSON SCHEMA event_json_wire MODE STRICT ( seq integer, note string );
       CREATE WIRE CBOR SCHEMA event_cbor_wire MODE STRICT ( seq integer, note text );
       CREATE WIRE AVRO SCHEMA event_avro_wire MODE STRICT ( seq long, note string );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC json_wire_codec FROM WIRE JSON SCHEMA event_json_wire TO SCHEMA event;
-      CREATE CODEC cbor_wire_codec FROM WIRE CBOR SCHEMA event_cbor_wire TO SCHEMA event;
-      CREATE CODEC avro_wire_codec FROM WIRE AVRO SCHEMA event_avro_wire TO SCHEMA event;
-      CREATE CODEC json_codec FROM JSON TO SCHEMA event
+      CREATE WIRE JSON CODEC json_wire_codec FROM WIRE SCHEMA event_json_wire TO SCHEMA event;
+      CREATE WIRE CBOR CODEC cbor_wire_codec FROM WIRE SCHEMA event_cbor_wire TO SCHEMA event;
+      CREATE WIRE AVRO CODEC avro_wire_codec FROM WIRE SCHEMA event_avro_wire TO SCHEMA event;
+      CREATE JAQ JSON CODEC json_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '.';
-      CREATE CODEC yaml_codec FROM YAML TO SCHEMA event
+      CREATE JAQ YAML CODEC yaml_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '.';
-      CREATE CODEC toml_codec FROM TOML TO SCHEMA event
+      CREATE JAQ TOML CODEC toml_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '.';
-      CREATE CODEC cbor_codec FROM CBOR TO SCHEMA event
+      CREATE JAQ CBOR CODEC cbor_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '.';
-      CREATE CODEC xml_codec FROM XML TO SCHEMA event
+      CREATE JAQ XML CODEC xml_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{t: "event", a: {seq: (.seq | tostring), note: .note}}';
-      CREATE CODEC proto_codec
-        FROM PROTOBUF
+      CREATE PROTOBUF CODEC proto_codec
         USING RESOURCE proto_bundle VERSION 1
         CONFIG {'file' = 'event.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Event'
         BATCH MESSAGE 'nervix.test.EventBatch'
         TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '{seq: .seq, note: .note}';
-      CREATE CODEC proto_envelope_codec
-        FROM PROTOBUF
+      CREATE PROTOBUF CODEC proto_envelope_codec
         USING RESOURCE proto_bundle VERSION 1
         CONFIG {'file' = 'event.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Event'
@@ -201,19 +199,19 @@ Feature: Emitter batch containers
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA rich_event ( seq I64, tags <tags_type>, blob BYTES );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA rich_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA rich_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC identity_codec FROM JSON TO SCHEMA rich_event
+      CREATE JAQ JSON CODEC identity_codec TO SCHEMA rich_event
         WITH JAQ TRANSFORMATIONS ON EMITTING '.' ON EMITTING BATCH '.';
-      CREATE CODEC map_codec FROM JSON TO SCHEMA rich_event
+      CREATE JAQ JSON CODEC map_codec TO SCHEMA rich_event
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '.'
           ON EMITTING BATCH 'map({id: .seq, first_tag: .tags[0]})';
-      CREATE CODEC envelope_codec FROM JSON TO SCHEMA rich_event
+      CREATE JAQ JSON CODEC envelope_codec TO SCHEMA rich_event
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{id: .seq, blob: .blob}'
           ON EMITTING BATCH '{schema_version: 2, count: length, records: .}';
-      CREATE CODEC expansion_codec FROM JSON TO SCHEMA rich_event
+      CREATE JAQ JSON CODEC expansion_codec TO SCHEMA rich_event
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{id: .seq}'
           ON EMITTING BATCH '[.[], .[]]';
@@ -303,18 +301,16 @@ Feature: Emitter batch containers
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA echoed_event ( seq I64, note STRING, path STRING );
-      CREATE CODEC json_batch_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC json_batch_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]' ON EMITTING '.';
-      CREATE CODEC proto_batch_codec
-        FROM PROTOBUF
+      CREATE PROTOBUF CODEC proto_batch_codec
         USING RESOURCE proto_bundle VERSION 1
         CONFIG {'file' = 'event.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Event'
         BATCH MESSAGE 'nervix.test.EventBatch'
         TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '{seq: .seq, note: .note}';
-      CREATE CODEC proto_batch_reader
-        FROM PROTOBUF
+      CREATE PROTOBUF CODEC proto_batch_reader
         USING RESOURCE proto_bundle VERSION 1
         CONFIG {'file' = 'event.proto', 'include' = '.'}
         MESSAGE 'nervix.test.EventBatch'
@@ -416,9 +412,9 @@ Feature: Emitter batch containers
         error_message STRING,
         operation STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC padded_pairs_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC padded_pairs_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS
           ON EMITTING 'if .seq == 7 then error("unencodable") else {seq: .seq, note: .note} end'
           ON EMITTING BATCH 'if length == 2 then {pad: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", records: .} else . end';
@@ -497,9 +493,9 @@ Feature: Emitter batch containers
         error_message STRING,
         operation STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC failing_codec FROM <format> TO SCHEMA event
+      CREATE JAQ <format> CODEC failing_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '.' ON EMITTING BATCH '<program>';
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
@@ -574,9 +570,9 @@ Feature: Emitter batch containers
         hostname STRING OPTIONAL,
         message STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA syslog_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';

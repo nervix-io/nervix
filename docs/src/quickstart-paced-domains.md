@@ -43,8 +43,8 @@ CREATE WIRE JSON SCHEMA order_event_wire MODE STRICT (
   occurred_at string
 );
 
-CREATE CODEC order_event_codec
-  FROM WIRE JSON SCHEMA order_event_wire
+CREATE WIRE JSON CODEC order_event_codec
+  FROM WIRE SCHEMA order_event_wire
   TO SCHEMA order_event
   ENCODE occurred_at AS RFC3339;
 

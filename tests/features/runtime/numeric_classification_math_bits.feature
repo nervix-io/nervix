@@ -34,8 +34,7 @@ Feature: Numeric classification, math and bit functions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC reading_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC reading_batch_codec
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
@@ -126,8 +125,7 @@ Feature: Numeric classification, math and bit functions
         input_id STRING,
         error_message STRING
       );
-      CREATE CODEC register_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC register_batch_codec
         TO SCHEMA register_sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY register_samples SCHEMA register_sample UNBRANCHED;

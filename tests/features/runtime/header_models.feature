@@ -18,7 +18,7 @@ Feature: Header models
       """
       CREATE SCHEMA event (event_id STRING, tenant STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (event_id string, tenant string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE PULSAR CLIENT pulsar_main CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
@@ -111,7 +111,7 @@ Feature: Header models
       """
       CREATE SCHEMA event (event_id STRING, tenant STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (event_id string, tenant string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge header-models-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT events_ingress ON edge PATH '/events';
@@ -182,7 +182,7 @@ Feature: Header models
       """
       CREATE SCHEMA event (event_id STRING, attempt I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (event_id string, attempt integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE SQS CLIENT sqs_main CONFIG {

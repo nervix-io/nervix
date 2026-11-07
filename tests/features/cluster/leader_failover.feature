@@ -82,17 +82,17 @@ Feature: Cluster leader failover
         tenant string,
         vector array
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
-      CREATE CODEC features_codec
-        FROM WIRE JSON SCHEMA features_wire
+      CREATE WIRE JSON CODEC features_codec
+        FROM WIRE SCHEMA features_wire
         TO SCHEMA features;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
@@ -261,17 +261,17 @@ Feature: Cluster leader failover
         tenant string,
         vector array
       );
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
-      CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+      CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
-      CREATE CODEC features_codec
-        FROM WIRE JSON SCHEMA features_wire
+      CREATE WIRE JSON CODEC features_codec
+        FROM WIRE SCHEMA features_wire
         TO SCHEMA features;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );

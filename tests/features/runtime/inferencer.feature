@@ -79,8 +79,8 @@ Feature: Inferencer resources
         tenant string,
         vector array
       );
-      CREATE CODEC features_codec
-        FROM WIRE JSON SCHEMA features_wire
+      CREATE WIRE JSON CODEC features_codec
+        FROM WIRE SCHEMA features_wire
         TO SCHEMA features;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_feature_source SCHEMA tenant_branch TTL 5m;
@@ -182,8 +182,8 @@ Feature: Inferencer resources
         tenant string,
         vector array
       );
-      CREATE CODEC features_codec
-        FROM WIRE JSON SCHEMA features_wire
+      CREATE WIRE JSON CODEC features_codec
+        FROM WIRE SCHEMA features_wire
         TO SCHEMA features;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_feature_source SCHEMA tenant_branch TTL 5m;
@@ -387,8 +387,8 @@ Feature: Inferencer resources
         value number,
         fallback number
       );
-      CREATE CODEC inference_value_codec
-        FROM WIRE JSON SCHEMA inference_value_wire
+      CREATE WIRE JSON CODEC inference_value_codec
+        FROM WIRE SCHEMA inference_value_wire
         TO SCHEMA inference_value;
       CREATE RELAY inference_values SCHEMA inference_value UNBRANCHED;
       CREATE RELAY inference_results SCHEMA inference_result UNBRANCHED;
@@ -451,7 +451,7 @@ Feature: Inferencer resources
       CREATE SCHEMA matrices ( matrix <matrix_type> );
       CREATE SCHEMA transformed_matrices ( transformed <matrix_type> );
       CREATE WIRE JSON SCHEMA matrices_wire MODE STRICT ( matrix array );
-      CREATE CODEC matrices_codec FROM WIRE JSON SCHEMA matrices_wire TO SCHEMA matrices;
+      CREATE WIRE JSON CODEC matrices_codec FROM WIRE SCHEMA matrices_wire TO SCHEMA matrices;
       CREATE RELAY matrices SCHEMA matrices UNBRANCHED;
       CREATE RELAY transformed_matrices SCHEMA transformed_matrices UNBRANCHED;
       CREATE VHOST edge infer-matrix-{{test_id}}.example.com;
@@ -510,7 +510,7 @@ Feature: Inferencer resources
       CREATE SCHEMA sequences ( features <sequence_type>, mask <sequence_type> );
       CREATE SCHEMA scored_sequences ( scores <sequence_type> );
       CREATE WIRE JSON SCHEMA sequences_wire MODE STRICT ( features array, mask array );
-      CREATE CODEC sequences_codec FROM WIRE JSON SCHEMA sequences_wire TO SCHEMA sequences;
+      CREATE WIRE JSON CODEC sequences_codec FROM WIRE SCHEMA sequences_wire TO SCHEMA sequences;
       CREATE RELAY sequences SCHEMA sequences UNBRANCHED;
       CREATE RELAY scored_sequences SCHEMA scored_sequences UNBRANCHED;
       CREATE VHOST edge infer-dynamic-{{test_id}}.example.com;
@@ -571,7 +571,7 @@ Feature: Inferencer resources
       CREATE SCHEMA sequences ( features <sequence_type>, mask <sequence_type> );
       CREATE SCHEMA scored_sequences ( scores <sequence_type> );
       CREATE WIRE JSON SCHEMA sequences_wire MODE STRICT ( features array, mask array );
-      CREATE CODEC sequences_codec FROM WIRE JSON SCHEMA sequences_wire TO SCHEMA sequences;
+      CREATE WIRE JSON CODEC sequences_codec FROM WIRE SCHEMA sequences_wire TO SCHEMA sequences;
       CREATE RELAY sequences SCHEMA sequences UNBRANCHED;
       CREATE RELAY scored_sequences SCHEMA scored_sequences UNBRANCHED;
       CREATE VHOST edge infer-dynamic-batch-{{test_id}}.example.com;
@@ -657,7 +657,7 @@ Feature: Inferencer resources
       CREATE SCHEMA scored ( score <output_field_type> );
       CREATE SCHEMA audited ( model_score <output_field_type> );
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( vector array );
-      CREATE CODEC features_codec FROM WIRE JSON SCHEMA features_wire TO SCHEMA features;
+      CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE RELAY audited SCHEMA audited UNBRANCHED;
@@ -743,7 +743,7 @@ Feature: Inferencer resources
         features array,
         mask array
       );
-      CREATE CODEC features_codec FROM WIRE JSON SCHEMA features_wire TO SCHEMA features;
+      CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE VHOST edge infer-batch-{{test_id}}.example.com;
@@ -841,7 +841,7 @@ Feature: Inferencer resources
         features array,
         mask array
       );
-      CREATE CODEC features_codec FROM WIRE JSON SCHEMA features_wire TO SCHEMA features;
+      CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
@@ -928,7 +928,7 @@ Feature: Inferencer resources
       CREATE SCHEMA scored ( score <output_field_type>, theme STRING, hint STRING OPTIONAL );
       CREATE SCHEMA preference ( theme STRING, hint STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( vector array );
-      CREATE CODEC features_codec FROM WIRE JSON SCHEMA features_wire TO SCHEMA features;
+      CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE RELAY default_preferences SCHEMA preference UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;

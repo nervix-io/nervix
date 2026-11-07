@@ -23,7 +23,7 @@ Feature: Endpoint request metadata
         remote_addr STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY tenant_requests SCHEMA request_event UNBRANCHED;
       CREATE RELAY other_requests SCHEMA request_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-metadata.example.com;
@@ -81,7 +81,7 @@ Feature: Endpoint request metadata
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA tenant_event ( seq I64, tenant STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY tenant_events SCHEMA tenant_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-header.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
@@ -119,7 +119,7 @@ Feature: Endpoint request metadata
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA tenant_event ( seq I64, tenant STRING OPTIONAL );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY tenant_events SCHEMA tenant_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-invalid-header.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
@@ -169,7 +169,7 @@ Feature: Endpoint request metadata
         remote_addr STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY requests SCHEMA request_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-acknowledged.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
@@ -218,7 +218,7 @@ Feature: Endpoint request metadata
         remote_addr STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY text_frames SCHEMA frame_event UNBRANCHED;
       CREATE RELAY binary_frames SCHEMA frame_event UNBRANCHED;
       CREATE VHOST edge ws-{{test_id}}-metadata.example.com;
@@ -291,8 +291,8 @@ Feature: Endpoint request metadata
         remote_addr STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
-      CREATE CODEC event_codec_v2 FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec_v2 FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY requests SCHEMA request_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-buffered.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';

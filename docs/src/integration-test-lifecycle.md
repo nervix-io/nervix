@@ -263,6 +263,23 @@ transport failure. The original restore call must remain uncertain when its next
 open the archive. The fixture restores the exact bytes only after that call ends, then recovers
 the completed outcome under the original statement and reference. No product fault hook is used.
 
+`just build-codec-parser-heads` prepares the focused codec parser/completion integration target.
+`just coverage-codec-heads [output]` collects those assertions as ordinary line coverage, including
+complete canonical Model equality for every codec head and conditional creation. Its report is
+focused owner evidence; the ordinary workspace coverage merge remains CI's integrity verdict.
+`just build-codec-tools` prepares the formatter, native CLI and diagnostic-report helper together
+so Cargo unifies their shared dependencies in one native graph.
+`just build-codec-heads` prepares current release console assets, the formatter, native CLI,
+diagnostic-report helper and scenario binary without executing scenarios. These preparation
+commands allow compilation to be bounded separately from test execution.
+`just test-codec-heads` uses the latter preparation and selects
+`tests/features/runtime/kinded_codec_heads.feature` through the ordinary scenario binary, with
+two concurrent cases, no retries and `ORT_DYLIB_PATH` set. The ordinary asset builder continues
+to produce release assets by default. The one- and three-node outlines exercise codec creation,
+canonical inspection and native-session completion under the ordinary harness lifecycle budgets.
+`just test-codec-scenarios <input> [args...]` selects related codec round trips or browser cases
+with the same preparation, quoting each input and extra argument intact for the ordinary runner.
+
 ## What Runs Where
 
 `just test-emitter-batch-metrics` prepares the in-process server prerequisites and runs only

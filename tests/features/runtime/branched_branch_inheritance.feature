@@ -17,8 +17,8 @@ Feature: Branched branch inheritance
         tenant string,
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_id_branch TTL 5m;

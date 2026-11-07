@@ -9,7 +9,7 @@ Feature: Ingestor instance counts fit the execution-unit representation
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       """

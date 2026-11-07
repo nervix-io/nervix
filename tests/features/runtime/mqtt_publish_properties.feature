@@ -12,8 +12,8 @@ Feature: MQTT publications carry the envelope the statement prepares
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_input CONFIG {
         'addr' = '{{mqtt_addr}}', 'client_id' = 'properties-in-{{test_id}}'
@@ -76,8 +76,8 @@ Feature: MQTT publications carry the envelope the statement prepares
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_output CONFIG {
         'addr' = '{{mqtt_addr}}', 'client_id' = 'properties-types-{{test_id}}'
@@ -115,8 +115,8 @@ Feature: MQTT publications carry the envelope the statement prepares
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_input CONFIG {
         'addr' = '{{mqtt_addr}}', 'client_id' = 'retry-in-{{test_id}}'
@@ -170,8 +170,8 @@ Feature: MQTT publications carry the envelope the statement prepares
       CREATE SCHEMA notification (user_id I64);
       CREATE SCHEMA rejected_notification (user_id I64, error_code STRING, error_message STRING);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY rejections SCHEMA rejected_notification UNBRANCHED;
       CREATE MQTT CLIENT mqtt_input CONFIG {

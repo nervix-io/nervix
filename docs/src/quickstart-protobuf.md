@@ -52,8 +52,7 @@ integers, so a field-for-field message needs only the identity program `'.'`:
 ```plexus
 BEGIN;
 
-CREATE CODEC order_protobuf_codec
-  FROM PROTOBUF
+CREATE PROTOBUF CODEC order_protobuf_codec
   USING RESOURCE order_proto VERSION 1
   CONFIG {'file' = 'order_event.proto', 'include' = '.'}
   MESSAGE 'quickstart.OrderEvent'

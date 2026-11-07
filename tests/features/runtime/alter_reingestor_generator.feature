@@ -12,7 +12,7 @@ Feature: Altering reingestors and generators
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reingestor.example.com;
@@ -93,7 +93,7 @@ Feature: Altering reingestors and generators
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY state_events SCHEMA event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated SCHEMA event UNBRANCHED;

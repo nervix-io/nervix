@@ -73,7 +73,7 @@ Feature: Nervix refuses connector declarations that cannot execute
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       """
@@ -156,7 +156,7 @@ Feature: Nervix refuses connector declarations that cannot execute
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR incoming
@@ -195,7 +195,7 @@ Feature: Nervix refuses connector declarations that cannot execute
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA CLIENT replacement CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
@@ -240,7 +240,7 @@ Feature: Nervix refuses connector declarations that cannot execute
       CREATE SCHEMA event ( seq I64, event_at DATETIME, label STRING );
       CREATE SCHEMA published ( seq I64 );
       CREATE WIRE JSON SCHEMA published_wire MODE STRICT ( seq integer );
-      CREATE CODEC published_codec FROM WIRE JSON SCHEMA published_wire TO SCHEMA published;
+      CREATE WIRE JSON CODEC published_codec FROM WIRE SCHEMA published_wire TO SCHEMA published;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA CLIENT replacement CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
@@ -281,7 +281,7 @@ Feature: Nervix refuses connector declarations that cannot execute
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG { 'endpoint' = 'http://127.0.0.1:8080', 'timeout_ms' = 5000 };
       CREATE HTTP REQUEST EMITTER accepted_request FROM events TO api

@@ -24,10 +24,10 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE RELAY first_events SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY later_events SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
@@ -121,7 +121,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
@@ -184,7 +184,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
@@ -252,7 +252,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
@@ -311,7 +311,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
@@ -394,14 +394,14 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA route (route_key STRING, prefix STRING);
-      CREATE CODEC routes_codec FROM JSON TO SCHEMA route
+      CREATE JAQ JSON CODEC routes_codec TO SCHEMA route
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_body (event_id STRING, payload STRING);
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA event_body;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA rejected_request (
         event_id STRING,
         tenant STRING,
@@ -512,7 +512,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_branch (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -603,7 +603,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     When these Plexus commands are executed
       """
       CREATE SCHEMA outbound_event (event_id STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
@@ -667,10 +667,10 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
-      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+      CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
-      CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
+      CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';

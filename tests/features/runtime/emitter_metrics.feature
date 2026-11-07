@@ -16,8 +16,8 @@ Feature: Emitter metrics
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
-        CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
+        CREATE WIRE JSON CODEC notification_codec
+        FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_emitter_metrics_source SCHEMA user_id_branch TTL 5m;
@@ -140,7 +140,7 @@ Feature: Emitter metrics
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE CLIENT PRODUCER INGESTOR events_in
         FROM SCHEMA event MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s
@@ -337,7 +337,7 @@ Feature: Emitter metrics
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE CLIENT PRODUCER INGESTOR events_in
         FROM SCHEMA event MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s

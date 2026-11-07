@@ -1112,7 +1112,7 @@ CREATE SCHEMA polled_order_status (
   request_id STRING OPTIONAL
 );
 CREATE WIRE JSON SCHEMA order_status_wire MODE STRICT ( order_id integer, state string );
-CREATE CODEC order_status_codec FROM WIRE JSON SCHEMA order_status_wire TO SCHEMA order_status;
+CREATE WIRE JSON CODEC order_status_codec FROM WIRE SCHEMA order_status_wire TO SCHEMA order_status;
 CREATE RELAY order_statuses SCHEMA polled_order_status UNBRANCHED;
 
 CREATE HTTP CLIENT orders_api CONFIG {
@@ -2892,7 +2892,7 @@ CREATE SCHEMA evaluated_sample (
   timestamp STRING,
   evaluated_at DATETIME OPTIONAL
 );
-CREATE CODEC sample_codec FROM JSON TO SCHEMA sample
+CREATE JAQ JSON CODEC sample_codec TO SCHEMA sample
   WITH JAQ TRANSFORMATIONS ON INGESTION '{job: .metric.job, value, timestamp}';
 CREATE RELAY samples SCHEMA evaluated_sample UNBRANCHED;
 
@@ -2942,7 +2942,7 @@ which drops `metric`:
 ```plexus
 CREATE SCHEMA sample_value ( value F64 );
 CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
-CREATE CODEC value_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample_value;
+CREATE WIRE JSON CODEC value_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample_value;
 ```
 
 A route reads what the sample answers through its metadata. `metadata.query` is the statement's

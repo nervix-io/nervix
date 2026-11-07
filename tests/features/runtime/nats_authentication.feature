@@ -24,7 +24,7 @@ Feature: NATS client authentication
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY delivered SCHEMA notification UNBRANCHED;
       CREATE NATS CLIENT authenticated MOUNT nats_identity VERSION 1 CONFIG {
@@ -80,7 +80,7 @@ Feature: NATS client authentication
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
-      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE NATS CLIENT unauthenticated CONFIG { 'addr' = '{{nats_<method>_addr}}' };
       CREATE NATS SUBJECT INGESTOR refused

@@ -33,8 +33,8 @@ Feature: Resource-backed lookups
         city string
       );
 
-      CREATE CODEC zip_code_entry_codec
-        FROM WIRE JSON SCHEMA zip_code_entry_wire
+      CREATE WIRE JSON CODEC zip_code_entry_codec
+        FROM WIRE SCHEMA zip_code_entry_wire
         TO SCHEMA zip_code_entry;
 
       CREATE HASH MAP zip_codes_by_zip
@@ -109,8 +109,8 @@ Feature: Resource-backed lookups
         key string,
         value string
       );
-      CREATE CODEC malformed_entry_codec
-        FROM WIRE JSON SCHEMA malformed_entry_wire
+      CREATE WIRE JSON CODEC malformed_entry_codec
+        FROM WIRE SCHEMA malformed_entry_wire
         TO SCHEMA malformed_entry;
       """
     When these Plexus commands fail with "failed to build domain execution for '{{domain}}': failed to load lookup 'malformed_by_key': failed to decode lookup 'malformed_by_key' line 1: failed to parse json payload for codec 'malformed_entry_codec'"
@@ -141,8 +141,8 @@ Feature: Resource-backed lookups
         key string,
         value string
       );
-      CREATE CODEC lookup_codec
-        FROM WIRE JSON SCHEMA lookup_wire
+      CREATE WIRE JSON CODEC lookup_codec
+        FROM WIRE SCHEMA lookup_wire
         TO SCHEMA lookup_entry;
       """
     When these Plexus commands fail with "resource file 'missing.jsonl' in 'lookup_bundle@1' for HASH MAP 'by_key'"
@@ -185,8 +185,8 @@ Feature: Resource-backed lookups
         city string
       );
 
-      CREATE CODEC zip_code_entry_codec
-        FROM WIRE JSON SCHEMA zip_code_entry_wire
+      CREATE WIRE JSON CODEC zip_code_entry_codec
+        FROM WIRE SCHEMA zip_code_entry_wire
         TO SCHEMA zip_code_entry;
 
       CREATE HASH MAP zip_codes_by_zip
@@ -237,8 +237,8 @@ Feature: Resource-backed lookups
         city string
       );
 
-      CREATE CODEC zip_code_entry_codec
-        FROM WIRE JSON SCHEMA zip_code_entry_wire
+      CREATE WIRE JSON CODEC zip_code_entry_codec
+        FROM WIRE SCHEMA zip_code_entry_wire
         TO SCHEMA zip_code_entry;
 
       CREATE HASH MAP zip_codes_by_zip
@@ -318,8 +318,8 @@ Feature: Resource-backed lookups
         city string
       );
 
-      CREATE CODEC zip_code_entry_codec
-        FROM WIRE JSON SCHEMA zip_code_entry_wire
+      CREATE WIRE JSON CODEC zip_code_entry_codec
+        FROM WIRE SCHEMA zip_code_entry_wire
         TO SCHEMA zip_code_entry;
 
       CREATE HASH MAP zip_codes_by_zip
@@ -397,8 +397,7 @@ Feature: Resource-backed lookups
         city STRING
       );
 
-      CREATE CODEC zip_batch_codec
-        FROM JSON
+      CREATE JAQ JSON CODEC zip_batch_codec
         TO SCHEMA zip_code_entry
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
 

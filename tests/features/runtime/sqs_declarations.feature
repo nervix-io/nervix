@@ -10,7 +10,7 @@ Feature: SQS queue declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:1',
@@ -84,7 +84,7 @@ Feature: SQS queue declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:1',
@@ -124,7 +124,7 @@ Feature: SQS queue declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:1',
@@ -162,7 +162,7 @@ Feature: SQS queue declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:1',
@@ -200,7 +200,7 @@ Feature: SQS queue declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:1',
@@ -241,7 +241,7 @@ Feature: SQS queue declarations
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, value STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:1',

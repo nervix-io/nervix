@@ -16,7 +16,7 @@ Feature: Partitioned processor recovery and handoff
       """
       CREATE SCHEMA event (tenant STRING, seq I64, amount I64);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer, amount integer);
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
       CREATE BRANCH tenants SCHEMA tenant_key TTL 5m PARTITIONS 2;
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;

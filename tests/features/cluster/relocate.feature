@@ -14,8 +14,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         id integer
       );
-      CREATE CODEC state_event_codec
-        FROM WIRE JSON SCHEMA state_event_wire
+      CREATE WIRE JSON CODEC state_event_codec
+        FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
@@ -65,8 +65,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         id integer
       );
-      CREATE CODEC state_event_codec
-        FROM WIRE JSON SCHEMA state_event_wire
+      CREATE WIRE JSON CODEC state_event_codec
+        FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
@@ -119,8 +119,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         transaction_id string
       );
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -206,8 +206,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         transaction_id string
       );
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -274,7 +274,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA event ( value I32 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY raw_events SCHEMA event UNBRANCHED;
       CREATE RELAY restored_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge rejecting-wasm-{{test_id}}.example.com;
@@ -545,8 +545,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         tenant string,
         id integer
       );
-      CREATE CODEC state_event_codec
-        FROM WIRE JSON SCHEMA state_event_wire
+      CREATE WIRE JSON CODEC state_event_codec
+        FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
@@ -650,8 +650,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         transaction_id string,
         amount integer
       );
-      CREATE CODEC transaction_codec
-        FROM WIRE JSON SCHEMA transaction_wire
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
@@ -1198,8 +1198,8 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA reject_event ( id I64 );
       CREATE WIRE JSON SCHEMA reject_event_wire MODE STRICT ( id integer );
-      CREATE CODEC reject_event_codec
-        FROM WIRE JSON SCHEMA reject_event_wire
+      CREATE WIRE JSON CODEC reject_event_codec
+        FROM WIRE SCHEMA reject_event_wire
         TO SCHEMA reject_event;
       CREATE RELAY reject_input SCHEMA reject_event UNBRANCHED;
       CREATE RELAY reject_output SCHEMA reject_event UNBRANCHED;
@@ -1286,8 +1286,8 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA failover_event ( id I64 );
       CREATE WIRE JSON SCHEMA failover_event_wire MODE STRICT ( id integer );
-      CREATE CODEC failover_event_codec
-        FROM WIRE JSON SCHEMA failover_event_wire
+      CREATE WIRE JSON CODEC failover_event_codec
+        FROM WIRE SCHEMA failover_event_wire
         TO SCHEMA failover_event;
       CREATE RELAY failover_input SCHEMA failover_event UNBRANCHED;
       CREATE RELAY failover_output SCHEMA failover_event UNBRANCHED;
@@ -1357,8 +1357,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         id integer,
         source string
       );
-      CREATE CODEC promote_event_codec
-        FROM WIRE JSON SCHEMA promote_event_wire
+      CREATE WIRE JSON CODEC promote_event_codec
+        FROM WIRE SCHEMA promote_event_wire
         TO SCHEMA promote_event;
       CREATE SCHEMA promote_tenant ( tenant STRING );
       CREATE BRANCH promote_by_tenant SCHEMA promote_tenant TTL 5m;
@@ -1536,8 +1536,8 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA abort_event ( seq I64 );
       CREATE WIRE JSON SCHEMA abort_event_wire MODE STRICT ( seq integer );
-      CREATE CODEC abort_event_codec
-        FROM WIRE JSON SCHEMA abort_event_wire
+      CREATE WIRE JSON CODEC abort_event_codec
+        FROM WIRE SCHEMA abort_event_wire
         TO SCHEMA abort_event;
       CREATE RELAY abort_input SCHEMA abort_event UNBRANCHED;
       CREATE RELAY abort_staged SCHEMA abort_event UNBRANCHED CAPACITY 1;
@@ -1639,8 +1639,8 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       CREATE SCHEMA wait_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
-      CREATE CODEC wait_event_codec
-        FROM WIRE JSON SCHEMA wait_event_wire
+      CREATE WIRE JSON CODEC wait_event_codec
+        FROM WIRE SCHEMA wait_event_wire
         TO SCHEMA wait_event;
       CREATE RELAY untouched_state SCHEMA wait_event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -1785,8 +1785,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         id integer,
         source string
       );
-      CREATE CODEC state_event_codec
-        FROM WIRE JSON SCHEMA state_event_wire
+      CREATE WIRE JSON CODEC state_event_codec
+        FROM WIRE SCHEMA state_event_wire
         TO SCHEMA state_event;
       CREATE SCHEMA state_tenant ( tenant STRING );
       CREATE BRANCH state_by_tenant SCHEMA state_tenant TTL 5m;

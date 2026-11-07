@@ -14,7 +14,7 @@ Feature: Window processor runtime behavior
       CREATE SCHEMA window_input (tenant STRING, value I64);
       CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
       CREATE WIRE JSON SCHEMA window_wire MODE STRICT (tenant string, value integer);
-      CREATE CODEC window_codec FROM WIRE JSON SCHEMA window_wire TO SCHEMA window_input;
+      CREATE WIRE JSON CODEC window_codec FROM WIRE SCHEMA window_wire TO SCHEMA window_input;
       CREATE SCHEMA tenant_key (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 2 EVICT LRU;
       CREATE RELAY window_inputs SCHEMA window_input BRANCHED BY by_tenant;
@@ -91,7 +91,7 @@ Feature: Window processor runtime behavior
       CREATE SCHEMA window_input (tenant STRING, value I64);
       CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
       CREATE WIRE JSON SCHEMA window_wire MODE STRICT (tenant string, value integer);
-      CREATE CODEC window_codec FROM WIRE JSON SCHEMA window_wire TO SCHEMA window_input;
+      CREATE WIRE JSON CODEC window_codec FROM WIRE SCHEMA window_wire TO SCHEMA window_input;
       CREATE SCHEMA tenant_key (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 2 EVICT LRU;
       CREATE RELAY window_inputs SCHEMA window_input BRANCHED BY by_tenant;
@@ -177,8 +177,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -284,8 +284,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -385,8 +385,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -479,8 +479,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -614,8 +614,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -727,8 +727,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -804,8 +804,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -881,8 +881,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -949,8 +949,8 @@ Feature: Window processor runtime behavior
         sample_count I64,
         total_latency I64
       );
-        CREATE CODEC metric_codec
-        FROM JSON TO SCHEMA metric
+        CREATE JAQ JSON CODEC metric_codec
+        TO SCHEMA metric
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -1037,8 +1037,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -1147,8 +1147,8 @@ Feature: Window processor runtime behavior
         tenant string,
         latency integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
@@ -1299,11 +1299,11 @@ Feature: Window processor runtime behavior
         tenant string,
         sample_count integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
-        CREATE CODEC metric_summary_codec
-        FROM WIRE JSON SCHEMA metric_summary_wire
+        CREATE WIRE JSON CODEC metric_summary_codec
+        FROM WIRE SCHEMA metric_summary_wire
         TO SCHEMA metric_summary;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_kafka_metrics SCHEMA tenant_branch TTL 5m;
@@ -1390,11 +1390,11 @@ Feature: Window processor runtime behavior
         tenant string,
         sample_count integer
       );
-        CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
+        CREATE WIRE JSON CODEC metric_codec
+        FROM WIRE SCHEMA metric_wire
         TO SCHEMA metric;
-        CREATE CODEC metric_summary_codec
-        FROM WIRE JSON SCHEMA metric_summary_wire
+        CREATE WIRE JSON CODEC metric_summary_codec
+        FROM WIRE SCHEMA metric_summary_wire
         TO SCHEMA metric_summary;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_kafka_metrics SCHEMA tenant_branch TTL 5m;
