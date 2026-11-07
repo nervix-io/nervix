@@ -190,7 +190,7 @@ Feature: Runtime persistence
       """
     Then the last command output contains
       """
-      CREATE ATTACHED REINGESTOR sensor_partition
+      CREATE REINGESTOR sensor_partition
       """
     When these Plexus commands are executed on the leader node
       """

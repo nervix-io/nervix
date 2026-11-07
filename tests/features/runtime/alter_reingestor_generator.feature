@@ -57,8 +57,9 @@ Feature: Altering reingestors and generators
       """
     Then the last command output contains
       """
-      CREATE DETACHED REINGESTOR repartition
+      CREATE REINGESTOR repartition
         FROM incoming COLLECT FOR 10ms MAX BATCH SIZE 1MiB
+        DETACHED
         FILTER WHERE input.key > 0
       """
     When http payload is posted to host "http-{{test_id}}-alter-reingestor.example.com" path "/events"

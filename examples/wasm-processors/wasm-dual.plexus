@@ -73,8 +73,9 @@ CREATE HTTP ENDPOINT INGESTOR metric_source
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED WASM PROCESSOR rust_filter_even_rows
+CREATE WASM PROCESSOR rust_filter_even_rows
   FROM raw_metrics
+  ATTACHED
   USING RESOURCE rust_wasm_filter VERSION 1
   FILE 'nervix_wasm_processor_rust_guest.wasm'
   MAX FUEL 1000000000
@@ -90,8 +91,9 @@ CREATE ATTACHED WASM PROCESSOR rust_filter_even_rows
   ON REJECTED STATE PRESERVE
   ON GLOBAL ERROR LOG;
 
-CREATE ATTACHED WASM PROCESSOR go_filter_even_rows
+CREATE WASM PROCESSOR go_filter_even_rows
   FROM rust_filtered_metrics
+  ATTACHED
   USING RESOURCE go_wasm_filter VERSION 1
   FILE 'nervix_wasm_processor_go_guest.wasm'
   MAX FUEL 1000000000

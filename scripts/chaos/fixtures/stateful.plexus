@@ -36,8 +36,9 @@ CREATE KAFKA TOPIC INGESTOR chaos_state_ingestor
 
 CREATE RELAY chaos_unique SCHEMA chaos_state_record BRANCHED BY chaos_branch CAPACITY 1;
 
-CREATE ATTACHED DEDUPLICATOR chaos_dedup
+CREATE DEDUPLICATOR chaos_dedup
   FROM chaos_state_records
+  ATTACHED
   DEDUPLICATE ON input.dedup_key
   MAX TIME 1h
   BRANCHED BY chaos_branch
@@ -46,8 +47,9 @@ CREATE ATTACHED DEDUPLICATOR chaos_dedup
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED KAFKA TOPIC EMITTER chaos_unique_emitter
+CREATE KAFKA TOPIC EMITTER chaos_unique_emitter
   FROM chaos_unique
+  ATTACHED
   TO chaos_kafka TOPIC 'chaos_unique_output'
     MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
     ENCODE USING chaos_state_json
@@ -80,8 +82,9 @@ CREATE WIRE JSON CODEC chaos_window_json
 
 CREATE RELAY chaos_windows SCHEMA chaos_window_summary BRANCHED BY chaos_branch CAPACITY 1;
 
-CREATE DETACHED WINDOW PROCESSOR chaos_window
+CREATE WINDOW PROCESSOR chaos_window
   FROM chaos_state_records
+  DETACHED
   WIDTH 12 MESSAGES
   STEP 12 MESSAGES
   BRANCHED BY chaos_branch
@@ -94,8 +97,9 @@ CREATE DETACHED WINDOW PROCESSOR chaos_window
         sequence_sum = sum(input.sequence)
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED KAFKA TOPIC EMITTER chaos_window_emitter
+CREATE KAFKA TOPIC EMITTER chaos_window_emitter
   FROM chaos_windows
+  ATTACHED
   TO chaos_kafka TOPIC 'chaos_window_output'
     MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
     ENCODE USING chaos_window_json
@@ -158,8 +162,9 @@ CREATE WIRE JSON CODEC chaos_enriched_json
 
 CREATE RELAY chaos_enriched SCHEMA chaos_enriched_record BRANCHED BY chaos_branch CAPACITY 1;
 
-CREATE ATTACHED JUNCTION chaos_enrich
+CREATE JUNCTION chaos_enrich
   FROM chaos_state_records
+  ATTACHED
   BRANCHED BY chaos_branch
   USING MATERIALIZED STATE chaos_profiles DEFAULT { branch_name = 'none', profile_version = 0 }
   TO chaos_enriched
@@ -169,8 +174,9 @@ CREATE ATTACHED JUNCTION chaos_enrich
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED KAFKA TOPIC EMITTER chaos_enriched_emitter
+CREATE KAFKA TOPIC EMITTER chaos_enriched_emitter
   FROM chaos_enriched
+  ATTACHED
   TO chaos_kafka TOPIC 'chaos_enriched_output'
     MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
     ENCODE USING chaos_enriched_json
@@ -205,8 +211,9 @@ CREATE WIRE JSON CODEC chaos_counted_json
 
 CREATE RELAY chaos_counted SCHEMA chaos_counted_record BRANCHED BY chaos_branch CAPACITY 1;
 
-CREATE ATTACHED WASM PROCESSOR chaos_counter
+CREATE WASM PROCESSOR chaos_counter
   FROM chaos_state_records
+  ATTACHED
   USING RESOURCE chaos_counter_guest VERSION 1
   FILE 'processors/branch-counter.wat'
   MAX FUEL 100000000
@@ -224,8 +231,9 @@ CREATE ATTACHED WASM PROCESSOR chaos_counter
   ON REJECTED STATE PRESERVE
   ON GLOBAL ERROR LOG;
 
-CREATE ATTACHED KAFKA TOPIC EMITTER chaos_counted_emitter
+CREATE KAFKA TOPIC EMITTER chaos_counted_emitter
   FROM chaos_counted
+  ATTACHED
   TO chaos_kafka TOPIC 'chaos_counted_output'
     MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
     ENCODE USING chaos_counted_json

@@ -47,7 +47,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
       TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
@@ -178,7 +179,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
       TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
@@ -264,7 +266,8 @@ Feature: MQTT name resolution
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-mqtt-dns-boundary-{{test_id}}'
       };
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+        ATTACHED
         TO mqtt_sink TOPIC 'mqtt_dns_boundary_out_{{test_id}}'
           QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -334,7 +337,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
       TO mqtt_out TOPIC 'dns_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL

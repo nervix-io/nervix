@@ -35,8 +35,9 @@ Feature: Altering emitters
       """
     Then the last command output contains
       """
-      CREATE DETACHED ZEROMQ PUSH EMITTER event_emitter
+      CREATE ZEROMQ PUSH EMITTER event_emitter
         FROM outgoing COLLECT FOR 10ms MAX BATCH SIZE 512KiB
+        DETACHED
         TO emitter_b
           MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_codec

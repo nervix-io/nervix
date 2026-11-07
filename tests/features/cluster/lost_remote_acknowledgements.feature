@@ -35,8 +35,9 @@ Feature: Remote record acknowledgements lost between nodes
           BRANCHED BY lost_ack_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER lost_ack_emitter
+      CREATE KAFKA TOPIC EMITTER lost_ack_emitter
         FROM lost_ack_records
+        ATTACHED
         TO lost_ack_kafka TOPIC 'lost_ack_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING lost_ack_codec

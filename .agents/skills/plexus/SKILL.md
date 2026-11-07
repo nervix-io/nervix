@@ -726,6 +726,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   clause>`, the construction operations and `SET GENERAL ERROR`; see `Emitters` → `Altering
   emitters`.
   External table and collection names retain case. Keep client/schema/codec references as identifiers.
+- Put an explicit processor or emitter `ATTACHED | DETACHED` mode after the complete inputs and
+  optional `COLLECT FOR`; on a correlator use the position after `RIGHT FROM`. Read `Processors`
+  → `Shared input and branch contracts` and `Emitters` → `Statement heads and external names`
+  for clause order and defaults.
 - Name the connector and entity in every ingestor head, such as `CREATE KAFKA TOPIC INGESTOR`,
   `CREATE HTTP ENDPOINT INGESTOR`, or `CREATE SYSLOG LISTENER INGESTOR`, and write the body after
   `FROM` without a connector keyword. Reference a client of the head's connector, and pair

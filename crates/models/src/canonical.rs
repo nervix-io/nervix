@@ -2060,12 +2060,20 @@ fn general_error_policy_to_plexus(policy: &GeneralErrorPolicy) -> &'static str {
     }
 }
 
+/// The input list and its acknowledgement mode, in their shared body order.
+fn processor_input_clauses(
+    inputs: &ProcessorInputs,
+    mode: crate::AckMode,
+) -> error_stack::Result<Vec<Clause>, CanonicalPlexusError> {
+    Ok(vec![
+        Clause::line(format!("FROM {}", processor_inputs_to_plexus(inputs)?)),
+        Clause::line(mode.as_ref()),
+    ])
+}
+
 impl CreateJunction {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.extend(processor_tail_clauses(
             &self.branched_by,
@@ -2074,11 +2082,7 @@ impl CreateJunction {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} JUNCTION {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE JUNCTION {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2086,10 +2090,7 @@ impl CreateJunction {
 
 impl CreateDeduplicator {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "DEDUPLICATE ON {}",
@@ -2107,11 +2108,7 @@ impl CreateDeduplicator {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} DEDUPLICATOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE DEDUPLICATOR {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2122,6 +2119,7 @@ impl CreateCorrelator {
         let mut clauses = vec![
             Clause::line(prefixed_processor_inputs_to_plexus("LEFT", &self.left)?),
             Clause::line(prefixed_processor_inputs_to_plexus("RIGHT", &self.right)?),
+            Clause::line(self.mode.as_ref()),
             Clause::line(format!(
                 "CORRELATE WHERE {}",
                 expression_to_plexus(&self.correlate_where)?
@@ -2141,11 +2139,7 @@ impl CreateCorrelator {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} CORRELATOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE CORRELATOR {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2160,10 +2154,7 @@ fn correlation_timeout_action_to_plexus(action: &CorrelationTimeoutAction) -> St
 
 impl CreateReorderer {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "BY {}",
@@ -2181,11 +2172,7 @@ impl CreateReorderer {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} REORDERER {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE REORDERER {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2193,10 +2180,7 @@ impl CreateReorderer {
 
 impl CreateWindowProcessor {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "WIDTH {}",
@@ -2216,11 +2200,7 @@ impl CreateWindowProcessor {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} WINDOW PROCESSOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE WINDOW PROCESSOR {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2228,10 +2208,7 @@ impl CreateWindowProcessor {
 
 impl CreateEmitter {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
         let (reference, body) =
             emitter_destination_parts(&self.connector, &self.body, &self.envelope, None)?;
@@ -2254,8 +2231,7 @@ impl CreateEmitter {
         )));
         Ok(clause_statement(
             format!(
-                "CREATE {} {} EMITTER {}",
-                self.mode.as_ref(),
+                "CREATE {} EMITTER {}",
                 self.connector.kind().phrase(),
                 self.name.as_str()
             ),
@@ -2282,20 +2258,13 @@ fn window_bound_to_plexus(bound: &WindowBound) -> String {
 
 impl CreateReingestor {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
         clauses.extend(processor_outputs_clauses(&self.output_routes)?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} REINGESTOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE REINGESTOR {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2303,10 +2272,7 @@ impl CreateReingestor {
 
 impl<Version: Display> CreateInferencer<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "USING RESOURCE {} VERSION {}",
@@ -2332,11 +2298,7 @@ impl<Version: Display> CreateInferencer<Version> {
         )?);
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} INFERENCER {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE INFERENCER {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -2344,10 +2306,7 @@ impl<Version: Display> CreateInferencer<Version> {
 
 impl<Version: Display> CreateWasmProcessor<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            processor_inputs_to_plexus(&self.from)?
-        ))];
+        let mut clauses = processor_input_clauses(&self.from, self.mode)?;
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "USING RESOURCE {} VERSION {}",
@@ -2374,11 +2333,7 @@ impl<Version: Display> CreateWasmProcessor<Version> {
         ));
 
         Ok(clause_statement(
-            format!(
-                "CREATE {} WASM PROCESSOR {}",
-                self.mode.as_ref(),
-                self.name.as_str()
-            ),
+            format!("CREATE WASM PROCESSOR {}", self.name.as_str()),
             clauses,
         ))
     }
@@ -4347,9 +4302,9 @@ mod tests {
         };
         assert_eq!(
             junction.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED JUNCTION orders_junction\n  FROM orders_a, orders_b COLLECT FOR 25ms \
-             MAX BATCH SIZE 2MiB\n  BRANCHED BY by_tenant_branch\n  TO orders_all\n    FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
+            "CREATE JUNCTION orders_junction\n  FROM orders_a, orders_b COLLECT FOR 25ms MAX \
+             BATCH SIZE 2MiB\n  ATTACHED\n  BRANCHED BY by_tenant_branch\n  TO orders_all\n    \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
         );
 
         let deduplicator = CreateDeduplicator {
@@ -4365,7 +4320,7 @@ mod tests {
         };
         assert_eq!(
             deduplicator.to_canonical_plexus().expect("must render"),
-            "CREATE DETACHED DEDUPLICATOR orders_dedup\n  FROM orders_in\n  DEDUPLICATE ON \
+            "CREATE DEDUPLICATOR orders_dedup\n  FROM orders_in\n  DETACHED\n  DEDUPLICATE ON \
              input.transaction_id\n  MAX TIME 10m\n  BRANCHED BY by_tenant_branch\n  TO \
              orders_out\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
         );
@@ -4403,10 +4358,10 @@ mod tests {
         };
         assert_eq!(
             correlator.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED CORRELATOR orders_correlator\n  LEFT FROM orders_left, \
-             orders_left_archive COLLECT FOR 10ms\n  RIGHT FROM orders_right COLLECT FOR 20ms MAX \
-             BATCH SIZE 1MiB\n  CORRELATE WHERE left.id = right.id\n  MATCH EARLIEST\n  MAX TIME \
-             5s\n  ON CORRELATION TIMEOUT DROP, DROP\n  BRANCHED BY by_tenant_branch\n  TO \
+            "CREATE CORRELATOR orders_correlator\n  LEFT FROM orders_left, orders_left_archive \
+             COLLECT FOR 10ms\n  RIGHT FROM orders_right COLLECT FOR 20ms MAX BATCH SIZE 1MiB\n  \
+             ATTACHED\n  CORRELATE WHERE left.id = right.id\n  MATCH EARLIEST\n  MAX TIME 5s\n  \
+             ON CORRELATION TIMEOUT DROP, DROP\n  BRANCHED BY by_tenant_branch\n  TO \
              orders_matched\n    SET id = left.id\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    \
              ON MESSAGE ERROR LOG;"
         );
@@ -4450,7 +4405,7 @@ mod tests {
         };
         assert_eq!(
             window_processor.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED WINDOW PROCESSOR latency_window\n  FROM orders_in\n  WIDTH 100 \
+            "CREATE WINDOW PROCESSOR latency_window\n  FROM orders_in\n  ATTACHED\n  WIDTH 100 \
              MESSAGES 10s DURATION\n  STEP 10 MESSAGES 1s DURATION\n  BRANCHED BY \
              by_tenant_branch\n  TO orders_p99\n    SET latency_p99 = \
              percentile_linear_histogram(input.latency, 99, 2048, 0, 10000, '2s')\n    ON MESSAGE \
@@ -4467,7 +4422,9 @@ mod tests {
         };
         assert_eq!(
             reingestor.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED REINGESTOR orders_repartition\n  FROM orders_in\n  TO orders_out\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
+            "CREATE REINGESTOR orders_repartition\n  FROM orders_in\n  ATTACHED\n  TO \
+             orders_out\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE \
+             ERROR LOG;"
         );
 
         let route_reingestor = CreateReingestor {
@@ -4498,7 +4455,7 @@ mod tests {
         };
         assert_eq!(
             route_reingestor.to_canonical_plexus().expect("must render"),
-            "CREATE DETACHED REINGESTOR orders_splitter\n  FROM orders_in\n  FILTER WHERE \
+            "CREATE REINGESTOR orders_splitter\n  FROM orders_in\n  DETACHED\n  FILTER WHERE \
              active\n  TO orders_errors\n    WHERE level = 'error'\n    UNBRANCHED\n    FLUSH \
              EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  TO orders_warn\n    SET \
              severity = 'warning'\n    WHERE level = 'warn'\n    UNBRANCHED\n    FLUSH EACH 100ms \
@@ -4683,8 +4640,8 @@ mod tests {
             assert_eq!(
                 emitter.to_canonical_plexus().expect("must render"),
                 format!(
-                    "CREATE ATTACHED {rendered_kind} EMITTER emit_orders\n  FROM orders_stream \
-                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_emitter}\n    MODE \
+                    "CREATE {rendered_kind} EMITTER emit_orders\n  FROM orders_stream COLLECT FOR \
+                     50ms MAX BATCH SIZE 4MiB\n  ATTACHED\n  TO {rendered_emitter}\n    MODE \
                      {rendered_mode}\n    ENCODE USING orders_codec\n  FLUSH EACH 100ms MAX BATCH \
                      SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
                 )
@@ -4697,8 +4654,8 @@ mod tests {
             assert_eq!(
                 batching.to_canonical_plexus().expect("must render"),
                 format!(
-                    "CREATE ATTACHED {rendered_kind} EMITTER emit_orders\n  FROM orders_stream \
-                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_emitter}\n    MODE \
+                    "CREATE {rendered_kind} EMITTER emit_orders\n  FROM orders_stream COLLECT FOR \
+                     50ms MAX BATCH SIZE 4MiB\n  ATTACHED\n  TO {rendered_emitter}\n    MODE \
                      {rendered_mode}\n    ENCODE USING orders_codec\n  BATCH MAX MESSAGES 500 MAX \
                      SIZE 1MiB\n  FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  \
                      ON GENERAL ERROR LOG;"
@@ -4851,7 +4808,7 @@ mod tests {
 
         assert_eq!(
             emitter.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED POSTGRES TABLE EMITTER emit_notifications\n  FROM notifications\n  \
+            "CREATE POSTGRES TABLE EMITTER emit_notifications\n  FROM notifications\n  ATTACHED\n  \
              TO postgres_main TABLE 'notification_rows'\n    MODE ACK RETRY POLICY BACKOFF 250ms \
              MAX 30s\n    VALUES {\n      'postgres_user_id' = input.user_id,\n      \
              'postgres_action' = lower(input.action)\n    }\n    ON CONFLICT ('postgres_user_id') \
@@ -4907,8 +4864,8 @@ mod tests {
 
         assert_eq!(
             emitter.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED MYSQL TABLE EMITTER emit_notifications\n  FROM notifications\n  TO \
-             mysql_main TABLE 'notification_rows'\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX \
+            "CREATE MYSQL TABLE EMITTER emit_notifications\n  FROM notifications\n  ATTACHED\n  \
+             TO mysql_main TABLE 'notification_rows'\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX \
              30s\n    VALUES {\n      'mysql_user_id' = input.user_id,\n      'mysql_action' = \
              lower(input.action)\n    }\n    ON CONFLICT DO NOTHING\n  BATCH MAX MESSAGES 500 MAX \
              SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON \
@@ -4965,8 +4922,8 @@ mod tests {
 
         assert_eq!(
             emitter.to_canonical_plexus().expect("must render"),
-            "CREATE ATTACHED MONGODB COLLECTION EMITTER emit_notifications\n  FROM \
-             notifications\n  TO mongodb_main COLLECTION 'notification_rows'\n    MODE ACK RETRY \
+            "CREATE MONGODB COLLECTION EMITTER emit_notifications\n  FROM notifications\n  \
+             ATTACHED\n  TO mongodb_main COLLECTION 'notification_rows'\n    MODE ACK RETRY \
              POLICY BACKOFF 250ms MAX 30s\n    VALUES {\n      'mongodb_user_id' = \
              input.user_id,\n      'mongodb_action' = lower(input.action)\n    }\n    ON CONFLICT \
              ('mongodb_user_id') DO UPDATE\n  BATCH MAX MESSAGES 500 MAX SIZE 8MiB\n  FLUSH EACH \
