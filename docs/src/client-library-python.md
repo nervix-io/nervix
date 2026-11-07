@@ -157,19 +157,32 @@ session, so the restored subscription keeps its name but can carry the number it
 {{#include ../../tests/client_conformance/python/suite/cluster/test_subscriptions.py:interrupted}}
 ```
 
-`RESTORATION_FAILED` says the new session refused to open it again, with the server's message and how
-long the session waits before it tries again.
-
-```python
-{{#include ../../tests/client_conformance/python/suite/cluster/test_subscriptions.py:restoration_failed}}
-```
-
-`ENDED` is the last event of a generation the server ended, because its relay was removed or
-redefined; subscribe again to read the relay under its current definition. `DELIVERY_LOST`,
-`ROWS_SKIPPED` and `CONSUMER_OVERFLOW` report gaps with their row counts in `row_count`.
+`ENDED` is the last event of a generation that ended for good, and its `end_reason` says why:
+`RELAY_REMOVED` when its relay or its domain was removed, and `RELAY_CHANGED` when its relay was
+redefined with another schema. The server ends a generation its session holds when that happens;
+subscribe again to read the relay under its current definition.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_subscriptions.py:ended}}
+```
+
+A subscription whose relay was removed or redefined while its session was lost ends the same way:
+the new session finds it so when it opens the subscription again, and reports `ENDED` instead of
+opening it.
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_subscriptions.py:ended_while_lost}}
+```
+
+`RESTORATION_FAILED` says the new session refused for now to open the subscription again, for
+example because the node it reached has not caught up with the cluster yet. Its
+`restoration_failure` carries the `RestorationCause`, the server's message and how long the session
+waits before it tries again; the subscription stays and the session keeps trying. `DELIVERY_LOST`,
+`ROWS_SKIPPED` and `CONSUMER_OVERFLOW` report gaps with their row counts in `row_count`. A reader
+handles each kind of event:
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_subscriptions.py:handle_events}}
 ```
 
 `DELETE SUBSCRIPTION <name>;` closes a subscription and frees its name.
@@ -218,6 +231,11 @@ attaches again on its next session, and reports the clock again with a `STATE` e
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_clocks.py:clock_interrupted}}
 ```
+
+When the new session refuses for now to attach the clock again, a `RESTORATION_FAILED` event carries
+the same `RestorationFailure` a subscription's does, with `IN_TRANSACTION`, `REJECTED` or `FAILED` as
+its cause, and the session tries again after the wait it names. A clock whose domain was removed
+ends with `ENDED`, and its `end_reason` is `DOMAIN_REMOVED`.
 
 `DETACH DOMAIN CLOCK;` stops following it.
 

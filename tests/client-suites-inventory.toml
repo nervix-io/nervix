@@ -333,7 +333,12 @@ tier = "cluster"
 
 [[test]]
 host = "python"
-identity = "cluster/test_subscriptions.py::test_a_relay_dropped_while_the_session_was_lost_refuses_the_restoration"
+identity = "cluster/test_subscriptions.py::test_a_relay_dropped_while_the_session_was_lost_ends_the_subscription"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_subscriptions.py::test_a_relay_redefined_while_the_session_was_lost_ends_the_subscription"
 tier = "cluster"
 
 [[test]]

@@ -178,29 +178,76 @@ def test_a_lost_session_interrupts_a_subscription_which_is_then_restored(
         completed(watching, f"DELETE SUBSCRIPTION {name};")
 
 
-def test_a_relay_dropped_while_the_session_was_lost_refuses_the_restoration(
+def handled(event: nx.Event, log: list[str]) -> bool:
+    """Handles one subscription event as a reader does, and tells whether the subscription goes
+    on."""
+
+    # ANCHOR: handle_events
+    if event.kind == nx.EventKind.ROWS:
+        log.append(f"{event.row_count} rows")
+    elif event.kind == nx.EventKind.INTERRUPTED:
+        log.append("interrupted")
+    elif event.kind == nx.EventKind.RESTORATION_FAILED:
+        # The new session refused for now to open the subscription again; it tries again later.
+        failure = event.restoration_failure
+        assert failure is not None
+        log.append(f"refused: {failure.cause!r} {failure.message} {failure.retry_after_nanos}")
+    elif event.kind == nx.EventKind.ENDED:
+        # The generation ended for good: subscribe again to read the relay as it is now.
+        log.append(f"ended: {event.end_reason!r}")
+        return False
+    else:
+        # DELIVERY_LOST, ROWS_SKIPPED and CONSUMER_OVERFLOW count the rows the reader missed.
+        log.append(f"missed {event.row_count} rows")
+    return True
+    # ANCHOR_END: handle_events
+
+
+def test_a_relay_dropped_while_the_session_was_lost_ends_the_subscription(
     cluster: Cluster, relay: Relay, session: nx.Session, unique: str
 ) -> None:
     doomed = f"doomed_{unique}"
-    name = f"refused_{unique}"
+    name = f"removed_{unique}"
     completed(session, f"CREATE RELAY {doomed} SCHEMA suite_row BRANCHED BY by_tenant;")
+    log: list[str] = []
     with cluster.connect(relay.uri) as watching:
         completed(watching, f"CREATE SUBSCRIPTION {name} TO {doomed};")
         relay.cut()
-        assert watching.next_event(cancel=deadline()).kind == nx.EventKind.INTERRUPTED
+        assert handled(watching.next_event(cancel=deadline()), log)
         completed(session, f"DROP RELAY {doomed};")
         relay.restore()
-        # ANCHOR: restoration_failed
+        # ANCHOR: ended_while_lost
         event = watching.next_event(cancel=nx.Cancel(deadline=120))
-        assert event.kind == nx.EventKind.RESTORATION_FAILED
-        failure = event.restoration_failure
-        assert failure is not None
-        print(failure.message, failure.retry_after_nanos)
-        # ANCHOR_END: restoration_failed
-        assert failure.retry_after_nanos > 0
-        assert doomed in failure.message
-        # Deleting a subscription no session holds needs no server.
-        completed(watching, f"DELETE SUBSCRIPTION {name};")
+        # The relay was dropped while the session was lost, so the new session ends the
+        # subscription instead of opening it again.
+        assert event.kind == nx.EventKind.ENDED
+        assert event.end_reason == nx.EndReason.RELAY_REMOVED
+        # ANCHOR_END: ended_while_lost
+        assert event.subscription.name == name
+        assert event.restoration_failure is None
+        assert not handled(event, log)
+    assert log == ["interrupted", "ended: EndReason.RELAY_REMOVED"]
+
+
+def test_a_relay_redefined_while_the_session_was_lost_ends_the_subscription(
+    cluster: Cluster, relay: Relay, session: nx.Session, unique: str
+) -> None:
+    redefined = f"redefined_{unique}"
+    name = f"changed_{unique}"
+    completed(session, f"CREATE RELAY {redefined} SCHEMA suite_row BRANCHED BY by_tenant;")
+    with cluster.connect(relay.uri) as watching:
+        completed(watching, f"CREATE SUBSCRIPTION {name} TO {redefined};")
+        relay.cut()
+        assert watching.next_event(cancel=deadline()).kind == nx.EventKind.INTERRUPTED
+        # The relay comes back under its name, announcing another schema.
+        completed(session, f"DROP RELAY {redefined};")
+        completed(session, f"CREATE SCHEMA other_{unique} ( value I64 );")
+        completed(session, f"CREATE RELAY {redefined} SCHEMA other_{unique};")
+        relay.restore()
+        event = watching.next_event(cancel=deadline())
+        assert event.kind == nx.EventKind.ENDED
+        assert event.end_reason == nx.EndReason.RELAY_CHANGED
+        assert event.subscription.name == name
 
 
 def test_a_subscription_the_server_ended_reports_its_end(
@@ -214,6 +261,7 @@ def test_a_subscription_the_server_ended_reports_its_end(
     # ANCHOR: ended
     event = session.next_event(cancel=nx.Cancel(deadline=120))
     assert event.kind == nx.EventKind.ENDED
+    assert event.end_reason == nx.EndReason.RELAY_REMOVED
     # ANCHOR_END: ended
     assert event.subscription.name == name
     # An event that carries no rows has no schema or frame to read.
