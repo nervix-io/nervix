@@ -2066,6 +2066,14 @@ A restore that failed at a step is `RequestFailed`, and its report names the ste
 steps before it as `Applied`, and those after it as `NotAttempted`. A dry run reports every step as
 `Planned`, and is never admitted or recorded.
 
+An executed `RequestFailed` without a `RestoreReport` can refuse verification or planning before
+admission, or report that the attempt's task could not finish. It does not give an earlier
+attempt's recorded outcome. After a whole upload lost its answer, or an `OutcomeUnknown` answer,
+the web console keeps the restore unknown under its original reference when a later attempt
+returns such a failure, retaining that complete typed outcome beneath the uncertainty. An initial
+failure remains definitive. A failure with origin `Recovered`, or one carrying a restore report,
+settles the restore, including the steps a failed restore already applied.
+
 A domain whose restore has not published its complete runtime-state generation refuses `START`
 with a definitive command failure naming the incomplete installation. Planning rejects it before
 admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
@@ -2115,7 +2123,9 @@ when ten minutes of repetitions leave it unknown. It reports the outcome as unkn
 the restore ends without it after an attempt may have had the restore admitted, by sending the
 whole archive without learning the outcome or by an `OutcomeUnknown` answer: when the file can no
 longer be read, a reply cannot be accepted, the leader refuses a later stream, or the leader no
-longer holds the reference.
+longer holds the reference. A later executed request failure without a restore report likewise
+leaves an earlier possible admission unknown; the matching request and execution identities alone
+do not make it the earlier restore's recorded result.
 
 ## Node Stop And Restart As A Client Observes Them
 
