@@ -216,7 +216,8 @@ Feature: Resource version bindings
       """
     Then the last command output contains
       """
-      PROTOBUF USING RESOURCE proto_bundle VERSION 2
+      CREATE PROTOBUF CODEC notification_codec
+        USING RESOURCE proto_bundle VERSION 2
       """
     When these Plexus commands are executed on the leader node
       """
@@ -436,7 +437,8 @@ Feature: Resource version bindings
       """
     Then the last command output contains
       """
-      PROTOBUF USING RESOURCE proto_bundle VERSION 1
+      CREATE PROTOBUF CODEC notification_codec
+        USING RESOURCE proto_bundle VERSION 1
       """
     When these Plexus commands are executed on the leader node
       """
@@ -463,7 +465,8 @@ Feature: Resource version bindings
       """
     Then the last command output contains
       """
-      PROTOBUF USING RESOURCE proto_bundle VERSION 1
+      CREATE PROTOBUF CODEC notification_codec
+        USING RESOURCE proto_bundle VERSION 1
       """
     When these Plexus commands are executed on the leader node
       """
