@@ -45,7 +45,7 @@ backup_fault_host() {
 
 # Places the backup graph so that the leader coordinates, a follower owns the ingestor and relay
 # state, and the other follower runs the emitter whose broker link the run delays. Sets
-# backup_fault_leader, backup_fault_owner and backup_fault_sink to node names.
+# backup_fault_leader, backup_fault_owner and backup_fault_emitter to node names.
 backup_fault_place() {
     local case_dir="$1"
     wait_for 'settled cluster before backup placement' 120 cluster_settled "${case_dir}"
@@ -56,12 +56,12 @@ backup_fault_place() {
         [[ "${node}" == "${backup_fault_leader}" ]] || followers+=("${node}")
     done
     backup_fault_owner="${followers[0]}"
-    backup_fault_sink="${followers[1]}"
+    backup_fault_emitter="${followers[1]}"
     domain_cli_command "RELOCATE INGESTOR chaos_ingestor ONTO NODE ${backup_fault_owner} IGNORE PREFERENCES;" \
         >"${case_dir}/relocate-ingestor.txt" 2>&1
     domain_cli_command "RELOCATE RELAY chaos_records ONTO NODE ${backup_fault_owner} IGNORE PREFERENCES;" \
         >"${case_dir}/relocate-relay.txt" 2>&1
-    domain_cli_command "RELOCATE EMITTER chaos_emitter ONTO NODE ${backup_fault_sink} IGNORE PREFERENCES;" \
+    domain_cli_command "RELOCATE EMITTER chaos_emitter ONTO NODE ${backup_fault_emitter} IGNORE PREFERENCES;" \
         >"${case_dir}/relocate-emitter.txt" 2>&1
     wait_for "ingestor owner ${backup_fault_owner}" 60 \
         describe_owner_ready 'DESCRIBE INGESTOR chaos_ingestor;' \
@@ -69,12 +69,12 @@ backup_fault_place() {
     wait_for "relay owner ${backup_fault_owner}" 60 \
         describe_owner_ready 'DESCRIBE RELAY chaos_records;' \
         "${backup_fault_owner}" "${case_dir}/describe-relay.txt"
-    wait_for "emitter owner ${backup_fault_sink}" 60 \
+    wait_for "emitter owner ${backup_fault_emitter}" 60 \
         describe_owner_ready 'DESCRIBE EMITTER chaos_emitter;' \
-        "${backup_fault_sink}" "${case_dir}/describe-emitter.txt"
+        "${backup_fault_emitter}" "${case_dir}/describe-emitter.txt"
     jq -n --arg leader "${backup_fault_leader}" --arg owner "${backup_fault_owner}" \
-        --arg sink "${backup_fault_sink}" \
-        '{leader:$leader,state_owner:$owner,emitter_owner:$sink,
+        --arg emitter "${backup_fault_emitter}" \
+        '{leader:$leader,state_owner:$owner,emitter_owner:$emitter,
           evidence:["describe-ingestor.txt","describe-relay.txt","describe-emitter.txt","leader.txt"]}' \
         >"${case_dir}/placement.json"
 }
@@ -86,12 +86,12 @@ backup_fault_gate_name() {
 # Closes the acknowledgement gate: the broker drops every packet it sends to the emitter's node.
 backup_fault_close_gate() {
     local case_dir="$1"
-    local sink_id sink_address
-    sink_id="$(owned_service_container "$(backup_fault_host "${backup_fault_sink}")")" || return 1
-    sink_address="$(container_address "${sink_id}")"
-    [[ "${sink_address}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    local emitter_id emitter_address
+    emitter_id="$(owned_service_container "$(backup_fault_host "${backup_fault_emitter}")")" || return 1
+    emitter_address="$(container_address "${emitter_id}")"
+    [[ "${emitter_address}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || backup_fault_fail controller 'the emitter node has no address on the run network'
-    node_fault_netem_start "${case_dir}" "$(backup_fault_gate_name)" broker broker "${sink_address}" 600 \
+    node_fault_netem_start "${case_dir}" "$(backup_fault_gate_name)" broker broker "${emitter_address}" 600 \
         'loss 100%' loss --percent 100
     backup_fault_gated_output=""
 }
@@ -115,7 +115,7 @@ backup_fault_gate_holds_publish() {
     [[ "${output_end}" == "${previous_output}" ]] && ((source_end >= output_end + 2))
 }
 
-# Starts the fault backup through the sink node in the background. The report, the CLI's standard
+# Starts the fault backup through the emitter node in the background. The report, the CLI's standard
 # error, the time the CLI exited and its exit status go to the case directory, so the end time
 # holds even while the run's foreground still holds or heals the fault.
 backup_fault_start_backup() {
@@ -127,7 +127,7 @@ backup_fault_start_backup() {
     backup_fault_backup_started_ms="$(epoch_ms)"
     (
         local status=0
-        cli_host="$(backup_fault_host "${backup_fault_sink}")"
+        cli_host="$(backup_fault_host "${backup_fault_emitter}")"
         compose_call_timeout=$((backup_fault_exit_seconds + 60))
         backup_archive_domain "${archive_dir}" chaos_baseline "${archive_dir}/fault.nvxb" \
             "${case_dir}/fault-backup.json" --backup-wait-timeout "${backup_fault_wait}" \
@@ -138,10 +138,10 @@ backup_fault_start_backup() {
     backup_fault_backup_pid=$!
 }
 
-# True once the sink node reports the ingestor quiesced by the domain pause.
+# True once the emitter node reports the ingestor quiesced by the domain pause.
 backup_fault_cut_held() {
     local case_dir="${backup_fault_case_dir}"
-    cli_host="$(backup_fault_host "${backup_fault_sink}")"
+    cli_host="$(backup_fault_host "${backup_fault_emitter}")"
     local status=0
     domain_cli_command 'DESCRIBE INGESTOR chaos_ingestor;' \
         >"${case_dir}/cut-observation.attempt.txt" 2>&1 || status=$?
@@ -285,7 +285,7 @@ backup_fault_recover_domain() {
     wait_for 'Kafka source advanced past the fault' 60 \
         topic_progressed chaos_input "${backup_fault_source_at_fault}" \
         || recovery_finding "${case_dir}" 'the source did not advance after the fault'
-    wait_for 'Kafka sink advanced past the fault' 180 \
+    wait_for 'Kafka emitter advanced past the fault' 180 \
         topic_progressed chaos_output "${backup_fault_output_at_fault}" \
         || recovery_finding "${case_dir}" 'the domain did not resume its output after the fault'
     backup_fault_resumed_ms=$(($(epoch_ms) - started_ms))

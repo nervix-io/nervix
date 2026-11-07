@@ -213,7 +213,7 @@ pub struct SqsQueueIngestorMessage {
 }
 
 impl SqsQueueIngestorMessage {
-    /// A message a receive brought, which the source can settle only through its receipt handle.
+    /// A message a receive brought, which the ingestor can settle only through its receipt handle.
     fn new(message: SqsMessage) -> SqsQueueIngestorResult<Self> {
         let Some(receipt_handle) = message.receipt_handle().map(ToOwned::to_owned) else {
             return Err(Report::new(SqsQueueIngestorError::MissingReceiptHandle {
@@ -430,7 +430,7 @@ impl BatchUnderway {
     }
 
     /// Takes in what one receive brought. A message without a receipt handle stays off the batch,
-    /// because the source could neither delete it nor make it visible again, and the first such
+    /// because the ingestor could neither delete it nor make it visible again, and the first such
     /// message becomes the failure the next read reports.
     fn take(&mut self, received: Vec<SqsMessage>) {
         for message in received {

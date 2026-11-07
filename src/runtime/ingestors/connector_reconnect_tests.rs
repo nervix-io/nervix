@@ -130,7 +130,7 @@ impl IngestorMessage for BrokerDelivery {
     }
 }
 
-/// A ingestor reading through one connection of a [`RedeliveringBroker`] at a time.
+/// An ingestor reading through one connection of a [`RedeliveringBroker`] at a time.
 pub(super) struct RedeliveringIngestor {
     broker: Arc<Mutex<RedeliveringBroker>>,
     connection: u64,
@@ -167,7 +167,7 @@ impl IngestorConnector for RedeliveringIngestor {
         broker.suspensions = broker
             .suspensions
             .checked_add(1)
-            .verified("a check suspends its source only a few times");
+            .verified("a check suspends its ingestor only a few times");
         Ok(())
     }
 
@@ -273,7 +273,7 @@ impl IngestorHostServices for RedeliveryHost {
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
     ) -> IngestorIntakeResult<()> {
-        panic!("a connection-bound source reads in an acknowledged mode");
+        panic!("a connection-bound ingestor reads in an acknowledged mode");
     }
 
     async fn intake_acknowledged(
@@ -391,7 +391,7 @@ async fn a_reconnect_discards_a_rejection_the_broker_redelivers() {
 }
 
 #[nervix_primitives::test]
-async fn a_source_without_positions_keeps_no_failed_rejection() {
+async fn an_ingestor_without_positions_keeps_no_failed_rejection() {
     let broker = lose_the_connection_of_the_first_message(PositionClass::None).await;
 
     let broker = broker.lock();
@@ -405,7 +405,7 @@ async fn a_source_without_positions_keeps_no_failed_rejection() {
 
 /// A transport that upgrades successfully but fails reads until it delivers a real batch.
 struct ClosingIngestor {
-    source: RedeliveringIngestor,
+    connector: RedeliveringIngestor,
     reads: Arc<Mutex<Vec<Instant>>>,
     steps: VecDeque<ScriptedRead>,
     reconnect: bool,
@@ -426,7 +426,7 @@ impl IngestorConnector for ClosingIngestor {
     type Plan = ();
 
     async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
-        panic!("the test supplies its already constructed source");
+        panic!("the test supplies its already constructed ingestor");
     }
 
     fn needs_resume(&mut self) -> bool {
@@ -435,7 +435,7 @@ impl IngestorConnector for ClosingIngestor {
 
     async fn resume(&mut self) -> IngestorResult<IngestorResume> {
         self.reconnect = false;
-        self.source.resume().await
+        self.connector.resume().await
     }
 }
 
@@ -451,7 +451,7 @@ impl BrokerIngestorConnector for ClosingIngestor {
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
         self.reads.lock().push(Instant::now());
         match self.steps.pop_front() {
-            Some(ScriptedRead::Deliver) => self.source.next_batch(request, cancellation).await,
+            Some(ScriptedRead::Deliver) => self.connector.next_batch(request, cancellation).await,
             Some(ScriptedRead::Failure) => {
                 self.reconnect = true;
                 Err(Report::new(IngestorError::Read {
@@ -467,11 +467,11 @@ impl BrokerIngestorConnector for ClosingIngestor {
     }
 
     async fn acknowledge(&mut self, positions: &[u64]) -> IngestorResult<()> {
-        self.source.acknowledge(positions).await
+        self.connector.acknowledge(positions).await
     }
 
     async fn reject(&mut self, positions: &[u64]) -> IngestorResult<()> {
-        self.source.reject(positions).await
+        self.connector.reject(positions).await
     }
 }
 
@@ -480,8 +480,8 @@ async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivere
     for interruption in [ScriptedRead::Failure, ScriptedRead::ResumeRequired] {
         let broker = RedeliveringBroker::shared([1]);
         let reads = Arc::new(Mutex::new(Vec::new()));
-        let source = ClosingIngestor {
-            source: RedeliveringIngestor::new(broker.clone()),
+        let connector = ClosingIngestor {
+            connector: RedeliveringIngestor::new(broker.clone()),
             reads: reads.clone(),
             steps: VecDeque::from([
                 interruption,
@@ -499,7 +499,7 @@ async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivere
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
         run_ingestor_instance_with_retry(
-            source,
+            connector,
             IngestorHost::new(RedeliveryHost::new(broker.clone(), false)),
             policy,
             shutdown_rx,
@@ -521,7 +521,7 @@ async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivere
 }
 
 #[test]
-fn a_broker_source_without_a_retry_policy_reopens_on_the_reconnect_cadence() {
+fn a_broker_ingestor_without_a_retry_policy_reopens_on_the_reconnect_cadence() {
     let unacknowledged =
         BrokerIngestorPolicy::new(IngestorAckPolicy::None, PositionClass::Replayable);
     assert_eq!(unacknowledged.retry, INGESTOR_RECONNECT_POLICY);

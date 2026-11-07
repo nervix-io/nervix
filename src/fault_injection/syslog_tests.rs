@@ -3,7 +3,7 @@
 //! Layer: test harness, outside the product layer order.
 //! Owns: the retained request and acknowledgement boundary of one armed listener fault.
 //! Depends on: the host's fault controls and execution-sensitive watch channels.
-//! Must not know: socket drivers, source lifecycle or product configuration.
+//! Must not know: socket drivers, ingestor lifecycle or product configuration.
 
 use super::FaultInjection;
 

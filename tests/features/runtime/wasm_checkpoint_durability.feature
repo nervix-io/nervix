@@ -38,7 +38,7 @@ Feature: WASM guest-state checkpoint durability
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_checkpoint_local_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_checkpoint_local_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -110,6 +110,128 @@ Feature: WASM guest-state checkpoint durability
       | 3            | 0             |
       | 3            | 1             |
 
+  # Each acknowledged input is one guest callback whose checkpoint replaced its branch's previous
+  # checkpoint. The nodes' runtime state stores are counted after every node stopped and before any
+  # starts again, so the count shows whether a stored checkpoint kept only the revision-index
+  # entry its current revision needs; the continuation then shows each branch restored from it.
+  @long_running
+  Scenario Outline: Repeated guest checkpoints keep one revision-index entry for each stored checkpoint on <cluster_size> nodes
+    Given Kafka is running
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "wasm_checkpoint_replacement_in_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_checkpointed_filter;
+      UPLOAD RESOURCE wasm_checkpointed_filter VERSION '{{wasm_processor}}';
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'session.timeout.ms' = '6000',
+        'heartbeat.interval.ms' = '500'
+      };
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
+        FROM kafka_ingress TOPIC 'wasm_checkpoint_replacement_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_replacement_group_{{test_id}}' START AT EARLIEST
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING metric_codec
+        TO raw_metrics
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
+        USING RESOURCE wasm_checkpointed_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        BRANCHED BY by_tenant
+        TO filtered_metrics
+        SET value = value, tenant = tenant
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      START;
+      """
+    Then Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" eventually has 1 consumers
+    When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+      """
+      {"value":1,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+      """
+      {"value":11,"tenant":"beta"}
+      """
+    Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 2"
+    When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+      """
+      {"value":2,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+      """
+      {"value":12,"tenant":"beta"}
+      """
+    Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 4"
+    When Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+      """
+      {"value":3,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+      """
+      {"value":13,"tenant":"beta"}
+      """
+    Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 6"
+    And within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "value":2
+      key={"tenant":"beta"} | "tenant":"beta" | "value":12
+      """
+    When the cluster is restarted after counting the runtime state each node stored for domain "{{domain}}"
+    Then the stopped nodes stored at least <stored_checkpoints> runtime state checkpoints, each with one revision-index entry
+    And node "node-1" eventually observes a stable leader
+    And within "120s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" eventually has 1 consumers
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      """
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+      """
+      {"value":4,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "wasm_checkpoint_replacement_in_{{test_id}}"
+      """
+      {"value":14,"tenant":"beta"}
+      """
+    Then within "60s" Kafka consumer group "wasm_checkpoint_replacement_group_{{test_id}}" next offset for topic "wasm_checkpoint_replacement_in_{{test_id}}" partition 0 is "at least 8"
+    And within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "value":4
+      key={"tenant":"beta"} | "tenant":"beta" | "value":14
+      """
+
+    Examples:
+      | cluster_size | replica_count | stored_checkpoints |
+      | 1            | 0             | 2                  |
+      | 3            | 0             | 2                  |
+      | 3            | 1             | 4                  |
+
   # The checkpoint is held for longer than the source's ACK TIMEOUT, so the source sends the held
   # input again unless the branch reports it alive, and well inside the checkpoint's own ninety
   # seconds. The source is sequential: it commits no later offset before the held batch resolves,
@@ -143,7 +265,7 @@ Feature: WASM guest-state checkpoint durability
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_checkpoint_alive_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_checkpoint_alive_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -232,7 +354,7 @@ Feature: WASM guest-state checkpoint durability
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_checkpoint_replica_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_checkpoint_replica_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
@@ -335,7 +457,7 @@ Feature: WASM guest-state checkpoint durability
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE KAFKA TOPIC INGESTOR metric_source
+      CREATE KAFKA TOPIC INGESTOR metric_ingestor
         FROM kafka_ingress TOPIC 'wasm_checkpoint_failover_in_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'wasm_checkpoint_failover_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s

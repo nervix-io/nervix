@@ -1,7 +1,7 @@
 //! The broker loop's reads, which the host may interrupt but never abandons.
 //!
 //! Layer: test harness.
-//! - **Owns.** The read-in-flight assertion the loop's ingestor doubles share, a ingestor double that
+//! - **Owns.** The read-in-flight assertion the loop's ingestor doubles share, an ingestor double that
 //!   gathers a batch from a channel one message at a time, a host double that records what it took
 //!   in, both of them recording into one ordered log with the check over that log, and the unit
 //!   tests of a read that a stop, a quiesce change or a due flush meets.
@@ -26,7 +26,7 @@ use super::{
     *,
 };
 
-/// Whether a ingestor double has a read in flight.
+/// Whether an ingestor double has a read in flight.
 ///
 /// The host awaits every read to completion. A read whose future the host dropped leaves its flag
 /// set, so a double asked to read again, to suspend or to close while its last read is still in
@@ -40,7 +40,7 @@ impl ReadInFlight {
     pub(super) fn start(&mut self) {
         assert!(
             !self.in_flight,
-            "the host dropped a source read in flight and started another"
+            "the host dropped an ingestor read in flight and started another"
         );
         self.in_flight = true;
     }
@@ -53,7 +53,7 @@ impl ReadInFlight {
     pub(super) fn assert_none_before(&self, operation: &str) {
         assert!(
             !self.in_flight,
-            "the host had the source {operation} while a read it dropped was still in flight"
+            "the host had the ingestor {operation} while a read it dropped was still in flight"
         );
     }
 }
@@ -107,7 +107,10 @@ pub(super) fn assert_every_taken_position_taken_in_first(events: &[ReadEvent]) {
     for event in events {
         match event {
             ReadEvent::Took(position) => {
-                assert!(taken.insert(*position), "the source took {position} twice");
+                assert!(
+                    taken.insert(*position),
+                    "the ingestor took {position} twice"
+                );
             }
             ReadEvent::TookIn(positions) => {
                 for position in positions {
@@ -120,8 +123,8 @@ pub(super) fn assert_every_taken_position_taken_in_first(events: &[ReadEvent]) {
             ReadEvent::Suspended | ReadEvent::Closed => {
                 assert_eq!(
                     taken, taken_in,
-                    "the source was suspended or closed before the host took in what it had read: \
-                     {events:?}"
+                    "the ingestor was suspended or closed before the host took in what it had \
+                     read: {events:?}"
                 );
             }
             ReadEvent::Cancelled
@@ -132,7 +135,7 @@ pub(super) fn assert_every_taken_position_taken_in_first(events: &[ReadEvent]) {
     }
     assert_eq!(
         taken, taken_in,
-        "a position the source took was lost: {events:?}"
+        "a position the ingestor took was lost: {events:?}"
     );
 }
 
@@ -195,7 +198,7 @@ impl IngestorMessage for GatheredMessage {
     }
 }
 
-/// A ingestor that gathers each batch from a channel one message at a time, waiting for the next one
+/// An ingestor that gathers each batch from a channel one message at a time, waiting for the next one
 /// until its batch is full, and that returns what it gathered once the host cancels.
 pub(super) struct GatheringIngestor {
     transport: mpsc::Receiver<u64>,
@@ -263,7 +266,7 @@ impl IngestorConnector for GatheringIngestor {
     type Plan = ();
 
     async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
-        panic!("the tests install their source directly")
+        panic!("the tests install their ingestor directly")
     }
 
     async fn suspend(&mut self) -> IngestorResult<()> {
@@ -445,7 +448,7 @@ impl IngestorHostServices for RecordingHost {
         panic!("a test graph that acknowledges every batch failed one: {reason}");
     }
     fn record_transport_redeliveries(&self, positions: usize) {
-        panic!("a replayable test source discarded {positions} positions after a reconnect");
+        panic!("a replayable test ingestor discarded {positions} positions after a reconnect");
     }
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
         self.events.record(ReadEvent::CountedOversized(payloads));
@@ -467,9 +470,9 @@ pub(super) fn gathering_policy(max_in_flight: usize) -> BrokerIngestorPolicy {
     BrokerIngestorPolicy::new(acknowledgement, PositionClass::Replayable)
 }
 
-/// A ingestor the tests feed and the host it reads for, before the loop takes them.
+/// An ingestor the tests feed and the host it reads for, before the loop takes them.
 struct Fixture {
-    source: GatheringIngestor,
+    connector: GatheringIngestor,
     host: RecordingHost,
     observers: Observers,
 }
@@ -498,7 +501,7 @@ impl Fixture {
             reported_errors: host.reported_errors.clone(),
         };
         Self {
-            source: GatheringIngestor::new(receiver, events, signals),
+            connector: GatheringIngestor::new(receiver, events, signals),
             host,
             observers,
         }
@@ -510,7 +513,7 @@ impl Observers {
         self.transport
             .send(position)
             .await
-            .assured("the source keeps its transport until the test ends");
+            .assured("the ingestor keeps its transport until the test ends");
     }
 
     fn events(&self) -> Vec<ReadEvent> {
@@ -536,10 +539,14 @@ struct RunningLoop {
 }
 
 impl RunningLoop {
-    fn start(source: GatheringIngestor, host: RecordingHost, policy: BrokerIngestorPolicy) -> Self {
+    fn start(
+        connector: GatheringIngestor,
+        host: RecordingHost,
+        policy: BrokerIngestorPolicy,
+    ) -> Self {
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
-            source,
+            connector,
             IngestorHost::new(host),
             policy,
             shutdown_rx,
@@ -558,23 +565,23 @@ impl RunningLoop {
 }
 
 #[nervix_primitives::test]
-async fn a_stop_during_a_read_takes_in_what_the_source_gathered_before_closing_it() {
+async fn a_stop_during_a_read_takes_in_what_the_ingestor_gathered_before_closing_it() {
     let Fixture {
-        source,
+        connector,
         host,
         observers,
     } = Fixture::new();
-    let running = RunningLoop::start(source, host, gathering_policy(3));
+    let running = RunningLoop::start(connector, host, gathering_policy(3));
     observers.send(1).await;
     reach(
         observers.signals.took.notified(),
-        "the source takes the message",
+        "the ingestor takes the message",
     )
     .await;
     observers.send(2).await;
     reach(
         observers.signals.took.notified(),
-        "the source takes the message",
+        "the ingestor takes the message",
     )
     .await;
 
@@ -597,24 +604,24 @@ async fn a_stop_during_a_read_takes_in_what_the_source_gathered_before_closing_i
 }
 
 #[nervix_primitives::test]
-async fn a_quiesce_change_during_a_read_takes_in_what_the_source_gathered_before_suspending_it() {
+async fn a_quiesce_change_during_a_read_takes_in_what_the_ingestor_gathered_before_suspending_it() {
     let Fixture {
-        source,
+        connector,
         host,
         observers,
     } = Fixture::new();
-    let running = RunningLoop::start(source, host, gathering_policy(3));
+    let running = RunningLoop::start(connector, host, gathering_policy(3));
     observers.send(1).await;
     reach(
         observers.signals.took.notified(),
-        "the source takes the message",
+        "the ingestor takes the message",
     )
     .await;
 
     observers.control.suspend_intake();
     reach(
         observers.signals.suspended.notified(),
-        "the loop suspends the source",
+        "the loop suspends the ingestor",
     )
     .await;
     running.stop().await;
@@ -638,11 +645,11 @@ async fn a_quiesce_change_during_a_read_takes_in_what_the_source_gathered_before
 #[nervix_primitives::test]
 async fn a_read_cancelled_before_it_took_anything_takes_nothing_in() {
     let Fixture {
-        source,
+        connector,
         host,
         observers,
     } = Fixture::new();
-    let running = RunningLoop::start(source, host, gathering_policy(3));
+    let running = RunningLoop::start(connector, host, gathering_policy(3));
     reach(observers.signals.reading.notified(), "the loop reads").await;
 
     running.stop().await;
@@ -661,11 +668,11 @@ async fn a_read_cancelled_before_it_took_anything_takes_nothing_in() {
 #[nervix_primitives::test]
 async fn a_stop_signal_that_changes_without_stopping_restarts_the_read() {
     let Fixture {
-        source,
+        connector,
         host,
         observers,
     } = Fixture::new();
-    let running = RunningLoop::start(source, host, gathering_policy(3));
+    let running = RunningLoop::start(connector, host, gathering_policy(3));
     reach(observers.signals.reading.notified(), "the loop reads").await;
 
     running.shutdown.send_replace(false);
@@ -688,7 +695,7 @@ async fn a_stop_signal_that_changes_without_stopping_restarts_the_read() {
 #[nervix_primitives::test(start_paused = true)]
 async fn a_flush_due_while_a_read_waits_happens_without_cancelling_the_read() {
     let Fixture {
-        source,
+        connector,
         mut host,
         observers,
     } = Fixture::new();
@@ -698,11 +705,11 @@ async fn a_flush_due_while_a_read_waits_happens_without_cancelling_the_read() {
         retry: INGESTOR_RECONNECT_POLICY,
         position_class: PositionClass::None,
     };
-    let running = RunningLoop::start(source, host, unacknowledged);
+    let running = RunningLoop::start(connector, host, unacknowledged);
     observers.send(1).await;
     reach(
         observers.signals.took.notified(),
-        "the source takes the message",
+        "the ingestor takes the message",
     )
     .await;
     // The read after the first batch waits on an empty transport, so the paused clock reaches the
@@ -715,7 +722,7 @@ async fn a_flush_due_while_a_read_waits_happens_without_cancelling_the_read() {
     observers.send(2).await;
     reach(
         observers.signals.took.notified(),
-        "the source takes the message",
+        "the ingestor takes the message",
     )
     .await;
 
@@ -744,17 +751,17 @@ async fn a_flush_due_while_a_read_waits_happens_without_cancelling_the_read() {
 #[nervix_primitives::test]
 async fn an_interruption_the_host_did_not_ask_for_is_reported_and_its_messages_taken_in() {
     let Fixture {
-        mut source,
+        mut connector,
         host,
         observers,
     } = Fixture::new();
-    source.interrupts_unasked = true;
-    let running = RunningLoop::start(source, host, gathering_policy(3));
+    connector.interrupts_unasked = true;
+    let running = RunningLoop::start(connector, host, gathering_policy(3));
     reach(observers.signals.reading.notified(), "the loop reads").await;
     observers.send(1).await;
     reach(
         observers.signals.took.notified(),
-        "the source takes the message",
+        "the ingestor takes the message",
     )
     .await;
     // The loop reads again once it took the interrupted batch in.
@@ -776,7 +783,7 @@ async fn an_interruption_the_host_did_not_ask_for_is_reported_and_its_messages_t
     assert_every_taken_position_taken_in_first(&events);
     assert_eq!(
         *observers.reported_errors.lock(),
-        ["source interrupted a read the host did not cancel"]
+        ["ingestor interrupted a read the host did not cancel"]
     );
 }
 
@@ -821,7 +828,7 @@ async fn only_a_read_the_host_did_not_cancel_waits_out_a_retry_delay() {
 }
 
 #[nervix_primitives::test]
-async fn payloads_a_source_dropped_for_their_size_are_counted_and_nothing_is_taken_in() {
+async fn payloads_an_ingestor_dropped_for_their_size_are_counted_and_nothing_is_taken_in() {
     let Fixture {
         host, observers, ..
     } = Fixture::new();
@@ -833,7 +840,7 @@ async fn payloads_a_source_dropped_for_their_size_are_counted_and_nothing_is_tak
     };
 
     let ReadOutcome::TakeIn(messages) = read.into_outcome(&host) else {
-        panic!("a source that dropped oversized payloads leaves the loop reading");
+        panic!("an ingestor that dropped oversized payloads leaves the loop reading");
     };
 
     assert!(messages.is_empty(), "a dropped payload is never taken in");

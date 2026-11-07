@@ -41,6 +41,13 @@ RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The 
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
 certificate/key pairing refusal remains independent of the scheme check.
 
+NATS authentication retains the maintained NKey codec's typed refusal beneath the existing
+length, encoding, user-kind or checksum context, including the original base32 decoding source.
+User-kind validation precedes the checksum, preserving the refusal when both are invalid.
+Credentials parsing retains the driver's typed missing/incomplete-section cause. Neither chain
+renders the JWT or seed. Signing, filesystem admission and retryable no-work refusals keep their
+existing owners and outcomes; the [Connector Contract](connector-contract.md) owns preparation.
+
 NATS stream metadata is decoded where a program requests it. A malformed acknowledgement
 subject retains the driver's parsing cause; a nonpositive sequence or delivery count and an
 out-of-range publication timestamp have distinct typed field causes. `IngestMetadataFailure`
@@ -2674,11 +2681,13 @@ of any call: the Rust client reports it as a typed restoration failure carrying 
 message and the wait before it tries again, and reports a refused subscription reopening the same
 way. An attach the new session leaves unanswered past the request timeout ends that session instead,
 and the next session attaches the clock again; one it answers `DomainNotFound` ends the attachment
-as the server would. In the shared C binding a restoration failure carries only its domain, without
-the message or the wait. Each disposition's message is display text for a client that prints it; a
-client decides from the variant. The Rust client's `execute` turns any disposition but `Attached` or
-`Detached` into a `Failed` command outcome carrying that message, and its clock helper reports a
-stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
+as the server would. In the shared C binding both clock and subscription restoration failures
+expose their message as borrowed UTF-8 bytes and the next retry wait as unsigned nanoseconds;
+the wrong event kind returns `NX_ERROR_TYPE`. Each disposition's message is display text for a
+client that prints it; a client decides from the variant. The Rust client's `execute` turns any
+disposition but `Attached` or `Detached` into a `Failed` command outcome carrying that message,
+and its clock helper reports a stopped or uninstalled clock, or a projection outside the timestamp
+range, as a typed
 `DomainClockReadError`. When `execute` runs either statement, it fails with `NoActiveDomain` while
 no domain is selected and refuses the statement as client-local while a transaction is active,
 before it sends a request. Waiting for the next clock event returns a failure to reopen a session
@@ -2999,10 +3008,12 @@ command outcome names another execution reference than its command's is a protoc
 dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
 '<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
 connection, and recovers the command under its own reference on the next one. The console WebSocket
-session also stops on a reply that cannot be decoded or reassembled, or carries an unexpected body
-kind. It reports `protocol violation:` with the cause and that pending command outcomes are unknown.
-It recovers every waiting command whole, under its original reference and issue order, after the
-new connection restores the session. The console WebSocket
+session also stops on a reply that cannot be decoded or reassembled, and on a reply whose kind does
+not answer its request, which it reports as `protocol violation: the server answered with a reply
+of another kind`. It checks that kind before it applies anything the reply carries, so such a reply
+is never shown as a command's failure. Each report gives `protocol violation:` with the cause and
+says that pending command outcomes are unknown. The console recovers every waiting command whole,
+under its original reference and issue order, after the new connection restores the session. The console WebSocket
 transport closes a call whose client broke its framing with the codec's close code, a second
 download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
 the node stops with `1001`.

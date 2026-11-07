@@ -61,7 +61,7 @@ impl WebsocketIdleDeadline {
 
     fn elapsed(self, elapsed: Elapsed) -> Report<IngestorError> {
         // Elapsed is a fieldless expiry signal. Retain it for typed inspection while the
-        // actionable key/budget remains the deepest context projected into source status.
+        // actionable key/budget remains the deepest context projected into ingestor status.
         let read = IngestorError::Read {
             connector: WEBSOCKETS.keyword(),
         };

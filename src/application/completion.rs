@@ -5,8 +5,8 @@
 //!
 //! - **Owns.** The barriers for a fixed revision over every live node or over named live nodes:
 //!   authoritative visibility, runtime preparation and readiness, and HTTPS listener installation.
-//! - **Depends on.** Consensus for the committed revision, cluster availability, and authenticated
-//!   incarnation-aware progress observations.
+//! - **Depends on.** Consensus for the committed revision, cluster availability, and the
+//!   incarnation-bound application progress each node records, reports and answers queries for.
 //! - **Must not know.** Session transports, Plexus syntax, data-plane tasks, or payloads.
 
 #![cfg_attr(
@@ -24,15 +24,12 @@ use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use meticulous::ResultExt as _;
 use nervix_consensus::{LeaderTenure, Observer};
 use nervix_interconnect::{
-    ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse,
-    ApplicationRevisionRequest, ApplicationRevisionResponse, HandlerRegistrationError,
+    ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse, ApplicationProgress,
+    ApplicationProgressPhase, ApplicationRevisionRequest, HandlerRegistrationError,
     HttpsListenerInstallation, HttpsListenerInstallationRequest, Transport,
 };
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
-use nervix_primitives::{
-    sync::{Arc, CancellationToken},
-    task::{AbortOnDropHandle, JoinHandle},
-};
+use nervix_primitives::{sync::Arc, task::AbortOnDropHandle};
 use nervix_recovery::Reported as _;
 use thiserror::Error;
 
@@ -42,19 +39,29 @@ use super::{
 };
 use crate::cluster::ClusterHandle;
 
+mod progress;
+
+#[cfg(test)]
+pub(in crate::application) use progress::record_authoritative_progress;
+pub(in crate::application) use progress::{
+    ApplicationProgressState, register_application_progress_report_handler,
+    spawn_application_progress_reporting, spawn_authoritative_progress_recording,
+};
+
 const APPLICATION_REVISION_PROBE_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Registers the handler that answers this incarnation's progress record to a revision query.
 pub(in crate::application) fn register_application_revision_handler(
-    cluster: Arc<ClusterHandle>,
+    progress: ApplicationProgressState,
     interconnect: &Transport,
     #[cfg(feature = "testing")] fault_injection: crate::FaultInjection,
 ) -> Result<(), Report<HandlerRegistrationError>> {
     interconnect.register_handler::<ApplicationRevisionRequest, _, _>(move |_context, _request| {
-        let cluster = cluster.clone();
+        let progress = progress.clone();
         #[cfg(feature = "testing")]
         let fault_injection = fault_injection.clone();
         async move {
-            let response = cluster.local_application_revision().await;
+            let response = progress.local();
             #[cfg(feature = "testing")]
             fault_injection
                 .pause_application_revision_response_if_armed(response.identity.node_id())
@@ -64,18 +71,22 @@ pub(in crate::application) fn register_application_revision_handler(
     })
 }
 
+/// Registers the handler that answers a follower's barrier with this leader's participants and the
+/// progress it holds for them.
 pub(in crate::application) fn register_completion_peers_handler(
     cluster: Arc<ClusterHandle>,
     consensus: Observer,
+    progress: ApplicationProgressState,
     interconnect: &Transport,
 ) -> Result<(), Report<HandlerRegistrationError>> {
     interconnect.register_handler::<ApplicationCompletionPeersRequest, _, _>(
         move |_context, _request| {
             let cluster = cluster.clone();
             let consensus = consensus.clone();
+            let progress = progress.clone();
             async move {
                 let tenure = consensus.current_leader_tenure()?;
-                let leader = cluster.local_node_identity().await;
+                let leader = progress.identity();
                 if tenure.leader_id() != leader.node_id() {
                     return None;
                 }
@@ -84,22 +95,41 @@ pub(in crate::application) fn register_completion_peers_handler(
                 if consensus.current_leader_tenure().as_ref() != Some(&tenure) {
                     return None;
                 }
+                let held = progress.progress_of(&peers);
                 Some(ApplicationCompletionPeersResponse {
                     leader,
                     term: tenure.term(),
                     peers: peers.into_iter().collect(),
+                    progress: held,
                 })
             }
         },
     )
 }
 
-fn accepted_completion_peers(
+/// The participants of one barrier wake and the progress the leader held for them.
+#[derive(Debug, PartialEq, Eq)]
+struct CompletionParticipants {
+    peers: BTreeSet<ClusterNodeIdentity>,
+    /// The leader's own record and the latest report each other peer sent the leader.
+    progress: Vec<ApplicationProgress>,
+}
+
+/// One leader observation: the tenure it was made in and the participants it named.
+struct CompletionView {
+    tenure: LeaderTenure,
+    participants: CompletionParticipants,
+}
+
+/// Accepts a leader's answer only from the leader and term the barrier observed, with the leader's
+/// own incarnation among its peers, and adds the local incarnation. Progress for an incarnation the
+/// answer does not name is dropped.
+fn accepted_completion_participants(
     response: ApplicationCompletionPeersResponse,
     expected_leader: &ClusterNodeName,
     expected_term: u64,
     local_identity: &ClusterNodeIdentity,
-) -> Option<BTreeSet<ClusterNodeIdentity>> {
+) -> Option<CompletionParticipants> {
     if response.leader.node_id() != expected_leader || response.term != expected_term {
         return None;
     }
@@ -108,18 +138,27 @@ fn accepted_completion_peers(
         return None;
     }
     peers.insert(local_identity.clone());
-    Some(peers)
+    let mut progress = Vec::new();
+    for held in response.progress {
+        if peers.contains(&held.identity) {
+            progress.push(held);
+        }
+    }
+    Some(CompletionParticipants { peers, progress })
 }
 
 /// All completion participants come from one leader health observation. A follower cannot retire
 /// a peer merely because its own interconnect is impaired, or keep waiting for a peer the leader
-/// has already removed from the active schedule. The local incarnation always participates.
-async fn completion_peers(
+/// has already removed from the active schedule. The local incarnation always participates. The
+/// leader also answers the progress it holds for the participants, so a follower's barrier sees
+/// the reports the other followers sent the leader.
+async fn completion_view(
     cluster: &ClusterHandle,
     consensus: &Observer,
     interconnect: &Transport,
+    progress: &ApplicationProgressState,
     local_identity: &ClusterNodeIdentity,
-) -> Option<(LeaderTenure, BTreeSet<ClusterNodeIdentity>)> {
+) -> Option<CompletionView> {
     let tenure = consensus.current_leader_tenure()?;
     if tenure.leader_id() == local_identity.node_id() {
         let mut peers = cluster.availability_state().await.live_identities();
@@ -127,7 +166,14 @@ async fn completion_peers(
         if consensus.current_leader_tenure().as_ref() != Some(&tenure) {
             return None;
         }
-        return Some((tenure, peers));
+        let held = progress.progress_of(&peers);
+        return Some(CompletionView {
+            tenure,
+            participants: CompletionParticipants {
+                peers,
+                progress: held,
+            },
+        });
     }
 
     let response = match interconnect
@@ -144,9 +190,16 @@ async fn completion_peers(
     if consensus.current_leader_tenure().as_ref() != Some(&tenure) {
         return None;
     }
-    let peers =
-        accepted_completion_peers(response, tenure.leader_id(), tenure.term(), local_identity)?;
-    Some((tenure, peers))
+    let participants = accepted_completion_participants(
+        response,
+        tenure.leader_id(),
+        tenure.term(),
+        local_identity,
+    )?;
+    Some(CompletionView {
+        tenure,
+        participants,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -157,25 +210,22 @@ pub(in crate::application) enum ApplicationRevisionPhase {
 }
 
 impl ApplicationRevisionPhase {
-    fn is_complete(self, application: &ApplicationRevisionResponse, revision: u64) -> bool {
-        let completed_revision = match self {
-            Self::Authoritative => application.authoritative,
-            Self::RuntimePrepared => application.runtime_prepared,
-            Self::RuntimeReady => application.runtime_ready,
-        };
-        completed_revision >= revision
+    /// The phase of a progress record this barrier phase reads.
+    const fn progress_phase(self) -> ApplicationProgressPhase {
+        match self {
+            Self::Authoritative => ApplicationProgressPhase::Authoritative,
+            Self::RuntimePrepared => ApplicationProgressPhase::RuntimePrepared,
+            Self::RuntimeReady => ApplicationProgressPhase::RuntimeReady,
+        }
     }
 
-    async fn gossiped_nodes(
-        self,
-        cluster: &ClusterHandle,
-        revision: u64,
-    ) -> BTreeSet<ClusterNodeIdentity> {
-        match self {
-            Self::Authoritative => cluster.nodes_at_authoritative_revision(revision).await,
-            Self::RuntimePrepared => cluster.nodes_prepared_for_runtime_revision(revision).await,
-            Self::RuntimeReady => cluster.nodes_ready_for_runtime_revision(revision).await,
-        }
+    /// Whether `progress` reached `revision`, or a later revision, in this phase. A phase the
+    /// incarnation has not reached completes no revision.
+    fn is_complete(self, progress: &ApplicationProgress, revision: u64) -> bool {
+        let Some(reached) = progress.reached(self.progress_phase()) else {
+            return false;
+        };
+        reached >= revision
     }
 }
 
@@ -303,16 +353,36 @@ async fn probe_https_listeners(
     probed
 }
 
+/// What a revision barrier on one node reads: its cluster view, consensus, transport and the
+/// application progress it records and holds.
+#[derive(Clone, Copy)]
+pub(in crate::application) struct BarrierNode<'a> {
+    pub(in crate::application) cluster: &'a ClusterHandle,
+    pub(in crate::application) consensus: &'a Observer,
+    pub(in crate::application) interconnect: &'a Transport,
+    pub(in crate::application) progress: &'a ApplicationProgressState,
+}
+
+/// Waits until every required live incarnation reached `revision` in `phase`, or `deadline`.
+///
+/// A required incarnation completes through its own record on this node, through the progress the
+/// leader holds for it, or through a direct query. The barrier registers for progress changes
+/// before it reads the progress, so a report or an advance that arrives in between wakes it.
 pub(in crate::application) async fn wait_for_application_revision(
-    cluster: &ClusterHandle,
-    consensus: &Observer,
-    interconnect: &Transport,
+    barrier_node: BarrierNode<'_>,
     revision: u64,
     phase: ApplicationRevisionPhase,
     participants: ApplicationRevisionParticipants<'_>,
     deadline: nervix_primitives::time::Instant,
 ) -> Result<(), ApplicationRevisionTimeout> {
-    let local_identity = cluster.local_node_identity().await;
+    let BarrierNode {
+        cluster,
+        consensus,
+        interconnect,
+        progress,
+    } = barrier_node;
+    let local_identity = progress.identity();
+    let mut observer = progress.observer();
     let mut directly_completed_nodes = BTreeSet::new();
     let mut deadline_elapsed = false;
     let mut pending_probes = None;
@@ -322,8 +392,9 @@ pub(in crate::application) async fn wait_for_application_revision(
         let mut cluster_state = cluster.subscribe_state_changes().await;
         let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
         tokio::pin!(cluster_change);
-        let Some((tenure, mut expected_nodes)) =
-            completion_peers(cluster, consensus, interconnect, &local_identity).await
+        let local_progress = observer.observe();
+        let Some(view) =
+            completion_view(cluster, consensus, interconnect, progress, &local_identity).await
         else {
             if deadline_elapsed || nervix_primitives::time::Instant::now() >= deadline {
                 let pending_node = match consensus.current_leader_tenure() {
@@ -338,14 +409,31 @@ pub(in crate::application) async fn wait_for_application_revision(
                 biased;
                 _ = nervix_primitives::time::sleep_until(deadline) => deadline_elapsed = true,
                 _ = &mut cluster_change => {},
+                () = observer.changed() => {},
                 _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {},
             }
             continue;
         };
+        let CompletionView {
+            tenure,
+            participants:
+                CompletionParticipants {
+                    peers: mut expected_nodes,
+                    progress: held_progress,
+                },
+        } = view;
         participants.retain(&mut expected_nodes);
         directly_completed_nodes.retain(|identity| expected_nodes.contains(identity));
 
-        let mut completed_nodes = phase.gossiped_nodes(cluster, revision).await;
+        let mut completed_nodes = BTreeSet::new();
+        if phase.is_complete(&local_progress, revision) {
+            completed_nodes.insert(local_identity.clone());
+        }
+        for held in &held_progress {
+            if held.identity != local_identity && phase.is_complete(held, revision) {
+                completed_nodes.insert(held.identity.clone());
+            }
+        }
         completed_nodes.extend(directly_completed_nodes.iter().cloned());
         let pending_nodes = expected_nodes
             .difference(&completed_nodes)
@@ -378,6 +466,8 @@ pub(in crate::application) async fn wait_for_application_revision(
             )))
         });
         let completed_before_probe = directly_completed_nodes.len();
+        // A follower learns the other followers' reports only from the leader's view, so it reads
+        // that view again on the retry cadence while its queries are outstanding.
         nervix_primitives::select! {
             biased;
             _ = nervix_primitives::time::sleep_until(deadline) => {
@@ -403,36 +493,16 @@ pub(in crate::application) async fn wait_for_application_revision(
                             deadline_elapsed = true;
                         }
                         _ = &mut cluster_change => {}
+                        () = observer.changed() => {}
                         _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
                     }
                 }
             }
             _ = &mut cluster_change => {}
+            () = observer.changed() => {}
+            _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
         }
     }
-}
-
-pub(in crate::application) fn spawn_authoritative_revision_reporting(
-    cluster: Arc<ClusterHandle>,
-    consensus: Observer,
-    shutdown: CancellationToken,
-) -> JoinHandle<()> {
-    let mut applied_revision = consensus.subscribe_applied();
-    nervix_primitives::task::spawn(async move {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let revision = *applied_revision.borrow_and_update();
-            cluster.set_local_authoritative_revision(revision).await;
-            nervix_primitives::select! {
-                _ = shutdown.cancelled() => break,
-                changed = applied_revision.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    })
 }
 
 #[derive(Debug, Error)]
@@ -505,21 +575,25 @@ impl SessionServiceImpl {
         self.wait_for_authoritative_revision(revision).await
     }
 
+    /// What this node's revision barriers read.
+    pub(in crate::application) fn barrier_node(&self) -> BarrierNode<'_> {
+        BarrierNode {
+            cluster: &self.inner.cluster,
+            consensus: &self.inner.consensus,
+            interconnect: &self.inner.interconnect,
+            progress: &self.inner.application_progress,
+        }
+    }
+
+    /// Waits until every live incarnation applied `revision`, a revision this node has applied.
     pub(in crate::application) async fn wait_for_authoritative_revision(
         &self,
         revision: u64,
     ) -> Result<(), Report<CompletionError>> {
-        self.inner
-            .cluster
-            .set_local_authoritative_revision(revision)
-            .await;
-
         let deadline = self.completion_deadline()?;
 
         wait_for_application_revision(
-            &self.inner.cluster,
-            &self.inner.consensus,
-            &self.inner.interconnect,
+            self.barrier_node(),
             revision,
             ApplicationRevisionPhase::Authoritative,
             ApplicationRevisionParticipants::EveryLiveNode,
@@ -542,14 +616,22 @@ impl SessionServiceImpl {
         revision: u64,
     ) -> Result<(), Report<CompletionError>> {
         let deadline = self.completion_deadline()?;
-        let local_identity = self.inner.cluster.local_node_identity().await;
+        let local_identity = self.inner.application_progress.identity();
 
         loop {
             nervix_primitives::task::consume_budget().await;
-            let Some((tenure, expected_nodes)) = completion_peers(
+            let Some(CompletionView {
+                tenure,
+                participants:
+                    CompletionParticipants {
+                        peers: expected_nodes,
+                        ..
+                    },
+            }) = completion_view(
                 &self.inner.cluster,
                 &self.inner.consensus,
                 &self.inner.interconnect,
+                &self.inner.application_progress,
                 &local_identity,
             )
             .await
@@ -642,9 +724,7 @@ impl SessionServiceImpl {
         };
 
         wait_for_application_revision(
-            &self.inner.cluster,
-            &self.inner.consensus,
-            &self.inner.interconnect,
+            self.barrier_node(),
             revision,
             ApplicationRevisionPhase::RuntimeReady,
             ApplicationRevisionParticipants::EveryLiveNode,
@@ -660,20 +740,83 @@ impl SessionServiceImpl {
     }
 }
 
+#[cfg(feature = "testing")]
+impl SessionServiceImpl {
+    /// Answers the scenario's application progress queries from this node. A query for another
+    /// node goes over the interconnect, as this node's revision barriers query it; a query for this
+    /// node answers what its revision-query handler answers.
+    pub(in crate::application) fn register_application_progress_test_queries(
+        &self,
+        fault_injection: &crate::fault_injection::FaultInjection,
+        shutdown: nervix_primitives::sync::CancellationToken,
+    ) {
+        use nervix_recovery::NoReceiver as _;
+
+        let local_node = self.inner.consensus.local_node_id().clone();
+        let mut queries = fault_injection.register_application_progress_queries(local_node.clone());
+        let service = self.clone();
+        self.inner.service_tasks.spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let query = nervix_primitives::select! {
+                    _ = shutdown.cancelled() => break,
+                    query = queries.recv() => query,
+                };
+                let Some(query) = query else {
+                    break;
+                };
+                let answer = service
+                    .answer_application_progress_test_query(&local_node, query.target)
+                    .await;
+                query
+                    .response
+                    .send(answer)
+                    .means_peer_left("application progress test query");
+            }
+        });
+    }
+
+    async fn answer_application_progress_test_query(
+        &self,
+        local_node: &ClusterNodeName,
+        target: ClusterNodeName,
+    ) -> error_stack::Result<
+        ApplicationProgress,
+        crate::fault_injection::ApplicationProgressQueryError,
+    > {
+        use error_stack::ResultExt as _;
+
+        if &target == local_node {
+            return Ok(self.inner.application_progress.local());
+        }
+        let failed = crate::fault_injection::ApplicationProgressQueryError::Query {
+            querier: local_node.clone(),
+            target: target.clone(),
+        };
+        self.inner
+            .interconnect
+            .request(&target, ApplicationRevisionRequest)
+            .await
+            .change_context(failed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, time::Duration};
 
     use meticulous::ResultExt as _;
-    use nervix_interconnect::ApplicationCompletionPeersResponse;
+    use nervix_interconnect::{
+        ApplicationCompletionPeersResponse, ApplicationProgress, ApplicationProgressPhase,
+    };
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     };
 
     use super::{
         super::test_fixtures::{TestService, build_test_service},
-        ApplicationRevisionParticipants, ApplicationRevisionPhase, accepted_completion_peers,
-        wait_for_application_revision,
+        ApplicationRevisionParticipants, ApplicationRevisionPhase, CompletionParticipants,
+        accepted_completion_participants, wait_for_application_revision,
     };
 
     #[test]
@@ -686,27 +829,43 @@ mod tests {
             ClusterNodeName::parse("node-2").assured("the test node name is valid"),
             ClusterNodeIncarnation::new(9),
         );
+        let retired = ClusterNodeIdentity::new(
+            ClusterNodeName::parse("node-3").assured("the test node name is valid"),
+            ClusterNodeIncarnation::new(4),
+        );
+        let leader_progress = ApplicationProgress {
+            runtime_prepared: Some(6),
+            ..ApplicationProgress::new(leader.clone())
+        };
         let response = ApplicationCompletionPeersResponse {
             leader: leader.clone(),
             term: 12,
             peers: vec![leader.clone()],
+            progress: vec![
+                leader_progress.clone(),
+                ApplicationProgress::new(retired.clone()),
+            ],
         };
         assert_eq!(
-            accepted_completion_peers(response.clone(), leader.node_id(), 12, &local),
-            Some(BTreeSet::from([leader.clone(), local.clone()])),
+            accepted_completion_participants(response.clone(), leader.node_id(), 12, &local),
+            Some(CompletionParticipants {
+                peers: BTreeSet::from([leader.clone(), local.clone()]),
+                progress: vec![leader_progress],
+            }),
+            "the leader's held progress for an incarnation it does not name is dropped",
         );
         assert_eq!(
-            accepted_completion_peers(response.clone(), leader.node_id(), 13, &local),
+            accepted_completion_participants(response.clone(), leader.node_id(), 13, &local),
             None,
             "another Raft term cannot choose this barrier's participants",
         );
         assert_eq!(
-            accepted_completion_peers(response.clone(), local.node_id(), 12, &local),
+            accepted_completion_participants(response.clone(), local.node_id(), 12, &local),
             None,
             "another Raft leader cannot choose this barrier's participants",
         );
         assert_eq!(
-            accepted_completion_peers(
+            accepted_completion_participants(
                 ApplicationCompletionPeersResponse {
                     peers: Vec::new(),
                     ..response
@@ -727,10 +886,8 @@ mod tests {
             nervix_primitives::time::timeout(bound, build_test_service(false))
                 .await
                 .assured("the revision barrier fixture starts within its test deadline");
-        let cluster = &service.inner.cluster;
-        let consensus = &service.inner.consensus;
-        let interconnect = &service.inner.interconnect;
-        let local = cluster.local_node_identity().await;
+        let barrier_node = service.barrier_node();
+        let local = service.inner.application_progress.identity();
         let named = BTreeSet::from([local.node_id().clone()]);
         let elsewhere = BTreeSet::from([
             ClusterNodeName::parse("node-elsewhere").assured("the test node name is valid")
@@ -741,9 +898,7 @@ mod tests {
         let elapsed = nervix_primitives::time::Instant::now();
 
         let unnamed = wait_for_application_revision(
-            cluster,
-            consensus,
-            interconnect,
+            barrier_node,
             revision,
             ApplicationRevisionPhase::RuntimePrepared,
             ApplicationRevisionParticipants::LiveAmong(&elsewhere),
@@ -756,9 +911,7 @@ mod tests {
         );
 
         let Err(named_timeout) = wait_for_application_revision(
-            cluster,
-            consensus,
-            interconnect,
+            barrier_node,
             revision,
             ApplicationRevisionPhase::RuntimePrepared,
             ApplicationRevisionParticipants::LiveAmong(&named),
@@ -771,9 +924,7 @@ mod tests {
         assert_eq!(named_timeout.pending_nodes, vec![local.node_id().clone()]);
 
         let Err(every_timeout) = wait_for_application_revision(
-            cluster,
-            consensus,
-            interconnect,
+            barrier_node,
             revision,
             ApplicationRevisionPhase::RuntimePrepared,
             ApplicationRevisionParticipants::EveryLiveNode,
@@ -785,11 +936,12 @@ mod tests {
         };
         assert_eq!(every_timeout.pending_nodes, vec![local.node_id().clone()]);
 
-        cluster.set_local_runtime_revision_prepared(revision).await;
+        service
+            .inner
+            .application_progress
+            .advance(ApplicationProgressPhase::RuntimePrepared, revision);
         let prepared = wait_for_application_revision(
-            cluster,
-            consensus,
-            interconnect,
+            barrier_node,
             revision,
             ApplicationRevisionPhase::RuntimePrepared,
             ApplicationRevisionParticipants::LiveAmong(&named),

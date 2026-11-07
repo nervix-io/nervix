@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The MQTT client Model, the topic source and emitter Models with their session,
-//!   quality-of-service and delivery modes, the topic filter a source subscribes to with the rules
+//! - **Owns.** The MQTT client Model, the topic ingestor and emitter Models with their session,
+//!   quality-of-service and delivery modes, the topic filter an ingestor subscribes to with the rules
 //!   MQTT holds it to, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality, and the
 //!   typed values of a configuration that satisfies them.
-//! - **Depends on.** The shared source and emitter declarations, the shared client configuration
+//! - **Depends on.** The shared ingestor and emitter declarations, the shared client configuration
 //!   schema and the names a body references.
 //! - **Must not know.** The MQTT driver, or how a topic filter is
 //!   subscribed or published to.
@@ -112,7 +112,7 @@ external_names! {
     /// An MQTT topic filter: 1 to 65,535 bytes without the NUL character, whose levels are joined by
     /// `/` and may be empty. `+` stands for one level and `#` for every remaining level, each only as
     /// a whole level, and `#` only as the last one, as MQTT itself requires. Its first level is not
-    /// `$share`: the source subscribes through a shared subscription Nervix forms around the filter,
+    /// `$share`: the ingestor subscribes through a shared subscription Nervix forms around the filter,
     /// within which a filter naming its own would match nothing. It is subscribed to exactly as
     /// written, letter case included.
     pub struct MqttTopicFilter => mqtt_topic_filter_rule, label "mqtt_topic_filter",
@@ -509,7 +509,7 @@ impl IngestorEntityBody for MqttTopicIngestor {
         self.mode.acknowledgement()
     }
 
-    /// The session and the quality of service this source subscribes with, which suspending it
+    /// The session and the quality of service this ingestor subscribes with, which suspending it
     /// and acknowledging its messages require.
     fn chosen(&self, option: &str) -> Option<&'static str> {
         match option {
@@ -699,11 +699,11 @@ impl crate::IngestorEntityChange for MqttTopicIngestorChange {
 
 connector_ingestors! {
     connector Mqtt = "MQTT";
-    /// What an MQTT source reads.
+    /// What an MQTT ingestor reads.
     pub enum MqttIngestor;
     /// The alterations of the ingestors that read an MQTT entity.
     pub enum MqttTopicIngestorAlteration;
-    /// The entities an MQTT source reads.
+    /// The entities an MQTT ingestor reads.
     pub enum MqttIngestorEntity {
         Topic(MqttTopicIngestor => MqttTopicIngestorChange) = "TOPIC", "MQTT";
     }

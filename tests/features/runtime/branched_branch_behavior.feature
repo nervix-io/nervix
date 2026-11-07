@@ -39,7 +39,7 @@ Feature: Branched branch behavior
       CREATE ENDPOINT ingress
         ON edge
         PATH '/notifications'
-        TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR source_notifications
+        TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR ingestor_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -99,7 +99,7 @@ Feature: Branched branch behavior
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR source_txns
+        CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
@@ -263,7 +263,7 @@ Feature: Branched branch behavior
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR source_one
+        CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
@@ -273,7 +273,7 @@ Feature: Branched branch behavior
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE HTTP ENDPOINT INGESTOR source_two
+        CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2

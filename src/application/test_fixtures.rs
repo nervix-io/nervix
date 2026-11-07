@@ -258,6 +258,7 @@ fn test_session_service(
     registry: Arc<Registry>,
     resource_store: StdArc<ResourceStore>,
     interconnect: Transport,
+    application_progress: super::completion::ApplicationProgressState,
     runtime: Runtime,
 ) -> SessionServiceImpl {
     let https_certificates = HttpsListenerCertificates::new(
@@ -307,6 +308,7 @@ fn test_session_service(
             client_producers,
             client_consumers,
             interconnect,
+            application_progress,
             service_tasks: super::service_tasks::ServiceTasks::default(),
             authentication_pacing: SessionServiceImpl::new_authentication_pacing(),
             traffic,
@@ -702,6 +704,8 @@ pub(in crate::application) async fn build_test_service_inner(
         .await
         .expect("cluster should start"),
     );
+    let application_progress =
+        super::completion::ApplicationProgressState::new(cluster.local_node_identity().await);
     let service = test_session_service(
         cluster,
         &consensus,
@@ -711,8 +715,19 @@ pub(in crate::application) async fn build_test_service_inner(
                 .expect("resource store should open"),
         ),
         interconnect,
+        application_progress.clone(),
         runtime,
     );
+    // The node's authoritative writer: the service's barriers read this incarnation's applied
+    // revision from its progress record.
+    service
+        .inner
+        .service_tasks
+        .spawn(super::completion::record_authoritative_progress(
+            application_progress,
+            consensus.observer(),
+            CancellationToken::new(),
+        ));
     (
         TestService {
             service,

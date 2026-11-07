@@ -738,7 +738,7 @@ impl SessionServiceImpl {
 
         // A route may own an admitted partial batch that has not entered its relay yet. Closing
         // that relay first would park the batch behind the very gate waiting for its ACK root.
-        // Hold source admission on every node and drain those roots with the relay still open.
+        // Hold ingestor admission on every node and drain those roots with the relay still open.
         let intake_impact = match &impact {
             Some((recorder, PauseRequirement::Subgraph { scope })) => Some((
                 *recorder,

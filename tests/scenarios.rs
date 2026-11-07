@@ -102,6 +102,7 @@ use nervix_server::{
         AppError, InternalTransportMode, SettingOverride, ShutdownPhaseOutcome, run_server_process,
     },
     memory_pressure::MemoryPressureConfig,
+    runtime::revision_index_inspection::{StoredRevisionIndex, read_stored_revision_index},
 };
 use nervix_test_environment::{TestParallelism, TestParallelismArgs, workspace_root};
 use nervix_wasm::{
@@ -634,6 +635,15 @@ struct ScenarioWorld {
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
+    /// When the scenario last released a held application progress path: progress reports or
+    /// revision replies.
+    progress_hold_released_at: Option<Instant>,
+    /// When a client's background Plexus execution finished, which its task records itself.
+    background_plexus_finished_at: Option<StdArc<OnceLock<Instant>>>,
+    /// The process incarnation each node answered its application progress under when the
+    /// scenario saved it.
+    saved_application_progress_incarnations:
+        BTreeMap<String, nervix_models::ClusterNodeIncarnation>,
     /// Human-readable references in scenarios map to UUIDv7 identities so retries retain one
     /// stable creation timestamp while feature text remains legible.
     command_execution_references: BTreeMap<String, String>,
@@ -662,6 +672,9 @@ struct ScenarioWorld {
     /// Contents each Plexus file was given, so "is unchanged" has something to compare against.
     formatter_original_files: BTreeMap<String, String>,
     last_cluster_operation_elapsed: Option<Duration>,
+    /// What each node's runtime state store held for the counted domain when the cluster last
+    /// stopped for a counted restart.
+    stopped_revision_indexes: BTreeMap<String, StoredRevisionIndex>,
     /// The last node start a scenario attempted without requiring it to succeed.
     node_start_attempt: Option<NodeStartAttempt>,
     browser_page: Option<playwright_rs::Page>,
@@ -783,6 +796,7 @@ impl fmt::Debug for ScenarioWorld {
                 "last_cluster_operation_elapsed",
                 &self.last_cluster_operation_elapsed,
             )
+            .field("stopped_revision_indexes", &self.stopped_revision_indexes)
             .field("node_start_attempt", &self.node_start_attempt)
             .field("clickhouse_table", &self.clickhouse_table)
             .field("clickhouse_tls", &self.clickhouse_tls)
@@ -4823,6 +4837,11 @@ fn client_probe_target(
         websocket_uri: websocket_uri.to_string(),
         username: TEST_AUTH_USERNAME.to_string(),
         password: TEST_AUTH_PASSWORD.to_string(),
+        ca_pem: (world.cluster_config.grpc_mode == InternalTransportMode::Https).then(|| {
+            std::fs::read_to_string(workspace_root().join("tls/dev/ca.pem"))
+                .expect("the conformance fixture CA exists")
+        }),
+        seed_uri: None,
         domain: world.domain.clone(),
         execution_reference: Uuid::now_v7().to_string(),
         exercise,
@@ -4896,6 +4915,56 @@ async fn when_client_probe_subscribes(
         .placeholders
         .insert("client_probe_redirect_report".to_string(), redirect_report);
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
+}
+
+#[when(
+    expr = "the {string} client probe connects through a seed after its first gRPC address is \
+            unavailable"
+)]
+async fn when_client_probe_connects_through_seed(world: &mut ScenarioWorld, runtime: String) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a binding probe runtime");
+    let node_id = "node-1";
+    let mut target = client_probe_target(world, node_id, ProbeExercise::Connection);
+    target.seed_uri = Some(target.grpc_uri.clone());
+    let scheme = if world.cluster_config.grpc_mode == InternalTransportMode::Https {
+        "https"
+    } else {
+        "http"
+    };
+    target.grpc_uri = format!("{scheme}://127.0.0.1:1");
+    start_client_probe(world, runtime, node_id, target, "CONNECTED seed").await;
+}
+
+#[when(
+    expr = "the {string} client probe subscribes for restoration through the forwarded gRPC \
+            endpoint of node {string}"
+)]
+async fn when_client_probe_subscribes_for_restoration(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a binding probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let forwarded = world
+        .placeholders
+        .get("forwarded_grpc")
+        .verified("a preceding step forwarded the node's gRPC endpoint")
+        .clone();
+    let mut target = client_probe_target(
+        world,
+        &node_id,
+        ProbeExercise::Restoration {
+            relay: "watched".to_string(),
+            subscription: "watching".to_string(),
+        },
+    );
+    target.grpc_uri = forwarded;
+    start_client_probe(world, runtime, &node_id, target, "SUBSCRIBED").await;
 }
 
 /// Starts a probe that follows the domain's clock through the TCP forwarder a preceding step stood
@@ -12649,9 +12718,230 @@ async fn when_application_revision_responses_are_released(
     node_id: String,
 ) {
     let node_id = expand_placeholders(world, &node_id);
+    world.progress_hold_released_at = Some(Instant::now());
     world
         .cluster()
         .release_application_revision_responses_from(&node_id);
+}
+
+#[given(expr = "application progress reports from node {string} pause before sending")]
+async fn given_application_progress_reports_are_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster()
+        .pause_application_progress_reports_from(&node_id);
+}
+
+#[then(expr = "within {string} the application progress report pause on node {string} is reached")]
+async fn then_application_progress_report_pause_is_reached(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let bound = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::timeout(
+        bound,
+        world
+            .cluster()
+            .wait_for_application_progress_report_pause(&node_id),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "no application progress report from '{node_id}' reached its pause within {duration}: \
+             {error}"
+        )
+    });
+}
+
+#[when(expr = "application progress reports from node {string} are released")]
+async fn when_application_progress_reports_are_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.progress_hold_released_at = Some(Instant::now());
+    world
+        .cluster()
+        .release_application_progress_reports_from(&node_id);
+}
+
+#[then(expr = "within {string} the background Plexus execution succeeds after the release")]
+async fn then_background_plexus_execution_succeeds_after_the_release(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let bound = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let released_at = world
+        .progress_hold_released_at
+        .verified("a preceding step released a held application progress path");
+    let finished_at = world
+        .background_plexus_finished_at
+        .take()
+        .verified("a preceding step started a timed background Plexus execution");
+    let task = world
+        .background_plexus
+        .take()
+        .verified("a preceding step started a background Plexus execution");
+    let output = nervix_primitives::time::timeout(bound, task)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the background Plexus execution did not finish within {duration}: {error}")
+        })
+        .assured("the background Plexus task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("the background Plexus execution failed: {error}"));
+    let finished_at = *finished_at
+        .get()
+        .verified("the background task records when it finished before it returns");
+    assert!(
+        finished_at >= released_at,
+        "the background Plexus execution finished {:?} before the held progress path was \
+         released, so something other than the released path completed it",
+        released_at.saturating_duration_since(finished_at)
+    );
+    append_cucumber_log_line(&format!(
+        "background Plexus execution finished {:?} after the held progress path was released",
+        finished_at.saturating_duration_since(released_at)
+    ));
+    world.last_command_output = Some(output);
+}
+
+/// Asks `querier` for the application progress of `target`, as `querier`'s revision barriers
+/// read it.
+async fn query_application_progress(
+    world: &ScenarioWorld,
+    querier: &str,
+    target: &str,
+) -> Result<nervix_interconnect::ApplicationProgress, String> {
+    let querier = crate::common::cluster::node_name(querier);
+    let target = crate::common::cluster::node_name(target);
+    match world
+        .fault_injection
+        .query_application_progress(&querier, target)
+        .await
+    {
+        Ok(answer) => Ok(answer),
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
+/// Whether `answer` reports every phase at `revision`, the runtime revision its reference node
+/// made ready, with an authoritative revision at least that runtime revision.
+fn answers_ready_revision(
+    answer: &nervix_interconnect::ApplicationProgress,
+    revision: u64,
+) -> bool {
+    let Some(authoritative) = answer.authoritative else {
+        return false;
+    };
+    authoritative >= revision
+        && answer.runtime_prepared == Some(revision)
+        && answer.runtime_ready == Some(revision)
+}
+
+#[then(
+    expr = "within {string} node {string} answers node {string} the revisions node {string} made \
+            ready"
+)]
+async fn then_node_answers_the_revisions_another_node_made_ready(
+    world: &mut ScenarioWorld,
+    duration: String,
+    target: String,
+    querier: String,
+    reference: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let querier = expand_placeholders(world, &querier);
+    let reference = expand_placeholders(world, &reference);
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let reference_answer = query_application_progress(world, &reference, &reference).await;
+        let target_answer = query_application_progress(world, &querier, &target).await;
+        if let (Ok(reference_answer), Ok(target_answer)) = (&reference_answer, &target_answer)
+            && let Some(revision) = reference_answer.runtime_ready
+            && target_answer.identity.node_id().as_str() == target
+            && answers_ready_revision(target_answer, revision)
+        {
+            append_cucumber_log_line(&format!(
+                "node '{target}' answered node '{querier}' {target_answer:?} at the runtime \
+                 revision {revision} node '{reference}' made ready"
+            ));
+            return;
+        }
+        let observation = format!("reference {reference_answer:?}, answer {target_answer:?}");
+        assert!(
+            Instant::now() < deadline,
+            "node '{target}' did not answer node '{querier}' the revisions node '{reference}' \
+             made ready within {duration}; last observation: {observation}"
+        );
+        nervix_primitives::time::sleep(LEADER_POLL_INTERVAL).await;
+    }
+}
+
+#[when(expr = "the application progress incarnation node {string} answers node {string} is saved")]
+async fn when_application_progress_incarnation_is_saved(
+    world: &mut ScenarioWorld,
+    target: String,
+    querier: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let querier = expand_placeholders(world, &querier);
+    let answer = query_application_progress(world, &querier, &target)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("node '{querier}' could not query node '{target}' for its progress: {error}")
+        });
+    world
+        .saved_application_progress_incarnations
+        .insert(target, answer.identity.incarnation());
+}
+
+#[then(
+    expr = "within {string} node {string} answers node {string} a new incarnation that prepared \
+            and readied no runtime revision"
+)]
+async fn then_node_answers_a_new_incarnation_without_runtime_progress(
+    world: &mut ScenarioWorld,
+    duration: String,
+    target: String,
+    querier: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let querier = expand_placeholders(world, &querier);
+    let previous = *world
+        .saved_application_progress_incarnations
+        .get(&target)
+        .unwrap_or_else(|| panic!("a preceding step saved the incarnation of node '{target}'"));
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let answer = query_application_progress(world, &querier, &target).await;
+        if let Ok(answer) = &answer
+            && answer.identity.incarnation() != previous
+        {
+            assert_eq!(
+                (answer.runtime_prepared, answer.runtime_ready),
+                (None, None),
+                "node '{target}' answered under its new incarnation {:?} a runtime phase, while \
+                 its runtime preparation is held: {answer:?}",
+                answer.identity.incarnation()
+            );
+            append_cucumber_log_line(&format!(
+                "node '{target}' answered node '{querier}' under its new incarnation: {answer:?}"
+            ));
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{target}' did not answer node '{querier}' under a new incarnation within \
+             {duration}; last observation: {answer:?}"
+        );
+        nervix_primitives::time::sleep(LEADER_POLL_INTERVAL).await;
+    }
 }
 
 #[when(expr = "application health probes from node {string} to node {string} fail")]
@@ -13012,7 +13302,7 @@ async fn when_leader_takes_long_to_release_shutdown_drain_cordon(
 }
 
 #[given(expr = "the transport of ingestor {string} takes {string} to confirm its acknowledgements")]
-async fn given_source_confirmation_delay(
+async fn given_ingestor_confirmation_delay(
     world: &mut ScenarioWorld,
     ingestor: String,
     delay: String,
@@ -13021,7 +13311,7 @@ async fn given_source_confirmation_delay(
     let ingestor = world.ingestor_dispatch_ref(&ingestor);
     world
         .fault_injection
-        .delay_source_confirmation(ingestor, delay);
+        .delay_ingestor_confirmation(ingestor, delay);
 }
 
 /// Every read of the junction's materialized dependencies waits this long first, as a read slow to
@@ -15361,6 +15651,73 @@ async fn when_the_cluster_restarts_from_on_disk_tables(world: &mut ScenarioWorld
     }
 }
 
+/// Every node stops, the runtime state store of each stopped node is counted for `domain` before
+/// any node starts again, and the cluster then restarts as "the cluster is restarted" does.
+#[when(
+    expr = "the cluster is restarted after counting the runtime state each node stored for domain \
+            {string}"
+)]
+async fn when_the_cluster_restarts_counting_stored_runtime_state(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = nervix_models::DomainName::parse(&expand_placeholders(world, &domain))
+        .expect("the counted domain is a valid domain name");
+    world.forget_session_observations();
+    let counted = world
+        .cluster_mut()
+        .restart_inspecting_stopped_databases(move |databases| {
+            let mut counted = BTreeMap::new();
+            for database in databases {
+                let index = match read_stored_revision_index(&database.path, &domain) {
+                    Ok(index) => index,
+                    Err(error) => panic!(
+                        "the stopped runtime state store of node '{}' could not be counted: \
+                         {error:#}",
+                        database.node
+                    ),
+                };
+                counted.insert(database.node, index);
+            }
+            counted
+        })
+        .await
+        .expect("failed to restart cluster");
+    world.stopped_revision_indexes = counted;
+}
+
+/// Reads the counts of the last counted restart: every node kept exactly one revision-index entry
+/// for each runtime state checkpoint it stored, and together the nodes stored at least `minimum`.
+#[then(
+    expr = "the stopped nodes stored at least {int} runtime state checkpoints, each with one \
+            revision-index entry"
+)]
+async fn then_stopped_nodes_kept_one_index_entry_per_checkpoint(
+    world: &mut ScenarioWorld,
+    minimum: usize,
+) {
+    assert!(
+        !world.stopped_revision_indexes.is_empty(),
+        "no counted restart recorded what the stopped nodes stored"
+    );
+    let mut stored = 0_usize;
+    for (node, index) in &world.stopped_revision_indexes {
+        assert_eq!(
+            index.index_entries, index.checkpoints,
+            "node '{node}' stopped with {} revision-index entries beside {} runtime state \
+             checkpoints",
+            index.index_entries, index.checkpoints
+        );
+        stored = stored
+            .checked_add(index.checkpoints)
+            .assured("a test cluster stores fewer checkpoints than a usize counts");
+    }
+    assert!(
+        stored >= minimum,
+        "the stopped nodes stored {stored} runtime state checkpoints, fewer than {minimum}"
+    );
+}
+
 #[then(expr = "the last cluster operation completes within {string}")]
 async fn then_last_cluster_operation_completes_within(world: &mut ScenarioWorld, duration: String) {
     let max_duration =
@@ -15682,6 +16039,25 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .wait_for_kafka_consumer_group_members(&group, expected)
         .await
         .expect("kafka consumer group did not reach expected member count");
+}
+
+/// A restarted node starts its ingestors only once it has prepared the cluster's runtime revision,
+/// so a group that regains its member shows the restarted runtime installed. The budget covers an
+/// installation that compiles WASM modules again on a loaded host.
+#[then(expr = "within {string} Kafka consumer group {string} eventually has {int} consumers")]
+async fn then_within_duration_kafka_consumer_group_eventually_has_consumers(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    expected: usize,
+) {
+    let budget = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_group_members_within(&group, expected, budget)
+        .await
+        .expect("kafka consumer group did not reach expected member count within the duration");
 }
 
 #[then(expr = "Kafka topic {string} does not exist")]
@@ -17468,21 +17844,28 @@ async fn when_named_client_begins_executing_in_the_background(
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
+    let finished_at = StdArc::new(OnceLock::new());
+    world.background_plexus_finished_at = Some(finished_at.clone());
     world.background_plexus = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
-            let mut last_output = String::new();
-            for command in statements {
-                nervix_primitives::task::consume_budget().await;
-                let outcome = client
-                    .execute(command)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if !outcome.succeeded() {
-                    return Err(outcome.message);
+            let execution = async move {
+                let mut last_output = String::new();
+                for command in statements {
+                    nervix_primitives::task::consume_budget().await;
+                    let outcome = client
+                        .execute(command)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if !outcome.succeeded() {
+                        return Err(outcome.message);
+                    }
+                    last_output = outcome.message;
                 }
-                last_output = outcome.message;
-            }
-            Ok(last_output)
+                Ok(last_output)
+            };
+            let result = execution.await;
+            finished_at.get_or_init(Instant::now);
+            result
         },
     )));
 }

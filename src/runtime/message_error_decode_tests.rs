@@ -5,7 +5,7 @@
 //! - **Owns.** The record a codec refusal becomes, its transport position, the fields it names and
 //!   how an ingestor's general error policy reports it.
 //! - **Depends on.** The runtime's codec compilation, its runtime event bus and its test fixtures.
-//! - **Must not know.** A source driver or how a source host settles a payload on its transport.
+//! - **Must not know.** An ingestor driver or how an ingestor host settles a payload on its transport.
 
 #![cfg_attr(
     nervix_lint,

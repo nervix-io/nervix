@@ -3,7 +3,7 @@
 //! Layer: test harness.
 //! - **Owns.** FIFO frame/header preservation on success and complete purge on failed signaling.
 //! - **Depends on.** The production handoff, modeled channels and the canonical Shuttle runner.
-//! - **Must not know.** Sockets, wall time, the registry or the source host.
+//! - **Must not know.** Sockets, wall time, the registry or the ingestor host.
 
 #![cfg_attr(
     nervix_lint,
