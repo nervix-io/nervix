@@ -32,6 +32,41 @@ workloads cover direct ingestion, a mapped processor, four-way fanout, and remot
 
 ## Running implementations
 
+### RabbitMQ publication boundaries
+
+`just bench-rabbitmq-publish` measures the production RabbitMQ queue emitter in `MODE NO ACK`
+with 1, 100 and 1,000 messages per write and payloads of 200 and 4,096 bytes. It provisions an
+isolated Testcontainers broker and queue before timing. Measurements take the repository's shared
+benchmark lock, with a sixty-second acquisition deadline, so concurrent checkouts do not measure
+these workloads together.
+
+The `driver_enqueue` and `driver_round_trip` controls differ only in whether their timed region
+includes a `basic.qos` answer. Enqueue completion says nothing about broker acceptance. The
+`production_no_ack` case invokes the public production emitter and includes record allocation,
+its required channel round trip and exact per-record outcome validation. Each sample checks and
+consumes exactly its written message count and checks every payload byte outside timing; the
+broker retains at most one write.
+These are isolated publication costs. They do not measure graph throughput, FLUSH latency,
+or CPU time. Keep those measurements separate when qualifying batching.
+
+The benchmark uses the product's jemalloc allocator. Before timing each write shape it warms
+one publication, then records the allocator's reported allocation-request delta and allocated,
+resident and retained byte snapshots around another production publication. Queue observation
+and consumption follow that sample. The counters cover the whole process, including driver threads,
+and follow jemalloc's statistics refresh semantics. They are observations rather than an exact
+per-thread allocation trace or an in-flight memory peak. Retained bytes here are jemalloc's
+retained mappings; they are distinct from buffered payload bytes.
+
+Pass Criterion filters and budgets after the recipe, for example
+`just bench-rabbitmq-publish 'rabbitmq_publish/200_bytes/production_no_ack/100$'`.
+`just test-rabbitmq-publish-benchmark` runs each body once, including its real-broker count oracle.
+Its test mode first catches an intentional panic with a live fixture and checks that Docker
+reports the private broker released. The runtime stays entered until every fixture is dropped.
+An actual benchmark failure prints the broker's last 200 log lines under a thirty-second bound
+before resuming the original panic, so teardown preserves its cause.
+Its ordinary native coverage producer has the same name. It is separate from the in-memory
+`bench-smoke` suite, so unrelated benchmark smoke checks do not start a broker.
+
 Build the current checkout and run local Nervix:
 
 ```bash

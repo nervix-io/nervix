@@ -385,6 +385,19 @@ test-emitter-native-metrics *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/{client_emitters,emitter_batch_databases,http_emitter,iceberg_emission,otel_export_retries}.feature") }} --tags '@emitter_payload_observations' {{ quote(args) }}
 
+# Complete batch values and explicit sensitivity leakage through one- and three-node public graphs.
+build-emitter-batch-boundaries: build-deps
+    cargo test --package nervix-scenarios --test scenarios --no-run
+
+test-emitter-batch-boundaries *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input 'tests/features/runtime/{emitter_batch_containers,sensitive_data}.feature' \
+        --name 'ON EMITTING BATCH maps, wraps and expands the array of member values|Sensitive external emission requires explicit leakage' \
+        {{ quote(args) }}
+
 # Exercise NATS authentication through real brokers and one-/three-node public graphs.
 test-nats-authentication *args: build-deps
     #!/usr/bin/env bash
@@ -2703,6 +2716,18 @@ bench-smoke-bodies:
 # transformation. Extra arguments are forwarded to Criterion.
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
+
+# Real RabbitMQ write costs. Serialize measurements across checkouts of this repository.
+bench-rabbitmq-publish *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    benchmark_lock="$(git rev-parse --path-format=absolute --git-common-dir)/nervix-benchmark.lock"
+    flock --exclusive --timeout 60 "$benchmark_lock" \
+        cargo bench --package nervix-connector-rabbitmq --features benchmarks --bench publish -- {{ quote(args) }}
+
+# Exercise the same real-broker fixture and publication/count oracles once per benchmark body.
+test-rabbitmq-publish-benchmark:
+    cargo bench --profile dev --package nervix-connector-rabbitmq --features benchmarks --bench publish -- --test
 
 # Measure ordinary native atomic, publication, lock and reference-count costs on this host.
 # Model and diagnostic builds have different instrumentation and are not performance baselines.

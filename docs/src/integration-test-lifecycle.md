@@ -43,6 +43,17 @@ node's files, observes the initially loaded leaf on a fresh connection before re
 replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
 name, and the console recorder checks an opened WSS connection to the advertised leader.
 
+## Focused Emitter Batch Boundaries
+
+`just test-emitter-batch-boundaries --concurrency 2 --retry 0` selects the one- and three-node
+batch-transformation and external-sensitivity outlines. The container oracle includes omitted
+optional values, nested and empty lists, binary bytes and escaped text. The sensitivity outline
+requires explicit leakage both with batching omitted and with a singleton batch container.
+Preparation builds the console assets, WASM guests and ONNX runtime used by the in-process nodes;
+the existing Kafka and ZeroMQ observers retain their normal startup, delivery and teardown bounds.
+For a cold or changed scenario executable, run `just build-emitter-batch-boundaries` first and
+budget that compilation separately from the focused scenario run.
+
 ## Focused Application Progress Qualification
 
 `just test-progress-qualification --concurrency 2 --retry 0` runs the application-progress,
