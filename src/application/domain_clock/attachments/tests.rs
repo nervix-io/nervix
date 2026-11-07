@@ -643,13 +643,12 @@ mod modeled {
         };
 
         let mut request = fixture.request.clone();
-        let process_epoch;
-        if duplicate {
-            process_epoch = 11;
+        let process_epoch = if duplicate {
+            11
         } else {
             request.target = Fixture::identity("receiver", 3);
-            process_epoch = 12;
-        }
+            12
+        };
         let target = request.target.clone();
         let current_view = BTreeSet::from([target.clone()]);
         let attachments = fixture.attachments.clone();
