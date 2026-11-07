@@ -1092,20 +1092,21 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `addr` | required | string | Nervix; strict | no | none |
+| `addr` | required | host:port | Nervix; strict | no | none |
 | `connect_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `framing` | optional | octet-counting or non-transparent | Nervix; strict | no | none |
-| `idle_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `max_message_size` | optional | positive integer | Nervix; strict | no | none |
+| `framing` | optional; requires `protocol` to be tcp or tls | octet-counting or non-transparent | Nervix; strict | no | none |
+| `idle_timeout_ms` | optional; requires `protocol` to be tcp or tls | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `max_message_size` | optional; default `131072` | positive integer | Nervix; strict | no | none |
 | `protocol` | required | udp or tcp or tls | Nervix; strict | no | none |
 | `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
-| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
-| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
-| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `tls_ca_file` | optional; requires `protocol` to be tls | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `protocol` to be tls | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_client_ca_file` | optional; requires `protocol` to be tls | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_key_file` | optional; requires `protocol` to be tls | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
-Only its `SYSLOG LISTENER` ingestors read `idle_timeout_ms` and `max_message_size`. Only its `SYSLOG COLLECTOR` emitters read `framing` and `timeout_ms`. Every entity that references the client reads its other keys.
+Only its `SYSLOG LISTENER` ingestors read `idle_timeout_ms`, `max_message_size` and `tls_client_ca_file`. Only its `SYSLOG COLLECTOR` emitters read `timeout_ms` and `tls_ca_file`. Every entity that references the client reads its other keys.
 
 ### PROMETHEUS client
 

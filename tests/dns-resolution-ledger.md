@@ -120,7 +120,9 @@ connection and share one 30-second budget between the lookup, the ordered addres
 for TLS, the handshake; a WebSocket attempt also completes the opening upgrade. Syslog UDP binds a
 socket in each answer's family and sends to the first whose setup succeeds. TLS verifies the
 configured host, and the WebSocket upgrade keeps the configured URL's authority, path and query.
-The source host cancels a pending resume when shutdown or a quiesce change arrives.
+The source host cancels a pending resume when shutdown or a quiesce change arrives. A Syslog listener
+binds a literal socket address and resolves nothing, and a host name in its `addr` refuses the
+statement that binds the client.
 
 | Acceptance item | Evidence |
 | --- | --- |

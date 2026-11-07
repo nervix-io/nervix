@@ -18,11 +18,15 @@
 use std::num::NonZeroU32;
 
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ClientConfigSchema, ClientName, ConnectorKind, OptionDeclaration, ResourceName};
+use crate::{
+    ClientConfigSchema, ClientConfigSchemaError, ClientConfigSide, ClientName, ConnectorKind,
+    OptionDeclaration, ResourceName,
+};
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -163,6 +167,20 @@ pub struct ConfiguredClientRef<'a, Version> {
     pub name: &'a ClientName,
     pub mount: Option<&'a ClientResourceMount<Version>>,
     pub config: &'a [ClientConfigEntry],
+}
+
+impl<Version> ConfiguredClientRef<'_, Version> {
+    /// Refuses a key only the other side of this client's connector reads.
+    pub fn validate_side(
+        &self,
+        side: ClientConfigSide,
+    ) -> Result<(), Report<ClientConfigSchemaError>> {
+        let declaration = self
+            .connector
+            .client()
+            .assured("a configured client has a connector declaration");
+        declaration.config.validate_side(self.config, side)
+    }
 }
 
 /// Declares the client Model of one connector: its name, its mount and its configuration.
