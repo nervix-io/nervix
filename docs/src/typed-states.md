@@ -133,6 +133,12 @@ Kafka's external unavailable encoding is resolved at this boundary. Missing bina
 empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
 from a present empty payload when both lend an empty slice to a codec.
 
+An emitter's external key is absent or a present byte sequence, including an empty sequence.
+The `KEY` expression must produce a non-null `STRING` or `BYTES`, with explicit leakage of any
+sensitive source, message or branch value. Its admitted type is resolved when the program binds;
+the external representation is the string's UTF-8 bytes or the binary bytes unchanged. Source
+branch identity and destination-partition selection remain separate from that external key.
+
 An MQTT publish keeps a property its publisher left unset distinct from one it set empty: an unset
 content type, response topic, correlation data or message expiry is absent and reads as a typed
 null, while an empty string, empty bytes or a zero expiry remain values. Absence comes from the
@@ -325,7 +331,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX AVRO ITEM` archive signature identifies the current Model layout, including
+The registry's `NERVIX KEYARRAYS` archive signature identifies the current Model layout, including
 the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the required 16-bit branch partition count,
@@ -336,7 +342,7 @@ service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of s
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
 that header state, and inferencer state bindings with their initial expressions.
-Consensus's `raft_inference_avro_` keyspaces and current `ClusterState`
+Consensus's `raft_key_avro_` keyspaces and current `ClusterState`
 metadata encoding, 14, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
@@ -352,6 +358,9 @@ major `5` and its unit-bearing record versions own an eight-byte primitive unit 
 positions and an optional applied explicit-start generation. Pending canonical starts and
 subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
+
+Emitter Models also carry explicit STRING/BYTES key expressions, source-partition routing and
+expression-only SQS FIFO groups in this current shape.
 
 ## Absence And Distinct States
 

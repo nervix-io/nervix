@@ -736,6 +736,23 @@ member, or the message-count limit. Each encoding attempt uses the codec's bound
 
 An emitter evaluates only envelope clauses its entity declares and retains their prepared values
 with the payload in its pending work, so a retry uses the same envelope and input-row identities.
+
+An explicit record key is evaluated while the source branch is available. Its typed STRING or
+BYTES value and the source partition ordinal belong to the retained envelope, so every attempt
+uses the admitted values. The execution plan carries the resolved source partition count for
+`PARTITION FROM BRANCH`; changing that count changes the plan. The source relay and concrete
+branch remain independent packing fences even when the transport key is absent.
+
+Pulsar selects a destination partition through its driver's routing callback. One emitter task
+owns the current send's ordinal and sets its selected atomic immediately before handing the
+message over. The pinned driver calls the callback synchronously under that task's exclusive
+producer borrow, before awaiting the selected partition producer. The callback only reads the
+ordinal; it neither publishes another value nor supplies a wakeup. Relaxed ordering suffices for
+this scalar in the same send. The shared handle satisfies the driver's `Sync` callback API and
+does not transfer write ownership to a producer task. This keeps the driver's partition producers,
+connections, queues and receipt ownership intact. Deloxide observes no blocking lock on this
+path, and the callback makes no cross-location publication or wait-and-notify claim.
+
 A record emitter prepares its external bytes once before retention, including when a payload carries
 one row without `BATCH`. A Sentry envelope therefore keeps its event identity and complete bytes
 across retries and connector replacement; preparation adds no shared owner or synchronization.

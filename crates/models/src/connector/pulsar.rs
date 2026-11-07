@@ -632,6 +632,8 @@ impl EmitterDeclaration for PulsarTopicEmitter {
         // retention flag, no reply target and no per-message identity a producer chooses. Its
         // properties carry what a PROPERTIES block would, and its ordering key is a key.
         envelope: &[
+            EnvelopeClauseKind::Key,
+            EnvelopeClauseKind::PartitionFromBranch,
             EnvelopeClauseKind::Timestamp,
             EnvelopeClauseKind::DeliverAfter,
         ],

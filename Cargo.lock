@@ -7315,6 +7315,7 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "async-trait",
+ "base64 0.22.1",
  "bolero",
  "error-stack",
  "futures-util",

@@ -477,6 +477,10 @@ native decoding; an unrepresentable count fails decoding. Window processor state
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
 
+Emitter statements exchanged through the control plane use explicit `KEY` expressions and
+`PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
+`WIRE_CONTRACT` fingerprint identifies that archived Model layout; peers must match it exactly.
+
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
 partition relay grants retain that bounded footprint when other entities declare external
 instances. Grant admission charges the exact encoded metadata size, body, decoded batch and

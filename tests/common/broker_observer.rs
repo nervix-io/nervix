@@ -54,7 +54,9 @@ pub(crate) struct BrokerMessage {
     /// because those brokers keep no order of their own.
     pub(crate) headers: Vec<(String, String)>,
     /// The key the broker delivered with the payload: a Kafka record key or a Pulsar partition key.
-    pub(crate) key: Option<String>,
+    pub(crate) key: Option<Vec<u8>>,
+    /// The destination partition the broker read this message from, where its protocol names one.
+    pub(crate) partition: Option<i32>,
     /// The ordering group the broker delivered the payload in: an SQS FIFO message group.
     pub(crate) group: Option<String>,
     /// When the broker says the record was made: a Kafka record's create or log-append time.
@@ -83,6 +85,7 @@ impl BrokerMessage {
             bytes: bytes.to_vec(),
             headers,
             key: None,
+            partition: None,
             group: None,
             time: None,
             typed_headers: Vec::new(),
@@ -95,8 +98,13 @@ impl BrokerMessage {
         self
     }
 
-    pub(crate) fn with_key(mut self, key: Option<String>) -> Self {
+    pub(crate) fn with_key(mut self, key: Option<Vec<u8>>) -> Self {
         self.key = key;
+        self
+    }
+
+    pub(crate) fn with_partition(mut self, partition: Option<i32>) -> Self {
+        self.partition = partition;
         self
     }
 

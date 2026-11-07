@@ -17,6 +17,8 @@ use crate::semantic_program::parse_expression;
 
 /// Every clause kind, which no entity declares together; the section reads each declared one.
 const EVERY_CLAUSE: &[EnvelopeClauseKind] = &[
+    EnvelopeClauseKind::Key,
+    EnvelopeClauseKind::PartitionFromBranch,
     EnvelopeClauseKind::Persistent,
     EnvelopeClauseKind::Mandatory,
     EnvelopeClauseKind::Retain,
@@ -96,15 +98,18 @@ fn expression(text: &str) -> Expression {
 fn every_declared_clause_and_property_is_read_in_written_order() {
     let envelope = read(
         EVERY_CLAUSE,
-        "PERSISTENT MANDATORY RETAIN TIMESTAMP input.occurred_at DELIVER AFTER 5s DELAY 250ms \
-         REPLY TO 'replies' MESSAGE ID input.id DEDUPLICATION ID concat(input.id, '-1') \
-         PROPERTIES {'priority' = 9, 'content_type' = 'application/json'}",
+        "KEY branch.tenant PARTITION FROM BRANCH PERSISTENT MANDATORY RETAIN TIMESTAMP \
+         input.occurred_at DELIVER AFTER 5s DELAY 250ms REPLY TO 'replies' MESSAGE ID input.id \
+         DEDUPLICATION ID concat(input.id, '-1') PROPERTIES {'priority' = 9, 'content_type' = \
+         'application/json'}",
     )
     .expect("every declared clause is read");
 
     assert_eq!(
         envelope,
         EmitterEnvelope {
+            key: Some(expression("branch.tenant")),
+            partition_from_branch: true,
             persistent: true,
             mandatory: true,
             retain: true,
@@ -209,8 +214,10 @@ fn completion_offers_each_declared_clause_as_one_item_in_written_order() {
         "DELAY",
         "DELIVER AFTER",
         "FLUSH",
+        "KEY",
         "MANDATORY",
         "MESSAGE ID",
+        "PARTITION FROM BRANCH",
         "PERSISTENT",
         "PROPERTIES",
         "REPLY TO",
