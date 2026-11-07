@@ -1823,6 +1823,13 @@ The harness keeps these boundaries explicit.
   releases and clears them even after an assertion fails. The original health-only scenario keeps
   its nine-second sequential probe and remains an independent check.
 
+  The [Progress 04 qualification](https://app.clickup.com/t/86bcy647h) compared twelve batches per
+  condition and revision on the same host on 7 November 2026, at concurrency two. Request reports
+  reduced median completion from 459 to 297 milliseconds with revision queries available, and
+  from 4,458 to 795 milliseconds with their replies held; both sampled tail latencies improved.
+  These measurements preserve the prepared client, statement sequence and fault conditions.
+  The nine- and twenty-second bounds continue to allow parallel control-queue and runtime load.
+
   The large-resource control probe connects a named production client to the restarted node once
   it has started, then waits until that node's
   `nervix_interconnect_bulk_bytes_total{class="bulk",direction="received"}` shows archive bytes
