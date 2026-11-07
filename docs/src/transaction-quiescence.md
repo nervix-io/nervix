@@ -103,7 +103,7 @@ Engaging any entity gate also requests a force flush of the full current executi
 on both sides of the change. [Data Plane](./data-plane.md) explains the runtime work these gates
 protect; [Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) lists the model
 changes that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its
-external-source behavior under a hold; it is distinct from the step's quiesce level.
+external system's behavior under a hold; it is distinct from the step's quiesce level.
 
 A [client ingestor](./ingestors.md#client-ingestors) under a hold suspends admission: its producers
 are told admission is suspended, batches that were queued but not admitted are refused as

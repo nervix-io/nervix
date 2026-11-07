@@ -855,7 +855,7 @@ lost when the process ends.
 
 Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
 so the ingestor's own redelivery contract applies. An ingestor instance that stops while it still waits
-on such a batch logs `source instance stopped before its transport confirmed positions it read; the
+on such a batch logs `ingestor instance stopped before its transport confirmed positions it read; the
 transport presents them again` at `info`, with the count of positions. This is why a drain that
 times out leaves Kafka offsets uncommitted rather than advancing them.
 
@@ -1428,7 +1428,7 @@ admission phase still finishes `Completed` when the cut lets the listeners close
 deadline.
 
 An ingestor instance that stops before its transport confirmed positions it read records
-`source instance stopped before its transport confirmed positions it read; the transport presents
+`ingestor instance stopped before its transport confirmed positions it read; the transport presents
 them again` at `info`, with the `domain`, the `ingestor`, the `instance` and the count of
 `positions`.
 
