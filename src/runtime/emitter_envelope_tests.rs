@@ -56,7 +56,21 @@ fn vm_schema(schema: &Arc<CompiledSchema>) -> RuntimeVmSchema {
 fn value(target: EnvelopeTarget, ty: ParseAsType, text: &str) -> EnvelopeValue {
     EnvelopeValue {
         target,
-        ty,
+        ty: match ty {
+            ParseAsType::String => PropertyType::String.into(),
+            ParseAsType::Datetime => PropertyType::Datetime.into(),
+            ParseAsType::U8 => PropertyType::U8.into(),
+            ParseAsType::I8 => PropertyType::I8.into(),
+            ParseAsType::U16 => PropertyType::U16.into(),
+            ParseAsType::I16 => PropertyType::I16.into(),
+            ParseAsType::U32 => PropertyType::U32.into(),
+            ParseAsType::I32 => PropertyType::I32.into(),
+            ParseAsType::U64 => PropertyType::U64.into(),
+            ParseAsType::I64 => PropertyType::I64.into(),
+            ParseAsType::Bool => PropertyType::Bool.into(),
+            ParseAsType::Bytes => PropertyType::Bytes.into(),
+            _ => panic!("envelope values are scalar"),
+        },
         expression: expression(text),
     }
 }
@@ -110,6 +124,7 @@ async fn evaluate(
     envelope
         .evaluate(
             &Executor::default(),
+            &named("source"),
             published,
             input,
             &HashMap::default(),
@@ -497,8 +512,9 @@ fn a_publish_batch_without_envelopes_gives_no_row_one_and_rows_share_a_fixed_env
         "a batch without envelopes answers alike for any row"
     );
 
-    let fixed =
-        publish_batch.with_envelopes(RowEnvelopes::Fixed(Arc::new(persistent_with_delay())));
+    let fixed = publish_batch.with_envelopes(RowEnvelopes::Fixed(
+        Arc::new(persistent_with_delay()).into(),
+    ));
     let carried = |row: usize| match fixed.envelope(row).expect("the row exists") {
         Ok(Some(envelope)) => envelope,
         other => panic!("row {row} carries the fixed envelope, found {other:?}"),
@@ -687,4 +703,153 @@ fn an_emitter_compiles_an_envelope_only_where_it_writes_one() {
         enveloped.is_some(),
         "an emitter that writes an envelope compiles it"
     );
+}
+
+#[nervix_primitives::test]
+async fn explicit_keys_keep_their_inferred_value_kind_and_exact_empty_or_binary_bytes() {
+    let input = test_schema(&[("id", ParseAsType::String)]);
+    for (text, expected) in [
+        ("input.id", RecordKey::String("café".to_owned())),
+        ("''", RecordKey::String(String::new())),
+        ("hex_decode('00ff10')", RecordKey::Bytes(vec![0, 255, 16])),
+        ("hex_decode('')", RecordKey::Bytes(Vec::new())),
+    ] {
+        nervix_primitives::task::consume_budget().await;
+        let plan = EmitterEnvelopePlan::computing(
+            RecordEnvelope::default(),
+            vec![EnvelopeValue {
+                target: EnvelopeTarget::Clause(EnvelopeClauseKind::Key),
+                ty: EnvelopeValueType::Key,
+                expression: expression(text),
+            }],
+            false,
+        )
+        .expect("the key lowers");
+        let fixture = CompileFixture::new();
+        let compiled = CompiledEnvelope::compile(
+            &named("keys"),
+            &plan,
+            EnvelopeSchemas {
+                input: vm_schema(&input),
+                output: None,
+            },
+            fixture.context(),
+        )
+        .expect("the exact key type compiles");
+        let mut published = batch(
+            input.clone(),
+            vec![vec![("id", RuntimeValue::String("café".to_owned()))]],
+        );
+        let envelopes = evaluate(&compiled, &mut published, EnvelopeInput::Published).await;
+        let destination = envelopes
+            .destination(0)
+            .expect("the row retained its explicit key");
+        assert_eq!(destination.key, Some(expected));
+        assert_eq!(destination.source_partition, None);
+        assert_eq!(
+            destination.held_bytes(),
+            u64::try_from(std::mem::size_of::<RecordDestination>()).expect("native size fits u64")
+                + u64::try_from(destination.key.as_ref().expect("present").as_bytes().len())
+                    .expect("the retained key length fits u64")
+        );
+    }
+}
+
+#[nervix_primitives::test]
+async fn partition_only_envelopes_select_each_source_count_without_a_value_program() {
+    let input = test_schema(&[("id", ParseAsType::String)]);
+    let schema = nervix_models::CreateSchema {
+        name: named("tenant_fields"),
+        fields: vec![nervix_models::SchemaField {
+            name: named("tenant"),
+            ty: ParseAsType::String,
+            optional: false,
+            sensitive: false,
+        }],
+    };
+    let sources = BTreeMap::from([
+        (
+            named("first"),
+            ResolvedBranching::branched(
+                named("first_branch"),
+                schema.clone(),
+                nervix_models::BranchPartitions::Direct(
+                    std::num::NonZeroU16::new(4).expect("four"),
+                ),
+            ),
+        ),
+        (
+            named("second"),
+            ResolvedBranching::branched(
+                named("second_branch"),
+                schema,
+                nervix_models::BranchPartitions::ONE,
+            ),
+        ),
+    ]);
+    let plan = EmitterEnvelopePlan {
+        fixed: RecordEnvelope::default(),
+        computed: None,
+        sources,
+        partition_from_branch: true,
+    };
+    let fixture = CompileFixture::new();
+    let compiled = CompiledEnvelope::for_emitter(
+        &named("partitioned"),
+        Some(&plan),
+        &input,
+        &input,
+        fixture.context(),
+    )
+    .expect("the source plans bind")
+    .expect("the emitter declares a destination");
+    let key = BranchKey::from_fields([(named("tenant"), RuntimeValue::String("acme".to_owned()))])
+        .expect("valid fields");
+    for (source, expected) in [("first", 3), ("second", 0)] {
+        nervix_primitives::task::consume_budget().await;
+        let mut published = batch(
+            input.clone(),
+            vec![vec![("id", RuntimeValue::String("a".to_owned()))]],
+        );
+        published.key = Some(key.clone());
+        let envelopes = compiled
+            .evaluate(
+                &Executor::default(),
+                &named(source),
+                &mut published,
+                EnvelopeInput::Published,
+                &HashMap::default(),
+                Timestamp::from_unix_nanos(1),
+            )
+            .await
+            .expect("the partition resolves");
+        let destination = envelopes
+            .destination(0)
+            .expect("the source ordinal is retained");
+        assert_eq!(destination.source_partition, Some(expected));
+        assert_eq!(destination.key, None);
+        assert!(matches!(envelopes, RowEnvelopes::Fixed(_)));
+    }
+    let mut changed = plan.clone();
+    if let ResolvedBranching::Branched { partitions, .. } =
+        changed.sources.get_mut("first").expect("source exists")
+    {
+        *partitions = nervix_models::BranchPartitions::ONE;
+    }
+    assert_ne!(
+        plan, changed,
+        "a partition-count change invalidates the emitter plan"
+    );
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn shared_emitter_carriers_keep_their_native_fixed_footprints() {
+    // Measured on the unchanged ordinary native base, with the same compiler and target.
+    assert!(std::mem::size_of::<nervix_connector::EmitterRecord>() <= 312);
+    assert!(std::mem::size_of::<crate::runtime::emitter_batch_packing::BatchEnvelope>() <= 88);
+    assert_eq!(std::mem::size_of::<RecordEnvelope>(), 168);
+    assert!(std::mem::size_of::<RowEnvelopes>() <= 24);
+    assert!(std::mem::size_of::<CompiledEnvelope>() <= 144);
+    assert!(std::mem::size_of::<CompiledEnvelopeValues>() <= 136);
 }

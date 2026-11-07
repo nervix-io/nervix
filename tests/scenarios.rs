@@ -222,6 +222,7 @@ mod deadlock_diagnostics;
 mod deadlock_reports;
 mod domain_clock_attachment;
 mod domain_resume;
+mod emitter_destinations;
 mod emitter_finish;
 mod emitter_metrics;
 mod endpoint_intake;
@@ -36345,7 +36346,7 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_message
         };
         let message = ExpectedBrokerMessage {
             payload: expand_placeholders(world, payload).into_bytes(),
-            key: expected_message_attribute(world, key),
+            key: expected_message_attribute(world, key).map(String::into_bytes),
             headers: expected_message_headers(world, headers),
             group: expected_message_attribute(world, group),
         };
@@ -36549,7 +36550,7 @@ impl BrokerMessageExpectation for ExpectedBrokerPayload {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ExpectedBrokerMessage {
     payload: Vec<u8>,
-    key: Option<String>,
+    key: Option<Vec<u8>>,
     headers: Vec<(String, String)>,
     group: Option<String>,
 }

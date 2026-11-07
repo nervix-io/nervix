@@ -1325,9 +1325,9 @@ written; at most 1,024 bytes without whitespace, control characters or an empty 
 ingestor names a subscription of 1 to 255 bytes with its declared owner and type, declares `NO ACK`,
 `ACK SEQUENTIAL` and `ACK PARALLEL` in Pulsar's own delivery-mode type, and quiesces only by
 `SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
-`ACK` publishing, optional batching under the `maxMessageSize` the broker announces, the `TIMESTAMP`
-and `DELIVER AFTER` envelope clauses it writes as each message's `event_time` and `deliver_at_time`,
-and no other envelope clause or properties. Message properties are headers in both directions,
+`ACK` publishing, optional batching under the `maxMessageSize` the broker announces, `KEY` and
+`PARTITION FROM BRANCH`, and the `TIMESTAMP` and `DELIVER AFTER` clauses it writes as each message's
+`event_time` and `deliver_at_time`. It declares no typed envelope properties. Message properties are headers in both directions,
 `ordered_repeats` on ingestion and `last_wins` on emission. A Pulsar client declares only the keys
 both directions read, and both directions connect through one builder in the connector, so the two
 cannot disagree on how they connect. `namespace` holds exactly a tenant and a namespace, with the
@@ -2322,8 +2322,9 @@ text. It keeps the host's request cadence and per-record outcomes.
 
 An ordering group exists only where the emitter plan declares one; today that is the SQS
 `FIFO GROUP`. The host binds the lowered declaration, evaluates it once per filtered source batch, and
-carries the result beside the batch: the batch's branch key for `FROM BRANCH`, or a string column
-for an expression, whose null rows keep the reason they have no group. It selects that column
+carries the result beside the batch as a string column from the declared expression, whose null
+rows keep the reason they have no group. The expression can read the source's exact branch fields
+with their declared types and sensitivity. It selects that column
 through the rows the emitter's route keeps, so each record keeps the group of its own input row. A
 record without a group is rejected by the host under the emitter's message error policy and never
 reaches the connector, which receives each remaining record's group already evaluated. An emitter
@@ -2332,21 +2333,37 @@ whose plan declares no group carries nothing beside its batches.
 An envelope exists only where the emitter's statement writes
 [envelope clauses](emitters.md#envelope-clauses) or properties, or where its destination computes a
 value for every record, and the registry refuses any clause or property its entity does not
-declare. Today the one destination value is a `RABBITMQ EXCHANGE` emitter's `ROUTING KEY`, which
+declare. A `RABBITMQ EXCHANGE` emitter's `ROUTING KEY` is a destination value which
 the envelope carries with the clauses because it is computed from the same record at the same
 point. The plan fixes the flag and duration clauses and lowers the routing key, the expression
 clauses and the properties, in that order, into one program that writes each value into a non-null
-field of its exact type. The host compiles that program once for the task, over the source record as `input`, the
+field of its admitted exact type. `KEY` admits `STRING` or `BYTES`; its runtime bytes preserve the
+string's UTF-8 encoding or the binary value verbatim. Exact clause schemas retain their direct
+compile path; only `KEY` infers an admitted value type. The host compiles the program over the source record as `input`, the
 published record as `message` and, where the route constructs the published record, that output
-as `output`, with the materialized state and lookups the emitter reaches. It evaluates the program
+as `output`, with the materialized state and lookups the emitter reaches. A key expression also
+binds each source's exact branch schema and sensitivity. Source-dependent programs are compiled
+once for each declared input and selected by the admitted batch's source relay; the source's
+resolved partition count participates in plan equality. It evaluates the selected program
 once per admitted batch, after the route, and carries each row's `RecordEnvelope` beside the batch:
 the fixed clauses with the row's own values, or the reason the row has none. Where the envelope
-computes no value, every row of every batch shares the one envelope its fixed clauses form. A record
+computes no value and selects no source partition, every row of every batch shares the one envelope
+its fixed clauses form. A source partition is resolved once per admitted concrete-branch batch and
+retained with its rows' envelopes. A record
 without an envelope is rejected by the host under the emitter's message error policy, as an
 `evaluation` error of the `publish` operation, and never reaches the connector. Packing seals a
 batch payload where two members' envelopes differ. A payload shares its members' envelope with the
 batch they came from rather than copying it, and a retained payload keeps it with its bytes. An
 emitter that writes no envelope carries nothing beside its batches or in its payloads.
+
+Kafka discovers the destination partition count only for `PARTITION FROM BRANCH`, through
+the same producer and one charged connector-storage job per publish attempt. Executor admission
+and the native metadata wait share the effective native `socket.timeout.ms` budget. Cancellation
+is checked before and after the bounded driver call. Admission, timeout and metadata failures
+remain retryable publish failures; no record was rejected or handed over. Queue retries within
+that attempt reuse the discovered count. Ordinary key or unkeyed publication adds no metadata call. Producer metadata keeps
+librdkafka's existing auto-creation default; the broker may create a missing topic, unlike
+Nervix's consumers, which disable creation.
 
 A record emitter reads its record's `write_header` writes in the form its entity's header model
 declares. `EmitterRecord::headers` holds them, name and text, where the model's values are text,
@@ -2356,12 +2373,22 @@ is empty. The host evaluates each write once, when it admits the record, keeps t
 order the route makes them and retains them with the payload, so every attempt carries the writes
 the first attempt carried.
 
+An explicit destination lives in `EmitterRecord::destination`, an optional shared
+`RecordDestination` holding the exact STRING/BYTES key and optional source partition ordinal.
+The batch and retained payload share that owner across attempts. An absent destination allocates
+nothing, and key bytes contribute to the host's retained-byte accounting. Source relay and
+concrete branch remain independent packing fences even for an absent key.
+
 A record emitter reads its record's envelope from `EmitterRecord::envelope`: the three flags, the
 timestamp, the two durations, the reply target, the message and deduplication identities, the
 routing key, and the properties in written order, each a `RecordProperty` under the name its entity declares with a
 `PropertyValue` of exactly the declared `PropertyType`. A property is never a float, so equal
 envelopes always compare equal. A connector receives only what its entity declares, and an entity
-that declares nothing always receives the empty envelope. `KAFKA TOPIC` declares `TIMESTAMP`, which
+that declares nothing always receives the empty envelope. Kafka and Pulsar consume the destination's
+optional key bytes directly, keeping an empty key distinct from an absent key. Their optional
+source partition selects the source ordinal modulo the broker topic's partition count independently
+of the key. Topic partition discovery and concrete topic selection use the maintained drivers;
+Nervix provisions no topic or partition. `KAFKA TOPIC` declares `TIMESTAMP`, which
 it writes as each record's Kafka `CreateTime`, in the millisecond that contains it; it rejects a
 record whose millisecond is not after the Unix epoch before its producer takes it, because
 librdkafka reads a zero timestamp as the time it takes the record, and a record without a timestamp

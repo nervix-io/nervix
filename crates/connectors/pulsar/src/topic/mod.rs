@@ -39,6 +39,7 @@ use std::future::Future;
 
 use arch_into::ArchInto as _;
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use connection::PulsarClientConnection;
 pub use connection::{PulsarClientError, PulsarRefusal};
 use error_stack::Report;
@@ -54,11 +55,15 @@ use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerPublishingMode, BrokerVerdict, ConfirmationWindow,
     ConfirmationWindowError, EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost,
     EmitterLifecycle, EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult,
-    EmitterWriteError, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
+    EmitterWriteError, PerRecordOutcome, RecordEmitter, RecordKey, RejectedEmitterMember,
     optional_client_config_value,
 };
 use nervix_models::{ClientConfigEntry, ConnectorKind, PulsarTopicName, Timestamp};
 use nervix_primitives::{
+    sync::{
+        Arc, StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::unconstrained,
     time::{Instant, timeout_at},
 };
@@ -66,7 +71,8 @@ use pulsar::{
     Error as PulsarError, TokioExecutor,
     error::{ConnectionError as PulsarConnectionError, ProducerError as PulsarProducerError},
     message::proto::{CommandSendReceipt, ServerError as PulsarServerError},
-    producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
+    producer::{Message as PulsarProducerMessage, ProducerOptions, SendFuture as PulsarSendFuture},
+    routing_policy::{CustomRoutingPolicy, RoutingPolicy},
 };
 use thiserror::Error;
 
@@ -164,6 +170,7 @@ pub struct PulsarTopicEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub topic: PulsarTopicName,
     pub mode: BrokerPublishingMode,
+    pub partition_from_branch: bool,
 }
 
 pub struct PulsarTopicEmitter {
@@ -174,6 +181,64 @@ pub struct PulsarTopicEmitter {
 enum PulsarPublishing {
     NoAck(UnconfirmedPulsarPublication),
     Ack(AckConfirmation),
+    RoutedNoAck {
+        receipts: Box<UnconfirmedPulsarPublication>,
+        selected: Arc<AtomicU64>,
+    },
+    RoutedAck {
+        settings: AckConfirmation,
+        selected: Arc<AtomicU64>,
+    },
+}
+
+enum PulsarPublicationRef<'a> {
+    NoAck(&'a mut UnconfirmedPulsarPublication),
+    Ack(AckConfirmation),
+}
+
+/// The SDK reads the selected ordinal synchronously in send_non_blocking, before its first
+/// await, while the emitter exclusively borrows the producer. The selected atomic satisfies the
+/// SDK's Sync callback contract; it is not an inter-task publication or a synchronization signal.
+struct BranchPartitionRouting {
+    selected: Arc<AtomicU64>,
+}
+
+impl CustomRoutingPolicy for BranchPartitionRouting {
+    fn route(&self, _message: &PulsarProducerMessage, num_producers: usize) -> usize {
+        assert!(
+            num_producers > 0,
+            "the SDK installs at least one topic producer"
+        );
+        let count: u64 = num_producers.arch_into();
+        (self.selected.load(Ordering::Relaxed) % count).arch_into()
+    }
+}
+
+impl PulsarPublishing {
+    fn parts(&mut self) -> (PulsarPublicationRef<'_>, Option<&AtomicU64>) {
+        match self {
+            Self::NoAck(receipts) => (PulsarPublicationRef::NoAck(receipts), None),
+            Self::Ack(settings) => (PulsarPublicationRef::Ack(*settings), None),
+            Self::RoutedNoAck { receipts, selected } => {
+                (PulsarPublicationRef::NoAck(receipts), Some(selected))
+            }
+            Self::RoutedAck { settings, selected } => {
+                (PulsarPublicationRef::Ack(*settings), Some(selected))
+            }
+        }
+    }
+}
+
+impl BranchPartitionRouting {
+    fn select(selected: Option<&AtomicU64>, source_partition: Option<u64>) {
+        if let Some(selected) = selected {
+            selected.store(
+                source_partition
+                    .verified("an explicit partition envelope retains its source ordinal"),
+                Ordering::Relaxed,
+            );
+        }
+    }
 }
 
 impl From<BrokerPublishingMode> for PulsarPublishing {
@@ -206,6 +271,7 @@ impl UnconfirmedPulsarPublication {
         &mut self,
         producer: &mut pulsar::Producer<TokioExecutor>,
         records: Vec<EmitterRecord>,
+        selected: Option<&AtomicU64>,
     ) -> PerRecordOutcome<EmitterRecordId> {
         self.collect_ready();
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
@@ -213,6 +279,7 @@ impl UnconfirmedPulsarPublication {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
+            let source_partition = record.source_partition();
             let message = match PulsarTopicEmitter::message(record) {
                 Ok(message) => message,
                 Err(rejection) => {
@@ -225,6 +292,7 @@ impl UnconfirmedPulsarPublication {
                 }
             };
             self.make_room().await;
+            BranchPartitionRouting::select(selected, source_partition);
             let sent = producer.send_non_blocking(message).await;
             match sent.map_err(PulsarSendFailure::from) {
                 Ok(receipt) => {
@@ -374,11 +442,30 @@ impl PulsarTopicEmitter {
                 })
                 .attach_printable(message));
         }
+        let selected = config
+            .partition_from_branch
+            .then(|| Arc::new(AtomicU64::new(0)));
+        let policy = match &selected {
+            Some(selected) => RoutingPolicy::Custom(StdArc::new(BranchPartitionRouting {
+                selected: Arc::clone(selected),
+            })),
+            None => RoutingPolicy::RoundRobin,
+        };
         let producer =
-            Self::producer_from_config(&config.config, &config.topic, config.mode).await?;
+            Self::producer_from_config(&config.config, &config.topic, config.mode, policy).await?;
+        let publishing = match (config.mode, selected) {
+            (mode, None) => mode.into(),
+            (BrokerPublishingMode::NoAck, Some(selected)) => PulsarPublishing::RoutedNoAck {
+                receipts: Box::default(),
+                selected,
+            },
+            (BrokerPublishingMode::Ack(settings), Some(selected)) => {
+                PulsarPublishing::RoutedAck { settings, selected }
+            }
+        };
         Ok(Self {
             producer,
-            publishing: config.mode.into(),
+            publishing,
         })
     }
 
@@ -386,6 +473,7 @@ impl PulsarTopicEmitter {
         config: &[ClientConfigEntry],
         topic: &PulsarTopicName,
         mode: BrokerPublishingMode,
+        policy: RoutingPolicy,
     ) -> EmitterStartResult<pulsar::Producer<TokioExecutor>> {
         // A publish's acknowledgement timeout bounds what the driver waits for on its behalf.
         let operation_timeout = match mode {
@@ -400,6 +488,10 @@ impl PulsarTopicEmitter {
         pulsar
             .producer()
             .with_topic(topic_name)
+            .with_options(ProducerOptions {
+                routing_policy: Some(policy),
+                ..ProducerOptions::default()
+            })
             .build()
             .await
             .map_err(Self::start_error)
@@ -408,15 +500,17 @@ impl PulsarTopicEmitter {
     /// Every way an ACK publish ends goes through the shared window, which settles answers
     /// already given before returning a driver, enqueue or timeout failure.
     async fn publish_confirmed(
-        &mut self,
+        producer: &mut pulsar::Producer<TokioExecutor>,
         records: Vec<EmitterRecord>,
         settings: AckConfirmation,
+        selected: Option<&AtomicU64>,
     ) -> PerRecordOutcome<EmitterRecordId> {
         let mut window = ConfirmationWindow::new(PULSAR.keyword(), settings, records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
+            let source_partition = record.source_partition();
             let message = match Self::message(record) {
                 Ok(message) => message,
                 Err(rejection) => {
@@ -424,7 +518,8 @@ impl PulsarTopicEmitter {
                     continue;
                 }
             };
-            let sent = self.producer.send_non_blocking(message).await;
+            BranchPartitionRouting::select(selected, source_partition);
+            let sent = producer.send_non_blocking(message).await;
             let receipt = match sent.map_err(PulsarSendFailure::from) {
                 Ok(receipt) => receipt,
                 Err(PulsarSendFailure::Rejected(rejection)) => {
@@ -456,10 +551,16 @@ impl PulsarTopicEmitter {
     /// The producer message of `record`, or why `record` cannot be one.
     fn message(record: EmitterRecord) -> Result<PulsarProducerMessage, PulsarRecordError> {
         let times = PulsarMessageTimes::of(&record)?;
+        let (partition_key, partition_key_b64_encoded) = match record.key() {
+            None => (None, None),
+            Some(RecordKey::String(key)) => (Some(key.clone()), None),
+            Some(RecordKey::Bytes(key)) => (Some(STANDARD.encode(key)), Some(true)),
+        };
         Ok(PulsarProducerMessage {
             payload: record.payload,
             properties: record.headers.into_iter().collect(),
-            partition_key: record.key,
+            partition_key,
+            partition_key_b64_encoded,
             event_time: times.event_time,
             deliver_at_time: times.deliver_at_time,
             ..Default::default()
@@ -529,9 +630,10 @@ impl EmitterLifecycle for PulsarTopicEmitter {
     /// Producer acceptance completes NO ACK records, while finish waits for their receipts before
     /// dropping the producer. An ACK publish already settled all answers it could observe.
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
-        match &mut self.publishing {
-            PulsarPublishing::NoAck(receipts) => receipts.finish(deadline).await,
-            PulsarPublishing::Ack(_) => Ok(EmitterFinish::NothingHeld),
+        let (publishing, _) = self.publishing.parts();
+        match publishing {
+            PulsarPublicationRef::NoAck(receipts) => receipts.finish(deadline).await,
+            PulsarPublicationRef::Ack(_) => Ok(EmitterFinish::NothingHeld),
         }
     }
 }
@@ -539,13 +641,16 @@ impl EmitterLifecycle for PulsarTopicEmitter {
 #[async_trait]
 impl RecordEmitter for PulsarTopicEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
-        let settings = match &mut self.publishing {
-            PulsarPublishing::NoAck(receipts) => {
-                return receipts.publish(&mut self.producer, records).await;
+        let (publishing, selected) = self.publishing.parts();
+        let settings = match publishing {
+            PulsarPublicationRef::NoAck(receipts) => {
+                return receipts
+                    .publish(&mut self.producer, records, selected)
+                    .await;
             }
-            PulsarPublishing::Ack(settings) => *settings,
+            PulsarPublicationRef::Ack(settings) => settings,
         };
-        self.publish_confirmed(records, settings).await
+        Self::publish_confirmed(&mut self.producer, records, settings, selected).await
     }
 }
 
@@ -1105,6 +1210,7 @@ mod tests {
 
     async fn connector(broker: &FakeBroker, mode: BrokerPublishingMode) -> PulsarTopicEmitter {
         let config = PulsarTopicEmitterConfig {
+            partition_from_branch: false,
             config: vec![entry("addr", &broker.service_url)],
             topic: PulsarTopicName::parse("limited").expect("the test topic is a valid topic name"),
             mode,
@@ -1221,6 +1327,7 @@ mod tests {
     async fn a_timeout_past_the_clock_range_is_refused_before_the_driver_uses_it() {
         let broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
         let config = PulsarTopicEmitterConfig {
+            partition_from_branch: false,
             config: vec![entry("addr", &broker.service_url)],
             topic: PulsarTopicName::parse("limited").assured("the fixture topic is a valid name"),
             mode: BrokerPublishingMode::Ack(AckConfirmation {
@@ -1487,3 +1594,6 @@ mod tests {
         assert_eq!(properties, expected);
     }
 }
+
+#[cfg(test)]
+mod destination_properties;

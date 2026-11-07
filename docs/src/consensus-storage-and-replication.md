@@ -510,9 +510,10 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_inference_avro_logs`,
-`raft_inference_avro_meta`, `raft_inference_avro_state`, and
-`raft_inference_avro_snapshots`. Opening it validates the complete keyspace namespace before
+The current emitter Models carry explicit key expressions, source-partition routing and
+expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces: `raft_key_avro_logs`,
+`raft_key_avro_meta`, `raft_key_avro_state`, and
+`raft_key_avro_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including the separate JSON
 and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka

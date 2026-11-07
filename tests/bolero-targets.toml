@@ -373,7 +373,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 51
+domain_version = 52
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -388,7 +388,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 53
+domain_version = 54
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -628,7 +628,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 51
+domain_version = 52
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -658,7 +658,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 50
+domain_version = 51
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -673,7 +673,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 50
+domain_version = 51
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -688,7 +688,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 49
+domain_version = 50
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -763,7 +763,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 34
+domain_version = 35
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits, a type contract exactly for direct-value bodies and a client of a declared connector."
@@ -1063,7 +1063,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 50
+domain_version = 51
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1467,7 +1467,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
-domain_version = 45
+domain_version = 46
 features = []
 id = "registry-archived-models"
 invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
@@ -2382,7 +2382,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 43
+domain_version = 44
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, current state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2397,7 +2397,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 31
+domain_version = 32
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -2412,7 +2412,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_registry_stored_models_list_back_from_memory_and_tables/corpus"
-domain_version = 40
+domain_version = 41
 features = []
 id = "registry-stored-models"
 invariant = "Committed Models named across the whole name rule list back complete and in key order, and read back by their own keys, from a reopened registry serving them from its journal or from the on-disk table a flush moved them into."
@@ -2427,7 +2427,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_corrupt_registry_records_fail_typed_or_list_canonically/corpus"
-domain_version = 40
+domain_version = 41
 features = []
 id = "registry-stored-models-corruption"
 invariant = "Damaged registry records free every decoding allocation, and damaged records and keys either fail the listing with the registry's typed storage failure or list Models whose own keys are exactly the stored keys."
@@ -3327,7 +3327,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__emitter_batch_packing__tests__bolero_packed_payloads_hold_their_members_exactly_within_both_limits/corpus"
-domain_version = 6
+domain_version = 7
 features = []
 id = "emitter-batch-packing"
 invariant = "Packing generated carriers of a generated schemaful codec across relays, concrete branches, envelopes and seals ends every selected row once in order: in a payload whose bytes are the format's container of exactly its members' own encodings, within MAX SIZE and MAX MESSAGES and one relay, branch and envelope, or alone when its own container exceeds MAX SIZE, as the documented rule packs them."
@@ -3372,10 +3372,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__emitter_record_writes__tests__bolero_retained_payloads_are_written_unchanged_until_answered/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "emitter-retained-payloads"
-invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, key, text or typed headers, group, complete MQTT retained-publication envelope, message ID and reply subject envelope they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
+invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, typed key and source-partition ordinal, text or typed headers, group, complete MQTT retained-publication envelope, message ID and reply subject envelope they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-server"
@@ -3957,7 +3957,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_entity_presentations_keep_declared_rows_and_complete_configuration/corpus"
-domain_version = 30
+domain_version = 31
 features = []
 id = "connector-entity-presentation"
 invariant = "Every generated source and sink entity uses its declared phrase and ordered inspection rows, while the canonical Plexus built from that shared presentation reparses to its complete Model including all options, modes, payload mappings, flush and error policies."
@@ -4017,7 +4017,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/envelopes__bolero_envelopes_keep_every_clause_and_property_through_json_and_the_archive/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "models-emitter-envelopes"
 invariant = "A generated emitter envelope of every clause kind and of properties of any name in written order keeps every clause, duration and property through its complete JSON and archived representations."
@@ -4032,7 +4032,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/emitter/__fuzz__/emitter__envelope__tests__bolero_envelope_sections_read_back_as_the_envelopes_they_render/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "plexus-emitter-envelopes"
 invariant = "The canonical Plexus of a generated envelope section, of every clause kind and declared property, reads back through the shared envelope grammar as the complete envelope."
@@ -4238,6 +4238,36 @@ package = "nervix-models"
 random_iterations = 256
 source = "crates/models/src/connector/nats_tests.rs"
 test = "connector::nats::tests::bolero_nats_subjects_preserve_subscription_and_publication_bounds"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/pulsar/src/topic/__fuzz__/topic__destination_properties__bolero_destinations_preserve_key_bytes_presence_and_partition_modulo/corpus"
+domain_version = 1
+features = []
+id = "pulsar-record-destinations"
+invariant = "The production Pulsar message mapper preserves absent, present-empty, UTF-8 STRING and arbitrary BYTES logical keys with the exact protocol flag; the SDK callback routes every source ordinal to its wide-integer modulo partition."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-connector-pulsar"
+random_iterations = 128
+source = "crates/connectors/pulsar/src/topic/destination_properties.rs"
+test = "topic::destination_properties::bolero_destinations_preserve_key_bytes_presence_and_partition_modulo"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__destination_properties__bolero_explicit_partitions_match_the_wide_modulo_reference/corpus"
+domain_version = 1
+features = []
+id = "kafka-destination-partitions"
+invariant = "The production Kafka destination mapper produces exactly the wide-integer remainder of every source ordinal for every bounded positive native destination partition count."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-connector-kafka"
+random_iterations = 128
+source = "crates/connectors/kafka/src/topic/destination_properties.rs"
+test = "topic::destination_properties::bolero_explicit_partitions_match_the_wide_modulo_reference"
 test_target = "lib"
 
 [[target]]
