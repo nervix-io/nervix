@@ -49,6 +49,23 @@ pub enum WasmStateResetScope {
 }
 
 impl WasmStateResetScope {
+    /// Whether this scope selects an execution unit under the processor's resolved branching.
+    pub fn selects_unit(
+        &self,
+        unit: crate::Unit,
+        branching: Option<&crate::ResolvedBranching>,
+    ) -> bool {
+        let selected = match self {
+            Self::AllBranches => return true,
+            Self::Unbranched => crate::Unit::SINGLE,
+            Self::Branch(branch) => match branching.and_then(|branching| branching.partitions()) {
+                Some(partitions) => partitions.unit_of(branch.partition_seed()),
+                None => crate::Unit::SINGLE,
+            },
+        };
+        unit == selected
+    }
+
     /// A bounded diagnostic label that does not include a branch value or fingerprint.
     pub const fn kind(&self) -> &'static str {
         match self {
@@ -726,6 +743,210 @@ mod tests {
         WasmStateGeneration::try_from(value).expect("test generations are non-zero")
     }
 
+    fn partitioned_processor() -> ScheduledNode {
+        let mut node = wasm_processor(1, nonzero!(1_000u64));
+        let Model::WasmProcessor(processor) = node.config.as_mut() else {
+            unreachable!("the fixture constructs a WASM processor");
+        };
+        let branch = crate::BranchName::try_from("tenants").assured("tenants is a valid name");
+        processor.branched_by = BranchSelection::branched_by(branch.clone());
+        let schema = crate::CreateSchema {
+            name: "tenant_key"
+                .try_into()
+                .assured("tenant_key is a valid name"),
+            fields: vec![crate::SchemaField {
+                name: "tenant".try_into().assured("tenant is a valid name"),
+                ty: crate::ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let partitions = crate::BranchPartitions::Direct(nonzero!(2u16));
+        let node = node.with_resolved_branching(Some(crate::ResolvedBranching::branched(
+            branch, schema, partitions,
+        )));
+        assert!(node.units_match_declaration());
+        node
+    }
+
+    #[test]
+    fn a_branch_reset_and_recovery_touch_only_the_unit_that_owns_its_fingerprint() {
+        let mut processor = partitioned_processor();
+        assert_eq!(processor.units.len(), 2);
+        let scope = WasmStateResetScope::Branch(branch(2));
+        let request = CommandExecutionReference::parse("reset-partition")
+            .assured("the fixture reference is valid");
+        assert!(processor.begin_wasm_state_reset(
+            request.clone(),
+            scope,
+            WasmStateResetReason::Operator
+        ));
+        let selected = processor
+            .units
+            .get(&crate::Unit::partition(0))
+            .assured("partition zero is declared");
+        let sibling = processor
+            .units
+            .get(&crate::Unit::partition(1))
+            .assured("partition one is declared");
+        assert_eq!(
+            selected
+                .wasm_state_generations
+                .as_ref()
+                .assured("WASM units have generations")
+                .of_branch(Some(&branch(2))),
+            generation(2)
+        );
+        assert_eq!(
+            sibling
+                .wasm_state_generations
+                .as_ref()
+                .assured("WASM units have generations")
+                .of_branch(Some(&branch(1))),
+            generation(1)
+        );
+        assert!(sibling.wasm_state_reset.is_none());
+        assert!(processor.complete_wasm_state_reset(&request));
+        assert!(matches!(
+            processor.admit_wasm_state_recovery(
+                scope,
+                generation(2),
+                WasmSavedStateRejection::ApplicationState
+            ),
+            Some(WasmStateRecoveryAdmission::Admitted(_))
+        ));
+        let sibling = processor
+            .units
+            .get(&crate::Unit::partition(1))
+            .assured("partition one remains declared");
+        assert!(
+            sibling
+                .wasm_state_recoveries
+                .as_ref()
+                .assured("WASM units have recovery state")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn partition_inspection_fences_each_units_generation_and_keeps_one_report_budget() {
+        let mut processor = partitioned_processor();
+        processor.begin_wasm_branch_state_generation(branch(2));
+        let checkpoints = (0..200u8)
+            .map(|byte| WasmCheckpointInspection {
+                branch: Some(branch(byte)),
+                generation: generation(1),
+                committed_revision: None,
+                latest_revision: None,
+                stage: WasmCheckpointStage::Captured,
+                required_replicas: Some(0),
+                confirmed_replicas: Some(0),
+            })
+            .collect();
+        let inspection = WasmStateInspection::of_scheduled(&processor, checkpoints)
+            .assured("each WASM partition carries its generation and recovery state");
+        assert_eq!(inspection.units.len(), 2);
+        assert_eq!(
+            inspection
+                .units
+                .iter()
+                .map(|unit| unit.checkpoint_counts.total)
+                .sum::<usize>(),
+            199
+        );
+        assert_eq!(
+            inspection
+                .units
+                .iter()
+                .map(|unit| unit.checkpoints.len())
+                .sum::<usize>(),
+            128
+        );
+        assert_eq!(
+            inspection
+                .units
+                .iter()
+                .map(|unit| unit.omitted_checkpoints)
+                .sum::<usize>(),
+            71
+        );
+        assert!(
+            inspection
+                .units
+                .iter()
+                .flat_map(|unit| &unit.checkpoints)
+                .all(|checkpoint| checkpoint.branch != Some(branch(2)))
+        );
+    }
+
+    #[test]
+    fn every_partition_publishes_its_own_generation_in_one_all_branches_reset() {
+        let mut processor = partitioned_processor();
+        processor.begin_wasm_branch_state_generation(branch(2));
+        let request = CommandExecutionReference::parse("reset-every-partition")
+            .assured("the fixture reference is valid");
+        assert!(processor.begin_wasm_state_reset(
+            request.clone(),
+            WasmStateResetScope::AllBranches,
+            WasmStateResetReason::Operator
+        ));
+        let inspection = WasmStateInspection::of_scheduled(&processor, Vec::new())
+            .assured("each WASM partition carries its generation and recovery state");
+        assert_eq!(inspection.units[0].default_generation, generation(3));
+        assert_eq!(inspection.units[1].default_generation, generation(2));
+        assert!(
+            inspection
+                .units
+                .iter()
+                .all(|unit| unit.reset_readiness == Some(WasmStateResetReadiness::Resetting))
+        );
+        assert!(processor.complete_wasm_state_reset(&request));
+        assert!(processor.units.values().all(|unit| {
+            unit.wasm_state_reset
+                .as_ref()
+                .is_some_and(|reset| reset.phase() == WasmStateResetPhase::Ready)
+        }));
+    }
+
+    #[test]
+    fn every_partition_starts_a_generation_when_the_processor_starts_every_branch() {
+        let mut processor = partitioned_processor();
+
+        processor.begin_wasm_state_generation();
+
+        for unit in processor.units.values() {
+            let generations = unit
+                .wasm_state_generations
+                .as_ref()
+                .assured("a WASM execution unit carries its guest generations");
+            assert_eq!(generations.of_branch(None), generation(2));
+        }
+    }
+
+    #[test]
+    fn a_partitioned_processor_continues_the_lifetimes_of_each_matching_unit() {
+        let mut existing = partitioned_processor();
+        let first = existing
+            .units
+            .get_mut(&crate::Unit::partition(0))
+            .assured("the declaration contains partition zero");
+        first
+            .wasm_state_generations
+            .as_mut()
+            .assured("a WASM execution unit carries its guest generations")
+            .begin_branch(branch(2));
+        let mut rescheduled = partitioned_processor();
+
+        rescheduled.continue_wasm_state_generations_of(&existing);
+
+        for (unit, scheduled) in &rescheduled.units {
+            assert_eq!(
+                scheduled.wasm_state_generations, existing.units[unit].wasm_state_generations,
+                "rescheduling must preserve the generations of {unit:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_new_processor_starts_every_branch_in_the_first_generation() {
         let generations = WasmStateGenerations::first();
@@ -852,7 +1073,7 @@ mod tests {
         let resetting = WasmStateInspection::of_scheduled(&processor, Vec::new())
             .assured("the test scheduled a WASM processor with state generations");
         assert_eq!(
-            resetting.reset_readiness,
+            resetting.units[0].reset_readiness,
             Some(WasmStateResetReadiness::Resetting)
         );
         let checkpoint = |branch, generation, stage| WasmCheckpointInspection {
@@ -886,18 +1107,29 @@ mod tests {
         )
         .assured("the test scheduled a WASM processor with state generations");
         assert_eq!(
-            inspection.reset_readiness,
+            inspection.units[0].reset_readiness,
             Some(WasmStateResetReadiness::AwaitingUsableExecution)
         );
-        assert_eq!(inspection.checkpoint_counts.total, 2);
-        assert_eq!(inspection.checkpoint_counts.failed, 0);
-        assert_eq!(inspection.checkpoint_counts.replica_confirmed, 1);
-        assert_eq!(inspection.checkpoint_counts.captured, 1);
+        assert_eq!(inspection.units[0].checkpoint_counts.total, 2);
+        assert_eq!(inspection.units[0].checkpoint_counts.failed, 0);
+        assert_eq!(inspection.units[0].checkpoint_counts.replica_confirmed, 1);
+        assert_eq!(inspection.units[0].checkpoint_counts.captured, 1);
 
         assert!(processor.complete_wasm_state_reset(&request));
-        let ready = WasmStateInspection::of_scheduled(&processor, inspection.checkpoints)
-            .expect("the same processor remains inspectable");
-        assert_eq!(ready.reset_readiness, Some(WasmStateResetReadiness::Ready));
+        let ready = WasmStateInspection::of_scheduled(
+            &processor,
+            inspection
+                .units
+                .into_iter()
+                .next()
+                .assured("the fixture has one unit")
+                .checkpoints,
+        )
+        .expect("the same processor remains inspectable");
+        assert_eq!(
+            ready.units[0].reset_readiness,
+            Some(WasmStateResetReadiness::Ready)
+        );
     }
 
     #[test]
@@ -921,17 +1153,17 @@ mod tests {
         ));
         let inspection = WasmStateInspection::of_scheduled(&processor, Vec::new())
             .assured("the test scheduled a WASM processor with state generations");
-        assert_eq!(inspection.reset, None);
-        assert_eq!(inspection.reset_readiness, None);
-        assert_eq!(inspection.checkpoint_counts.total, 0);
-        assert_eq!(inspection.recoveries.len(), 1);
-        assert_eq!(inspection.recoveries[0].scope, scope);
+        assert_eq!(inspection.units[0].reset, None);
+        assert_eq!(inspection.units[0].reset_readiness, None);
+        assert_eq!(inspection.units[0].checkpoint_counts.total, 0);
+        assert_eq!(inspection.units[0].recoveries.len(), 1);
+        assert_eq!(inspection.units[0].recoveries[0].scope, scope);
         assert_eq!(
-            inspection.recoveries[0].rejection,
+            inspection.units[0].recoveries[0].rejection,
             WasmSavedStateRejection::ApplicationState
         );
         assert_eq!(
-            inspection.recoveries[0].outcome,
+            inspection.units[0].recoveries[0].outcome,
             WasmStateRecoveryOutcome::Failed
         );
     }
@@ -961,14 +1193,14 @@ mod tests {
         )
         .assured("the test scheduled a WASM processor with state generations");
 
-        assert_eq!(inspection.checkpoint_counts.total, 5);
-        assert_eq!(inspection.checkpoint_counts.empty, 1);
-        assert_eq!(inspection.checkpoint_counts.captured, 1);
-        assert_eq!(inspection.checkpoint_counts.locally_durable, 1);
-        assert_eq!(inspection.checkpoint_counts.awaiting_replicas, 1);
-        assert_eq!(inspection.checkpoint_counts.replica_confirmed, 1);
-        assert_eq!(inspection.checkpoint_counts.failed, 1);
-        assert_eq!(inspection.omitted_checkpoints, 0);
+        assert_eq!(inspection.units[0].checkpoint_counts.total, 5);
+        assert_eq!(inspection.units[0].checkpoint_counts.empty, 1);
+        assert_eq!(inspection.units[0].checkpoint_counts.captured, 1);
+        assert_eq!(inspection.units[0].checkpoint_counts.locally_durable, 1);
+        assert_eq!(inspection.units[0].checkpoint_counts.awaiting_replicas, 1);
+        assert_eq!(inspection.units[0].checkpoint_counts.replica_confirmed, 1);
+        assert_eq!(inspection.units[0].checkpoint_counts.failed, 1);
+        assert_eq!(inspection.units[0].omitted_checkpoints, 0);
     }
 
     #[test]

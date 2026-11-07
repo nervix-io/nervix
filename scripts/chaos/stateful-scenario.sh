@@ -10,6 +10,8 @@ source "${script_dir}/recovery-scenario.sh"
 # shellcheck source=node-faults.sh
 source "${script_dir}/node-faults.sh"
 
+recovery_graph_models[branch-chaos_state_branch]='SHOW CREATE BRANCH chaos_state_branch;'
+
 # The stateful entities, by the kind their DESCRIBE and RELOCATE statements spell. The ingestors run
 # apart from the state owner, so a fault on the owner leaves their Kafka consumers in place.
 stateful_owned_entities=(
@@ -65,6 +67,21 @@ stateful_fault_seconds() {
 }
 
 # Prints one JSON object naming the owner and replicas of every stateful entity, read through HOST.
+stateful_entity_placement() {
+    jq -Rn --rawfile description "$1" '
+        ($description | split("\n")) as $lines
+        | ($lines | map(capture("^partition (?<index>[0-9]+): owner=(?<owner>[^ ]+) replicas=(?<replicas>.*)$")?
+            | {unit: (.index | tonumber), owner, replicas})) as $units
+        | if ($units | length) > 0 then
+            {units: $units,
+             owner: ($units | map(.owner) | unique | if length == 1 then .[0] else "-" end),
+             replicas: ($units | map(.replicas) | unique | join(";"))}
+          else
+            {units: [], owner: ($lines | map(capture("^owner: (?<value>.*)$")? | .value) | first),
+             replicas: ($lines | map(capture("^replicas: (?<value>.*)$")? | .value) | first)}
+          end'
+}
+
 stateful_placement() {
     local host="$1"
     local output_dir="$2"
@@ -79,10 +96,8 @@ stateful_placement() {
     for entity in "${stateful_owned_entities[@]}" "${stateful_ingestors[@]}"; do
         local label="describe-${entity// /_}"
         batch_read_succeeded "${output_dir}" "${label}" || { rm -f "${placements_file}"; return 1; }
-        jq -n --arg entity "${entity}" \
-            --arg owner "$(awk -F ': ' '$1 == "owner" { print $2; exit }' "${output_dir}/${label}.txt")" \
-            --arg replicas "$(awk -F ': ' '$1 == "replicas" { print $2; exit }' "${output_dir}/${label}.txt")" \
-            '{key: $entity, value: {owner: $owner, replicas: $replicas}}' >>"${placements_file}"
+        stateful_entity_placement "${output_dir}/${label}.txt" \
+            | jq --arg entity "${entity}" '{key: $entity, value: .}' >>"${placements_file}" || return 1
     done
     jq -s 'from_entries' "${placements_file}" >"${output_dir}.json"
     rm -f "${placements_file}"
@@ -94,9 +109,12 @@ stateful_placed_on() {
     local ingest_node="$2"
     local output_dir="$3"
     stateful_placement "${node_hosts[0]}" "${output_dir}" || return 1
-    jq -e --arg owner "${owner}" --arg ingest "${ingest_node}" '
+    jq -e --arg owner "${owner}" --arg ingest "${ingest_node}" --argjson partitions "${stateful_partitions}" '
         to_entries | all(.[]; if (.key | startswith("INGESTOR ")) then .value.owner == $ingest
-                              else .value.owner == $owner end)
+                              else .value.owner == $owner
+                                and (if (.key | startswith("EMITTER ")) or $partitions == 1 then (.value.units | length) == 0
+                                     else (.value.units | map(.unit) | sort) == [range(0; $partitions)] end)
+                              end)
     ' "${output_dir}.json" >/dev/null
 }
 
@@ -107,7 +125,9 @@ stateful_moved_off() {
     local output_dir="$3"
     stateful_placement "${host}" "${output_dir}" || return 1
     jq -e --arg away "${away}" '
-        to_entries | all(.[]; (.value.owner | test("^node-[0-9]+$")) and .value.owner != $away)
+        to_entries | all(.[]; if (.value.units | length) > 0 then
+            all(.value.units[]; (.owner | test("^node-[0-9]+$")) and .owner != $away)
+          else (.value.owner | test("^node-[0-9]+$")) and .value.owner != $away end)
     ' "${output_dir}.json" >/dev/null
 }
 
@@ -220,10 +240,15 @@ stateful_checkpoints_committed() {
         || return 1
     # The answer is the JSON document after the administration container's own progress lines.
     sed -n '/^{/,$p' "${output%.json}.txt" >"${output}"
-    jq -e --argjson replicas "${CHAOS_REPLICA_COUNT:-0}" '
-        .checkpoint_counts.total == 2 and .checkpoint_counts.failed == 0
-        and (.checkpoints | length) == 2
-        and all(.checkpoints[]; .stage == "ReplicaConfirmed"
+    local active_units=1
+    if ((stateful_partitions > 1)); then active_units=2; fi
+    jq -e --argjson replicas "${CHAOS_REPLICA_COUNT:-0}" --argjson active_units "${active_units}" '
+        [.units[].checkpoints[]] as $checkpoints
+        | ([.units[].checkpoint_counts.total] | add) == 2
+        and ([.units[] | select(.checkpoint_counts.total > 0)] | length) == $active_units
+        and all(.units[]; .checkpoint_counts.failed == 0)
+        and ($checkpoints | length) == 2
+        and all($checkpoints[]; .stage == "ReplicaConfirmed"
                 and .committed_revision == .latest_revision
                 and .required_replicas == $replicas and .confirmed_replicas == $replicas)
     ' "${output}" >/dev/null 2>&1

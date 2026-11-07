@@ -24,8 +24,7 @@ Feature: Emitter payload measurements
     And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE CODEC proto_codec
-        FROM PROTOBUF
+      CREATE PROTOBUF CODEC proto_codec
         USING RESOURCE proto_bundle VERSION 1
         CONFIG {'file' = 'event.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Event'
@@ -65,7 +64,7 @@ Feature: Emitter payload measurements
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE CLIENT PRODUCER INGESTOR events_in
         FROM SCHEMA event MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s
@@ -175,7 +174,7 @@ Feature: Emitter payload measurements
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA rejected_event ( seq I64, error_code STRING, operation STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE CLIENT PRODUCER INGESTOR events_in

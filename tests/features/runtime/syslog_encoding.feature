@@ -22,12 +22,12 @@ Feature: Syslog encoding preservation
         structured_data STRING OPTIONAL,
         message STRING
       );
-      CREATE CODEC ingest_codec FROM JSON TO SCHEMA syslog_event
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA syslog_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec

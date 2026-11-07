@@ -63,6 +63,10 @@ expect_setup_rejection 'one node rejects voter rotations' 'voter-stop requires -
     "${chaos_dir}/run-baseline.sh" --scenario domain-time --image fixture --nodes 1 --fault voter-stop
 expect_setup_rejection 'other scenarios reject --fault' '--fault applies only to stateful, endpoints, lifetimes, domain-time, backup-fault and restore-fault' \
     "${chaos_dir}/run-baseline.sh" --scenario baseline --image fixture --fault none
+expect_setup_rejection 'other scenarios reject state partitions' '--state-partitions applies only to stateful' \
+    "${chaos_dir}/run-baseline.sh" --scenario baseline --image fixture --state-partitions 4
+expect_setup_rejection 'the stateful fixture bounds its partition choices' '--state-partitions must be 1 or 4' \
+    "${chaos_dir}/run-baseline.sh" --scenario stateful --image fixture --state-partitions 2
 
 # One hundred and twenty stateful records: sequences below 52 precede the milestone, 52 through 59
 # form the volatile interval and the rest were produced after recovery. Each branch then holds 26
@@ -569,4 +573,40 @@ expect_failure 'paced window with rows of both branches' 'mixed rows of the two 
     "${tmp_dir}/windows.json" "${clock}" windows --output "${tmp_dir}/windows-mixed.log" "${window_args[@]}" \
     --result "${tmp_dir}/windows.json"
 
+script_dir="${chaos_dir}"
+artifact_dir="${tmp_dir}/partition-placement"
+mkdir -p "${artifact_dir}/results"
+# shellcheck source=../stateful-scenario.sh
+source "${chaos_dir}/stateful-scenario.sh"
+[[ "${recovery_graph_models[branch-chaos_state_branch]}" == 'SHOW CREATE BRANCH chaos_state_branch;' ]] \
+    || fail 'the stateful branch is absent from the before/after graph comparison'
+printf 'owner: node-1\nreplicas: node-2\n' >"${tmp_dir}/single-description.txt"
+stateful_entity_placement "${tmp_dir}/single-description.txt" \
+    | jq -e '.owner == "node-1" and .replicas == "node-2" and .units == []' >/dev/null \
+    || fail 'the single-unit placement was not preserved'
+cat >"${tmp_dir}/partition-description.txt" <<'EOF'
+partitions: 4
+partition 0: owner=node-1 replicas=node-3
+partition 1: owner=node-2 replicas=node-3
+partition 2: owner=node-1 replicas=node-2
+partition 3: owner=node-2 replicas=node-1
+EOF
+stateful_entity_placement "${tmp_dir}/partition-description.txt" \
+    | jq -e '.owner == "-" and (.units | map(.unit)) == [0,1,2,3]
+        and .units[0].owner == "node-1" and .units[1].owner == "node-2"' >/dev/null \
+    || fail 'partition placement lost a unit or conflated its owners'
+stateful_partitions=4
+CHAOS_REPLICA_COUNT=1
+jq -n '{units: [range(0;4) | . as $unit | {checkpoint_counts: {total: (if . == 0 or . == 2 then 1 else 0 end), failed: 0},
+    checkpoints: (if . == 0 or . == 2 then [{stage: "ReplicaConfirmed", committed_revision: 7, latest_revision: 7, required_replicas: 1, confirmed_replicas: 1}] else [] end)}]}' \
+    >"${tmp_dir}/checkpoints-current.json"
+domain_cli_command() { cat "${tmp_dir}/checkpoints-current.json"; }
+stateful_checkpoints_committed nervix-1 "${tmp_dir}/checkpoint-evidence.json" \
+    || fail 'the partition milestone refused two confirmed active units'
+jq '.units[2].checkpoints[0].confirmed_replicas = 0' "${tmp_dir}/checkpoints-current.json" \
+    >"${tmp_dir}/checkpoints-incomplete.json"
+mv "${tmp_dir}/checkpoints-incomplete.json" "${tmp_dir}/checkpoints-current.json"
+if stateful_checkpoints_committed nervix-1 "${tmp_dir}/checkpoint-evidence.json"; then
+    fail 'the milestone accepted an unconfirmed sibling checkpoint'
+fi
 printf 'stateful and domain-time self-test passed\n'

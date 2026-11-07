@@ -195,22 +195,9 @@ impl RelayChannels {
         }
     }
 
-    /// End the current routing generation without publishing a successor. A forced schedule swap
-    /// does this after closing dispatch gates, so a retained or first-use channel cannot keep
-    /// waiting for the preceding destination or open another delivery toward it during the swap.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            lifecycle,
-            reason = "a committed forced move retires its preceding routes"
-        )
-    )]
-    pub(super) fn fence_routing(&self) {
-        self.routing.fence(&self.routing.units());
-    }
-
-    /// End the current routing generation of each of `units` without publishing a successor, as
-    /// [`Self::fence_routing`] does for every unit.
+    /// End the current routing generation of each of `units` without publishing a successor.
+    /// A forced schedule swap does this after closing dispatch gates, so a retained or first-use
+    /// channel cannot wait for the preceding destination or open another delivery toward it.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -238,11 +225,12 @@ impl RelayChannels {
         self.routing.replace(units);
     }
 
+    #[cfg(test)]
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             lifecycle,
-            reason = "schedule publication replaces remote consumer routes"
+            reason = "the test harness replaces every currently bound route"
         )
     )]
     pub(super) fn replace_destinations(&self) {

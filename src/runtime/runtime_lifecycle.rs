@@ -838,7 +838,7 @@ impl Runtime {
             Self::await_shutdown_task(
                 node_task.task,
                 domain,
-                Some(&IngestorName::from(&entity.identifier)),
+                Some(&IngestorName::from(&entity.node.identifier)),
                 "scheduled node",
             )
             .await;
@@ -863,7 +863,7 @@ impl Runtime {
         let mut generators = Vec::with_capacity(execution.generator_tasks.len());
         for (entity, task) in execution.generator_tasks {
             generators.push(StoppingTask {
-                owner: IngestorName::from(&entity.identifier),
+                owner: IngestorName::from(&entity.node.identifier),
                 task,
             });
         }
@@ -888,7 +888,7 @@ impl Runtime {
                 Self::await_shutdown_task(
                     task,
                     domain,
-                    Some(&IngestorName::from(&entity.identifier)),
+                    Some(&IngestorName::from(&entity.node.identifier)),
                     "scheduled node placement",
                 )
                 .await;

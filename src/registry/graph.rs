@@ -558,11 +558,21 @@ impl ActiveNode {
         if let Some(instancing) = &self.ingestor_units {
             return instancing.units();
         }
-        if matches!(self.config.as_ref(), Model::Relay(_))
-            && let Some(partitions) = self
-                .resolved_branching
-                .as_ref()
-                .and_then(|branch| branch.partitions())
+        if matches!(
+            self.config.as_ref(),
+            Model::Relay(_)
+                | Model::Junction(_)
+                | Model::Deduplicator(_)
+                | Model::Reorderer(_)
+                | Model::WindowProcessor(_)
+                | Model::Correlator(_)
+                | Model::Inferencer(_)
+                | Model::WasmProcessor(_)
+                | Model::Generator(_)
+        ) && let Some(partitions) = self
+            .resolved_branching
+            .as_ref()
+            .and_then(|branch| branch.partitions())
         {
             return partitions.units();
         }

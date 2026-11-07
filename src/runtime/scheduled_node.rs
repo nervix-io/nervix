@@ -103,7 +103,7 @@ impl PlacedNodeState {
 /// for the moved node without touching the rest of the domain.
 #[derive(Default)]
 pub(super) struct ScheduledNodePlacement {
-    pub(super) tasks: PlacementTasks,
+    pub(super) tasks: BTreeMap<Unit, PlacementTasks>,
     pub(super) kafka_offset_states: BTreeMap<Unit, KafkaOffsetStateOriginator>,
     /// The originator of the materialized state of each unit of a materialized relay this node
     /// owns, handed to that unit's state task.
@@ -123,10 +123,6 @@ pub(super) struct PlacementTasks {
 }
 
 impl PlacementTasks {
-    pub(super) fn is_empty(&self) -> bool {
-        self.replication.is_empty() && self.checkpoints.is_empty()
-    }
-
     /// Ends every task without a last write, as a reassignment that replaces the placement's
     /// runtime does.
     pub(super) async fn abort(self) {

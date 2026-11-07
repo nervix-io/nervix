@@ -310,7 +310,7 @@ async fn processor_plans_bind_only_against_an_installed_execution() {
         .first()
         .assured("the deduplicating revision plans its deduplicator");
     let plan = runtime
-        .bind_installed_processor_plan(&domain, spec)
+        .bind_installed_processor_plan(&domain, spec, &revision, Unit::SINGLE)
         .await
         .expect_err("a processor plan binds against the installed execution");
     assert_eq!(format!("{plan:#}"), unbound);
@@ -381,7 +381,10 @@ fn install_wasm_processor_task(
         .get_mut(domain)
         .assured("the test installed the domain's execution");
     execution.node_tasks.insert(
-        NodeRef::new(ModelKind::WasmProcessor, processor.clone()),
+        NodeUnitRef::new(
+            NodeRef::new(ModelKind::WasmProcessor, processor.clone()),
+            Unit::SINGLE,
+        ),
         ScheduledNodeTask { commands, task },
     );
 }
@@ -390,13 +393,13 @@ fn install_wasm_processor_task(
 async fn a_wasm_state_reset_keeps_the_report_of_the_task_that_did_not_apply_it() {
     let runtime = Runtime::default();
     let domain = domain("default");
+    let processor = named::<ModelName>("guest");
     install_test_domain_execution(
         &runtime,
         &domain,
-        Vec::new(),
+        wasm_reset_nodes(&processor),
         DomainRoutingSnapshot::default(),
     );
-    let processor = named::<ModelName>("guest");
     let request = CommandExecutionReference::parse("reset-guest")
         .assured("the request reference is an identifier-shaped literal");
     let reset = [DynamicExecutionUpdate::WasmStateReset {
@@ -468,6 +471,184 @@ async fn a_wasm_state_reset_keeps_the_report_of_the_task_that_did_not_apply_it()
              yet"
         )
     );
+}
+
+fn wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
+    let schema = named::<SchemaName>("event");
+    vec![
+        scheduled_model(nervix_models::Model::Schema(CreateSchema {
+            name: schema.clone(),
+            fields: vec![SchemaField {
+                name: named("value"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        })),
+        scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            name: named("events"),
+            schema: schema.clone(),
+            buffer: nonzero!(2usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        })),
+        scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            name: named("filtered"),
+            schema,
+            buffer: nonzero!(2usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        })),
+        ScheduledNode::new(
+            nervix_models::Model::WasmProcessor(nervix_models::CreateWasmProcessor {
+                name: named(processor.as_str()),
+                from: ProcessorInputs::single(named("events")),
+                output_routes: ProcessorOutputs::single(named("filtered")),
+                branched_by: BranchSelection::unbranched(),
+                resource: named("guest_resource"),
+                resource_version: 1,
+                file: "guest.wasm".to_string(),
+                limits: nervix_models::WasmProcessorLimits {
+                    max_fuel: nonzero!(1_000_000u64),
+                    max_memory_bytes: nonzero!(67_108_864u64),
+                },
+                global_error_policy: nervix_models::GeneralErrorPolicy::Log,
+                rejected_state_policy: Default::default(),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            }),
+            nervix_models::SchemaFingerprint::from_digest([1; 32]),
+        )
+        .with_resolved_branching(Some(ResolvedBranching::unbranched())),
+    ]
+}
+
+fn partitioned_wasm_reset_nodes(processor: &ModelName) -> Vec<ScheduledNode> {
+    let mut nodes = wasm_reset_nodes(processor);
+    let branch = named::<BranchName>("by_value");
+    let schema = CreateSchema {
+        name: named("event"),
+        fields: vec![SchemaField {
+            name: named("value"),
+            ty: ParseAsType::I64,
+            optional: false,
+            sensitive: false,
+        }],
+    };
+    let partitions = nervix_models::BranchPartitions::Direct(nonzero!(2u16));
+    for node in &mut nodes {
+        match node.config.as_mut() {
+            nervix_models::Model::Relay(relay) => {
+                relay.branching = RelayBranching::branched_by(branch.clone())
+            }
+            nervix_models::Model::WasmProcessor(processor) => {
+                processor.branched_by = BranchSelection::branched_by(branch.clone())
+            }
+            _ => continue,
+        }
+        *node = node
+            .clone()
+            .with_resolved_branching(Some(ResolvedBranching::branched(
+                branch.clone(),
+                schema.clone(),
+                partitions,
+            )));
+        for assignment in node.units.values_mut() {
+            assignment.primary_node = None;
+            assignment.assigned_nodes.clear();
+        }
+    }
+    nodes.push(scheduled_model(nervix_models::Model::Branch(
+        nervix_models::CreateBranch {
+            name: branch,
+            schema: schema.name,
+            ttl: "5m".to_string(),
+            partitions,
+            eviction: None,
+        },
+    )));
+    nodes
+}
+
+#[nervix_primitives::test]
+async fn aborting_a_partitioned_reset_cleans_up_running_units_after_a_missing_unit() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let processor = named::<ModelName>("guest");
+    install_test_domain_execution(
+        &runtime,
+        &domain,
+        partitioned_wasm_reset_nodes(&processor),
+        DomainRoutingSnapshot::default(),
+    );
+    let (commands, mut received) = mpsc::channel(1);
+    let (cleaned, observed) = oneshot::channel();
+    let task = spawn(async move {
+        let Some(ProcessorNodeCommand::AbortWasmStateReset { response, .. }) =
+            received.recv().await
+        else {
+            panic!("the running sibling receives cleanup");
+        };
+        response
+            .send(Ok(()))
+            .assured("the abort awaits its cleanup answer");
+        cleaned
+            .send(())
+            .assured("the test observes sibling cleanup");
+    });
+    runtime
+        .inner
+        .executions
+        .get_mut(&domain)
+        .assured("the domain was installed")
+        .node_tasks
+        .insert(
+            NodeUnitRef::new(
+                NodeRef::new(ModelKind::WasmProcessor, processor.clone()),
+                Unit::partition(1),
+            ),
+            ScheduledNodeTask { commands, task },
+        );
+    let coordination = CoordinationIdentity::new(named("node-1"), 1, 1);
+    let scope = WasmStateResetScope::AllBranches;
+    runtime
+        .engage_entity_gate_operation(
+            &coordination,
+            &domain,
+            &[],
+            &nervix_models::EntityGateTargets::Entities(vec![NodeRef::new(
+                ModelKind::WasmProcessor,
+                processor.clone(),
+            )]),
+            EntityGatePurpose::WasmStateReset(scope),
+            EntityGateLease {
+                deadline: Instant::now() + Duration::from_secs(5),
+                reason: "partition cleanup regression",
+            },
+        )
+        .await
+        .assured("the reset owns the processor gate");
+    let error = runtime
+        .abort_wasm_state_reset(
+            &coordination,
+            &domain,
+            &processor,
+            CommandExecutionReference::parse("reset-guest").assured("the request is an identifier"),
+            scope,
+        )
+        .await
+        .expect_err("a missing local unit is reported");
+    assert!(
+        matches!(error.current_context(), WasmStateResetRuntimeError::UnitUnavailable { unit, .. } if *unit == Unit::partition(0))
+    );
+    observed
+        .await
+        .assured("the missing unit did not prevent cleanup of the running sibling");
+    runtime
+        .release_entity_gate_operation(&coordination, &domain)
+        .await
+        .assured("the reset releases its gate");
 }
 
 #[nervix_primitives::test]
