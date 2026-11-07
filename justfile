@@ -1597,7 +1597,8 @@ package-client-jvm-tests:
     artifacts={{ quote(cargo_target_dir + "/client-conformance/java") }}
     mkdir -p "${artifacts}/tests"
     javac --release 21 -Xlint:all -Werror -cp "${artifacts}/nervix-client.jar" \
-        -d "${artifacts}/tests" crates/client-jvm/tests/java/io/nervix/client/*.java
+        -d "${artifacts}/tests" crates/client-jvm/tests/java/io/nervix/client/Properties.java \
+        tests/client_conformance/java/suite/boundary/*.java
 
 # Hold the Java 21 API to its host ownership and bulk-column contracts.
 test-client-jvm-api: build-client-jvm-tests
