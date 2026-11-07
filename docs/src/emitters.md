@@ -730,7 +730,8 @@ unit it was written in. `DESCRIBE EMITTER` reports it on its `batch:` line, as
 
 Its `batch container:` line identifies the effective format and container, including a codec's
 `ON EMITTING BATCH` transformation, a protobuf batch message, a native database write, an OTEL export
-or an Iceberg Parquet file. The shared typed presentation and canonical configuration read the same
+or an Iceberg Parquet file. A protobuf batch retains its declared message type when a transformation
+constructs its value. The shared typed presentation and canonical configuration read the same
 validated policy; CLI and native-client commands use the existing inspection interface.
 The destination section separates source records, encoded payload preparations and retained work;
 see [Emitter payload preparation](metrics-and-observability.md#emitter-payload-preparation) for

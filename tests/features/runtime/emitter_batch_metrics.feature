@@ -2,6 +2,59 @@ Feature: Emitter payload measurements
   Source records, Arrow memory and encoded payloads have distinct units. Preparing a retained
   payload counts once; a retry does not encode or count that payload again.
 
+  @emitter_batch_container_inspection
+  Scenario Outline: Protobuf batch inspection retains the declared message after transformation
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "proto_dir" containing
+      """
+      {
+        "event.proto": "syntax = \"proto3\";\npackage nervix.test;\nmessage Event { int64 seq = 1; }\nmessage EventEnvelope { uint32 count = 1; repeated Event records = 2; }\n"
+      }
+      """
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE RESOURCE proto_bundle;
+      UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64 );
+      CREATE CODEC proto_codec
+        FROM PROTOBUF
+        USING RESOURCE proto_bundle VERSION 1
+        CONFIG {'file' = 'event.proto', 'include' = '.'}
+        MESSAGE 'nervix.test.Event'
+        BATCH MESSAGE 'nervix.test.EventEnvelope'
+        TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS
+          ON EMITTING '{seq: .seq}'
+          ON EMITTING BATCH '{count: length, records: .}';
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA TOPIC EMITTER measured FROM events
+        TO kafka_main TOPIC 'inspection'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING proto_codec
+        INHERIT ALL
+        BATCH MAX MESSAGES 3 MAX SIZE 1KiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then DESCRIBE EMITTER "measured" from every node contains
+      """
+      batch: MAX MESSAGES 3 MAX SIZE 1KiB
+      batch container: PROTOBUF message nervix.test.EventEnvelope
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @emitter_batch_metrics
   Scenario Outline: Payload measurements distinguish records, containers and byte subdivisions
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

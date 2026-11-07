@@ -80,11 +80,11 @@ impl EmitterPayloadPresentation {
         } else {
             match format.batch_container() {
                 CodecBatchContainer::Undeclared => EmitterPayloadContainer::Undeclared,
-                container if container.transformation().is_some() => {
-                    EmitterPayloadContainer::TransformedValue
-                }
                 CodecBatchContainer::ProtobufMessage { message, .. } => {
                     EmitterPayloadContainer::ProtobufMessage(message.to_owned())
+                }
+                container if container.transformation().is_some() => {
+                    EmitterPayloadContainer::TransformedValue
                 }
                 CodecBatchContainer::Format { .. } => match format {
                     CodecWireFormat::JaqNative {
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(
             EmitterPayloadPresentation::codec(&CodecWireFormat::Protobuf(config.clone()), true)
                 .to_string(),
-            "PROTOBUF transformed value"
+            "PROTOBUF message event.Batch"
         );
         config.batch_message = None;
         assert_eq!(
