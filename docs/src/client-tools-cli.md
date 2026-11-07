@@ -528,7 +528,8 @@ The subcommand prints server notices beside the rows, and keeps printing both ac
 the client opens the subscription again on its next session, reports the gap as an interruption
 notice, and resumes the notices of the new session, as described in [Asynchronous
 Output](#asynchronous-output). A subscription the server ended is not opened again: the subcommand
-prints its end and keeps printing server notices until interrupted.
+prints its end and exits with status `0`. This includes a relay removed or redefined while the
+client reconnects. Opening a new generation under the same name requires a new invocation.
 
 ## Following A Domain Clock
 
@@ -599,10 +600,16 @@ for another reason, a notice line reports it and when the client tries again on 
 The server ends an attachment when the domain no longer exists on the serving node, and a new
 session that no longer has the domain ends it the same way. `<reason>` then reads
 `the domain no longer exists on the serving node`. The end line is the last clock line and the
-command exits with status `0`, as it does after Ctrl-C detaches the clock or finds it already
-detached. A failed connection, a refused attach, including a missing domain, and a refused detach
-print the typed reason on stderr and exit nonzero, as does a lost session the client cannot replace
-within its retry deadline.
+command exits with status `0`. A restoration that cannot open a session within the client's retry
+deadline prints `[events] notice: domain clock events could not resume yet: ...; the client keeps
+trying`, then the next read tries again. The observer can therefore follow the same clock after
+an outage longer than one retry deadline.
+
+Ctrl-C exits with status `0`. When the last clock event reports an attached clock, the CLI detaches
+it first. When an interruption or failed restoration is outstanding, it closes the observer
+without opening a replacement session just to detach. A failed initial connection, a refused
+attach, including a missing domain, a refused detach, or a session with no known server to reopen
+prints the typed reason on stderr and exits with status `1`.
 
 ## Cluster Node Administration
 

@@ -601,6 +601,13 @@ payload, infinity, and nullable and sensitive branch key fields.
   attachment without a gap: it keeps the newest tick of a clock that stays paced in the same
   generation, and ignores a tick of the new session that does not advance it.
 
+The Rust-backed CLI applies these lifecycle rules to its dedicated observers. Its `subscribe`
+process finishes after the terminal subscription event, including one discovered while restoring.
+Its `domain-clock` process keeps reading after a recoverable session-opening failure; one expired
+retry budget does not end the attachment. Ctrl-C closes an interrupted observer without reopening
+a session solely to detach. [CLI streaming](client-tools-cli.md#streaming-a-relay) owns their exit
+statuses and operator-facing output.
+
 ## Producers
 
 - **P-1.** A client MUST open a producer with `OpenIngestorRequest`, naming the domain, the
