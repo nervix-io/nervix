@@ -457,7 +457,6 @@ pub enum Identifier {
     String,
     Number,
     Integer,
-    Object,
     Array,
     Vec,
     Boolean,

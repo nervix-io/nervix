@@ -492,19 +492,19 @@ class InventoryTests(unittest.TestCase):
             target.id: target.domain_version for target in bolero.load_inventory().targets
         }
         for target, version in {
-            "plexus-model": 51,
-            "plexus-archive-model": 53,
-            "plexus-statement": 51,
-            "plexus-statement-text": 50,
-            "plexus-format-document": 50,
-            "plexus-format-text": 49,
-            "models-archived-models": 50,
-            "registry-archived-models": 45,
-            "consensus-state-records": 43,
-            "consensus-state-corruption": 43,
-            "consensus-raft-records": 43,
-            "registry-stored-models": 40,
-            "registry-stored-models-corruption": 40,
+            "plexus-model": 52,
+            "plexus-archive-model": 54,
+            "plexus-statement": 52,
+            "plexus-statement-text": 51,
+            "plexus-format-document": 51,
+            "plexus-format-text": 50,
+            "models-archived-models": 51,
+            "registry-archived-models": 46,
+            "consensus-state-records": 44,
+            "consensus-state-corruption": 44,
+            "consensus-raft-records": 44,
+            "registry-stored-models": 41,
+            "registry-stored-models-corruption": 41,
             "inferencer-tensor-columns": 1,
         }.items():
             with self.subTest(target=target):
