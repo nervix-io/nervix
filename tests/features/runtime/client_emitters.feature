@@ -2,7 +2,7 @@ Feature: Client emitters
   Applications receive constructed Arrow batches from domain-owned emitters and explicitly
   acknowledge their processing before an attached producer completes.
 
-  @client_emitter
+  @client_emitter @emitter_payload_observations
   Scenario Outline: A client emitter keeps two source relays and two concrete branches distinct
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -53,6 +53,23 @@ Feature: Client emitters
     And batch "two tenants" remains pending for "200ms"
     When output batch "fourth" is acknowledged
     Then batch "two tenants" completes
+    And within "30s" DESCRIBE EMITTER "app_output" on the leader node contains
+      """
+      batch container: Arrow IPC batch
+      """
+    And within "30s" DESCRIBE EMITTER "app_output" on the leader node contains
+      """
+      payloads: 4 source_messages=4
+      """
+    And the last command output owner is saved as placeholder "metrics_owner"
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_payload_encoded_bytes_total" with labels eventually reaches at least 1
+      """
+      emitter="app_output"
+      """
+    And node "{{metrics_owner}}" observability metric "nervix_emitter_prepared_bytes" with labels eventually equals 0
+      """
+      emitter="app_output"
+      """
 
     Examples:
       | cluster_size |

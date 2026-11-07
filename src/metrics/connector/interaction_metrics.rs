@@ -104,7 +104,7 @@ fn every_bounded_child_is_registered_at_zero_with_the_vocabulary_labels() {
     }
     assert_eq!(attempts, 8);
     assert_eq!(durations, 2);
-    assert_eq!(handle.describe_lines().len(), 10);
+    assert_eq!(handle.describe_lines().len(), 14);
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn registration_keeps_process_totals_and_separates_nodes_entities_and_processes(
     );
     let lines = metrics.describe_emitter_interactions(&entity);
     assert_eq!(lines[0], "destination:");
-    assert_eq!(lines.len(), 31);
+    assert_eq!(lines.len(), 43);
     let missing = DomainNodeRef::node_in(
         entity.domain,
         ModelKind::Emitter,
@@ -214,4 +214,111 @@ fn inspection_names_the_family_selector_total_and_wall_rates_without_domain_time
             assert!(line.ends_with("domain_rate_ema_1m_per_sec=- domain_rate_ema_15m_per_sec=-"));
         }
     }
+}
+
+struct PayloadProbe<'a>(&'a RuntimeMetrics);
+
+impl PayloadProbe<'_> {
+    fn gauge(&self, family: &str, state: Option<&str>) -> f64 {
+        for metric_family in self.0.series.prometheus.registry.gather() {
+            if metric_family.name() != family {
+                continue;
+            }
+            for sample in metric_family.get_metric() {
+                if let Some(state) = state
+                    && !sample
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "state" && label.value() == state)
+                {
+                    continue;
+                }
+                return sample.get_gauge().value();
+            }
+        }
+        panic!("required gauge {family} with state {state:?} was not registered");
+    }
+}
+
+#[test]
+fn retiring_one_work_owner_preserves_its_replacement_and_process_preparation_totals() {
+    let metrics = RuntimeMetrics::default();
+    let handle = registered(&metrics, "node-1", redis());
+    handle.record_payload(3, 31, 38);
+    handle.record_splits(2);
+    let mut first = handle.work();
+    first.set(EmitterWorkKind::Buffered, 3);
+    first.set(EmitterWorkKind::Prepared, 3);
+    first.set(EmitterWorkKind::Payloads, 1);
+    first.set(EmitterWorkKind::Bytes, 38);
+    let restarted = registered(&metrics, "node-1", redis());
+    let mut second = restarted.work();
+    second.set(EmitterWorkKind::Buffered, 5);
+    second.set(EmitterWorkKind::InFlight, 2);
+    second.set(EmitterWorkKind::Staged, 1);
+    let probe = PayloadProbe(&metrics);
+    assert_eq!(
+        probe.gauge("nervix_emitter_work_messages", Some("buffered")),
+        8.0
+    );
+    assert_eq!(probe.gauge("nervix_emitter_prepared_bytes", None), 38.0);
+    first.set(EmitterWorkKind::Buffered, 1);
+    assert_eq!(
+        probe.gauge("nervix_emitter_work_messages", Some("buffered")),
+        6.0
+    );
+    drop(first);
+    assert_eq!(
+        probe.gauge("nervix_emitter_work_messages", Some("buffered")),
+        5.0
+    );
+    assert_eq!(
+        probe.gauge("nervix_emitter_work_messages", Some("prepared")),
+        0.0
+    );
+    assert_eq!(
+        probe.gauge("nervix_emitter_work_messages", Some("in_flight")),
+        2.0
+    );
+    assert_eq!(probe.gauge("nervix_emitter_prepared_bytes", None), 0.0);
+    assert_eq!(probe.gauge("nervix_emitter_prepared_payloads", None), 0.0);
+    drop(second);
+    for state in ["buffered", "prepared", "in_flight", "staged"] {
+        assert_eq!(
+            probe.gauge("nervix_emitter_work_messages", Some(state)),
+            0.0
+        );
+    }
+    let lines = restarted.describe_lines().join("\n");
+    assert!(lines.contains(
+        "payloads: 1 source_messages=3 encoded_bytes=31 size_bound_bytes=31 prepared_bytes=38"
+    ));
+    assert!(lines.contains("payload_splits: 2"));
+    assert!(lines.contains("messages_per_payload: count=1 source_messages=3"));
+}
+
+#[test]
+fn staged_work_keeps_the_unsigned_connector_count_range() {
+    let metrics = RuntimeMetrics::default();
+    let handle = registered(&metrics, "node-1", redis());
+    let mut first = handle.work();
+    let mut second = handle.work();
+    first.set(EmitterWorkKind::Staged, u64::MAX - 7);
+    second.set(EmitterWorkKind::Staged, 5);
+    let assert_count = |count: u64| {
+        let expected = format!(" staged={count} prepared_payloads=");
+        assert!(
+            handle
+                .describe_lines()
+                .iter()
+                .any(|line| line.contains(&expected))
+        );
+    };
+    assert_count(u64::MAX - 2);
+    drop(first);
+    assert_count(5);
+    second.set(EmitterWorkKind::Staged, 2);
+    assert_count(2);
+    drop(second);
+    assert_count(0);
 }

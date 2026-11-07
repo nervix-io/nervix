@@ -170,6 +170,7 @@ pub enum MySqlConflictAction {
 
 /// The MySQL emitter, which binds each mapped row as the parameters of one multi-row insert.
 pub struct MySqlTableEmitter {
+    host: EmitterHost,
     connections: Box<dyn MySqlConnections>,
     table: MySqlTableName,
     conflict_action: MySqlConflictAction,
@@ -406,7 +407,7 @@ impl MySqlTableEmitter {
     pub fn new(
         config: MySqlTableEmitterConfig,
         connections: Box<dyn MySqlConnections>,
-        _host: EmitterHost,
+        host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let MySqlTableEmitterConfig {
             table,
@@ -418,6 +419,7 @@ impl MySqlTableEmitter {
             table,
             conflict_action,
             limits: RowRequestLimits::from(batch),
+            host,
         })
     }
 
@@ -565,6 +567,7 @@ impl RowEmitter for MySqlTableEmitter {
             request: (),
         });
         if requests.subdivisions > 0 {
+            self.host.record_payload_subdivisions(requests.subdivisions);
             debug!(
                 table = self.table.as_str(),
                 subdivisions = requests.subdivisions,
@@ -575,8 +578,19 @@ impl RowEmitter for MySqlTableEmitter {
             nervix_primitives::task::consume_budget().await;
             let written = match request {
                 RowRequest::Write {
-                    members: written, ..
-                } => written,
+                    members: written,
+                    size,
+                    ..
+                } => {
+                    self.host.record_prepared_payload(
+                        nervix_connector::EmitterPayloadMeasurement::sized(
+                            u64::try_from(written.len())
+                                .assured("a request's row count fits the addressable range"),
+                            size,
+                        ),
+                    );
+                    written
+                }
                 RowRequest::Oversize { member, oversize } => {
                     let member = members[member];
                     outcome.reject(oversize.rejected(
@@ -1333,6 +1347,7 @@ mod tests {
 
     fn test_emitter(conflict_action: MySqlConflictAction) -> MySqlTableEmitter {
         MySqlTableEmitter {
+            host: nervix_connector_fake::FakeEmitterHost::default().host(),
             connections: Box::new(NoConnections),
             table: MySqlTableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
                 .expect("the test table name is valid"),

@@ -553,7 +553,7 @@ impl EmitterConnectorState {
         label: &str,
         context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
-        buffer: &EmitterBatchBuffer,
+        buffer: &mut EmitterBatchBuffer,
         reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         let mut reason = reason;
@@ -605,7 +605,7 @@ impl EmitterConnectorState {
         &mut self,
         context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
-        buffer: &EmitterBatchBuffer,
+        buffer: &mut EmitterBatchBuffer,
         reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         match self {
@@ -759,7 +759,7 @@ impl OpenEmitterConnector {
         &mut self,
         context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
-        buffer: &EmitterBatchBuffer,
+        buffer: &mut EmitterBatchBuffer,
         reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         let Some(staged) = self.connector.lifecycle().staged_commit() else {
@@ -772,6 +772,11 @@ impl OpenEmitterConnector {
         let attempt = context.interactions.begin(EmitterAttemptOperation::Commit);
         let acks = self.pending_acks(buffer);
         let committed = {
+            let mut in_flight = context.interactions.work();
+            in_flight.set(
+                crate::metrics::EmitterWorkKind::InFlight,
+                self.connector.lifecycle().staged_messages(),
+            );
             let _confirmation_wait =
                 EmitterConfirmationWaitGuard::begin(&context.confirmation_waits);
             let commit = Box::pin(self.connector.lifecycle_mut().commit());

@@ -616,6 +616,7 @@ impl EmitterDeclaration for KafkaTopicEmitter {
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Kafka),
         body: EmitterBodyForm::Codec,
+        payload: super::EmitterPayloadFormat::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: KafkaTopicPublishingMode::KINDS,

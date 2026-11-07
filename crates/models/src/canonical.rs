@@ -10,10 +10,12 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+mod emitter_payload;
 mod entity_presentation;
 
 use std::{fmt::Display, num::NonZeroU64};
 
+pub use emitter_payload::{EmitterPayloadContainer, EmitterPayloadPresentation};
 pub use entity_presentation::EntityPresentation;
 pub(crate) use entity_presentation::{request_headers_to_plexus, upgrade_headers_to_plexus};
 use error_stack::Report;

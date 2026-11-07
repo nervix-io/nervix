@@ -36,6 +36,8 @@ use nervix_models::{
 use nervix_primitives::{sync::Arc, time::Instant};
 use thiserror::Error;
 
+use crate::{EmitterPayloadMeasurement, EmitterPayloadObserver};
+
 /// How many publishes may await confirmation at once, and how long each one may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AckConfirmation {
@@ -1046,6 +1048,7 @@ pub trait EmitterHostServices:
     + EmitterStagingDirectory
     + EmitterGeneralErrorHandler
     + EmitterBoundedExecution
+    + EmitterPayloadObserver
     + Send
     + Sync
     + 'static
@@ -1058,6 +1061,7 @@ impl<T> EmitterHostServices for T where
         + EmitterStagingDirectory
         + EmitterGeneralErrorHandler
         + EmitterBoundedExecution
+        + EmitterPayloadObserver
         + Send
         + Sync
         + 'static
@@ -1091,6 +1095,18 @@ impl EmitterHost {
 
     pub fn clear_transient_error(&self) {
         self.inner.services.clear_transient_error();
+    }
+
+    /// Records a native payload once its encoder or file writer has prepared it.
+    pub fn record_prepared_payload(&self, measurement: EmitterPayloadMeasurement) {
+        self.inner.services.record_prepared_payload(measurement);
+    }
+
+    /// Reports the existing size divider's candidate halvings, excluding count boundaries.
+    pub fn record_payload_subdivisions(&self, subdivisions: u64) {
+        self.inner
+            .services
+            .record_payload_subdivisions(subdivisions);
     }
 
     pub fn report_error(&self, message: String) {

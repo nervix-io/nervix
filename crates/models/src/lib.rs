@@ -76,10 +76,11 @@ pub use backup::{
     BackupDomainSummary, BackupQuiesceCounters, BackupResources, BackupScope, DescribeBackup,
 };
 pub use canonical::{
-    CanonicalPlexusError, EntityPresentation, PLEXUS_LANGUAGE_VERSION,
-    alter_avro_wire_schema_to_canonical_plexus, alter_cbor_wire_schema_to_canonical_plexus,
-    alter_json_wire_schema_to_canonical_plexus, canonical_plexus_document, expression_to_plexus,
-    ingest_quiesce_to_plexus, ingestor_input_body_to_plexus, string_literal,
+    CanonicalPlexusError, EmitterPayloadContainer, EmitterPayloadPresentation, EntityPresentation,
+    PLEXUS_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_plexus,
+    alter_cbor_wire_schema_to_canonical_plexus, alter_json_wire_schema_to_canonical_plexus,
+    canonical_plexus_document, expression_to_plexus, ingest_quiesce_to_plexus,
+    ingestor_input_body_to_plexus, string_literal,
 };
 pub use client_consumer::{
     CLIENT_CONSUMER_NODE_BYTES, ClientConsumerLimits, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
@@ -124,9 +125,9 @@ pub use connector::{
     DeclaredValueMapping, DeclaredWait, DriverUrl, EmitterBodyForm, EmitterChange,
     EmitterClientReference, EmitterDeclaration, EmitterEntity, EmitterEntityBody,
     EmitterEntityCapabilities, EmitterEntityChange, EmitterEntityKind, EmitterEntityMetadata,
-    EmitterEntityModel, EmitterModeChange, EmitterPublication, EmitterReference,
-    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, EndpointIngestMode,
-    EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType, ExternalName,
+    EmitterEntityModel, EmitterModeChange, EmitterPayloadFormat, EmitterPublication,
+    EmitterReference, EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings,
+    EndpointIngestMode, EnvelopeClauseForm, EnvelopeClauseKind, EnvelopeValueType, ExternalName,
     ExternalNameDeclaration, ExternalNameError, GcsConfigEntry, HTTP_CLIENT_SECRET_KEY_PREFIX,
     HTTP_DEFAULT_MAX_BODY_SIZE, HeaderLayout, HeaderModel, HeaderNames, HeaderPair,
     HeaderPairsError, HeaderValueType, HeaderValues, HttpConfigEntry, HttpEmitter,

@@ -95,6 +95,7 @@ const OTLP_PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
 /// The OpenTelemetry emitter, which exports each mapped row as one OTLP record.
 pub(super) struct OtlpEncoder {
+    host: EmitterHost,
     client: OtelClient,
     signal: OtlpSignal,
     /// Where the signal's Export requests go, and the response each is answered with.
@@ -594,7 +595,7 @@ impl OtlpEncoder {
             reason = "the caller supplies typed name and error conversions at the OTEL boundary"
         )
     )]
-    pub(super) fn new(config: OtlpEncoderConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+    pub(super) fn new(config: OtlpEncoderConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let OtlpEncoderConfig {
             config,
             dns,
@@ -645,6 +646,7 @@ impl OtlpEncoder {
             service: OtelExportService::from(&signal),
             signal,
             batch: batch.map(RowRequestLimits::from),
+            host,
             attribute_offset: values.len(),
             value_columns,
             attributes,
@@ -1065,6 +1067,7 @@ impl OtlpEncoder {
             }
         });
         if requests.subdivisions > 0 {
+            self.host.record_payload_subdivisions(requests.subdivisions);
             debug!(
                 subdivisions = requests.subdivisions,
                 "halved OTEL export requests that exceeded MAX SIZE"

@@ -21,6 +21,7 @@ use nervix_connector::{EmitterLifecycle, EmitterRecordPosition, HttpRequestEmitt
 
 use super::{
     emitter_encoding::{PendingRowPayload, encode_pending_broker_payloads},
+    emitter_record_writes::PreparedContent as _,
     *,
 };
 
@@ -161,7 +162,10 @@ impl EmitterConnector for PreparedRequestEmitter {
         } = publication;
         let prepared = self.body.prepare_pending(context, batches).await?;
         for request in prepared {
+            let messages = request.members.len().arch_into();
+            let bytes = request.content.prepared_bytes().arch_into();
             requests.retain(request, batches)?;
+            context.interactions.record_payload(messages, bytes, bytes);
         }
         if requests.is_empty() {
             return Ok(());
