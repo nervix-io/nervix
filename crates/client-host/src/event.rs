@@ -1,5 +1,7 @@
 //! A subscription event a host reads, and bulk access to the rows it carries.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** The event kinds and cell states a host reads, copying or borrowing the cells of a
 //!   batch column by column, and building a rows event's rows as one batch of its row fields.
 //! - **Depends on.** The Rust client's subscription events, the wire contract's row views, the
@@ -10,6 +12,8 @@
 //! keeps exactly that frame alive. Every accessor reads the frame through the wire contract's
 //! checked views; a batch is held to its schema once, when the event is created, which is why
 //! reading a cell the schema describes cannot fail.
+
+use std::time::Duration;
 
 use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -278,6 +282,17 @@ impl Event {
         }
     }
 
+    /// The server or local reason an attempt to restore an interrupted subscription failed.
+    pub fn restoration_message(&self) -> Result<&str, Failure> {
+        match &self.event {
+            SubscriptionEvent::RestorationFailed(failure) => Ok(&failure.message),
+            _ => Err(Failure::new(
+                FailureKind::Type,
+                "the event carries no restoration failure",
+            )),
+        }
+    }
+
     /// Why the attempt a restoration failure reports opened nothing.
     pub fn restoration_cause(&self) -> Result<RestorationCause, Failure> {
         match &self.event {
@@ -292,6 +307,17 @@ impl Event {
             | SubscriptionEvent::ConsumerOverflow(_) => Err(Failure::new(
                 FailureKind::Type,
                 "the event carries no restoration cause",
+            )),
+        }
+    }
+
+    /// How long the client will wait before its next restoration attempt.
+    pub fn restoration_retry_after(&self) -> Result<Duration, Failure> {
+        match &self.event {
+            SubscriptionEvent::RestorationFailed(failure) => Ok(failure.retry_after),
+            _ => Err(Failure::new(
+                FailureKind::Type,
+                "the event carries no restoration failure",
             )),
         }
     }

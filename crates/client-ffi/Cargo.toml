@@ -18,6 +18,7 @@ nervix-client-core = { workspace = true, features = ["arrow", "autocomplete"] }
 nervix-client-host = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
 nervix-primitives = { workspace = true, features = ["native"] }
+url = { workspace = true }
 
 [dev-dependencies]
 arrow-ipc = { workspace = true }

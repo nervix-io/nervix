@@ -90,9 +90,13 @@ pub(crate) struct TransactionExpectation {
 pub(crate) const LOCAL_STATEMENT_IN_TRANSACTION: &str =
     "client-local commands are not allowed while a transaction is active";
 
-/// One logical command's identity and inputs. Keep this handle to retry after a cancelled waiter
-/// or an uncertain transport result; every attempt uses the same domain, transaction fence and
-/// durable execution reference.
+/// One prepared statement's identity and inputs. Keep this handle to retry a durable command
+/// after a cancelled waiter or an uncertain transport result: every attempt uses the same domain,
+/// transaction fence and durable execution reference. CREATE SUBSCRIPTION, DELETE SUBSCRIPTION,
+/// ATTACH DOMAIN CLOCK and DETACH DOMAIN CLOCK are session-local requests. Their reference is not
+/// a durable identity. Repeating any of these requests may be refused after the first succeeded;
+/// for example, a repeated DELETE fails when the subscription is already absent. Inspect the
+/// current session state to learn their effect.
 #[derive(Debug, Clone)]
 pub struct ExecutionHandle {
     query: String,
@@ -116,8 +120,9 @@ impl ExecutionHandle {
         &self.upload_identity
     }
 
-    /// The same command under `reference`, the execution reference an earlier run of it was
-    /// given. Running it recovers that run's outcome rather than starting another command.
+    /// The same durable command under `reference`, the execution reference an earlier run of it
+    /// was given. Running a session-local request with this handle does not recover its earlier
+    /// outcome under the reference.
     pub fn with_reference(mut self, reference: CommandExecutionReference) -> Self {
         self.reference = reference;
         self
@@ -326,7 +331,7 @@ impl Client {
         let server = Url::parse(server.as_ref())
             .map_err(|error| Report::new(ClientError::InvalidServerUrl(error)))?;
         const MAX_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
-        if options.seed_servers.len() > 32 {
+        if options.seed_servers.len() > ConnectOptions::MAX_SEED_SERVERS {
             return Err(Report::new(ClientError::TooManySeedServers {
                 count: options.seed_servers.len(),
             }));
@@ -482,8 +487,9 @@ impl Client {
             .await
     }
 
-    /// Captures the exact identity and inputs before a command is awaited. A caller can retain
-    /// the returned handle across cancellation and retry that one logical command explicitly.
+    /// Captures the exact identity and inputs before a statement is awaited. A caller can retain
+    /// the returned handle across cancellation and retry a durable command explicitly. Repeating
+    /// a session-local request does not recover its earlier outcome under this reference.
     pub async fn prepare_execution(&self, query: impl Into<String>) -> ExecutionHandle {
         let query = query.into();
         let route = Self::route(&query);
@@ -536,7 +542,9 @@ impl Client {
         }
     }
 
-    /// Runs a prepared statement under the identity its handle captured.
+    /// Runs a prepared statement under the identity its handle captured. A durable command can
+    /// recover its outcome under that identity; a session-local request may be refused after an
+    /// earlier attempt succeeded.
     ///
     /// The call is the prepared execution itself rather than a future that awaits it, so a host
     /// blocking on it carries no extra frame on its thread's stack.

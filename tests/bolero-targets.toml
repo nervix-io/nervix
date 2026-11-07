@@ -567,6 +567,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-ffi/src/tests/__fuzz__/tests__connect_options__bolero_seed_urls_are_copied_or_refused_without_changing_options/corpus"
+domain_version = 1
+features = []
+id = "client-ffi-seed-urls"
+invariant = "Every bounded host seed URL is parsed or refused without changing earlier options, and an accepted URL is owned independently of the caller's buffer."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-client-ffi"
+random_iterations = 256
+source = "crates/client-ffi/src/tests/connect_options.rs"
+test = "tests::connect_options::bolero_seed_urls_are_copied_or_refused_without_changing_options"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/client-host/src/tests/__fuzz__/tests__arrow__bolero_host_columns_round_trip_through_the_arrow_c_data_interface/corpus"
 domain_version = 1
 features = []

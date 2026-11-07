@@ -17,6 +17,8 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
+use std::time::Duration;
+
 use nervix_client_core::{
     DomainClockAttachmentEndReason, DomainClockEvent, DomainClockObservedState,
     DomainClockTickObservation, DomainName, PacedDomainClock,
@@ -85,8 +87,7 @@ impl ClockEvent {
         Self { event }
     }
 
-    /// The event as the Rust client reported it, with what a host's accessors do not name, such
-    /// as the message and wait of a refused restoration.
+    /// The event as the Rust client reported it.
     pub fn domain_clock_event(&self) -> &DomainClockEvent {
         &self.event
     }
@@ -104,6 +105,22 @@ impl ClockEvent {
     /// The domain whose clock the event concerns.
     pub fn domain(&self) -> &DomainName {
         self.event.domain()
+    }
+
+    /// The server or local reason an attempt to restore an interrupted clock failed.
+    pub fn restoration_message(&self) -> Result<&str, Failure> {
+        match &self.event {
+            DomainClockEvent::RestorationFailed(failure) => Ok(&failure.message),
+            _ => Err(self.carries_no("restoration failure")),
+        }
+    }
+
+    /// How long the client will wait before its next restoration attempt.
+    pub fn restoration_retry_after(&self) -> Result<Duration, Failure> {
+        match &self.event {
+            DomainClockEvent::RestorationFailed(failure) => Ok(failure.retry_after),
+            _ => Err(self.carries_no("restoration failure")),
+        }
     }
 
     /// The `START` generation a state or tick event belongs to.

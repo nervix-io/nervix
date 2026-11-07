@@ -98,6 +98,24 @@ runtime and held to one expected report:
   the final transport as well as the transport's scalar encoding.
 - A closure: deleting the subscription completes.
 
+The C ABI in process, C and C++ also run `A <runtime> C binding connects to an HTTPS seed and
+distinguishes session-local repeats from durable recovery` against one- and three-node HTTPS
+clusters with the fixture's private CA supplied through `nx_connect_options`. Those examples
+start at an unavailable HTTPS address and reach a live HTTPS seed. The probes set connect,
+request and retry deadlines, check that an empty subscription event stream waits to its call
+deadline rather than closing, and repeat the same prepared ATTACH, CREATE SUBSCRIPTION and DELETE
+SUBSCRIPTION executions. ATTACH and CREATE are refused on repeat; DELETE confirms the already
+absent subscription. None uses its reference for durable outcome recovery. The binding's owner
+tests also check both restoration event kinds' borrowed messages and nanosecond waits, wrong-kind
+and missing-output failures, and copied options buffers.
+
+`A <runtime> C binding exposes a refused subscription restoration's message and retry wait`
+opens a subscription through a forwarded gRPC endpoint on one and three nodes, cuts that
+connection, removes its relay while it is down, and restores the connection. The C ABI in process,
+C and C++ each report the interruption, then read the refusal message and positive retry wait from
+the `NX_EVENT_RESTORATION_FAILED` event. The owner tests cover the matching clock-event accessors
+because no domain-removal request is available to make a live clock restoration fail on demand.
+
 `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its
 generations apart` runs every binding host, the C ABI in process, C, C++, Python, Java and Ruby,
 against a one- and a three-node cluster. The scenario starts a paced domain at a logical origin with

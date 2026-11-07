@@ -2680,11 +2680,13 @@ of any call: the Rust client reports it as a typed restoration failure carrying 
 message and the wait before it tries again, and reports a refused subscription reopening the same
 way. An attach the new session leaves unanswered past the request timeout ends that session instead,
 and the next session attaches the clock again; one it answers `DomainNotFound` ends the attachment
-as the server would. In the shared C binding a restoration failure carries only its domain, without
-the message or the wait. Each disposition's message is display text for a client that prints it; a
-client decides from the variant. The Rust client's `execute` turns any disposition but `Attached` or
-`Detached` into a `Failed` command outcome carrying that message, and its clock helper reports a
-stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
+as the server would. In the shared C binding both clock and subscription restoration failures
+expose their message as borrowed UTF-8 bytes and the next retry wait as unsigned nanoseconds;
+the wrong event kind returns `NX_ERROR_TYPE`. Each disposition's message is display text for a
+client that prints it; a client decides from the variant. The Rust client's `execute` turns any
+disposition but `Attached` or `Detached` into a `Failed` command outcome carrying that message,
+and its clock helper reports a stopped or uninstalled clock, or a projection outside the timestamp
+range, as a typed
 `DomainClockReadError`. When `execute` runs either statement, it fails with `NoActiveDomain` while
 no domain is selected and refuses the statement as client-local while a transaction is active,
 before it sends a request. Waiting for the next clock event returns a failure to reopen a session

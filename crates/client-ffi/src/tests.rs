@@ -25,19 +25,22 @@ use nervix_primitives::{sync::Arc, time::Instant};
 use crate::{
     CellState, Disposition, EndReason, Event, EventKind, FailureKind, FieldType, Outcome,
     RestorationCause, Schema, nx_cancel_free, nx_cancel_new, nx_cancel_trigger,
-    nx_cancel_with_deadline, nx_error_execution_reference, nx_error_free, nx_error_kind_of,
+    nx_cancel_with_deadline, nx_connect_options_basic_auth, nx_connect_options_free,
+    nx_connect_options_new, nx_error_execution_reference, nx_error_free, nx_error_kind_of,
     nx_error_message, nx_event_cell_varlen, nx_event_column_fixed, nx_event_column_states,
     nx_event_column_varlen, nx_event_end_reason, nx_event_frame, nx_event_kind_of,
-    nx_event_release, nx_event_restoration_cause, nx_event_retain, nx_event_row_count,
-    nx_event_schema, nx_event_subscription, nx_execution_free, nx_outcome_backup,
-    nx_outcome_diagnostic, nx_outcome_diagnostic_count, nx_outcome_disposition,
-    nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message, nx_outcome_restore,
-    nx_outcome_schema, nx_outcome_subscription, nx_schema_branch, nx_schema_field,
-    nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_free,
+    nx_event_release, nx_event_restoration_cause, nx_event_restoration_message,
+    nx_event_restoration_retry_after, nx_event_retain, nx_event_row_count, nx_event_schema,
+    nx_event_subscription, nx_execution_free, nx_outcome_backup, nx_outcome_diagnostic,
+    nx_outcome_diagnostic_count, nx_outcome_disposition, nx_outcome_execution_reference,
+    nx_outcome_free, nx_outcome_message, nx_outcome_restore, nx_outcome_schema,
+    nx_outcome_subscription, nx_schema_branch, nx_schema_field, nx_schema_field_count,
+    nx_schema_free, nx_session_connect, nx_session_free,
 };
 
 mod batches;
 mod clock_events;
+mod connect_options;
 mod domain_clock;
 mod endpoints;
 mod field_descriptors;
@@ -872,6 +875,70 @@ fn header_value<T: Copy>(value: T) -> i32 {
     written
 }
 
+#[test]
+fn a_subscription_restoration_failure_exposes_its_message_and_retry_wait() {
+    let failed = Shared::new(SubscriptionEvent::RestorationFailed(
+        SubscriptionRestorationFailure {
+            subscription: handle(),
+            cause: SubscriptionRestorationCause::InTransaction,
+            message: "session holds a transaction".to_string(),
+            retry_after: Duration::from_millis(250),
+        },
+    ));
+    let other = Shared::new(SubscriptionEvent::Interrupted(SubscriptionInterruption {
+        subscription: handle(),
+    }));
+    let mut message = ptr::null();
+    let mut len = 0;
+    let mut nanos = 0;
+    // SAFETY: both events are live and every non-null out-parameter is writable.
+    unsafe {
+        succeeded(nx_event_restoration_message(
+            failed.0,
+            &mut message,
+            &mut len,
+        ));
+        assert_eq!(
+            slice::from_raw_parts(message, len),
+            b"session holds a transaction"
+        );
+        succeeded(nx_event_restoration_retry_after(failed.0, &mut nanos));
+        assert_eq!(nanos, 250_000_000);
+        assert_eq!(
+            failure_kind(nx_event_restoration_message(
+                other.0,
+                &mut message,
+                &mut len
+            )),
+            FailureKind::Type,
+        );
+        assert_eq!(
+            failure_kind(nx_event_restoration_retry_after(other.0, &mut nanos)),
+            FailureKind::Type,
+        );
+        assert_eq!(
+            failure_kind(nx_event_restoration_message(
+                failed.0,
+                ptr::null_mut(),
+                &mut len
+            )),
+            FailureKind::InvalidArgument,
+        );
+        assert_eq!(
+            failure_kind(nx_event_restoration_message(
+                failed.0,
+                &mut message,
+                ptr::null_mut()
+            )),
+            FailureKind::InvalidArgument,
+        );
+        assert_eq!(
+            failure_kind(nx_event_restoration_retry_after(failed.0, ptr::null_mut())),
+            FailureKind::InvalidArgument,
+        );
+    }
+}
+
 fn outcome(disposition: CommandDisposition, subscription: bool) -> Outcome {
     Outcome::new(command_outcome(disposition, subscription))
 }
@@ -1407,6 +1474,7 @@ fn connecting_refuses_invalid_arguments_and_reports_an_unreachable_server() {
     let not_utf8 = [0xFF_u8];
     let user = "user";
     let mut session = ptr::null_mut();
+    let options = nx_connect_options_new();
     // SAFETY: every text argument addresses its length in readable bytes, and `session` is
     // writable; no call succeeds, so there is no session to free.
     unsafe {
@@ -1415,10 +1483,7 @@ fn connecting_refuses_invalid_arguments_and_reports_an_unreachable_server() {
             0,
             ptr::null(),
             0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
+            options,
             ptr::null(),
             &mut session,
         );
@@ -1428,26 +1493,13 @@ fn connecting_refuses_invalid_arguments_and_reports_an_unreachable_server() {
             not_utf8.len(),
             ptr::null(),
             0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
+            options,
             ptr::null(),
             &mut session,
         );
         assert_eq!(failure_kind(invalid_text), FailureKind::InvalidArgument);
-        let half_credentials = nx_session_connect(
-            server.as_ptr(),
-            server.len(),
-            ptr::null(),
-            0,
-            user.as_ptr(),
-            user.len(),
-            ptr::null(),
-            0,
-            ptr::null(),
-            &mut session,
-        );
+        let half_credentials =
+            nx_connect_options_basic_auth(options, user.as_ptr(), user.len(), ptr::null(), 0);
         assert_eq!(failure_kind(half_credentials), FailureKind::InvalidArgument);
         let domain = "not a domain";
         let invalid_domain = nx_session_connect(
@@ -1455,10 +1507,7 @@ fn connecting_refuses_invalid_arguments_and_reports_an_unreachable_server() {
             server.len(),
             domain.as_ptr(),
             domain.len(),
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
+            options,
             ptr::null(),
             &mut session,
         );
@@ -1468,27 +1517,29 @@ fn connecting_refuses_invalid_arguments_and_reports_an_unreachable_server() {
             server.len(),
             ptr::null(),
             0,
-            ptr::null(),
-            0,
-            ptr::null(),
-            0,
+            options,
             ptr::null(),
             ptr::null_mut(),
         );
         assert_eq!(failure_kind(missing_out), FailureKind::InvalidArgument);
+        succeeded(nx_connect_options_basic_auth(
+            options,
+            user.as_ptr(),
+            user.len(),
+            user.as_ptr(),
+            user.len(),
+        ));
         let unreachable = nx_session_connect(
             server.as_ptr(),
             server.len(),
             ptr::null(),
             0,
-            user.as_ptr(),
-            user.len(),
-            user.as_ptr(),
-            user.len(),
+            options,
             ptr::null(),
             &mut session,
         );
         assert_eq!(failure_kind(unreachable), FailureKind::Connect);
+        nx_connect_options_free(options);
         nx_session_free(ptr::null_mut());
         nx_execution_free(ptr::null_mut());
     }

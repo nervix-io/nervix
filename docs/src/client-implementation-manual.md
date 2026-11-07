@@ -827,28 +827,39 @@ payload, infinity, and nullable and sensitive branch key fields.
 A host of the C ABI, `nervix-client-ffi`, follows the contract in
 `crates/client-ffi/include/nervix_client.h` and these rules:
 
-- **B-1.** A host MUST prepare each logical command once with `nx_session_prepare`, and MUST execute
-  the same `nx_execution` again after `NX_ERROR_UNCERTAIN`, `NX_ERROR_CANCELLED`, or
-  `NX_ERROR_DEADLINE` to recover its outcome. It MUST NOT prepare a new execution for a command
-  whose outcome is uncertain.
+- **B-1.** A host MUST prepare each durable logical command once with `nx_session_prepare`, and
+  MUST execute the same `nx_execution` again after `NX_ERROR_UNCERTAIN`, `NX_ERROR_CANCELLED`, or
+  `NX_ERROR_DEADLINE` to recover its outcome. It MUST NOT prepare a new execution for a durable
+  command whose outcome is uncertain. CREATE SUBSCRIPTION, DELETE SUBSCRIPTION and ATTACH or
+  DETACH DOMAIN CLOCK are session-local requests without durable outcome identity. Repeating a
+  CREATE, DELETE or ATTACH MAY be refused after the first took effect; a repeated DELETE fails when
+  the subscription is already absent. The host MUST inspect its current session state or events
+  rather than interpret the repeat as outcome recovery.
 - **B-2.** A host MUST release every object it receives exactly once, with that object's release
   function, and MUST NOT use a borrowed pointer after the object it was read from is released.
 - **B-3.** A host MUST hold a reference to an event, taken with `nx_event_retain`, for as long as it
   uses any frame or value borrowed from that event, and MUST release every reference exactly once.
   It MAY release a reference on any thread.
 - **B-4.** A host MUST read every string as a pointer and a length. Strings are never terminated and
-  may contain NUL.
+  may contain NUL. It MUST build an `nx_connect_options` handle for each connection policy, and
+  MAY release it after `nx_session_connect` returns because the binding copies its values. The
+  host MUST keep the handle unmodified while that call runs. The client validates its URL and
+  deadline bounds, and a session begun over HTTPS MUST NOT fall back to an HTTP seed or redirect.
 - **B-5.** A host MUST NOT call the binding from a thread that is driving a Tokio runtime.
 - **B-6.** A host SHOULD read a batch one column at a time with the column accessors. For a string
   or bytes column it first passes a null data buffer to learn the size it needs.
 - **B-7.** A host MUST treat `NX_EVENT_INTERRUPTED` as a gap in every subscription it names,
   `NX_EVENT_RESTORATION_FAILED` as a refused attempt to open that subscription again, which the
-  session repeats and whose cause `nx_event_restoration_cause` reads,
-  `NX_EVENT_CONSUMER_OVERFLOW` as the end of that subscription's delivery on this session, and
-  `NX_EVENT_ENDED` as the last event of that subscription's generation, which the session never
-  opens again. `nx_event_end_reason` reads why it ended: `NX_END_RELAY_REMOVED` when the relay or
-  its domain no longer exists, and `NX_END_RELAY_CHANGED` when the relay was redefined, whether the
-  server ended the generation or refused to open it again on a new session.
+  session repeats after the wait read with `nx_event_restoration_retry_after`; it reads the cause
+  with `nx_event_restoration_cause` and the failure message with `nx_event_restoration_message`.
+  It MUST treat `NX_EVENT_CONSUMER_OVERFLOW` as the end of that subscription's delivery on this
+  session, and `NX_EVENT_ENDED` as the last event of that subscription's generation, which the
+  session never opens again. `nx_event_end_reason` reads why it ended: `NX_END_RELAY_REMOVED` when
+  the relay or its domain no longer exists, and `NX_END_RELAY_CHANGED` when the relay was
+  redefined, whether the server ended the generation or refused to open it again on a new session.
+  A lost bounded event queue returns `NX_ERROR_OVERFLOW` from `nx_session_next_event`, distinct
+  from the consumer event. With no acknowledged subscription, `nx_session_next_event` waits for
+  another session's events; `NX_ERROR_CLOSED` means no known server can open that session.
 - **B-8.** A host that runs `BACKUP` through `nx_session_execute` receives the archive in the file
   the statement names, and reads its size and digest with `nx_outcome_backup`. After an error that
   names the backup's execution reference, the host MAY execute the same `nx_execution` again, which
@@ -859,8 +870,11 @@ A host of the C ABI, `nervix-client-ffi`, follows the contract in
   not reported, and the clock the restored attachment found arrives as the next state event, or,
   when the new session already held the attachment, with that session's later events. It MUST treat
   `NX_CLOCK_EVENT_RESTORATION_FAILED` as a refused attempt to attach that domain's clock again,
-  which the session repeats; that event carries its kind, its domain, and the cause
-  `nx_clock_event_restoration_cause` reads. [Rust Client
+  which the session repeats after `nx_clock_event_restoration_retry_after`; that event carries its
+  kind, its domain, the cause `nx_clock_event_restoration_cause` reads and the message
+  `nx_clock_event_restoration_message` reads. The restoration accessors return `NX_ERROR_TYPE` for
+  any other event kind and `NX_ERROR_INVALID_ARGUMENT` for a missing output.
+  [Rust Client
   Library](./client-library.md#through-the-shared-c-binding) lists the accessors of each event kind.
 - **B-10.** A host that runs `RESTORE` through `nx_session_execute` streams the archive the
   statement names, and reads what the restore's report says with `nx_outcome_restore`. After an

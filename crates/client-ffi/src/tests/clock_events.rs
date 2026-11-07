@@ -48,10 +48,11 @@ use crate::{
     RestorationCause, Session, nx_cancel_free, nx_cancel_new, nx_cancel_trigger,
     nx_cancel_with_deadline, nx_clock_event_domain, nx_clock_event_end_reason,
     nx_clock_event_generation, nx_clock_event_kind_of, nx_clock_event_paced,
-    nx_clock_event_release, nx_clock_event_restoration_cause, nx_clock_event_retain,
-    nx_clock_event_state, nx_clock_event_tick, nx_execution_free, nx_outcome_disposition,
-    nx_outcome_free, nx_session_connect, nx_session_execute, nx_session_free,
-    nx_session_next_clock_event, nx_session_prepare,
+    nx_clock_event_release, nx_clock_event_restoration_cause, nx_clock_event_restoration_message,
+    nx_clock_event_restoration_retry_after, nx_clock_event_retain, nx_clock_event_state,
+    nx_clock_event_tick, nx_connect_options_free, nx_connect_options_new, nx_execution_free,
+    nx_outcome_disposition, nx_outcome_free, nx_session_connect, nx_session_execute,
+    nx_session_free, nx_session_next_clock_event, nx_session_prepare,
 };
 
 /// Every wait in these tests ends when its condition holds, so the bound only has to be generous.
@@ -411,6 +412,23 @@ fn a_restoration_failure_names_its_domain_and_cause_and_carries_no_clock() {
     ));
     assert_eq!(failed.kind(), ClockEventKind::RestorationFailed);
     assert_eq!(failed.domain(), "sim");
+    let mut message = ptr::null();
+    let mut len = 0;
+    let mut nanos = 0;
+    // SAFETY: the event is live and every out-parameter is writable.
+    unsafe {
+        succeeded(nx_clock_event_restoration_message(
+            failed.0,
+            &mut message,
+            &mut len,
+        ));
+        assert_eq!(
+            slice::from_raw_parts(message, len),
+            b"the session holds a transaction"
+        );
+        succeeded(nx_clock_event_restoration_retry_after(failed.0, &mut nanos));
+    }
+    assert_eq!(nanos, 2_000_000_000);
     assert_eq!(failed.restoration_cause(), RestorationCause::InTransaction);
     for (cause, expected) in [
         (
@@ -441,6 +459,60 @@ fn a_restoration_failure_names_its_domain_and_cause_and_carries_no_clock() {
         Field::Tick,
         Field::EndReason,
     ]);
+}
+
+#[test]
+fn a_clock_restoration_accessor_refuses_other_kinds_and_missing_outputs() {
+    let state = SharedClock::new(observed(1, DomainClockObservedState::Unpaced));
+    let failed = SharedClock::new(DomainClockEvent::RestorationFailed(
+        DomainClockRestorationFailure {
+            domain: domain("sim"),
+            cause: DomainClockRestorationCause::InTransaction,
+            message: "refused".to_string(),
+            retry_after: Duration::from_secs(1),
+        },
+    ));
+    let mut message = ptr::null();
+    let mut len = 0;
+    let mut nanos = 0;
+    // SAFETY: both events are live and every non-null output is writable.
+    unsafe {
+        assert_eq!(
+            failure_kind(nx_clock_event_restoration_message(
+                state.0,
+                &mut message,
+                &mut len
+            )),
+            FailureKind::Type,
+        );
+        assert_eq!(
+            failure_kind(nx_clock_event_restoration_retry_after(state.0, &mut nanos)),
+            FailureKind::Type,
+        );
+        assert_eq!(
+            failure_kind(nx_clock_event_restoration_message(
+                failed.0,
+                ptr::null_mut(),
+                &mut len
+            )),
+            FailureKind::InvalidArgument,
+        );
+        assert_eq!(
+            failure_kind(nx_clock_event_restoration_message(
+                failed.0,
+                &mut message,
+                ptr::null_mut()
+            )),
+            FailureKind::InvalidArgument,
+        );
+        assert_eq!(
+            failure_kind(nx_clock_event_restoration_retry_after(
+                failed.0,
+                ptr::null_mut()
+            )),
+            FailureKind::InvalidArgument,
+        );
+    }
 }
 
 #[test]
@@ -743,6 +815,7 @@ impl SharedSession {
         let server = format!("http://{address}");
         let domain = "sim";
         let mut session = ptr::null_mut();
+        let options = nx_connect_options_new();
         // SAFETY: every text argument addresses its length in readable bytes, and `session` is
         // writable.
         succeeded(unsafe {
@@ -751,14 +824,13 @@ impl SharedSession {
                 server.len(),
                 domain.as_ptr(),
                 domain.len(),
-                ptr::null(),
-                0,
-                ptr::null(),
-                0,
+                options,
                 ptr::null(),
                 &mut session,
             )
         });
+        // SAFETY: the connect call took a snapshot of the options handle and has returned.
+        unsafe { nx_connect_options_free(options) };
         Self(session)
     }
 
