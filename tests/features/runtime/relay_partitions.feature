@@ -249,9 +249,22 @@ Feature: Relay partitions
       """
       capacity: 3
       """
-    When these Plexus commands fail with "has multiple execution units; RELOCATE requires a member with one owner"
+    When these Plexus commands are executed through the client on the leader node
       """
       RELOCATE RELAY notifications ONTO NODE node-1 IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status lists 4 partitions of relay "notifications"
+    When these Plexus commands are executed on node "<reader>"
+      """
+      DESCRIBE RELAY notifications;
+      """
+    Then the last command output contains
+      """
+      partition 0: owner=node-1 replicas=-
+      partition 1: owner=node-1 replicas=-
+      partition 2: owner=node-1 replicas=-
+      partition 3: owner=node-1 replicas=-
       """
 
     Examples:

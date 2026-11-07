@@ -1019,11 +1019,12 @@ fn processor_instance_materialization_requires_an_input_relay() {
         branch: None,
         branch_ttl: None,
         branch_max_instances: None,
-        wasm_state_reset: None,
         binding: Default::default(),
     };
     let error = materialize_processor_instance_template(
         &node,
+        Unit::SINGLE,
+        &ProcessorUnitRevision::Stateless,
         &HashMap::default(),
         &HashMap::default(),
         None,

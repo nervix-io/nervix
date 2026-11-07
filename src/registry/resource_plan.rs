@@ -86,6 +86,18 @@ pub(crate) struct PlannedUnitAssignment {
     assigned: BTreeSet<ClusterNodeName>,
 }
 
+impl PlannedUnitAssignment {
+    fn executes_on(&self, local: Option<&ClusterNodeName>) -> bool {
+        match local {
+            Some(local) => match &self.primary {
+                Some(primary) => primary == local,
+                None => self.assigned.contains(local),
+            },
+            None => self.primary.is_none() && self.assigned.is_empty(),
+        }
+    }
+}
+
 /// The unit-keyed assignments of the scheduled entry that produced a resource plan.
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedNodeAssignment {
@@ -112,13 +124,22 @@ impl PlannedNodeAssignment {
     }
 
     pub(crate) fn executes_on(&self, local: Option<&ClusterNodeName>) -> bool {
-        self.units.values().any(|unit| match local {
-            Some(local) => match &unit.primary {
-                Some(primary) => primary == local,
-                None => unit.assigned.contains(local),
-            },
-            None => unit.primary.is_none() && unit.assigned.is_empty(),
-        })
+        self.units_executing_on(local).next().is_some()
+    }
+
+    pub(crate) fn units_executing_on<'a>(
+        &'a self,
+        local: Option<&'a ClusterNodeName>,
+    ) -> impl Iterator<Item = Unit> + 'a {
+        self.units
+            .iter()
+            .filter_map(move |(identity, unit)| unit.executes_on(local).then_some(*identity))
+    }
+
+    pub(crate) fn unit_executes_on(&self, unit: Unit, local: Option<&ClusterNodeName>) -> bool {
+        self.units
+            .get(&unit)
+            .is_some_and(|unit| unit.executes_on(local))
     }
 
     pub(crate) fn is_assigned_to(&self, local: &ClusterNodeName) -> bool {
@@ -346,7 +367,11 @@ impl ResourceExecutionPlans {
                             node: node.identifier.clone(),
                         }));
                     }
-                    if node.wasm_state_generations().is_none() {
+                    if node
+                        .units
+                        .values()
+                        .any(|unit| unit.wasm_state_generations.is_none())
+                    {
                         return Err(Report::new(ResourcePlanError::MissingWasmGenerations {
                             processor: node.identifier.clone(),
                         }));

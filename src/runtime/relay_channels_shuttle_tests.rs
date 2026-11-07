@@ -38,7 +38,7 @@ fn shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publicat
             })
         });
         let fencing = channels.clone();
-        let fence = thread::spawn(move || fencing.fence_routing());
+        let fence = thread::spawn(move || fencing.fence_routing_of(&[Unit::SINGLE]));
         let racing = producer.join().assured(JOINS);
         fence.join().assured(JOINS);
         assert!(retained.cancellation().is_cancelled());

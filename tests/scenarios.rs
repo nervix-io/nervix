@@ -8929,14 +8929,16 @@ async fn completed_guest_wasm_state_reset(world: &ScenarioWorld, processor: &str
     let Some(node) = domain_schedule.nodes.get(&entity) else {
         return false;
     };
-    let Some(reset) = node.wasm_state_reset() else {
-        return false;
-    };
-    reset
-        .request()
-        .as_str()
-        .starts_with(GUEST_WASM_STATE_RESET_PREFIX)
-        && reset.phase() == nervix_models::WasmStateResetPhase::Ready
+    node.units
+        .values()
+        .filter_map(|unit| unit.wasm_state_reset.as_ref())
+        .any(|reset| {
+            reset
+                .request()
+                .as_str()
+                .starts_with(GUEST_WASM_STATE_RESET_PREFIX)
+                && reset.phase() == nervix_models::WasmStateResetPhase::Ready
+        })
 }
 
 #[then(expr = "within {string} WASM processor {string} completes a guest-requested state reset")]
@@ -9168,6 +9170,22 @@ async fn when_unbranched_wasm_processor_state_is_reset(
         .unwrap_or_else(|error| panic!("WASM processor state reset failed: {error:#}"));
 }
 
+#[given(expr = "a state-counting WASM reset graph with {int} branch partitions is running")]
+async fn given_partitioned_state_counting_wasm_reset_graph(
+    world: &mut ScenarioWorld,
+    partitions: u16,
+) {
+    assert!(partitions > 0, "the branch partition count is positive");
+    configure_wasm_state_reset_graph(
+        world,
+        WasmStateResetGraph {
+            partitions,
+            ..WasmStateResetGraph::branched()
+        },
+    )
+    .await;
+}
+
 #[given("a branched state-counting WASM reset graph is running")]
 async fn given_branched_state_counting_wasm_reset_graph_is_running(world: &mut ScenarioWorld) {
     configure_wasm_state_reset_graph(world, WasmStateResetGraph::branched()).await;
@@ -9279,6 +9297,7 @@ enum WasmStateResetGraphPlacement {
 #[derive(Clone, Copy)]
 struct WasmStateResetGraph {
     branched: bool,
+    partitions: u16,
     timeout_buffering: bool,
     placement: WasmStateResetGraphPlacement,
     create_domain: bool,
@@ -9292,6 +9311,7 @@ impl WasmStateResetGraph {
     fn branched() -> Self {
         Self {
             branched: true,
+            partitions: 1,
             timeout_buffering: false,
             placement: WasmStateResetGraphPlacement::Unconstrained,
             create_domain: true,
@@ -9303,6 +9323,7 @@ impl WasmStateResetGraph {
 async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: WasmStateResetGraph) {
     let WasmStateResetGraph {
         branched,
+        partitions,
         timeout_buffering,
         placement,
         create_domain,
@@ -9383,10 +9404,12 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         "even"
     };
     let branch_schema = if branched {
-        "CREATE SCHEMA tenant_branch ( tenant STRING );\nCREATE BRANCH by_tenant SCHEMA \
-         tenant_branch TTL 5m;"
+        format!(
+            "CREATE SCHEMA tenant_branch ( tenant STRING );\nCREATE BRANCH by_tenant SCHEMA \
+             tenant_branch TTL 5m PARTITIONS {partitions};"
+        )
     } else {
-        ""
+        String::new()
     };
     let relay_branching = if branched {
         " BRANCHED BY by_tenant"
@@ -26624,8 +26647,22 @@ async fn then_all_wasm_branches_have_confirmed_checkpoint(
             .lines()
             .filter(|line| line.trim_start().starts_with("checkpoint branch="))
             .collect::<Vec<_>>();
-        if output.contains(&format!("state structures: {branch_count}"))
-            && output.contains("failed checkpoints: 0")
+        let structures = output
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("state structures: "))
+            .map(|count| count.parse::<usize>().expect("state counts are unsigned"))
+            .sum::<usize>();
+        let failed = output
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("failed checkpoints: "))
+            .map(|count| {
+                count
+                    .parse::<usize>()
+                    .expect("checkpoint counts are unsigned")
+            })
+            .sum::<usize>();
+        if structures == branch_count
+            && failed == 0
             && checkpoints.len() == branch_count
             && checkpoints.iter().all(|line| line.contains(&expected))
         {
@@ -26654,12 +26691,19 @@ fn then_last_client_outcome_reports_wasm_reset(
         .wasm_state
         .as_ref()
         .assured("the preceding command described a WASM processor");
-    let reset = state
-        .reset
-        .as_ref()
-        .assured("the preceding transaction published a WASM state reset");
-    assert_eq!(reset.reset.phase().as_ref(), phase);
-    assert_eq!(u64::from(reset.generation), generation);
+    let resets = state
+        .units
+        .iter()
+        .filter_map(|unit| unit.reset.as_ref())
+        .collect::<Vec<_>>();
+    assert!(
+        !resets.is_empty(),
+        "the preceding transaction published a WASM state reset"
+    );
+    for reset in resets {
+        assert_eq!(reset.reset.phase().as_ref(), phase);
+        assert_eq!(u64::from(reset.generation), generation);
+    }
 }
 
 /// Assert that one of two emitters reports the given text.

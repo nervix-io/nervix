@@ -1,3 +1,10 @@
+//! Execution of one processor in a concrete branch and execution unit.
+//!
+//! Layer: data plane.
+//! - **Owns.** Applying a prepared processor program to branch-local input and output.
+//! - **Depends on.** Bound processor plans, Arrow and retained branch services.
+//! - **Must not know.** Plexus parsing, semantic Models or cluster scheduling policy.
+
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
@@ -68,7 +75,7 @@ impl RelayProcessorNode {
     }
 
     pub(super) fn refresh(&mut self, routing: &DomainRoutingSnapshot) {
-        let node = NodeRef::new(self.kind, self.processor.clone());
+        let node = NodeUnitRef::new(NodeRef::new(self.kind, self.processor.clone()), self.unit);
         let Some(plan) = routing.processor_plans.get(&node) else {
             warn!(
                 kind = self.kind.as_str(),

@@ -63,48 +63,6 @@ fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> R
     )
 }
 
-#[rstest::rstest]
-#[case(false)]
-#[case(true)]
-fn forced_routing_fence_ends_changed_channels_until_publication(#[case] move_owner: bool) {
-    let owner = named::<ClusterNodeName>("node-1");
-    let consumers = vec![RemoteRuntimeConsumer {
-        node_id: named("node-3"),
-        relay: named("events"),
-        mode: AckMode::Attached,
-    }];
-    let services = RelayBoundaryServices::new(
-        RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
-        0,
-        0,
-        consumers.clone(),
-        None,
-        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
-        Arc::new(crate::runtime_ack::AckRootTracker::default()),
-    );
-    services.replace_owner_routes(RelayOwnerRoutes::single(owner.clone()));
-    let retained = services.ingress_slot(&None, Unit::SINGLE);
-    services.fence_routing_change(&RelayOwnerRoutes::single(owner.clone()), &consumers);
-    assert!(!retained.cancellation().is_cancelled());
-
-    let destination = if move_owner { named("node-2") } else { owner };
-    let destinations = if move_owner { consumers } else { Vec::new() };
-    services.fence_routing_change(
-        &RelayOwnerRoutes::single(destination.clone()),
-        &destinations,
-    );
-    assert!(retained.cancellation().is_cancelled());
-    assert!(single_ingress_cancelled(&services, &None));
-    let appearing = string_branch_key("tenant", "beta");
-    assert!(single_ingress_cancelled(&services, &appearing));
-
-    services.replace_owner_routes(RelayOwnerRoutes::single(destination));
-    services.replace_remote_runtime_consumers(destinations);
-    assert!(!single_ingress_cancelled(&services, &None));
-    assert!(!single_ingress_cancelled(&services, &appearing));
-    assert!(retained.cancellation().is_cancelled());
-}
-
 #[nervix_primitives::test(start_paused = true)]
 async fn runtime_report_chain_detached_relay_delivery_log() {
     use crate::runtime::report_observer::ReportLogObserver;
@@ -125,7 +83,8 @@ async fn runtime_report_chain_detached_relay_delivery_log() {
         vec![RemoteRuntimeConsumer {
             node_id: named("node-2"),
             relay: named("orders"),
-            mode: AckMode::Detached,
+            mode: Some(AckMode::Detached),
+            unit_modes: BTreeMap::new(),
         }],
         Some(dispatcher),
         RelayBranchPresences::single(Arc::new(BranchPresence::new())),
@@ -157,6 +116,7 @@ async fn relay_task_stops_classify_join_failures_by_task_kind() {
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
     let state = RelayStateTask {
         shutdown: state_shutdown,
+        unit: Unit::SINGLE,
         task: nervix_primitives::task::spawn(async { panic!("state task fixture failed") }),
     };
     let state_error = state
@@ -195,6 +155,7 @@ async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
     let state = RelayStateTask {
         shutdown: state_shutdown,
+        unit: Unit::SINGLE,
         task: nervix_primitives::task::spawn(std::future::pending()),
     };
     let state_error = state
@@ -227,158 +188,6 @@ async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
     ));
 }
 
-#[test]
-fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
-    let slot = RelayOutboundSlot::new();
-    let start = Instant::now();
-    let first = slot.next_delivery_at(start);
-    let active_at = start
-        .checked_add(
-            RELAY_CHANNEL_IDLE_ROTATION
-                .checked_sub(Duration::from_nanos(1))
-                .expect("the relay idle duration is longer than one nanosecond"),
-        )
-        .expect("the fixed relay idle duration should fit the monotonic clock");
-    let second = slot.next_delivery_at(active_at);
-    let reopened = slot.next_delivery_at(
-        active_at
-            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
-            .expect("the fixed relay idle duration should fit the monotonic clock"),
-    );
-
-    assert_eq!(first.channel_incarnation, second.channel_incarnation);
-    assert_eq!(first.sequence, 0);
-    assert_eq!(second.sequence, 1);
-    assert_ne!(first.channel_incarnation, reopened.channel_incarnation);
-    assert_eq!(reopened.sequence, 0);
-}
-
-/// A receiver may forget a channel opened after this one and refuse every unseen channel at or
-/// below it, so a channel that opened and carried nothing for the idle rotation opens a fresh
-/// incarnation for its first batch.
-#[test]
-fn a_channel_left_unused_since_it_opened_reopens_before_its_first_delivery() {
-    let slot = RelayOutboundSlot::new();
-    let after_opening = Instant::now();
-    let opened_later = uuid::Uuid::now_v7().into_bytes();
-
-    let first = slot.next_delivery_at(
-        after_opening
-            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
-            .expect("the fixed relay idle duration should fit the monotonic clock"),
-    );
-
-    assert!(
-        first.channel_incarnation > opened_later,
-        "the first delivery used the incarnation the slot opened {RELAY_CHANNEL_IDLE_ROTATION:?} \
-         before it"
-    );
-    assert_eq!(first.sequence, 0);
-}
-
-#[test]
-fn a_channel_left_unused_since_it_reopened_reopens_before_its_next_delivery() {
-    let slot = RelayOutboundSlot::new();
-    let unresolved = slot.next_delivery();
-    slot.reopen_delivery_channel();
-    let after_reopening = Instant::now();
-    let reopened_later = uuid::Uuid::now_v7().into_bytes();
-
-    let next = slot.next_delivery_at(
-        after_reopening
-            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
-            .expect("the fixed relay idle duration should fit the monotonic clock"),
-    );
-
-    assert!(unresolved.channel_incarnation < reopened_later);
-    assert!(
-        next.channel_incarnation > reopened_later,
-        "the next delivery used the incarnation reopened {RELAY_CHANNEL_IDLE_ROTATION:?} before it"
-    );
-    assert_eq!(next.sequence, 0);
-}
-
-#[test]
-fn a_channel_used_within_the_idle_rotation_of_its_opening_keeps_its_incarnation() {
-    let slot = RelayOutboundSlot::new();
-    let opened_later = uuid::Uuid::now_v7().into_bytes();
-    let after_opening = Instant::now();
-
-    let first = slot.next_delivery_at(after_opening);
-
-    assert!(first.channel_incarnation < opened_later);
-    assert_eq!(first.sequence, 0);
-}
-
-/// A receiver refuses a channel at or below the greatest one it forgot, so every channel this
-/// process opens, at a slot's creation and at each reopening, sorts after every channel it opened
-/// before.
-#[test]
-fn every_channel_this_process_opens_sorts_after_the_channels_it_opened_before() {
-    let slots = [RelayOutboundSlot::new(), RelayOutboundSlot::new()];
-    let mut previous = slots[0].next_delivery().channel_incarnation;
-    let mut latest = slots[1].next_delivery().channel_incarnation;
-    assert!(latest > previous);
-    for round in 0..1_000 {
-        previous = latest;
-        let slot = &slots[round % 2];
-        slot.reopen_delivery_channel();
-        latest = slot.next_delivery().channel_incarnation;
-        assert!(
-            latest > previous,
-            "reopening {round} opened {latest:?} after {previous:?}"
-        );
-    }
-}
-
-#[test]
-fn indeterminate_delivery_reopens_with_a_fresh_channel_incarnation() {
-    let slot = RelayOutboundSlot::new();
-    let unresolved = slot.next_delivery();
-
-    slot.reopen_delivery_channel();
-
-    let retry = slot.next_delivery();
-    assert_ne!(unresolved.channel_incarnation, retry.channel_incarnation);
-    assert_eq!(retry.sequence, 0);
-}
-
-#[test]
-fn branch_eviction_cancels_and_reopens_relay_channel_generations() {
-    let services = test_relay_boundary_services();
-    let node = ClusterNodeName::parse("node-2").expect("valid node name");
-    let relay = RelayName::parse("notifications").expect("valid relay name");
-    let branch = string_branch_key("tenant", "acme");
-    let ingress = services.ingress_slot(&branch, Unit::SINGLE);
-    let outbound = services.outbound_slot(
-        &node,
-        &relay,
-        RelayPayloadKind::Routed,
-        &branch,
-        Unit::SINGLE,
-    );
-    let first_delivery = outbound.next_delivery();
-
-    services.remove_branch_slots(&branch);
-
-    assert!(ingress.cancellation().is_cancelled());
-    assert!(outbound.cancellation().is_cancelled());
-    let reopened = services.outbound_slot(
-        &node,
-        &relay,
-        RelayPayloadKind::Routed,
-        &branch,
-        Unit::SINGLE,
-    );
-    let reopened_delivery = reopened.next_delivery();
-    assert!(!reopened.cancellation().is_cancelled());
-    assert_ne!(
-        first_delivery.channel_incarnation,
-        reopened_delivery.channel_incarnation
-    );
-    assert_eq!(reopened_delivery.sequence, 0);
-}
-
 #[nervix_primitives::test]
 async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let runtime = Runtime::default();
@@ -405,6 +214,84 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
 
     assert_eq!(status.buffered_relay_batches, 1);
     assert!(!status.is_drained());
+}
+
+#[nervix_primitives::test]
+async fn partition_drains_count_their_own_transit_and_queues_while_the_domain_keeps_the_aggregate()
+{
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("orders");
+    let partitioning =
+        RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16)));
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(2usize)),
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::fresh(partitioning),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    runtime.inner.relay_boundary_fanouts.insert(
+        DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
+        services.fanout.clone(),
+    );
+    let first = Unit::partition(0);
+    let second = Unit::partition(1);
+    let (mut receiver, _buffer) =
+        services.activate_owner_buffer(second, relay_metrics(&runtime, &domain, &relay));
+    let status = |unit| {
+        runtime.entity_drain_status(
+            &domain,
+            std::slice::from_ref(&relay),
+            &nervix_models::EntityGateTargets::Units(vec![NodeUnitRef::new(
+                NodeRef::new(ModelKind::Relay, &relay),
+                unit,
+            )]),
+            EntityGatePurpose::OwnershipHandoff,
+        )
+    };
+    services
+        .enqueue_owner_batch(&quiesce_test_batch(), second)
+        .await
+        .assured("the owner buffer admits one batch");
+    assert!(status(first).is_drained());
+    assert_eq!(status(second).buffered_relay_batches, 1);
+    assert_eq!(services.fanout.outstanding_work_len(), 1);
+    assert!(matches!(receiver.try_recv(), RelayTryRecv::Batch(_)));
+    let completion = services.begin_owner_batch_completion(second);
+    assert_eq!(
+        status(second).buffered_relay_batches,
+        1,
+        "dequeue never hides a batch still being handed on"
+    );
+    drop(completion);
+    assert!(status(second).is_drained());
+    assert_eq!(services.fanout.outstanding_work_len(), 0);
+
+    let _common = services.add_local_runtime_consumer(AckMode::Detached);
+    let mut scoped = services.add_local_unit_runtime_consumer(AckMode::Detached, second);
+    services
+        .dispatch_local_runtime_consumers(
+            RuntimeConsumerDispatch::Owner,
+            second,
+            &quiesce_test_batch(),
+        )
+        .await
+        .assured("the second partition reaches its own and common consumers");
+    assert!(status(first).is_drained());
+    assert_eq!(status(second).buffered_relay_batches, 1);
+    assert!(matches!(scoped.try_recv(), RelayTryRecv::Batch(_)));
+    assert!(
+        status(second).is_drained(),
+        "a common consumer keeps its own lifecycle"
+    );
+    assert_eq!(
+        services.fanout.outstanding_work_len(),
+        1,
+        "the whole-domain drain still sees the common consumer's batch"
+    );
 }
 
 #[test]
@@ -1623,7 +1510,7 @@ async fn a_routed_attached_batch_fails_its_acknowledgement_without_an_attached_c
     let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks);
 
     services
-        .inject_remote_message(&batch)
+        .inject_remote_message(Unit::SINGLE, &batch)
         .await
         .expect_err("no attached consumer of the relay runs on this node");
 
@@ -1644,7 +1531,7 @@ async fn a_routed_attached_batch_completes_when_its_attached_consumer_does() {
     let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks.clone());
 
     services
-        .inject_remote_message(&batch)
+        .inject_remote_message(Unit::SINGLE, &batch)
         .await
         .expect("the attached consumer on this node takes the routed batch");
     acks.ack_success();
@@ -1676,9 +1563,76 @@ async fn a_routed_detached_batch_needs_no_attached_consumer() {
     let services = test_relay_boundary_services();
 
     services
-        .inject_remote_message(&quiesce_test_batch())
+        .inject_remote_message(Unit::SINGLE, &quiesce_test_batch())
         .await
         .expect("a detached routed batch carries no acknowledgement to complete");
+}
+
+#[rstest::rstest]
+#[case::whole(RelayPartitioning::Whole, false)]
+#[case::partition(
+    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    false
+)]
+#[case::partition_common(
+    RelayPartitioning::of_partitions(nervix_models::BranchPartitions::Direct(nonzero!(2u16))),
+    true
+)]
+#[nervix_primitives::test]
+async fn a_detached_consumer_joining_during_attached_backpressure_receives_the_batch(
+    #[case] partitioning: RelayPartitioning,
+    #[case] common: bool,
+) {
+    let fanout = match partitioning {
+        RelayPartitioning::Whole => RelayBoundaryFanout::direct_with_capacity(nonzero!(1usize)),
+        RelayPartitioning::Partitioned(_) => {
+            RelayBoundaryFanout::branch_collapse_with_capacity(nonzero!(1usize))
+        }
+    };
+    let services = RelayBoundaryServices::new(
+        fanout,
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::fresh(partitioning),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    let key = string_branch_key("tenant", "acme");
+    let unit = partitioning
+        .unit_of(&key)
+        .expect("the key names a relay unit");
+    let batch = RelayRecordBatch::single(
+        test_schema(&[("value", ParseAsType::I64)]),
+        key,
+        test_runtime_row([("value".into(), RuntimeValue::I64(1))]),
+        AckSet::empty(),
+    )
+    .expect("the fixture batch preserves its concrete branch");
+    let mut attached = services.add_local_unit_runtime_consumer(AckMode::Attached, unit);
+    services
+        .dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, unit, &batch)
+        .await
+        .expect("the first batch fills the attached queue");
+    let pending =
+        services.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, unit, &batch);
+    tokio::pin!(pending);
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    let mut detached = if common {
+        services.add_local_runtime_consumer(AckMode::Detached)
+    } else {
+        services.add_local_unit_runtime_consumer(AckMode::Detached, unit)
+    };
+    assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+    pending
+        .await
+        .expect("the attached queue returned its capacity");
+    assert!(matches!(attached.try_recv(), RelayTryRecv::Batch(_)));
+    assert!(
+        matches!(detached.try_recv(), RelayTryRecv::Batch(_)),
+        "detached publication begins after attached admission completes"
+    );
+    assert!(matches!(detached.try_recv(), RelayTryRecv::Empty));
 }
 
 #[nervix_primitives::test]
@@ -2601,7 +2555,8 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
     let consumers = ["one", "two", "three"].map(|relay| RemoteRuntimeConsumer {
         node_id: ClusterNodeName::parse(&format!("node-{relay}")).expect("valid name"),
         relay: named::<RelayName>(relay),
-        mode: AckMode::Attached,
+        mode: Some(AckMode::Attached),
+        unit_modes: BTreeMap::new(),
     });
     let payloads = consumers
         .iter()
@@ -2992,3 +2947,6 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
         );
     }
 }
+
+#[path = "relay_boundary_channel_tests.rs"]
+mod channel_tests;

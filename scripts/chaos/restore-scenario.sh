@@ -69,9 +69,11 @@ restore_guest_checkpoints_committed() {
     # The answer is the JSON document after the administration container's own progress lines.
     sed -n '/^{/,$p' "${output%.json}.txt" >"${output}"
     jq -e --argjson branches "${#restore_branches[@]}" --argjson replicas "${CHAOS_REPLICA_COUNT:-0}" '
-        .checkpoint_counts.total == $branches and .checkpoint_counts.failed == 0
-        and (.checkpoints | length) == $branches
-        and all(.checkpoints[]; .stage == "ReplicaConfirmed"
+        [.units[].checkpoints[]] as $checkpoints
+        | ([.units[].checkpoint_counts.total] | add) == $branches
+        and all(.units[]; .checkpoint_counts.failed == 0)
+        and ($checkpoints | length) == $branches
+        and all($checkpoints[]; .stage == "ReplicaConfirmed"
                 and .committed_revision == .latest_revision
                 and .required_replicas == $replicas and .confirmed_replicas == $replicas)
     ' "${output}" >/dev/null 2>&1

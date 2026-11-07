@@ -36,6 +36,26 @@ impl WireValues<'_> {
     }
 
     pub(super) fn wasm_state(&mut self) -> WasmStateInspection {
+        let units = if self.arbitrary.entropy().flag() {
+            [0, 1]
+                .into_iter()
+                .map(|partition| self.wasm_unit_state(nervix_models::Unit::partition(partition)))
+                .collect()
+        } else {
+            vec![self.wasm_unit_state(nervix_models::Unit::SINGLE)]
+        };
+        WasmStateInspection {
+            resource: self.arbitrary.name(),
+            resource_version: self.arbitrary.positive_u64().get(),
+            file: self.arbitrary.string(),
+            units,
+        }
+    }
+
+    fn wasm_unit_state(
+        &mut self,
+        unit: nervix_models::Unit,
+    ) -> nervix_models::WasmUnitStateInspection {
         let mut checkpoints = Vec::new();
         for stage in [
             WasmCheckpointStage::Empty,
@@ -128,10 +148,8 @@ impl WireValues<'_> {
             None
         };
         let omitted_checkpoints = self.arbitrary.entropy().count(usize::MAX - 5);
-        WasmStateInspection {
-            resource: self.arbitrary.name(),
-            resource_version: self.arbitrary.positive_u64().get(),
-            file: self.arbitrary.string(),
+        nervix_models::WasmUnitStateInspection {
+            unit,
             default_generation: self.wasm_generation(),
             reset,
             reset_readiness,

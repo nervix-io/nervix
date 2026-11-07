@@ -3248,11 +3248,37 @@ impl RuntimeMetrics {
         physical_node_id: Option<&ClusterNodeName>,
         branch: Option<BranchKeyFingerprint>,
     ) -> NodeInputMetricsHandle {
+        self.resolve_unit_node_input_metrics(NodeBatchMetricsSpec {
+            unit: Unit::SINGLE,
+            domain,
+            kind,
+            node,
+            relay,
+            physical_node_id,
+            branch,
+            direction: "received",
+        })
+    }
+
+    pub(crate) fn resolve_unit_node_input_metrics(
+        &self,
+        spec: NodeBatchMetricsSpec<'_>,
+    ) -> NodeInputMetricsHandle {
+        let NodeBatchMetricsSpec {
+            unit,
+            domain,
+            kind,
+            node,
+            relay,
+            physical_node_id,
+            branch,
+            ..
+        } = spec;
         let scope = match branch {
             Some(branch) => RecordingScope::GlobalAndBranch(branch),
             None => RecordingScope::Global,
         };
-        let messages_key = MetricKey::node(
+        let mut messages_key = MetricKey::node(
             domain,
             kind,
             node,
@@ -3261,6 +3287,7 @@ impl RuntimeMetrics {
             "received",
             MESSAGES_TOTAL,
         );
+        messages_key.unit = unit;
         let delivery_latency_layout =
             HistogramConfig::for_buckets(internal_buckets_for_metric(DELIVERY_LATENCY_SECONDS))
                 .delivery_latency_layout();

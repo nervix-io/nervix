@@ -5,12 +5,11 @@ use nonzero_ext::nonzero;
 use crate::{
     AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, ClusterSchedule,
     CommandExecutionReference, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
-    CreateWasmProcessor, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy,
-    GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity,
-    KafkaPartitionSchedule, Model, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
-    OwnershipTransition, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-    RelayBranching, ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint,
-    SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor, Unit, WasmProcessorLimits,
+    DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy, GeneralErrorPolicy,
+    HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity, KafkaPartitionSchedule,
+    Model, OwnershipStateComponent, ParseAsType, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayBranching, ResolvedBranching, ScheduledNode, SchemaField,
+    SchemaFingerprint, SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor, Unit,
     WasmStateResetReason, WasmStateResetScope,
 };
 
@@ -73,76 +72,27 @@ fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
         .with_max_len(128)
         .for_each(|bytes: &[u8]| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
-            let owner = named::<ClusterNodeName>("node-a");
-            let config = if arbitrary.entropy().flag() {
-                Model::WasmProcessor(CreateWasmProcessor {
-                    name: named("guest"),
-                    from: ProcessorInputs::single(named("input")),
-                    output_routes: ProcessorOutputs::single(named("output")),
-                    branched_by: BranchSelection::unbranched(),
-                    resource: named("guest_bundle"),
-                    resource_version: u64::from(arbitrary.entropy().byte()).max(1),
-                    file: "processors/guest.wasm".to_string(),
-                    limits: WasmProcessorLimits {
-                        max_fuel: nonzero!(1_000_000u64),
-                        max_memory_bytes: nonzero!(67_108_864u64),
-                    },
-                    global_error_policy: GeneralErrorPolicy::Log,
-                    rejected_state_policy: Default::default(),
-                    mode: AckMode::Attached,
-                    filter_where: None,
-                    materialized_state: Vec::new(),
-                })
-            } else {
-                Model::Schema(CreateSchema {
-                    name: named("orders"),
-                    fields: Vec::new(),
-                })
-            };
-            let mut node = ScheduledNode::new(
-                config,
-                SchemaFingerprint::from_digest([arbitrary.entropy().byte(); 32]),
-            )
-            .placed_on(Some(owner.clone()), vec![owner.clone()]);
-            if matches!(node.config.as_ref(), Model::WasmProcessor(_)) {
-                if arbitrary.entropy().flag() {
-                    node.begin_wasm_state_generation();
-                }
-                if arbitrary.entropy().flag() {
-                    node.single_unit_mut().ownership_transition = Some(OwnershipTransition {
-                        id: "unit-handoff".to_string(),
-                        source: named("node-b"),
-                        destination: owner.clone(),
-                        state_recovery: OwnershipStateRecoveryOutcome::Complete,
-                        resets: Vec::new(),
-                    });
-                }
-            }
-            let base = node.single_unit().clone();
-            let ordinal = u32::from(arbitrary.entropy().byte());
-            for unit in [
-                Unit::partition(ordinal),
-                Unit::try_instance(
-                    arbitrary
-                        .entropy()
-                        .boundary_biased(0..=Unit::MAX_INSTANCE_INDEX),
-                )
-                .assured("the fixture index fits the execution-unit range"),
-            ] {
-                if arbitrary.entropy().flag() {
-                    let mut placement = base.clone();
-                    placement.primary_node = Some(named("node-b"));
-                    placement.assigned_nodes = vec![named("node-b")];
-                    if let Some(transition) = placement.ownership_transition.as_mut() {
-                        transition.source = owner.clone();
-                        transition.destination = named("node-b");
-                    }
-                    if arbitrary.entropy().flag()
-                        && let Some(generations) = placement.wasm_state_generations.as_mut()
-                    {
-                        generations.begin_every_branch();
-                    }
-                    node.units.insert(unit, placement);
+            // The generator links the vocabulary library; this unit test is a separate crate
+            // instance. Read the generated current value into this instance before varying it.
+            let generated = arbitrary.scheduled_node();
+            let generated = rkyv::to_bytes::<rkyv::rancor::Error>(&generated)
+                .assured("the generated current node archives");
+            let mut node = rkyv::from_bytes::<ScheduledNode, rkyv::rancor::Error>(&generated)
+                .assured("the generated current node reads in the tested crate instance");
+            assert!(
+                node.units_match_declaration(),
+                "the generator must construct the node's declared current units"
+            );
+            for placement in node.units.values_mut() {
+                let owner = named::<ClusterNodeName>(if arbitrary.entropy().flag() {
+                    "node-a"
+                } else {
+                    "node-b"
+                });
+                placement.primary_node = Some(owner.clone());
+                placement.assigned_nodes = vec![owner.clone()];
+                if let Some(transition) = placement.ownership_transition.as_mut() {
+                    transition.destination = owner;
                 }
             }
             let schedule = DomainSchedule::new(domain("prod"), [node], Vec::new());
