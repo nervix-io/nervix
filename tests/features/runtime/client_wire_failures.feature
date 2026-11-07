@@ -1277,8 +1277,8 @@ Feature: Client wire failure regressions
         tenant string,
         sequence integer
       );
-      CREATE CODEC wire_record_codec
-        FROM WIRE JSON SCHEMA wire_record_json
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
         TO SCHEMA wire_record;
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;

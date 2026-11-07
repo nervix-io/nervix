@@ -25,7 +25,7 @@ The contract applies to every JAQ-backed codec: the JAQ-native formats `JSON`, `
 `SYSLOG` codec keep their one-payload-one-message contract; an array payload remains a decode failure
 for them.
 
-Nothing in Plexus changes. `CREATE CODEC` keeps its grammar, `SHOW CREATE CODEC` renders the same
+Nothing in Plexus changes. JAQ and Protobuf codec declarations keep their grammar, `SHOW CREATE CODEC` renders the same
 definition, and persisted Models keep their shape. A codec whose program yields exactly one object
 per payload behaves as it did before, apart from the diagnostic wording described under "Failure
 semantics". The only definitions whose outcome changes are the ones that previously failed.
