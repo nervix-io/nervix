@@ -14,7 +14,7 @@ use std::future::pending;
 
 use meticulous::OptionExt as _;
 use nervix_model_harness::shuttle::check_interleavings;
-use nervix_models::{DomainName, DomainNodeRef, EndpointType, IngestorName, ModelKind};
+use nervix_models::{DomainName, DomainNodeRef, IngestorName, ModelKind};
 use nervix_primitives::{
     sync::{Arc, oneshot},
     task::spawn,
@@ -123,8 +123,7 @@ fn ending_a_retained_intake_resolves_its_held_response_and_preserves_replacement
             vec![(
                 key.clone(),
                 RoutedEndpoint {
-                    endpoint_type: EndpointType::Http,
-                    signaling_protocol: None,
+                    kind: nervix_models::EndpointKind::Http,
                 },
             )],
         );

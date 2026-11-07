@@ -38,10 +38,9 @@ Feature: Protobuf codec
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -104,7 +103,7 @@ Feature: Protobuf codec
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE RELAY echoed_readings SCHEMA reading UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT readings_endpoint ON edge PATH '/readings' TYPE HTTP;
+      CREATE HTTP ENDPOINT readings_endpoint ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR http_readings
         FROM readings_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_reading_codec

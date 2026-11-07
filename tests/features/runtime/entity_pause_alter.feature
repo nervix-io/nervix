@@ -19,7 +19,7 @@ Feature: Entity-pause model alterations
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY outgoing SCHEMA routed_event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}-entity-swap.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -123,7 +123,7 @@ Feature: Entity-pause model alterations
       CREATE RELAY incoming SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge http-{{test_id}}-entity-timeout.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -234,8 +234,8 @@ Feature: Entity-pause model alterations
       CREATE RELAY disjoint_output SCHEMA scoped_output UNBRANCHED;
       CREATE VHOST affected_edge http-{{test_id}}-affected-scope.example.com;
       CREATE VHOST disjoint_edge http-{{test_id}}-disjoint-scope.example.com;
-      CREATE ENDPOINT affected_ingress ON affected_edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT disjoint_ingress ON disjoint_edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT affected_ingress ON affected_edge PATH '/events';
+      CREATE HTTP ENDPOINT disjoint_ingress ON disjoint_edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR affected_ingestor
         FROM affected_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
@@ -321,8 +321,8 @@ Feature: Entity-pause model alterations
       CREATE RELAY parked_input SCHEMA parked_event BRANCHED BY by_parked_tenant;
       CREATE RELAY parked_output SCHEMA parked_event BRANCHED BY by_parked_tenant;
       CREATE VHOST edge http-{{test_id}}-parked-gate.example.com;
-      CREATE ENDPOINT parked_state_ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE ENDPOINT parked_input_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT parked_state_ingress ON edge PATH '/state';
+      CREATE HTTP ENDPOINT parked_input_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR parked_state_ingestor
         FROM parked_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec

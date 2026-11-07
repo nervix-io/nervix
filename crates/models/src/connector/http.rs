@@ -433,7 +433,7 @@ impl HttpRequestIngestMode {
     }
 }
 
-/// One endpoint of `TYPE HTTP` this cluster serves, whose requests are the payloads. Every node of
+/// One `HTTP ENDPOINT` this cluster serves, whose requests are the payloads. Every node of
 /// the cluster serves it.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,

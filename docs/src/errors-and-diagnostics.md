@@ -1556,9 +1556,9 @@ references. A branch mismatch in an error route, for example, identifies the sou
 relay, and both branch declarations. A flush-based route without `FLUSH EACH` or `FLUSH IMMEDIATE`
 fails validation; the registry does not supply a cadence. The current registry reports this as an
 invalid-model failure naming the node and output in its diagnostic. An ingestor whose body names a
-client of another connector, or an endpoint of another `TYPE`, than its head's entity reads is
+client of another connector, or an endpoint of another kind, than its head's entity reads is
 refused with a typed failure naming the domain, the ingestor, its connector and entity, the client
-or endpoint, and both connectors or both endpoint types, such as `KAFKA TOPIC ingestor 'orders_in'
+or endpoint, and both connectors or both endpoint kind phrases, such as `KAFKA TOPIC ingestor 'orders_in'
 in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `PROMETHEUS CLIENT`'s `CONFIG` is held to the keys the vocabulary declares for it when the client
 is created. The refusal names the connector, the client and the domain, with the vocabulary's
 `PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address

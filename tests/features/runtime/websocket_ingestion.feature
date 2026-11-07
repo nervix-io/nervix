@@ -21,10 +21,9 @@ Feature: Websocket endpoint ingestion
         CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE VHOST edge ws-{{test_id}}.example.com;
-        CREATE ENDPOINT ws_notifications_endpoint
+        CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS;
+        PATH '/ws';
         CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -88,10 +87,9 @@ Feature: Websocket endpoint ingestion
       CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
       CREATE VHOST edge ws-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
-      CREATE ENDPOINT ws_notifications_endpoint
+      CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
         ON edge
-        PATH '/ws'
-        TYPE WEBSOCKETS;
+        PATH '/ws';
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

@@ -35,16 +35,14 @@ pub(super) struct HttpRouteKey {
 pub(super) struct EndpointRoute {
     pub(super) path: String,
     pub(super) hostnames: Vec<String>,
-    pub(super) endpoint_type: EndpointType,
-    pub(super) signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
+    pub(super) kind: nervix_models::EndpointKind<Arc<CompiledSignalingProtocol>>,
 }
 
 /// One instantiated endpoint route as inbound HTTP and WebSocket routing sees it, without the
 /// configuration a request never consults.
 #[derive(Debug, Clone)]
 pub(super) struct RoutedEndpoint {
-    pub(super) endpoint_type: EndpointType,
-    pub(super) signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
+    pub(super) kind: nervix_models::EndpointKind<Arc<CompiledSignalingProtocol>>,
 }
 
 /// The intake one ingestor admits an endpoint's requests through, bound to every route the

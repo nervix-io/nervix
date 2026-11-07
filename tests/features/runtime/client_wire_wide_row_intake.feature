@@ -18,7 +18,7 @@ Feature: Establishing a wide subscription row after a refused input handoff
       CREATE CODEC wide_record_codec FROM WIRE JSON SCHEMA wide_record_json TO SCHEMA wide_record;
       CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
-      CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
+      CREATE HTTP ENDPOINT wide_ingress ON edge PATH '/records';
       CREATE HTTP ENDPOINT INGESTOR wide_ingestor
         FROM wide_ingress MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wide_record_codec

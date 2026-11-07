@@ -61,7 +61,7 @@ Feature: Receiver-opened domain clock delivery
     And application health probes from node "node-3" to node "node-2" are restored
     And domain clock progress for domain "{{domain}}" on node "node-2" resumes
     When node "node-3" is stopped
-    Then node "node-1" eventually reports interconnect to "node-3" as "unavailable"
+    Then node "node-1" eventually reports status containing "raft member 'node-3' is marked unavailable"
     Given a clock session is opened on node "node-1"
     When the clock session attaches to the clock of domain "{{domain}}"
     Then the clock session is attached at generation 1 to a paced clock with period "100ms", skew "10ms", logical origin "2000-01-01T00:00:00Z" and time rate "4"

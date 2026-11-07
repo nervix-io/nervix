@@ -17,6 +17,11 @@ It prepares the console assets, WASM guests and ONNX runtime required by the in-
 these cases start no CLI, paced simulation or Python driver. Arguments pass to the ordinary
 scenario runner, whose startup, execution, parallelism and teardown budgets stay unchanged.
 
+After a peer stops, these scenarios observe its unavailability through the cluster-status
+warning from the same availability view the clock authority reads. The warning stays observable
+after discovery retires the peer's interconnect row. Observation keeps the existing status budget,
+and the surviving session must still receive increasing ticks within ten seconds.
+
 The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
 system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
 address explicitly and presents the node's fixture certificate. The redirect scenario launches a
@@ -249,6 +254,12 @@ expressions containing spaces, and brace input globs, are single arguments when 
 caller; the recipe does not expand their contents as shell code. The reuse recipe also sets
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
+
+`just test-endpoint-heads` selects `kinded_endpoint_heads.feature` for its in-process endpoint
+inspection and reference-kind refusal cases. It prepares the console, ONNX and guest assets,
+Plexus formatter, CLI and diagnostic report tool those cases use. The paced-driver steps own their
+Rust driver and Python package prerequisites in the full `tests-deps` path. Arguments after the
+focused recipe, including a quoted scenario name, reach the same scenario runner intact.
 
 `just test-restore-codec-replies` prepares the server assets, CLI and diagnostic reporter and runs
 only the restore reply rejection feature with the ordinary scenario runner. It forwards caller

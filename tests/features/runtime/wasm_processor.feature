@@ -42,7 +42,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY enriched_events SCHEMA enriched_event BRANCHED BY by_tenant;
       CREATE VHOST edge wasm-reference-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -125,7 +125,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY wasm_input_events SCHEMA wasm_input_event UNBRANCHED;
       CREATE RELAY wasm_output_events SCHEMA wasm_output_event UNBRANCHED;
       CREATE VHOST edge wasm-uninitialized-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR wasm_input_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wasm_input_codec
@@ -197,7 +197,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY required_input SCHEMA required_event UNBRANCHED;
       CREATE RELAY required_output SCHEMA required_event UNBRANCHED;
       CREATE VHOST edge wasm-required-uninitialized-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR required_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING required_event_codec
@@ -269,10 +269,9 @@ Feature: WASM processor runtime behavior
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/metrics'
-        TYPE HTTP;
+        PATH '/metrics';
 
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
@@ -377,7 +376,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_buffered_metrics SCHEMA buffered_metric UNBRANCHED;
       CREATE RELAY filtered_buffered_metrics SCHEMA buffered_metric UNBRANCHED;
       CREATE VHOST edge wasm-buffer-growth-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR buffered_metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING buffered_metric_codec
@@ -448,7 +447,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-limits-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
@@ -529,7 +528,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-restore-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
@@ -626,7 +625,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-init-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
@@ -707,7 +706,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY secret_input_events SCHEMA secret_input_event BRANCHED BY by_secret_tenant;
       CREATE RELAY secret_events SCHEMA secret_output_event BRANCHED BY by_secret_tenant;
       CREATE VHOST edge wasm-secret-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR secret_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING secret_input_codec
@@ -773,7 +772,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-callback-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
@@ -881,10 +880,9 @@ Feature: WASM processor runtime behavior
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/metrics'
-        TYPE HTTP;
+        PATH '/metrics';
 
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
@@ -982,10 +980,9 @@ Feature: WASM processor runtime behavior
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/metrics'
-        TYPE HTTP;
+        PATH '/metrics';
 
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
@@ -1112,10 +1109,9 @@ Feature: WASM processor runtime behavior
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/metrics'
-        TYPE HTTP;
+        PATH '/metrics';
 
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
@@ -1212,7 +1208,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY counted_input_events SCHEMA counted_input_event BRANCHED BY by_tenant;
       CREATE RELAY counted_events SCHEMA counted_output_event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR counted_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING counted_input_codec
@@ -1357,7 +1353,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1478,7 +1474,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1541,7 +1537,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1607,7 +1603,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1702,7 +1698,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1784,7 +1780,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1848,7 +1844,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY error_stream SCHEMA error_record UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1916,7 +1912,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1975,7 +1971,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -2034,7 +2030,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -2095,7 +2091,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -2145,7 +2141,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY generated_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -2211,7 +2207,7 @@ Feature: WASM processor runtime behavior
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
