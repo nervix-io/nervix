@@ -111,9 +111,10 @@ and missing-output failures, and copied options buffers.
 
 `A <runtime> C binding exposes a refused subscription restoration's message and retry wait`
 opens a subscription through a forwarded gRPC endpoint on one and three nodes, cuts that
-connection, removes its relay while it is down, and restores the connection. The C ABI in process,
-C and C++ each report the interruption, then read the refusal message and positive retry wait from
-the `NX_EVENT_RESTORATION_FAILED` event. The owner tests cover the matching clock-event accessors
+connection, arms every node to refuse the next subscription opening as unavailable while it is
+down, and restores the connection. The C ABI in process, C and C++ each report the interruption,
+then read the refusal message and positive retry wait from the `NX_EVENT_RESTORATION_FAILED` event.
+A removed relay ends the subscription instead (S-7), so only a refusal for now reports a failure. The owner tests cover the matching clock-event accessors
 because no domain-removal request is available to make a live clock restoration fail on demand.
 
 `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its
