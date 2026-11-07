@@ -6450,10 +6450,9 @@ impl IngestorLogicTransportFixture {
                 r#"
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT logic_endpoint
+      CREATE HTTP ENDPOINT logic_endpoint
         ON edge
-        PATH '/logic'
-        TYPE HTTP;
+        PATH '/logic';
 "#
             }
             Self::Kafka => {
@@ -6485,10 +6484,9 @@ impl IngestorLogicTransportFixture {
                 r#"
       CREATE VHOST edge ws-{{test_id}}.example.com;
 
-      CREATE ENDPOINT logic_endpoint
+      CREATE WEBSOCKETS ENDPOINT logic_endpoint
         ON edge
-        PATH '/logic'
-        TYPE WEBSOCKETS;
+        PATH '/logic';
 "#
             }
             Self::ZeroMq => {
@@ -9339,7 +9337,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         CREATE RELAY counted_input_events SCHEMA counted_input_event{relay_branching};
         CREATE RELAY {output_relay} SCHEMA counted_output_event{relay_branching};
         CREATE VHOST edge wasm-reset-{{{{test_id}}}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
         CREATE HTTP ENDPOINT INGESTOR counted_source
           FROM ingress MODE NO ACK
           ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING counted_input_codec

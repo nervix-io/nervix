@@ -324,6 +324,12 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
+
+An endpoint's `EndpointKind` owns its optional signaling reference only in its WebSockets variant.
+The HTTP kind carries no signaling field. The same kind carries a selected reference in the browser,
+a protocol name in the activation plan, and the compiled protocol in a runtime route; its
+`endpoint_type()` projection supplies the discriminant ingestor capabilities require.
+
 The NATS driver's ordered transport header projection owns either validated frame bytes with
 checked compact ranges or the emitter's owned ordered pairs. Names, values and payloads keep
 their ownership through publication; neither a cast nor a fabricated range stands for a failed
@@ -331,8 +337,8 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX KEYARRAYS` archive signature identifies the current Model layout, including
-the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
+The registry's `NERVIX KIND KEYS` archive signature identifies the current Model layout, including
+that union, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the required 16-bit branch partition count,
 typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
@@ -342,7 +348,7 @@ service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of s
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
 that header state, and inferencer state bindings with their initial expressions.
-Consensus's `raft_key_avro_` keyspaces and current `ClusterState`
+Consensus's `raft_kind_key_` keyspaces and current `ClusterState`
 metadata encoding, 14, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's

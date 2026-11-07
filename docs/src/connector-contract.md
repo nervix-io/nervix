@@ -50,7 +50,7 @@ kind and name without repeating a connector/entity head.
 
 The referenced client need not have the same connector kind as the entity: the entity declaration
 owns that relationship. An Iceberg table emitter names an object-store client and a catalog client;
-an endpoint ingestor names an endpoint; native client producers and consumers name a schema and
+an endpoint ingestor names an endpoint of its declared kind; native client producers and consumers name a schema and
 use the session transport without a client Model. The registry validates these reference contracts
 before a graph becomes active.
 

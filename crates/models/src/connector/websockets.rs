@@ -262,7 +262,7 @@ impl WebsocketsIngestMode {
     }
 }
 
-/// One endpoint of `TYPE WEBSOCKETS` this cluster serves, whose messages are the payloads. Every
+/// One `WEBSOCKETS ENDPOINT` this cluster serves, whose messages are the payloads. Every
 /// node of the cluster serves it.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,

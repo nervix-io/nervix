@@ -370,8 +370,8 @@ pub(crate) enum RegistryError {
         found: ConnectorKind,
     },
     #[error(
-        "{kind} ingestor '{ingestor}' in domain '{domain}' requires a TYPE {required} endpoint, \
-         but endpoint '{endpoint}' is TYPE {found}"
+        "{kind} ingestor '{ingestor}' in domain '{domain}' requires a {required} ENDPOINT, but \
+         endpoint '{endpoint}' is {found} ENDPOINT"
     )]
     IngestorEndpointTypeMismatch {
         domain: DomainName,

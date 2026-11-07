@@ -221,14 +221,12 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE RELAY physical_wait_output
         SCHEMA physical_wait_notification BRANCHED BY physical_wait_by_tenant;
       CREATE VHOST edge physical-wait-{{test_id}}.example.com;
-      CREATE ENDPOINT physical_wait_state_endpoint
+      CREATE HTTP ENDPOINT physical_wait_state_endpoint
         ON edge
-        PATH '/state'
-        TYPE HTTP;
-      CREATE ENDPOINT physical_wait_input_endpoint
+        PATH '/state';
+      CREATE HTTP ENDPOINT physical_wait_input_endpoint
         ON edge
-        PATH '/input'
-        TYPE HTTP;
+        PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR physical_wait_state_ingestor
         FROM physical_wait_state_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_preference_codec

@@ -24,10 +24,9 @@ Feature: Domain clock contract regressions
       CREATE RELAY http2_clock_observations
         SCHEMA http2_clock_observation UNBRANCHED;
       CREATE VHOST edge http2-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT http2_clock_endpoint
+      CREATE HTTP ENDPOINT http2_clock_endpoint
         ON edge
-        PATH '/clock'
-        TYPE HTTP;
+        PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR http2_clock_ingestor
         FROM http2_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING http2_clock_request_codec
@@ -119,10 +118,9 @@ Feature: Domain clock contract regressions
       CREATE RELAY authority_clock_observations
         SCHEMA authority_clock_observation UNBRANCHED;
       CREATE VHOST edge authority-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT authority_clock_endpoint
+      CREATE HTTP ENDPOINT authority_clock_endpoint
         ON edge
-        PATH '/clock'
-        TYPE HTTP;
+        PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR authority_clock_ingestor
         FROM authority_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING authority_clock_request_codec
@@ -369,10 +367,9 @@ Feature: Domain clock contract regressions
       CREATE RELAY joined_clock_observations
         SCHEMA joined_clock_observation UNBRANCHED;
       CREATE VHOST edge joined-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT joined_clock_endpoint
+      CREATE HTTP ENDPOINT joined_clock_endpoint
         ON edge
-        PATH '/clock'
-        TYPE HTTP;
+        PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR joined_clock_ingestor
         FROM joined_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING joined_clock_request_codec
@@ -634,10 +631,9 @@ Feature: Domain clock contract regressions
         TO SCHEMA clock_request;
       CREATE RELAY clock_observations SCHEMA clock_observation UNBRANCHED;
       CREATE VHOST edge clock-contract-{{test_id}}.example.com;
-      CREATE ENDPOINT clock_request_endpoint
+      CREATE HTTP ENDPOINT clock_request_endpoint
         ON edge
-        PATH '/clock'
-        TYPE HTTP;
+        PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR clock_request_ingestor
         FROM clock_request_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_request_codec
@@ -751,10 +747,9 @@ Feature: Domain clock contract regressions
         ENCODE occurred_at AS RFC3339;
       CREATE RELAY historical_events SCHEMA historical_event UNBRANCHED;
       CREATE VHOST edge historical-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT historical_event_endpoint
+      CREATE HTTP ENDPOINT historical_event_endpoint
         ON edge
-        PATH '/events'
-        TYPE HTTP;
+        PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR historical_event_ingestor
         FROM historical_event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING historical_event_codec
@@ -816,10 +811,9 @@ Feature: Domain clock contract regressions
       CREATE RELAY stamped_requests SCHEMA stamped_request UNBRANCHED;
       CREATE RELAY stamp_errors SCHEMA stamp_error UNBRANCHED;
       CREATE VHOST edge uuid-clock-{{test_id}}.example.com;
-      CREATE ENDPOINT stamp_endpoint
+      CREATE HTTP ENDPOINT stamp_endpoint
         ON edge
-        PATH '/stamp'
-        TYPE HTTP;
+        PATH '/stamp';
       CREATE HTTP ENDPOINT INGESTOR stamp_ingestor
         FROM stamp_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stamp_request_codec

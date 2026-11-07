@@ -674,7 +674,7 @@ Feature: Emitter publishing modes
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge http-{{test_id}}-set-mode-timeout.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

@@ -2221,10 +2221,9 @@ CREATE RELAY latency_windows SCHEMA latency_window UNBRANCHED;
 
 CREATE VHOST functions_edge access.example.com;
 
-CREATE ENDPOINT access_ingress
+CREATE HTTP ENDPOINT access_ingress
   ON functions_edge
-  PATH '/access'
-  TYPE HTTP;
+  PATH '/access';
 
 CREATE HTTP ENDPOINT INGESTOR access_intake
   FROM access_ingress MODE NO ACK
