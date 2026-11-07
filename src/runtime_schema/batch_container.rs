@@ -39,7 +39,10 @@ use nervix_bounded_write::{BoundedWrite, BoundedWriter};
 use nervix_jaq::{JaqNativeFormat, JaqProgramError};
 use nervix_models::PayloadSizeLimit;
 use prost::encoding::{WireType, encode_key, encode_varint};
-use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_json::{
+    Map as JsonMap, Value as JsonValue,
+    ser::{CompactFormatter, Formatter as _},
+};
 
 use super::{
     ArrowCodecRow, CodecContractError, CodecError, CompiledCodec, CompiledCodecBatchEncoder,
@@ -260,14 +263,21 @@ impl CompiledCodec {
         };
         match &self.wire_schema {
             CompiledWireSchema::Json(_) => {
-                output.write_all(b"[").map_err(unwritable)?;
+                // A compact array, whose brackets and separators serde_json's formatter writes.
+                // Each member is already a complete JSON text, so its bytes go between them as
+                // they are, neither parsed nor checked: the formatter's raw-fragment write would
+                // place them the same way, but it takes a `str`, which costs a UTF-8 check.
+                let mut formatter = CompactFormatter;
+                formatter.begin_array(output).map_err(unwritable)?;
                 for (index, member) in encoded_members(members, encoding)?.enumerate() {
-                    if index > 0 {
-                        output.write_all(b",").map_err(unwritable)?;
-                    }
+                    let first = index == 0;
+                    formatter
+                        .begin_array_value(output, first)
+                        .map_err(unwritable)?;
                     output.write_all(member).map_err(unwritable)?;
+                    formatter.end_array_value(output).map_err(unwritable)?;
                 }
-                output.write_all(b"]").map_err(unwritable)
+                formatter.end_array(output).map_err(unwritable)
             }
             CompiledWireSchema::Cbor(_) => {
                 // A definite-length array head, which ciborium writes in its shortest form, then
@@ -1077,6 +1087,17 @@ mod tests {
         assert!(matches!(member, BatchMemberEncoding::Oversize(_)));
     }
 
+    fn json_event_codec() -> Arc<CompiledCodec> {
+        let codec = codec_named(
+            "event_codec",
+            CodecWireFormat::Json {
+                wire_schema: named("event_wire"),
+            },
+        );
+        let wire = event_wire(JsonType::Integer, JsonType::String);
+        compile(&codec, ResolvedCodecWireFormat::Json(&wire), None)
+    }
+
     fn cbor_event_codec() -> Arc<CompiledCodec> {
         let codec = codec_named(
             "event_codec",
@@ -1197,6 +1218,95 @@ mod tests {
             };
             assert_eq!(exceeded.limit, limit(1), "{count} members");
         }
+    }
+
+    /// RFC 8259 §5: an array is `[`, its values separated by `,`, then `]`, and the container adds
+    /// no insignificant whitespace. One member takes no separator, and the batch maximum takes one
+    /// between every two members.
+    #[test]
+    fn a_wire_json_container_separates_its_members_with_one_comma_each() {
+        let codec = json_event_codec();
+        let batch = events();
+        let distinct = members_of(&codec, &batch, limit(4096));
+        for count in [1, 2, 3, 65_536] {
+            let mut run = Vec::with_capacity(count);
+            let mut expected = vec![b'['];
+            for index in 0..count {
+                let member = &distinct[index % distinct.len()];
+                let MemberValue::Encoded(bytes) = &member.0 else {
+                    panic!("a schemaful member is its record's own encoding");
+                };
+                if index > 0 {
+                    expected.push(b',');
+                }
+                expected.extend_from_slice(bytes);
+                run.push(member);
+            }
+            expected.push(b']');
+
+            let encoded = codec
+                .encode_batch_within(&run, limit(1 << 24))
+                .expect("a container of encoded members has no evaluation to fail");
+
+            let BoundedBatchEncoding::Encoded(payload) = encoded else {
+                panic!("{count} members fit 16 MiB");
+            };
+            assert_eq!(payload, expected, "{count} members");
+        }
+    }
+
+    /// The bounded writer refuses each write of the array whole, so a limit that ends inside the
+    /// first member, on the separator after it or on the closing bracket makes the container
+    /// oversize instead of cutting it, and exactly the container's length completes it.
+    #[test]
+    fn a_limit_on_a_json_member_separator_or_closing_bracket_is_oversize() {
+        let codec = json_event_codec();
+        let batch = events();
+        let distinct = members_of(&codec, &batch, limit(4096));
+        let run = distinct.iter().collect::<Vec<_>>();
+        let MemberValue::Encoded(first) = &distinct[0].0 else {
+            panic!("a schemaful member is its record's own encoding");
+        };
+        let complete = container(&codec).expect("the container should encode");
+        let length = u64::try_from(complete.len()).expect("a container's length fits u64");
+        let through_first = u64::try_from(first.len() + 1).expect("a member's length fits u64");
+
+        for refused in [1, through_first, length - 1] {
+            let encoded = codec
+                .encode_batch_within(&run, limit(refused))
+                .expect("reaching the limit is an outcome");
+
+            let BoundedBatchEncoding::Oversize(exceeded) = encoded else {
+                panic!("a {length}-byte container does not fit {refused} bytes");
+            };
+            assert_eq!(exceeded.limit, limit(refused));
+        }
+        let encoded = codec
+            .encode_batch_within(&run, limit(length))
+            .expect("a container of encoded members has no evaluation to fail");
+        let BoundedBatchEncoding::Encoded(payload) = encoded else {
+            panic!("a {length}-byte container fits {length} bytes");
+        };
+        assert_eq!(payload, complete);
+    }
+
+    /// The container frames each member's bytes exactly as its record's encoding produced them. It
+    /// neither parses, validates nor re-encodes a member, which keeps the framing after a
+    /// subdivision to the punctuation alone.
+    #[test]
+    fn a_json_container_writes_its_members_without_reading_them() {
+        let codec = json_event_codec();
+        let unread = BatchMember(MemberValue::Encoded(b"\xff{\"seq\":".to_vec()));
+        let text = BatchMember(MemberValue::Encoded(b"\"a\"".to_vec()));
+
+        let encoded = codec
+            .encode_batch_within(&[&unread, &text], limit(4096))
+            .expect("a container of encoded members has no evaluation to fail");
+
+        let BoundedBatchEncoding::Encoded(payload) = encoded else {
+            panic!("two short members fit 4096 bytes");
+        };
+        assert_eq!(payload, b"[\xff{\"seq\":,\"a\"]".to_vec());
     }
 
     #[test]

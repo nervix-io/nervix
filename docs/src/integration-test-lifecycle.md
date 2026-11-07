@@ -11,6 +11,13 @@ parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
+`just test-cli-streams` selects the one- and three-node CLI stream recovery and termination
+examples in `cli_session.feature`. It prepares the in-process server assets and CLI, without
+building unrelated language probes. The outage case observes a failed restoration after the
+client's ordinary retry deadline, then verifies that the same process resumes its clock. The
+termination cases check process exit after a subscription ends and after Ctrl-C during an outage.
+The ordinary scenario runner, deadlines and parallel execution remain in force.
+
 `just test-domain-clock-delivery` runs the one- and three-node receiver attachment scenarios:
 clock installation while gossip exchanges are blocked, session tick delivery and receiver restart.
 It prepares the console assets, WASM guests and ONNX runtime required by the in-process nodes;
