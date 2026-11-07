@@ -380,6 +380,15 @@ wire_enum!(ALL_SUBSCRIPTION_END_REASONS: SubscriptionEndReason => wire::Subscrip
     RelayChanged,
 });
 
+impl fmt::Display for SubscriptionEndReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RelayRemoved => formatter.write_str("its relay no longer exists"),
+            Self::RelayChanged => formatter.write_str("its relay was redefined"),
+        }
+    }
+}
+
 /// The server ended the subscription. It is the last frame about its generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionEnded {

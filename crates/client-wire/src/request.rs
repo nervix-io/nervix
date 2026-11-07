@@ -18,6 +18,7 @@ use crate::{
     frame::{ClientFrame, EncodedFrame, VerifiedFrame},
     limits::SessionLimits,
     producer::{CloseIngestorRequest, OpenIngestorRequest, SubmitBatchRequest},
+    row::RowSchema,
     server::ReplyBodyKind,
     subscription::SubscriptionType,
     transaction::{
@@ -139,7 +140,24 @@ pub struct SubscribeRequest {
     /// Exactly one CREATE SUBSCRIPTION statement.
     pub statement: String,
     pub subscription_type: SubscriptionType,
+    /// The schema the generation a restoration replaces announced, or `None` for a first
+    /// subscribe. The server opens a restoration only while the relay announces exactly this
+    /// schema, and refuses it as [`SubscriptionRefusal::RelayChanged`](crate::SubscriptionRefusal)
+    /// otherwise.
+    pub expected_schema: Option<RowSchema>,
 }
+
+/// The depth of a subscribe request's expected schema table in its frame: the client message, the
+/// subscribe request, and the schema.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "session.fbs nests a subscribe request's expected schema in the client message \
+                  and the subscribe request, so the schema table sits at this depth"
+    )
+)]
+const EXPECTED_SCHEMA_DEPTH: usize = 3;
 
 /// Closes a subscription of the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,12 +411,17 @@ impl ClientRequest {
             Self::Subscribe(subscribe) => {
                 let domain = encoder.text("SubscribeRequest.domain", subscribe.domain.as_str())?;
                 let statement = encoder.text("SubscribeRequest.statement", &subscribe.statement)?;
+                let expected_schema = match &subscribe.expected_schema {
+                    Some(schema) => Some(schema.encode(encoder, EXPECTED_SCHEMA_DEPTH)?),
+                    None => None,
+                };
                 let request = wire::SubscribeRequest::create(
                     encoder.fbb(),
                     &wire::SubscribeRequestArgs {
                         domain: Some(domain),
                         statement: Some(statement),
                         subscription_type: Some(subscribe.subscription_type.into()),
+                        expected_schema,
                     },
                 );
                 EncodedUnion::new(wire::ClientRequest::SubscribeRequest, request)
@@ -547,6 +570,10 @@ impl ClientRequest {
             }
             wire::ClientRequest::SubscribeRequest => {
                 let subscribe = request_member(message.request_as_subscribe_request());
+                let expected_schema = match subscribe.expected_schema() {
+                    Some(schema) => Some(RowSchema::decode(decoder, schema)?),
+                    None => None,
+                };
                 Self::Subscribe(SubscribeRequest {
                     domain: decoder.name("SubscribeRequest.domain", subscribe.domain())?,
                     statement: decoder.text("SubscribeRequest.statement", subscribe.statement())?,
@@ -554,6 +581,7 @@ impl ClientRequest {
                         "SubscribeRequest.subscription_type",
                         subscribe.subscription_type(),
                     )?,
+                    expected_schema,
                 })
             }
             wire::ClientRequest::UnsubscribeRequest => {

@@ -316,7 +316,7 @@ impl From<DomainClockAttachOutcome> for CommandOutcome {
             },
             DomainClockAttachDisposition::AlreadyAttached(_)
             | DomainClockAttachDisposition::DomainNotFound(_)
-            | DomainClockAttachDisposition::Failed => CommandDisposition::Failed,
+            | DomainClockAttachDisposition::Refused(_) => CommandDisposition::Failed,
         };
         Self::local(disposition, outcome.message)
     }

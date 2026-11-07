@@ -23,7 +23,7 @@ use pyo3::{
 
 use crate::{
     batch::Batch,
-    enums::{CellState, EventKind, Part},
+    enums::{CellState, EndReason, EventKind, Part, RestorationCause},
     errors,
     schema::Schema,
     values,
@@ -63,17 +63,19 @@ impl Subscription {
     }
 }
 
-/// A restoration the session's server refused: why, and how long the session waits before its
-/// next attempt, in nanoseconds.
+/// A restoration the session's server refused for now: why, and how long the session waits
+/// before its next attempt, in nanoseconds.
 #[pyclass(frozen, module = "nervix_client")]
 pub(crate) struct RestorationFailure {
+    cause: RestorationCause,
     message: String,
     retry_after: Duration,
 }
 
 impl RestorationFailure {
-    pub(crate) fn new(message: &str, retry_after: Duration) -> Self {
+    pub(crate) fn new(cause: host::RestorationCause, message: &str, retry_after: Duration) -> Self {
         Self {
+            cause: RestorationCause::from(cause),
             message: message.to_owned(),
             retry_after,
         }
@@ -82,6 +84,12 @@ impl RestorationFailure {
 
 #[pymethods]
 impl RestorationFailure {
+    /// Why the attempt opened or attached nothing.
+    #[getter]
+    fn cause(&self) -> RestorationCause {
+        self.cause
+    }
+
     #[getter]
     fn message(&self) -> &str {
         &self.message
@@ -135,16 +143,26 @@ impl Event {
         Subscription::of(self.event.subscription_event().subscription())
     }
 
-    /// The refusal of a restoration the server refused, or `None` for every other event.
+    /// The refusal of a restoration the server refused for now, or `None` for every other event.
     #[getter]
     fn restoration_failure(&self) -> Option<RestorationFailure> {
         let SubscriptionEvent::RestorationFailed(failure) = self.event.subscription_event() else {
             return None;
         };
         Some(RestorationFailure::new(
+            host::RestorationCause::from(failure.cause),
             &failure.message,
             failure.retry_after,
         ))
+    }
+
+    /// Why the generation an ended event reports ended.
+    #[getter]
+    fn end_reason(&self, py: Python<'_>) -> PyResult<EndReason> {
+        match self.event.end_reason() {
+            Ok(reason) => Ok(EndReason::from(reason)),
+            Err(failure) => Err(errors::raise(py, failure)),
+        }
     }
 
     /// The schema of a rows event's rows.

@@ -1632,10 +1632,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__requests__bolero_client_requests_keep_complete_values/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "client-requests"
-invariant = "Every current typed client request decodes to its complete original value, including identities, positions, schemas and opaque payloads."
+invariant = "Every current typed client request decodes to its complete original value, including identities, positions, schemas, a restoration's expected schema and opaque payloads."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-client-wire"
@@ -1647,10 +1647,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__replies__bolero_replies_keep_complete_values/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "client-replies"
-invariant = "Every current reply family decodes to the complete original typed value, including dispositions, diagnostics, metadata and client I/O."
+invariant = "Every current reply family decodes to the complete original typed value, including dispositions, typed subscribe and clock attach refusals, diagnostics, metadata and client I/O."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-client-wire"

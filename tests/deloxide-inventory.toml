@@ -561,6 +561,7 @@ tags = [
   "@backup_holder_download",
   "@snapshot_receive_admission",
   "@session_shutdown_ending",
+  "@client_wire_restoration_end",
   "@session_shutdown_unread",
   "@nats_envelope_metadata",
   "@client_foreign_execution",
@@ -2093,6 +2094,16 @@ scenario = "A native backup waits through an outage longer than its retry budget
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Native client subscription restoration that the server refuses for good: the desired-subscription lock across a lost session, the restoration's refusal, the end it reports once and the local deletion that releases the name, with the exchange's reply delivery."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-wire-restoration-end"
+invariant = "A native client whose subscription's relay was dropped while it was disconnected ends the subscription once as RelayRemoved on one and three nodes, reports nothing after that end, and deletes it without the server so its name is free again."
+invocation = "scenarios"
+scenario = "A native client ends the restoration of a subscription whose relay was <change> while it was disconnected"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -2360,6 +2371,16 @@ id = "stress.client-consumer-restore"
 invariant = "After a cluster restart on one and three nodes, a Rust client's producer and consumer resume their unchanged endpoint: the consumer reports its attachment interruption and delivers the batch submitted after the restart, and the attached domain clock reports its interruption and ticks again."
 invocation = "stress-scenarios"
 scenario = "A producer and consumer resume their unchanged endpoint after a session restart"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: native client subscription restoration that the server refuses for good: the desired-subscription lock across a lost session, the restoration's refusal, the end it reports once and the local deletion that releases the name, with the exchange's reply delivery."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-wire-restoration-end"
+invariant = "A native client whose subscription's relay was dropped while it was disconnected ends the subscription once as RelayRemoved on one and three nodes, reports nothing after that end, and deletes it without the server so its name is free again."
+invocation = "stress-scenarios"
+scenario = "A native client ends the restoration of a subscription whose relay was <change> while it was disconnected"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -3725,6 +3746,8 @@ workloads = [
   "stress.restore-codec-rejection",
   "stress.restore-codec-rejection-restore",
   "scenario.client-alter-drain",
+  "scenario.client-wire-restoration-end",
+  "stress.client-wire-restoration-end",
   "paced.reopen-generation",
   "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
@@ -3759,6 +3782,8 @@ workloads = [
 [[owner]]
 path = "crates/client-core/src/restoration.rs"
 workloads = [
+  "scenario.client-wire-restoration-end",
+  "stress.client-wire-restoration-end",
   "paced.reopen-generation",
   "paced.follow-start-generation",
   "stress.paced.reopen-generation",
@@ -3767,7 +3792,12 @@ workloads = [
 
 [[owner]]
 path = "crates/client-core/src/subscriptions.rs"
-workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "stress.diagnostic-nodes",
+  "scenario.client-wire-restoration-end",
+  "stress.client-wire-restoration-end",
+]
 
 [[owner]]
 path = "crates/connectors/kafka/src/topic/ingestor_rejection.rs"

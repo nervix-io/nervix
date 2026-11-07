@@ -424,6 +424,7 @@ fn subscribe_frame(subscription_type: Option<wire::SubscriptionType>) -> bytes::
             domain: Some(domain),
             statement: Some(statement),
             subscription_type,
+            expected_schema: None,
         },
     );
     let root = raw_message(

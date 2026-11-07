@@ -70,7 +70,7 @@ pub use domain_clock::DomainClock;
 pub use endpoint::{
     EndpointState, OpenRefusal, Reopen, ReopenReason, Window, WindowKind, credit, nanos,
 };
-pub use event::{CellState, Event, EventKind};
+pub use event::{CellState, EndReason, Event, EventKind, RestorationCause};
 pub use failure::{Failure, FailureKind};
 pub use fields::Fields;
 pub use outcome::{Disposition, Outcome, RestoreSummary};

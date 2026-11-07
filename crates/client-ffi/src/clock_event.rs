@@ -15,7 +15,9 @@
 
 use std::mem::ManuallyDrop;
 
-use nervix_client_host::{ClockEndReason, ClockEvent, ClockEventKind, ClockState, Failure};
+use nervix_client_host::{
+    ClockEndReason, ClockEvent, ClockEventKind, ClockState, Failure, RestorationCause,
+};
 use nervix_primitives::sync::Arc;
 
 use crate::abi;
@@ -253,6 +255,33 @@ unsafe fn write_end_reason(
     let value = unsafe { abi::handle(event, "event") }?.end_reason()?;
     // SAFETY: `reason` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(reason, value) };
+    Ok(())
+}
+
+/// # Safety
+///
+/// `event` is a live event; a non-null `cause` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_clock_event_restoration_cause(
+    event: *const ClockEvent,
+    cause: *mut RestorationCause,
+) -> *mut Failure {
+    // SAFETY: the header's contract is this function's.
+    abi::outcome(unsafe { write_restoration_cause(event, cause) })
+}
+
+/// # Safety
+///
+/// As [`nx_clock_event_restoration_cause`].
+unsafe fn write_restoration_cause(
+    event: *const ClockEvent,
+    cause: *mut RestorationCause,
+) -> Result<(), Failure> {
+    abi::require_out(cause, "cause")?;
+    // SAFETY: the caller guarantees a live event.
+    let value = unsafe { abi::handle(event, "event") }?.restoration_cause()?;
+    // SAFETY: `cause` is non-null, and the caller guarantees it is writable.
+    unsafe { abi::write(cause, value) };
     Ok(())
 }
 
