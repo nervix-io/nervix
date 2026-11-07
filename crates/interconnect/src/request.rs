@@ -573,7 +573,7 @@ impl InterconnectRequest for DomainClockAttachRequest {
     const NAME: &'static str = "domain_clock_attach";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const TIMEOUT: Duration = DomainClockProgressRequest::TIMEOUT;
 }
 
 impl InterconnectRequest for DomainClockProgressRequest {

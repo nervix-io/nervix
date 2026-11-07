@@ -1965,6 +1965,15 @@ newly attached or reconnected target receives the newest retained frontier. Inac
 metadata is bounded by current members and live joiners, one incarnation per node name, and holds
 no delivery task or pending report.
 
+An attachment accepted while the producer reads availability invalidates that observation before
+it can prune targets. A delayed handler also cannot replace an accepted newer receiver incarnation
+using a preceding availability view. These checks keep an accepted attachment alive without asking
+its receiver to retry an already successful request.
+
+This includes retries whose preceding acceptance reply was lost: the first duplicate overlapping
+the observation invalidates it without replacing its lifetime. Later duplicates in that read, and
+duplicates outside a read, send no redundant notification.
+
 A failed attachment or progress attempt waits 200 milliseconds before retrying the current
 attachment or newest frontier. Replacement and authority shutdown cancel both active requests
 and their retry delays. Revision installation reaches the authority directly through attachment;

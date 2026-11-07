@@ -40,7 +40,9 @@ mod attachments;
 pub(in crate::application) use attachments::{
     DomainClockAttachmentInstaller, DomainClockAttachments,
 };
-use attachments::{DomainClockAttachmentObserver, DomainClockAttachmentTarget};
+use attachments::{
+    DomainClockAttachmentObservation, DomainClockAttachmentObserver, DomainClockAttachmentTarget,
+};
 
 use super::{background_task::BackgroundTask, session_service::SessionServiceImpl};
 use crate::{
@@ -232,6 +234,7 @@ impl DomainClockProgressDeliveries {
         shutdown: &CancellationToken,
         domain_id: &DomainName,
     ) -> bool {
+        attachments.prepare_observation();
         let availability = service.inner.cluster.availability_state().await;
         let members = service
             .inner
@@ -240,9 +243,11 @@ impl DomainClockProgressDeliveries {
             .await
             .into_keys()
             .collect();
-        let Some(mut desired) = attachments.observe(&availability.live_identities(), &members)
-        else {
-            return false;
+        let mut desired = match attachments.observe(&availability.live_identities(), &members) {
+            DomainClockAttachmentObservation::Current(targets) => targets,
+            // Its unseen attachment version wakes the producer for a fresh availability read.
+            DomainClockAttachmentObservation::Refresh => return true,
+            DomainClockAttachmentObservation::Superseded => return false,
         };
         desired.remove(&spec.authority);
 
@@ -402,6 +407,7 @@ impl DomainClockAttachmentSenders {
             .map(|(domain, _)| domain.clone())
             .collect::<Vec<_>>();
         for domain in superseded {
+            nervix_primitives::task::consume_budget().await;
             if let Some(sender) = self.tasks.remove(&domain) {
                 sender.task.stop().await;
             }

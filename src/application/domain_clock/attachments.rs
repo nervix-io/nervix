@@ -38,9 +38,26 @@ struct AttachedClock {
     spec: DomainClockTaskSpec,
     minimum_revision: u64,
     targets: BTreeMap<ClusterNodeName, DomainClockAttachmentTarget>,
+    observation: AvailabilityObservationPhase,
+}
+
+enum AvailabilityObservationPhase {
+    Idle,
+    Reading,
+    Invalidated,
 }
 
 impl AttachedClock {
+    fn invalidate_observation(&mut self) -> bool {
+        match self.observation {
+            AvailabilityObservationPhase::Reading => {
+                self.observation = AvailabilityObservationPhase::Invalidated;
+                true
+            }
+            AvailabilityObservationPhase::Idle | AvailabilityObservationPhase::Invalidated => false,
+        }
+    }
+
     fn end(&self) {
         for target in self.targets.values() {
             target.lifetime.cancel();
@@ -82,6 +99,12 @@ pub(crate) struct DomainClockAttachmentInstaller {
 pub(super) struct DomainClockAttachmentObserver {
     slot: DomainClockAttachmentSlot,
     changes: watch::Receiver<Option<AttachedClock>>,
+}
+
+pub(super) enum DomainClockAttachmentObservation {
+    Superseded,
+    Refresh,
+    Current(BTreeMap<ClusterNodeIdentity, DomainClockAttachmentTarget>),
 }
 
 impl DomainClockAttachments {
@@ -133,6 +156,12 @@ impl DomainClockAttachments {
                 return false;
             }
             let previous = clock.targets.get(request.target.node_id());
+            if previous
+                .is_some_and(|target| target.identity.incarnation() > request.target.incarnation())
+            {
+                receipt = Receipt::UnavailableTarget;
+                return false;
+            }
             if request.installed_revision < clock.minimum_revision
                 || previous.is_some_and(|target| {
                     target.identity == request.target
@@ -148,7 +177,9 @@ impl DomainClockAttachments {
                     && previous.revision == request.installed_revision
                     && previous.peer_process_epoch == peer_process_epoch
                 {
-                    return false;
+                    // A repeated acceptance must invalidate a snapshot being read, even though
+                    // it keeps this exact target and lifetime. Further duplicates need no wake.
+                    return clock.invalidate_observation();
                 }
                 // End the preceding lifetime before publishing its replacement.
                 previous.lifetime.cancel();
@@ -162,6 +193,7 @@ impl DomainClockAttachments {
                     lifetime: CancellationToken::new(),
                 },
             );
+            clock.invalidate_observation();
             true
         });
         receipt
@@ -212,6 +244,7 @@ impl DomainClockAttachmentInstaller {
                 spec: spec.clone(),
                 minimum_revision: revision,
                 targets: BTreeMap::new(),
+                observation: AvailabilityObservationPhase::Idle,
             }));
             self.domains
                 .insert(domain.clone(), DomainClockAttachmentSlot { state });
@@ -245,23 +278,46 @@ impl Drop for DomainClockAttachmentInstaller {
 }
 
 impl DomainClockAttachmentObserver {
+    pub(super) fn prepare_observation(&mut self) {
+        // Register before the caller reads availability and membership. An attachment accepted
+        // during those reads must keep its notification and cannot be pruned by their snapshots.
+        let changes = &mut self.changes;
+        self.slot.state.send_if_modified(|state| {
+            // Marking the version without borrowing the value keeps registration and the read
+            // phase under one guard, with no additional lock or receiver allocation.
+            changes.mark_unchanged();
+            if let Some(clock) = state {
+                clock.observation = AvailabilityObservationPhase::Reading;
+            }
+            false
+        });
+    }
+
     pub(super) fn observe(
         &mut self,
         live: &BTreeSet<ClusterNodeIdentity>,
         members: &BTreeSet<ClusterNodeName>,
-    ) -> Option<BTreeMap<ClusterNodeIdentity, DomainClockAttachmentTarget>> {
-        // Register the version before reading the state. Marking it after the read could consume
-        // a concurrent attachment's notification without including that attachment in the result.
-        drop(self.changes.borrow_and_update());
+    ) -> DomainClockAttachmentObservation {
         let live_by_name = live
             .iter()
             .map(|identity| (identity.node_id(), identity))
             .collect::<BTreeMap<_, _>>();
-        let mut targets = None;
+        let mut observation = DomainClockAttachmentObservation::Superseded;
         self.slot.state.send_if_modified(|state| {
             let Some(clock) = state else {
                 return false;
             };
+            clock.observation = AvailabilityObservationPhase::Idle;
+            // This check runs under the same value guard as attachment insertion. Its version
+            // therefore covers every target that this snapshot could otherwise discard.
+            if self
+                .changes
+                .has_changed()
+                .assured("an observer retains its exact slot's sender")
+            {
+                observation = DomainClockAttachmentObservation::Refresh;
+                return false;
+            }
             let mut changed = false;
             clock.targets.retain(|node, target| {
                 let replaced = live_by_name
@@ -274,7 +330,7 @@ impl DomainClockAttachmentObserver {
                 }
                 keep
             });
-            targets = Some(
+            observation = DomainClockAttachmentObservation::Current(
                 clock
                     .targets
                     .values()
@@ -284,7 +340,7 @@ impl DomainClockAttachmentObserver {
             );
             changed
         });
-        targets
+        observation
     }
 
     pub(super) async fn changed(&mut self) {

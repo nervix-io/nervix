@@ -242,6 +242,17 @@ minimum installed revision and inherits no progress from its predecessor. Replac
 cancels its preceding delivery lifetime before publishing the replacement. Duplicate requests for
 the same attachment are idempotent.
 
+The producer registers the attachment version before reading availability and membership. If a
+handler accepts an attachment during those reads, the producer leaves the targets unchanged and
+uses the retained notification to refresh its snapshots. A preceding snapshot cannot discard the
+new attachment, and a handler holding an earlier availability view cannot replace a newer accepted
+receiver incarnation.
+
+An accepted duplicate overlapping that snapshot read invalidates it once, while retaining the exact
+attachment and cancellation lifetime. Further duplicates before the refresh and duplicates outside
+the read publish no notification. Preparing the read marks its version seen and its phase under one
+existing value guard; it adds no receiver allocation or lock acquisition.
+
 Delivery targets are accepted attachments intersected with effective availability. Departure stops
 their delivery tasks. An unavailable committed member can retain its attachment metadata, with no
 delivery task or pending report, so the same incarnation resumes with the newest frontier when it

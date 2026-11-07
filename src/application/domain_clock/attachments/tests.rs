@@ -10,7 +10,7 @@
     nervix::layer(harness, reason = "tests the production clock attachment owner")
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ahash::{HashMap, HashMapExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -21,7 +21,8 @@ use nervix_models::{
 };
 
 use super::{
-    DomainClockAttachmentInstaller, DomainClockAttachmentObserver, DomainClockAttachments,
+    DomainClockAttachmentInstaller, DomainClockAttachmentObservation,
+    DomainClockAttachmentObserver, DomainClockAttachmentTarget, DomainClockAttachments,
 };
 use crate::application::domain_clock::DomainClockTaskSpec;
 
@@ -95,9 +96,149 @@ impl Fixture {
     }
 }
 
+impl DomainClockAttachmentObserver {
+    /// These fixed fixture views are already known before any competing participant starts.
+    fn observe_current(
+        &mut self,
+        live: &BTreeSet<ClusterNodeIdentity>,
+        members: &BTreeSet<ClusterNodeName>,
+    ) -> Option<BTreeMap<ClusterNodeIdentity, DomainClockAttachmentTarget>> {
+        self.prepare_observation();
+        match self.observe(live, members) {
+            DomainClockAttachmentObservation::Current(targets) => Some(targets),
+            DomainClockAttachmentObservation::Superseded => None,
+            DomainClockAttachmentObservation::Refresh => {
+                panic!("an uncontended fixture observation changed")
+            }
+        }
+    }
+}
+
 #[cfg(not(feature = "shuttle"))]
 mod ordinary {
     use super::*;
+
+    #[test]
+    fn a_duplicate_acceptance_invalidates_one_snapshot_without_replacing_its_lifetime() {
+        let fixture = Fixture::new();
+        let mut observer = fixture.observer();
+        assert_eq!(
+            fixture.attach(&fixture.request),
+            DomainClockAttachReceipt::Accepted
+        );
+        let initial = observer
+            .observe_current(&fixture.live, &fixture.members)
+            .assured("the authority is installed");
+        let lifetime = initial[&fixture.request.target].lifetime.clone();
+        let mut notifications = observer.changes.clone();
+        observer.prepare_observation();
+        assert_eq!(
+            fixture.attach(&fixture.request),
+            DomainClockAttachReceipt::Accepted
+        );
+        assert!(
+            notifications
+                .has_changed()
+                .assured("the fixture retains its sender")
+        );
+        drop(notifications.borrow_and_update());
+        assert_eq!(
+            fixture.attach(&fixture.request),
+            DomainClockAttachReceipt::Accepted
+        );
+        assert!(
+            !notifications
+                .has_changed()
+                .assured("one invalidation already wakes this read")
+        );
+        assert!(matches!(
+            observer.observe(&BTreeSet::new(), &BTreeSet::new()),
+            DomainClockAttachmentObservation::Refresh
+        ));
+        let current = observer
+            .observe_current(&fixture.live, &fixture.members)
+            .assured("the accepted target survives the preceding empty view");
+        assert_eq!(current.len(), 1);
+        assert_eq!(
+            current[&fixture.request.target].revision,
+            fixture.request.installed_revision
+        );
+        assert_eq!(current[&fixture.request.target].peer_process_epoch, 11);
+        assert!(!lifetime.is_cancelled());
+        assert!(!current[&fixture.request.target].lifetime.is_cancelled());
+        current[&fixture.request.target].lifetime.cancel();
+        assert!(
+            lifetime.is_cancelled(),
+            "the duplicate retains the same cancellation lifetime"
+        );
+    }
+
+    #[test]
+    fn an_availability_snapshot_cannot_discard_an_attachment_accepted_after_it() {
+        for receiver_in_snapshot in [true, false] {
+            let fixture = Fixture::new();
+            let mut observer = fixture.observer();
+            observer.prepare_observation();
+            let (preceding_view, preceding_members) = if receiver_in_snapshot {
+                (fixture.live.clone(), fixture.members.clone())
+            } else {
+                (BTreeSet::new(), BTreeSet::new())
+            };
+            let mut request = fixture.request.clone();
+            request.target = Fixture::identity("receiver", 3);
+            let current_view = BTreeSet::from([request.target.clone()]);
+            assert_eq!(
+                fixture
+                    .attachments
+                    .attach(request.target.node_id(), 12, &request, &current_view,),
+                DomainClockAttachReceipt::Accepted
+            );
+            assert!(matches!(
+                observer.observe(&preceding_view, &preceding_members),
+                DomainClockAttachmentObservation::Refresh
+            ));
+            let targets = observer
+                .observe_current(&current_view, &fixture.members)
+                .assured("the accepted receiver remains available");
+            assert_eq!(
+                targets.keys().cloned().collect::<Vec<_>>(),
+                vec![request.target],
+                "a stale availability snapshot must not remove an accepted attachment",
+            );
+        }
+    }
+
+    #[test]
+    fn a_delayed_attachment_cannot_replace_a_newer_receiver_incarnation() {
+        let fixture = Fixture::new();
+        let mut observer = fixture.observer();
+        let mut request = fixture.request.clone();
+        request.target = Fixture::identity("receiver", 3);
+        let live = BTreeSet::from([request.target.clone()]);
+        assert_eq!(
+            fixture
+                .attachments
+                .attach(request.target.node_id(), 12, &request, &live),
+            DomainClockAttachReceipt::Accepted
+        );
+        let targets = observer
+            .observe_current(&live, &fixture.members)
+            .assured("the authority remains installed");
+        let current = &targets[&request.target];
+        assert_eq!(
+            fixture.attach(&fixture.request),
+            DomainClockAttachReceipt::UnavailableTarget,
+            "a handler holding a preceding availability view cannot replace a newer receiver",
+        );
+        assert!(!current.lifetime.is_cancelled());
+        let after = observer
+            .observe_current(&live, &fixture.members)
+            .assured("the accepted incarnation remains installed");
+        assert_eq!(
+            after.keys().cloned().collect::<Vec<_>>(),
+            vec![request.target]
+        );
+    }
 
     #[test]
     fn a_newer_attachment_ends_its_predecessor_and_a_late_one_cannot_replace_it() {
@@ -112,7 +253,7 @@ mod ordinary {
         request.installed_revision = 7;
         assert_eq!(fixture.attach(&request), DomainClockAttachReceipt::Accepted);
         let targets = observer
-            .observe(&fixture.live, &fixture.members)
+            .observe_current(&fixture.live, &fixture.members)
             .assured("the fixture authority remains installed");
         let first = targets[&request.target].clone();
         assert!(!first.lifetime.is_cancelled());
@@ -121,7 +262,7 @@ mod ordinary {
         assert_eq!(fixture.attach(&request), DomainClockAttachReceipt::Accepted);
         assert!(first.lifetime.is_cancelled());
         let targets = observer
-            .observe(&fixture.live, &fixture.members)
+            .observe_current(&fixture.live, &fixture.members)
             .assured("the fixture authority remains installed");
         let current = targets[&request.target].clone();
         assert_eq!(current.revision, 8);
@@ -153,7 +294,7 @@ mod ordinary {
             DomainClockAttachReceipt::Accepted
         );
         let preceding = observer
-            .observe(&fixture.live, &fixture.members)
+            .observe_current(&fixture.live, &fixture.members)
             .assured("the fixture authority remains installed");
         let lifetime = preceding[&fixture.request.target].lifetime.clone();
         assert_eq!(
@@ -167,7 +308,7 @@ mod ordinary {
         );
         assert!(lifetime.is_cancelled());
         let current = observer
-            .observe(&fixture.live, &fixture.members)
+            .observe_current(&fixture.live, &fixture.members)
             .assured("the fixture authority remains installed");
         assert_eq!(current[&fixture.request.target].peer_process_epoch, 12);
     }
@@ -212,18 +353,18 @@ mod ordinary {
             DomainClockAttachReceipt::Accepted
         );
         let targets = observer
-            .observe(&fixture.live, &fixture.members)
+            .observe_current(&fixture.live, &fixture.members)
             .assured("the fixture authority remains installed");
         let lifetime = targets[&fixture.request.target].lifetime.clone();
         assert!(
             observer
-                .observe(&BTreeSet::new(), &fixture.members)
+                .observe_current(&BTreeSet::new(), &fixture.members)
                 .assured("unavailability does not change authority")
                 .is_empty()
         );
         assert_eq!(
             observer
-                .observe(&fixture.live, &fixture.members)
+                .observe_current(&fixture.live, &fixture.members)
                 .assured("the same member can resume")
                 .len(),
             1
@@ -234,7 +375,7 @@ mod ordinary {
         let live = BTreeSet::from([replacement.clone()]);
         assert!(
             observer
-                .observe(&live, &fixture.members)
+                .observe_current(&live, &fixture.members)
                 .assured("the authority remains installed")
                 .is_empty()
         );
@@ -257,7 +398,7 @@ mod ordinary {
             DomainClockAttachReceipt::Accepted
         );
         let targets = observer
-            .observe(&live, &fixture.members)
+            .observe_current(&live, &fixture.members)
             .assured("the replacement attached to the current authority");
         assert_eq!(
             targets.keys().cloned().collect::<Vec<_>>(),
@@ -276,7 +417,7 @@ mod ordinary {
             DomainClockAttachReceipt::Accepted
         );
         let targets = observer
-            .observe(&fixture.live, &fixture.members)
+            .observe_current(&fixture.live, &fixture.members)
             .assured("the fixture authority remains installed");
         let lifetime = targets[&preceding.target].lifetime.clone();
         let mut request = fixture.request.clone();
@@ -290,7 +431,7 @@ mod ordinary {
         );
         assert!(lifetime.is_cancelled());
         let current = observer
-            .observe(&live, &fixture.members)
+            .observe_current(&live, &fixture.members)
             .assured("the replacement attaches before a producer reconciles availability");
         assert_eq!(current[&request.target].revision, 7);
     }
@@ -304,19 +445,19 @@ mod ordinary {
             DomainClockAttachReceipt::Accepted
         );
         let targets = observer
-            .observe(&fixture.live, &fixture.members)
+            .observe_current(&fixture.live, &fixture.members)
             .assured("the fixture authority remains installed");
         let lifetime = targets[&fixture.request.target].lifetime.clone();
         assert!(
             observer
-                .observe(&BTreeSet::new(), &BTreeSet::new())
+                .observe_current(&BTreeSet::new(), &BTreeSet::new())
                 .assured("membership removal does not change authority")
                 .is_empty()
         );
         assert!(lifetime.is_cancelled());
         assert!(
             observer
-                .observe(&fixture.live, &fixture.members)
+                .observe_current(&fixture.live, &fixture.members)
                 .assured("the returned peer must attach again")
                 .is_empty()
         );
@@ -331,7 +472,7 @@ mod ordinary {
             DomainClockAttachReceipt::Accepted
         );
         let targets = observer
-            .observe(&fixture.live, &fixture.members)
+            .observe_current(&fixture.live, &fixture.members)
             .assured("the fixture authority remains installed");
         let lifetime = targets[&fixture.request.target].lifetime.clone();
         let mut spec = fixture.spec.clone();
@@ -343,7 +484,11 @@ mod ordinary {
         desired.insert(fixture.domain.clone(), spec.clone());
         fixture.installation.install(&desired, 8);
         assert!(lifetime.is_cancelled());
-        assert!(observer.observe(&fixture.live, &fixture.members).is_none());
+        assert!(
+            observer
+                .observe_current(&fixture.live, &fixture.members)
+                .is_none()
+        );
         assert_eq!(
             fixture.attach(&fixture.request),
             DomainClockAttachReceipt::SupersededAuthority
@@ -354,7 +499,7 @@ mod ordinary {
             .assured("the fixture installed the replacement authority");
         assert!(
             replacement
-                .observe(&fixture.live, &fixture.members)
+                .observe_current(&fixture.live, &fixture.members)
                 .assured("the new authority is installed")
                 .is_empty()
         );
@@ -423,7 +568,7 @@ mod modeled {
             DomainClockAttachReceipt::Accepted
         );
         let first = observer
-            .observe(&fixture.live, &fixture.members)
+            .observe_current(&fixture.live, &fixture.members)
             .assured("the initial authority is installed");
         let initial_lifetime = first[&fixture.request.target].lifetime.clone();
         let live = fixture.live.clone();
@@ -432,11 +577,17 @@ mod modeled {
             block_on(async move {
                 let mut held: Vec<CancellationToken> = Vec::new();
                 loop {
-                    let Some(targets) = observer.observe(&live, &members) else {
-                        for lifetime in held {
-                            assert!(lifetime.is_cancelled());
+                    nervix_primitives::task::consume_budget().await;
+                    observer.prepare_observation();
+                    let targets = match observer.observe(&live, &members) {
+                        DomainClockAttachmentObservation::Current(targets) => targets,
+                        DomainClockAttachmentObservation::Refresh => continue,
+                        DomainClockAttachmentObservation::Superseded => {
+                            for lifetime in held {
+                                assert!(lifetime.is_cancelled());
+                            }
+                            return;
                         }
-                        return;
                     };
                     for target in targets.into_values() {
                         held.push(target.lifetime);
@@ -471,5 +622,92 @@ mod modeled {
         // Replacement races authority stop and the producer's observe-before-wait protocol.
         // A lost wake leaves no runnable thread, which Shuttle reports as a deadlock.
         check_dfs(attach_replace_and_stop, Some(1_000));
+    }
+
+    fn attach_during_availability_observation(duplicate: bool) {
+        let fixture = Fixture::new();
+        let mut observer = fixture.observer();
+        assert_eq!(
+            fixture.attach(&fixture.request),
+            DomainClockAttachReceipt::Accepted
+        );
+        let first = observer
+            .observe_current(&fixture.live, &fixture.members)
+            .assured("the initial authority is installed");
+        let initial_lifetime = first[&fixture.request.target].lifetime.clone();
+        observer.prepare_observation();
+        let (preceding_view, preceding_members) = if duplicate {
+            (BTreeSet::new(), BTreeSet::new())
+        } else {
+            (fixture.live.clone(), fixture.members.clone())
+        };
+
+        let mut request = fixture.request.clone();
+        let process_epoch;
+        if duplicate {
+            process_epoch = 11;
+        } else {
+            request.target = Fixture::identity("receiver", 3);
+            process_epoch = 12;
+        }
+        let target = request.target.clone();
+        let current_view = BTreeSet::from([target.clone()]);
+        let attachments = fixture.attachments.clone();
+        let live = current_view.clone();
+        let replacing = thread::spawn(move || {
+            assert_eq!(
+                attachments.attach(request.target.node_id(), process_epoch, &request, &live),
+                DomainClockAttachReceipt::Accepted
+            );
+        });
+        let attachments = fixture.attachments.clone();
+        let request = fixture.request.clone();
+        let live = fixture.live.clone();
+        let delayed = thread::spawn(move || {
+            let receipt = attachments.attach(request.target.node_id(), 11, &request, &live);
+            assert!(matches!(
+                receipt,
+                DomainClockAttachReceipt::Accepted | DomainClockAttachReceipt::UnavailableTarget
+            ));
+        });
+        assert!(!matches!(
+            observer.observe(&preceding_view, &preceding_members),
+            DomainClockAttachmentObservation::Superseded
+        ));
+        replacing
+            .join()
+            .assured("the replacement participant must complete");
+        delayed
+            .join()
+            .assured("the delayed participant must complete");
+        let targets = observer
+            .observe_current(&current_view, &fixture.members)
+            .assured("the authority remains installed after both handlers finish");
+        assert_eq!(
+            targets.keys().cloned().collect::<Vec<_>>(),
+            vec![target.clone()]
+        );
+        assert!(!targets[&target].lifetime.is_cancelled());
+        assert_eq!(targets[&target].peer_process_epoch, process_epoch);
+        assert_eq!(
+            targets[&target].revision,
+            fixture.request.installed_revision
+        );
+        if !duplicate {
+            assert!(initial_lifetime.is_cancelled());
+        }
+    }
+
+    #[test]
+    fn shuttle_an_attachment_survives_a_preceding_availability_snapshot() {
+        check_dfs(
+            || attach_during_availability_observation(false),
+            Some(1_000),
+        );
+    }
+
+    #[test]
+    fn shuttle_a_duplicate_attachment_survives_a_preceding_availability_snapshot() {
+        check_dfs(|| attach_during_availability_observation(true), Some(1_000));
     }
 }

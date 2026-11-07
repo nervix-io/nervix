@@ -168,8 +168,16 @@ lists. `pause`, `advance` and `resume` exist only with the `test-util` capabilit
 tests of elapsed-time behavior enable and no production graph has, because a clock that can be
 paused is checked on every read.
 
-The clock-attachment Shuttle check has two explicitly permitted modeled participants, a producer
-observer and a replacement handler. They race finite attachment and authority-stop operations,
+A watch receiver's `mark_unchanged` marks its current version seen without borrowing the value,
+publishing a change or changing another receiver. The Shuttle adapter takes a scheduling point
+before reading that version, matching the registration it observes. Shared native/Shuttle
+conformance exercises it while the value's write guard is held, its next send and channel closure;
+the paired race checks expose marking after a predicate read as a lost wake and keep marking before
+the read sound. Ordinary builds still re-export Tokio's operation directly.
+
+The clock-attachment Shuttle checks have at most two explicitly permitted modeled participants,
+an observer and replacement handler, or two competing attachment handlers. They race finite
+attachment, availability observation and authority-stop operations,
 join before each execution ends and explore at most 1,000 depth-first schedules under the model
 runner's step and wall bounds. Its production owner uses the boundary's watch and cancellation
 primitives; the permission adds no product thread or executor bypass.
