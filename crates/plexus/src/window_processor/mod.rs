@@ -1,10 +1,21 @@
+//! Plexus window processor statements.
+//!
+//! Layer: language.
+//! - **Owns.** The window processor grammar, lowering into Models and grammar-derived completion.
+//! - **Depends on.** Shared parser clauses, tokens and the vocabulary.
+//! - **Must not know.** Registry validation, execution planning or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use chumsky::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AckMode, CreateStatement, CreateWindowProcessor, WindowBound, WindowStateLimit,
-    parse_duration_text,
+    CreateStatement, CreateWindowProcessor, WindowBound, WindowStateLimit, parse_duration_text,
 };
 
 use crate::{
@@ -199,12 +210,12 @@ pub fn create_window_processor_parser<'src>()
 + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Identifier::Window))
         .then_ignore(kw(Identifier::Processor))
         .then(window_processor_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(ack_mode().or_not())
         .then(filter_where_clause().or_not())
         .boxed()
         .then(width_and_step())
@@ -220,7 +231,7 @@ pub fn create_window_processor_parser<'src>()
             let (parsed, branched_by) = parsed;
             let (parsed, state_limit) = parsed;
             let ((head, width), step) = parsed;
-            let ((((if_not_exists, mode), name), from_input), filter_where) = head;
+            let ((((if_not_exists, name), from_input), mode), filter_where) = head;
             Ok(CreateStatement::new(
                 CreateWindowProcessor {
                     name,
@@ -230,7 +241,7 @@ pub fn create_window_processor_parser<'src>()
                     width,
                     step,
                     state_limit,
-                    mode: mode.unwrap_or(AckMode::Attached),
+                    mode: mode.unwrap_or_default(),
                     filter_where,
                     materialized_state,
                 },
@@ -273,8 +284,23 @@ pub fn suggest_create_window_processor(input: &str, cursor: usize) -> Vec<String
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::AckMode;
+
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn input_acknowledgement_clause() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE WINDOW PROCESSOR tested FROM incoming",
+            "WIDTH 3 MESSAGES STEP 3 MESSAGES UNBRANCHED TO outgoing SET value = \
+             COUNT(input.value) ON MESSAGE ERROR LOG",
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE WINDOW PROCESSOR tested FROM incoming DETACHED ",
+            &["FILTER WHERE", "WIDTH"],
+        );
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)
@@ -333,8 +359,9 @@ mod tests {
     #[test]
     fn parses_tumbling_message_window() {
         let input = r#"
-            CREATE DETACHED WINDOW PROCESSOR counts
+            CREATE WINDOW PROCESSOR counts
                 FROM s1
+                DETACHED
                 WIDTH 100 MESSAGES
                 STEP 100 MESSAGES
                 BRANCHED BY tenant

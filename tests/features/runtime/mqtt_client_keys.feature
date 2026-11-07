@@ -40,7 +40,8 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
       TO mqtt_out TOPIC 'auth_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
@@ -95,7 +96,8 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
       TO anonymous TOPIC 'anonymous_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
@@ -194,7 +196,8 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
       TO mqtt_out TOPIC 'identity_out_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
@@ -245,7 +248,8 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
       TO mqtt_main TOPIC 'default_identity_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
@@ -294,7 +298,8 @@ Feature: MQTT client credentials, identity, keep-alive and admitted publish size
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      ATTACHED
       TO mqtt_out TOPIC 'keep_alive_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL

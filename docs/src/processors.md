@@ -18,6 +18,12 @@ FROM <relay> [WHERE <expr>], ...
 COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]
 ```
 
+The optional `ATTACHED | DETACHED` clause follows the complete input list and its optional
+`COLLECT FOR`, before the node filter, resource binding, branch selection or output routes. On a
+correlator it follows the complete `RIGHT FROM` list and its collection policy. Omitting the clause
+selects `ATTACHED`; canonical Plexus and `SHOW CREATE` always write it explicitly in that body
+position. The supported `ALTER ... SET ATTACHED | SET DETACHED` operations change the same mode.
+
 Without `COLLECT FOR`, each relay batch is executed immediately and Nervix creates no additional
 input buffer. With it, the duration starts when data enters an empty input collector. The node
 executes the accumulated batch when that timer expires or the optional maximum size is reached.

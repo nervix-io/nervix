@@ -43,7 +43,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED KAFKA TOPIC EMITTER retried FROM events
+      CREATE KAFKA TOPIC EMITTER retried FROM events
+        ATTACHED
         TO kafka_main TOPIC 'retried_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 3s MAX 3s
           ENCODE USING event_codec
@@ -124,7 +125,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED KAFKA TOPIC EMITTER detached_retried FROM events
+      CREATE KAFKA TOPIC EMITTER detached_retried FROM events
+        DETACHED
         TO kafka_main TOPIC 'detached_retried_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 10s MAX 10s
           ENCODE USING event_codec

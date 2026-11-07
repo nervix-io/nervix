@@ -1,6 +1,18 @@
+//! Plexus reingestor statements.
+//!
+//! Layer: language.
+//! - **Owns.** The reingestor grammar, lowering into Models and grammar-derived completion.
+//! - **Depends on.** Shared parser clauses, tokens and the vocabulary.
+//! - **Must not know.** Registry validation, execution planning or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{AckMode, AlterReingestor, CreateReingestor, CreateStatement};
+use nervix_models::{AlterReingestor, CreateReingestor, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
@@ -18,18 +30,18 @@ pub fn create_reingestor_parser<'src>()
 + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then(ack_mode().or_not())
         .then_ignore(kw(Identifier::Reingestor))
         .then(reingestor_name())
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
+        .then(ack_mode().or_not())
         .then(filter_where_clause().or_not())
         .then(materialized_state_dependencies())
         .then(flushed_ingestor_outputs())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |(
-                (((((if_not_exists, mode), name), from_input), filter_where), materialized_state),
+                (((((if_not_exists, name), from_input), mode), filter_where), materialized_state),
                 outputs,
             )| {
                 CreateStatement::new(
@@ -37,7 +49,7 @@ pub fn create_reingestor_parser<'src>()
                         name,
                         from: from_input,
                         output_routes: outputs,
-                        mode: mode.unwrap_or(AckMode::Attached),
+                        mode: mode.unwrap_or_default(),
                         filter_where,
                         materialized_state,
                     },
@@ -136,10 +148,22 @@ pub fn suggest_alter_reingestor(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::FlushPolicy;
+    use nervix_models::{AckMode, FlushPolicy};
 
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn input_acknowledgement_clause() {
+        crate::conformance_support::assert_input_acknowledgement_clause(
+            "CREATE REINGESTOR tested FROM incoming",
+            "TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG",
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE REINGESTOR tested FROM incoming DETACHED ",
+            &["FILTER WHERE", "USING MATERIALIZED STATE", "TO"],
+        );
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)
@@ -260,7 +284,7 @@ mod tests {
     #[test]
     fn parses_create_reingestor_detached() {
         let tokens = to_tokens(
-            "CREATE DETACHED REINGESTOR repartition FROM notifications TO tenant_notifications \
+            "CREATE REINGESTOR repartition FROM notifications DETACHED TO tenant_notifications \
              BRANCHED BY tenant_branch SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH \
              SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
@@ -286,15 +310,6 @@ mod tests {
                 max_batch_size: "1MiB".to_string()
             }
         );
-    }
-
-    #[test]
-    fn suggests_mode_after_create() {
-        let input = "CREATE ";
-        let suggestions = suggest_create_reingestor(input, input.len());
-        assert!(suggestions.contains(&"ATTACHED".to_string()));
-        assert!(suggestions.contains(&"DETACHED".to_string()));
-        assert!(!suggestions.contains(&"FROM".to_string()));
     }
 
     #[test]

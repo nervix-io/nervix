@@ -270,10 +270,10 @@ async fn process_command_preserves_detached_deduplicator_and_emitter_modes() {
          SUSPEND DECODE USING notification_codec TIMESTAMP NOW TO notifications INHERIT ALL \
          UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR \
          LOG;",
-        "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications DEDUPLICATE ON input.user_id \
+        "CREATE DEDUPLICATOR passthrough FROM notifications DETACHED DEDUPLICATE ON input.user_id \
          MAX TIME 10m UNBRANCHED TO forwarded_notifications INHERIT ALL FLUSH EACH 100ms MAX \
          BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
-        "CREATE DETACHED KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC \
+        "CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications DETACHED TO kafka_main TOPIC \
          'notifications_out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
          notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
          ON GENERAL ERROR LOG;",

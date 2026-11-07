@@ -331,7 +331,8 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE <attachment> HTTP REQUEST EMITTER published FROM outgoing
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        <attachment>
         TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         INVOKE write_header('X-Attempt-Key', uuid_v4())
