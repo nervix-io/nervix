@@ -46,7 +46,7 @@ Feature: Visual connector choices follow the entity declarations
       | 1            |
       | 3            |
 
-  @connector_presentation_console
+  @connector_presentation_console @slots_2
   Scenario Outline: Each transport editor offers exactly its declared delivery modes
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -84,6 +84,8 @@ Feature: Visual connector choices follow the entity declarations
       | 3            | rabbitmq-queue        | no-ack         | ack-sequential | ack-parallel   | 3     | .create-ingestor-queue         |
       | 1            | redis-pubsub          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-channel       |
       | 3            | redis-pubsub          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-channel       |
+      | 1            | redis-pubsub          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-pattern       |
+      | 3            | redis-pubsub          | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-pattern       |
       | 1            | prometheus-query      | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-max-body-size |
       | 3            | prometheus-query      | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-max-body-size |
       | 1            | zeromq-pull           | no-ack         | no-ack         | no-ack         | 1     | .create-ingestor-source-ref    |

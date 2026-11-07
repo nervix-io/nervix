@@ -114,10 +114,14 @@ fn records_carry_ordered_repeated_headers_and_their_log_position() {
             IngestorMetadataField::new("topic", IngestorMetadataType::String),
             IngestorMetadataField::new("partition", IngestorMetadataType::I32),
             IngestorMetadataField::new("offset", IngestorMetadataType::I64),
+            IngestorMetadataField::new("key", IngestorMetadataType::Bytes),
+            IngestorMetadataField::new("timestamp", IngestorMetadataType::Datetime),
+            IngestorMetadataField::new("timestamp_type", IngestorMetadataType::String),
+            IngestorMetadataField::new("tombstone", IngestorMetadataType::Bool),
         ]
     );
     assert!(emit.options.is_empty());
-    assert!(emit.envelope.is_empty());
+    assert_eq!(emit.envelope, [EnvelopeClauseKind::Timestamp]);
     assert!(emit.properties.is_empty());
 }
 

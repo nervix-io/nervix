@@ -27,12 +27,13 @@ use nervix_models::{
     PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestMode,
     PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
     PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
-    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisIngestorEntity,
-    RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
-    SqsQueueIngestor, SqsQueueName, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
-    WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode,
-    ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisChannelPattern,
+    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget,
+    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName,
+    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, WebsocketsConnectionIngestor,
+    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity,
+    WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity,
+    ZeroMqPullIngestor,
 };
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
@@ -52,6 +53,7 @@ pub(super) struct IngestorEntityDraft {
     pub(super) topic: String,
     pub(super) queue: String,
     pub(super) channel: String,
+    pub(super) pattern: String,
     pub(super) subject: String,
     pub(super) queue_group: String,
     pub(super) subscription: String,
@@ -187,8 +189,9 @@ impl IngestorEntityDraft {
             }
             "QOS" => self.mqtt_qos = MqttQos::iter().find(|value| value.spelling() == choice),
             "SUBSCRIPTION" => {
-                self.subscription_ownership =
-                    PulsarSubscriptionOwnership::iter().find(|value| value.keywords() == choice)
+                self.subscription_ownership = PulsarSubscriptionOwnership::CHOICES
+                    .into_iter()
+                    .find(|value| value.keywords() == choice)
             }
             "OFFSET BY" => {
                 self.offset = match choice {
@@ -202,7 +205,10 @@ impl IngestorEntityDraft {
     }
 
     fn requirement_met(&self, requirement: &ChoiceRequirement) -> bool {
-        self.chosen_option(requirement.option) == Some(requirement.choice)
+        let Some(chosen) = self.chosen_option(requirement.option) else {
+            return false;
+        };
+        requirement.accepts(chosen)
     }
 
     pub(super) fn mode_enabled(&self, mode: IngestDeliveryKind) -> bool {
@@ -261,8 +267,7 @@ impl IngestorEntityDraft {
         for requirement in delivery.requires {
             if !self.requirement_met(requirement) {
                 return Err(Report::new(IngestorEntityDraftError::OptionRequirement {
-                    option: requirement.option,
-                    choice: requirement.choice,
+                    requirement: *requirement,
                 }));
             }
         }
@@ -312,6 +317,8 @@ impl IngestorEntityDraft {
                 topic: MqttTopicFilter::parse(&self.topic)
                     .change_context(IngestorEntityDraftError::Topic)?,
                 instances: self.instances()?,
+                session: self.mqtt_session()?,
+                qos: self.mqtt_qos()?,
                 mode: self.mqtt_mode()?,
                 quiesce,
             }
@@ -338,8 +345,7 @@ impl IngestorEntityDraft {
             .into(),
             IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => RedisPubSubIngestor {
                 client: self.client()?,
-                channel: RedisChannelName::parse(&self.channel)
-                    .change_context(IngestorEntityDraftError::Channel)?,
+                subscription: self.redis_subscription()?,
                 mode: RedisPubSubIngestMode::NoAck,
                 quiesce,
             }
@@ -401,6 +407,24 @@ impl IngestorEntityDraft {
             return Err(Report::new(IngestorEntityDraftError::UnsupportedQuiesce));
         }
         Ok(source)
+    }
+
+    /// The subscription the Redis fields write: the pattern where one is written, otherwise the
+    /// channel. A form that writes both names two subscriptions, which no ingestor holds.
+    fn redis_subscription(
+        &self,
+    ) -> error_stack::Result<RedisSubscriptionTarget, IngestorEntityDraftError> {
+        if self.pattern.is_empty() {
+            let channel = RedisChannelName::parse(&self.channel)
+                .change_context(IngestorEntityDraftError::Channel)?;
+            return Ok(RedisSubscriptionTarget::Channel(channel));
+        }
+        if !self.channel.is_empty() {
+            return Err(Report::new(IngestorEntityDraftError::ChannelAndPattern));
+        }
+        let pattern = RedisChannelPattern::parse(&self.pattern)
+            .change_context(IngestorEntityDraftError::Pattern)?;
+        Ok(RedisSubscriptionTarget::Pattern(pattern))
     }
 
     fn client(&self) -> error_stack::Result<ClientName, IngestorEntityDraftError> {
@@ -605,17 +629,21 @@ impl IngestorEntityDraft {
         }
     }
 
+    /// The session the draft chooses, which every MQTT TOPIC statement writes.
+    fn mqtt_session(&self) -> error_stack::Result<MqttSession, IngestorEntityDraftError> {
+        self.mqtt_session
+            .ok_or_else(|| Report::new(IngestorEntityDraftError::MqttSession))
+    }
+
+    /// The quality of service the draft chooses, which every MQTT TOPIC statement writes.
+    fn mqtt_qos(&self) -> error_stack::Result<MqttQos, IngestorEntityDraftError> {
+        self.mqtt_qos
+            .ok_or_else(|| Report::new(IngestorEntityDraftError::MqttQos))
+    }
+
     fn mqtt_mode(&self) -> error_stack::Result<MqttIngestMode, IngestorEntityDraftError> {
         match self.delivery {
-            Some(IngestDeliveryKind::NoAck) => {
-                let session = MqttSession::iter()
-                    .find(|value| Some(value.keyword()) == self.chosen_option("SESSION"))
-                    .ok_or_else(|| Report::new(IngestorEntityDraftError::MqttSession))?;
-                let qos = MqttQos::iter()
-                    .find(|value| Some(value.spelling()) == self.chosen_option("QOS"))
-                    .ok_or_else(|| Report::new(IngestorEntityDraftError::MqttQos))?;
-                Ok(MqttIngestMode::NoAck { session, qos })
-            }
+            Some(IngestDeliveryKind::NoAck) => Ok(MqttIngestMode::NoAck),
             Some(IngestDeliveryKind::AckSequential | IngestDeliveryKind::AckParallel) => {
                 if self.delivery == Some(IngestDeliveryKind::AckSequential) {
                     Ok(MqttIngestMode::AckSequential {
@@ -683,6 +711,10 @@ pub(super) enum IngestorEntityDraftError {
     Queue,
     #[error("Enter a valid channel")]
     Channel,
+    #[error("Enter a valid channel pattern")]
+    Pattern,
+    #[error("Enter a channel or a channel pattern, not both")]
+    ChannelAndPattern,
     #[error("Enter a valid subject")]
     Subject,
     #[error("Enter a valid queue group")]
@@ -723,11 +755,8 @@ pub(super) enum IngestorEntityDraftError {
     MqttSession,
     #[error("Choose MQTT QOS")]
     MqttQos,
-    #[error("The selected mode requires {option} {choice}")]
-    OptionRequirement {
-        option: &'static str,
-        choice: &'static str,
-    },
+    #[error("The selected mode requires {}", requirement.phrase())]
+    OptionRequirement { requirement: ChoiceRequirement },
     #[error("Choose an ON QUIESCE mode")]
     Quiesce,
     #[error("This source cannot use the selected ON QUIESCE mode")]
@@ -750,14 +779,14 @@ mod tests {
     use nervix_models::{
         CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, IngestDeliveryKind,
         IngestQuiesceKind, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
-        KafkaIngestorEntity, Model, ModelKind, ModelName, MqttIngestorEntity, MqttQos, MqttSession,
-        NatsIngestorEntity, NodeRef, PulsarIngestor, PulsarIngestorEntity,
-        PulsarSubscriptionOwnership, RedisIngestorEntity, RequestedResourceVersion, Statement,
-        WebsocketsIngestorEntity,
+        KafkaIngestorEntity, Model, ModelKind, ModelName, MqttIngestMode, MqttIngestor,
+        MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity, NodeRef, PulsarIngestor,
+        PulsarIngestorEntity, PulsarSubscriptionOwnership, RedisIngestorEntity,
+        RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
     };
     use nervix_plexus::statement::parse_statement;
 
-    use super::{IngestorEntityDraft, OffsetChoice};
+    use super::{IngestorEntityDraft, IngestorEntityDraftError, OffsetChoice};
     use crate::create_dialog::{
         SelectedReference,
         ingestor_draft::{IngestorDraft, TimestampDraft},
@@ -887,8 +916,8 @@ mod tests {
             IngestorEntity::Mqtt(MqttIngestor::Topic(entity)) => {
                 draft.topic = entity.topic.to_string();
                 draft.instances = entity.instances.to_string();
-                draft.mqtt_session = Some(entity.mode.session());
-                draft.mqtt_qos = Some(entity.mode.qos());
+                draft.mqtt_session = Some(entity.session);
+                draft.mqtt_qos = Some(entity.qos);
             }
             IngestorEntity::Nats(NatsIngestor::Subject(entity)) => {
                 draft.subject = entity.subject.to_string();
@@ -899,9 +928,10 @@ mod tests {
                 draft.queue = entity.queue.to_string();
                 draft.instances = entity.instances.to_string();
             }
-            IngestorEntity::Redis(RedisIngestor::PubSub(entity)) => {
-                draft.channel = entity.channel.to_string()
-            }
+            IngestorEntity::Redis(RedisIngestor::PubSub(entity)) => match &entity.subscription {
+                RedisSubscriptionTarget::Channel(channel) => draft.channel = channel.to_string(),
+                RedisSubscriptionTarget::Pattern(pattern) => draft.pattern = pattern.to_string(),
+            },
             IngestorEntity::Sqs(SqsIngestor::Queue(entity)) => {
                 draft.queue = entity.queue.to_string();
                 draft.instances = entity.instances.to_string();
@@ -949,6 +979,34 @@ mod tests {
             });
     }
 
+    #[test]
+    fn a_redis_form_subscribes_by_its_pattern_or_its_channel_but_never_both() {
+        use nervix_models::{RedisChannelPattern, RedisIngestor, RedisSubscriptionTarget};
+        let mut draft = complete(IngestorEntityKind::Redis(RedisIngestorEntity::PubSub));
+        draft.channel.clear();
+        draft.pattern = "orders.*".into();
+        let IngestorEntity::Redis(RedisIngestor::PubSub(source)) = draft
+            .build()
+            .assured("a pattern written alone is a subscription")
+        else {
+            panic!("the Redis Pub/Sub form builds a Redis Pub/Sub source");
+        };
+        assert_eq!(
+            source.subscription,
+            RedisSubscriptionTarget::Pattern(
+                RedisChannelPattern::parse("orders.*").assured("the pattern is within the bound")
+            )
+        );
+        draft.channel = "orders".into();
+        let error = draft
+            .build()
+            .expect_err("a channel and a pattern name two subscriptions");
+        assert_eq!(
+            error.current_context(),
+            &super::IngestorEntityDraftError::ChannelAndPattern
+        );
+    }
+
     fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {
         let mut draft = IngestorEntityDraft::default();
         draft.choose_kind(kind);
@@ -981,7 +1039,7 @@ mod tests {
         draft.retry_backoff = "200ms".into();
         draft.retry_max = "5s".into();
         draft.mqtt_session = Some(MqttSession::Clean);
-        draft.mqtt_qos = Some(MqttQos::AtMostOnce);
+        draft.mqtt_qos = Some(MqttQos::Qos0);
         draft.quiesce = Some(match kind {
             IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
             | IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => {
@@ -1050,13 +1108,57 @@ mod tests {
         let mut draft = complete(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic));
         draft.delivery = Some(IngestDeliveryKind::AckParallel);
         draft.quiesce = Some(IngestQuiesceKind::Suspend);
-        assert!(draft.build().is_err());
+        let Err(refused) = draft.build() else {
+            panic!("an acknowledged mode needs a persistent session at QoS 1 or 2");
+        };
+        assert_eq!(
+            refused.current_context().to_string(),
+            "The selected mode requires SESSION PERSISTENT"
+        );
         draft.mqtt_session = Some(MqttSession::Persistent);
-        draft.mqtt_qos = Some(MqttQos::AtLeastOnce);
-        assert!(draft.build().is_ok());
+        let Err(refused) = draft.build() else {
+            panic!("an acknowledged mode needs QoS 1 or 2");
+        };
+        assert_eq!(
+            refused.current_context().to_string(),
+            "The selected mode requires QOS 1 or 2"
+        );
+        for qos in [MqttQos::Qos1, MqttQos::Qos2] {
+            draft.mqtt_qos = Some(qos);
+            assert!(draft.build().is_ok(), "{qos:?}");
+        }
         draft.delivery = Some(IngestDeliveryKind::NoAck);
         draft.mqtt_session = Some(MqttSession::Clean);
         assert!(draft.build().is_err());
+    }
+
+    #[test]
+    fn an_mqtt_draft_writes_the_session_and_quality_of_service_it_chose() {
+        let mut draft = complete(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic));
+        draft.mqtt_session = None;
+        let Err(refused) = draft.build() else {
+            panic!("every MQTT TOPIC statement writes its session");
+        };
+        assert!(matches!(
+            refused.current_context(),
+            IngestorEntityDraftError::MqttSession
+        ));
+        draft.mqtt_session = Some(MqttSession::Clean);
+        draft.mqtt_qos = None;
+        let Err(refused) = draft.build() else {
+            panic!("every MQTT TOPIC statement writes its quality of service");
+        };
+        assert!(matches!(
+            refused.current_context(),
+            IngestorEntityDraftError::MqttQos
+        ));
+        draft.mqtt_qos = Some(MqttQos::Qos2);
+        let Ok(IngestorEntity::Mqtt(MqttIngestor::Topic(entity))) = draft.build() else {
+            panic!("a complete MQTT draft builds its topic source");
+        };
+        assert_eq!(entity.session, MqttSession::Clean);
+        assert_eq!(entity.qos, MqttQos::Qos2);
+        assert_eq!(entity.mode, MqttIngestMode::NoAck);
     }
 
     #[test]
@@ -1070,7 +1172,7 @@ mod tests {
                     && *choice == IngestQuiesceKind::Suspend
                 {
                     candidate.mqtt_session = Some(MqttSession::Persistent);
-                    candidate.mqtt_qos = Some(MqttQos::AtLeastOnce);
+                    candidate.mqtt_qos = Some(MqttQos::Qos1);
                 }
                 assert!(
                     candidate.build().is_ok(),
@@ -1099,11 +1201,8 @@ mod tests {
             error.current_context(),
             &super::IngestorEntityDraftError::SubscriptionOwnership
         );
-        for ownership in [
-            PulsarSubscriptionOwnership::Ingestor,
-            PulsarSubscriptionOwnership::Provisioned,
-        ] {
-            draft.subscription_ownership = Some(ownership);
+        for ownership in PulsarSubscriptionOwnership::CHOICES {
+            draft.choose_option("SUBSCRIPTION", ownership.keywords());
             let IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) =
                 draft.build().assured("a complete Pulsar draft builds")
             else {

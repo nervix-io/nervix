@@ -70,10 +70,13 @@ impl Generated {
         }
     }
 
-    /// This statement, making every choice `requirements` name.
+    /// This statement, making the first choice each of `requirements` accepts.
     fn choosing(mut self, requirements: &[ChoiceRequirement]) -> Self {
         for requirement in requirements {
-            self.chosen.insert(requirement.option, requirement.choice);
+            let Some(first) = requirement.choices.first() else {
+                panic!("{} requires no choice of {}", self.kind, requirement.option);
+            };
+            self.chosen.insert(requirement.option, first);
         }
         self
     }
@@ -296,13 +299,25 @@ fn every_declared_delivery_and_quiesce_mode_parses_into_its_kind() {
                     continue;
                 };
                 for requirement in delivery.requires.iter().chain(quiesce.requires) {
-                    assert_eq!(
-                        source.chosen(requirement.option),
-                        Some(requirement.choice),
-                        "{text}"
-                    );
+                    let Some(chosen) = source.chosen(requirement.option) else {
+                        panic!("the source answers for {}: {text}", requirement.option);
+                    };
+                    assert!(requirement.accepts(chosen), "{text}");
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn every_declared_locator_parses_into_its_kind() {
+    for kind in IngestorEntityKind::all() {
+        for locator in kind.locators() {
+            let generated = Generated {
+                locator: Some(locator.example()),
+                ..Generated::of(kind)
+            };
+            generated.parse();
         }
     }
 }
@@ -433,9 +448,10 @@ fn a_required_option_cannot_be_left_out() {
 fn an_empty_external_name_is_refused_where_a_name_is_declared() {
     for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
-        if let Some(locator) = declared.locator
-            && let LocatorName::External(_) = locator.name
-        {
+        for locator in kind.locators() {
+            let LocatorName::External(_) = locator.name else {
+                continue;
+            };
             let generated = Generated {
                 locator: Some(format!("{} ''", locator.keywords)),
                 ..Generated::of(kind)
@@ -529,13 +545,20 @@ fn completion_names_the_declared_locator_then_the_declared_options() {
             reference(&declared)
         );
         let mut after_locator = head.clone();
-        if let Some(locator) = declared.locator {
-            assert_offers_exactly(&head, &[&locator.example()]);
+        let locators = kind.locators();
+        if !locators.is_empty() {
+            let written: Vec<String> = locators.iter().map(LocatorDeclaration::example).collect();
+            let examples: Vec<&str> = written.iter().map(String::as_str).collect();
+            assert_offers_exactly(&head, &examples);
+        }
+        for locator in &locators {
             let label = match locator.name {
                 LocatorName::External(name) => name.label,
                 LocatorName::Unquoted { label } => label,
             };
             assert_offers_exactly(&format!("{head}{} ", locator.keywords), &[label]);
+        }
+        if let Some(locator) = declared.locator {
             after_locator = format!("{head}{} ", locator.example());
         }
 

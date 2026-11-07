@@ -180,7 +180,12 @@ window aggregates, and UDFs. The compiler handles those specially. For a tree th
 path.
 
 No builtin has side effects. The language's one side effect, `write_header`, is an `INVOKE`
-statement rather than an expression.
+statement rather than an expression. `CompileOptions::header_writes` carries the header values the
+emitter's entity declares, and a program compiled without them refuses `INVOKE`. The compiler holds
+the name to a `STRING` and the value to one of the declared exact types, `STRING` for text values,
+both non-null, and moves each into a register of its own type. The host reads the value back from
+that typed register as the record's text or typed header, so an integer or a byte string reaches a
+typed transport without passing through text.
 
 A value rule that both folding and execution apply is defined once in the catalog:
 
@@ -385,6 +390,10 @@ The host builds a program's input with `project_vm_input_batch` in `src/runtime/
 - **Built columns.** Branch key fields, broadcast materialized-state values, lookup results, and
   selected ingest metadata are built as new columns. `SharedVmInputColumns` builds each of them
   once per dispatched batch and shares it among every output route that reads it.
+- **Missing nullable inputs.** These are typed Arrow null columns with the carrier's row count.
+  This includes unread metadata fields such as a Kafka record's binary key. Absence does not pass
+  through scalar `RuntimeValue` construction, so an unread `BYTES` declaration needs no scalar
+  byte representation and does not visit the message's metadata.
 - **Uninitialized outputs.** These stay `TypedArray::Uninitialized` until finalization
   materializes them.
 

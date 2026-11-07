@@ -448,7 +448,7 @@ Feature: Web console Plexus REPL
     When selector ".prompt-row input" is filled with "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" contains "read_header"
     And selector ".suggestions" contains "read_headers"
-    When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
+    When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" does not contain "read_header"
     When selector ".prompt-row input" is filled with "CREATE KAFKA TOPIC EMITTER emitter FROM incoming TO broker TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
     Then selector ".suggestions" contains "write_header"
@@ -1720,7 +1720,7 @@ Feature: Web console Plexus REPL
         'uri' = 'http://127.0.0.1:8181',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       }; CREATE MQTT TOPIC INGESTOR iot_device_activity
-        FROM mqtt_devices TOPIC 'datalake/device_activity' INSTANCES 2 MODE NO ACK
+        FROM mqtt_devices TOPIC 'datalake/device_activity' INSTANCES 2 SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING activity_codec
         TO device_activity_landing
         INHERIT ALL

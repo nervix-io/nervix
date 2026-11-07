@@ -49,14 +49,18 @@ Feature: MQTT TOPIC declarations
 
     Examples:
       | cluster_size | filter           | subscription                                                                                                           | quiesce                                      | topic                | publishing                                                                 | batch                               |
-      | 1            | Devices/+/Orders | MODE NO ACK                                                                                                            | DROP                                         | Devices/EU/Orders    | QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s                                   |                                     |
-      | 3            | Devices/+/Orders | MODE NO ACK                                                                                                            | DROP                                         | Devices/EU/Orders    | QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s                                   |                                     |
+      | 1            | Devices/+/Orders | SESSION CLEAN QOS 0 MODE NO ACK                                                                                        | DROP                                         | Devices/EU/Orders    | QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s                                   |                                     |
+      | 3            | Devices/+/Orders | SESSION CLEAN QOS 0 MODE NO ACK                                                                                        | DROP                                         | Devices/EU/Orders    | QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s                                   |                                     |
+      | 1            | Devices/+/Alerts | SESSION CLEAN QOS 2 MODE NO ACK                                                                                        | DROP                                         | Devices/EU/Alerts    | QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s                                   |                                     |
+      | 3            | Devices/+/Alerts | SESSION CLEAN QOS 2 MODE NO ACK                                                                                        | DROP                                         | Devices/EU/Alerts    | QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s                                   |                                     |
       | 1            | telemetry/#      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s                         | SUSPEND                                      | telemetry/Événements | QOS 1 ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s | BATCH MAX MESSAGES 8 MAX SIZE 64KiB |
       | 3            | telemetry/#      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s                         | SUSPEND                                      | telemetry/Événements | QOS 1 ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s | BATCH MAX MESSAGES 8 MAX SIZE 64KiB |
-      | 1            | /                | SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | sensors/Raw Topic    | QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |                                     |
-      | 3            | /                | SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | sensors/Raw Topic    | QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |                                     |
+      | 1            | /                | SESSION PERSISTENT QOS 2 MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | sensors/Raw Topic    | QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |                                     |
+      | 3            | /                | SESSION PERSISTENT QOS 2 MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | sensors/Raw Topic    | QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |                                     |
+      | 1            | sensors/#        | SESSION PERSISTENT QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s                         | SUSPEND                                      | sensors/Raw Topic    | QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |                                     |
+      | 3            | sensors/#        | SESSION PERSISTENT QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s                         | SUSPEND                                      | sensors/Raw Topic    | QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |                                     |
 
-  Scenario Outline: MQTT TOPIC ingestors refuse acknowledgement and suspension outside a persistent QoS 1 session
+  Scenario Outline: MQTT TOPIC ingestors refuse acknowledgement and suspension outside a persistent session at QoS 1 or 2
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -81,17 +85,99 @@ Feature: MQTT TOPIC declarations
       """
 
     Examples:
-      | cluster_size | subscription                                                                                                  | quiesce | expected                                                  |
-      | 1            | SESSION CLEAN QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                        | DROP    | MQTT ACK modes require SESSION PERSISTENT                 |
-      | 3            | SESSION CLEAN QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                        | DROP    | MQTT ACK modes require SESSION PERSISTENT                 |
-      | 1            | SESSION PERSISTENT MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | DROP    | MQTT ACK modes require QOS 1                              |
-      | 3            | SESSION PERSISTENT MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | DROP    | MQTT ACK modes require QOS 1                              |
-      | 1            | SESSION PERSISTENT QOS 2 MODE NO ACK                                                                          | DROP    | MQTT ingestor QOS must be 0 or 1, found 2                 |
-      | 3            | SESSION PERSISTENT QOS 2 MODE NO ACK                                                                          | DROP    | MQTT ingestor QOS must be 0 or 1, found 2                 |
-      | 1            | MODE NO ACK                                                                                                   | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1 |
-      | 3            | MODE NO ACK                                                                                                   | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1 |
-      | 1            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                          | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1 |
-      | 3            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                          | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1 |
+      | cluster_size | subscription                                                                                                        | quiesce | expected                                                                                                                                   |
+      | 1            | SESSION CLEAN QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                              | DROP    | MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1    |
+      | 3            | SESSION CLEAN QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                              | DROP    | MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1    |
+      | 1            | SESSION CLEAN QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                              | DROP    | MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and QOS 1 or 2; the statement writes SESSION CLEAN and QOS 2    |
+      | 3            | SESSION CLEAN QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                              | DROP    | MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and QOS 1 or 2; the statement writes SESSION CLEAN and QOS 2    |
+      | 1            | SESSION PERSISTENT QOS 0 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | DROP    | MQTT TOPIC ingestors name MODE ACK PARALLEL only with SESSION PERSISTENT and QOS 1 or 2; the statement writes SESSION PERSISTENT and QOS 0 |
+      | 3            | SESSION PERSISTENT QOS 0 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | DROP    | MQTT TOPIC ingestors name MODE ACK PARALLEL only with SESSION PERSISTENT and QOS 1 or 2; the statement writes SESSION PERSISTENT and QOS 0 |
+      | 1            | SESSION PERSISTENT QOS 3 MODE NO ACK                                                                                | DROP    | MQTT ingestor QOS must be 0, 1 or 2, found 3                                                                                               |
+      | 3            | SESSION PERSISTENT QOS 3 MODE NO ACK                                                                                | DROP    | MQTT ingestor QOS must be 0, 1 or 2, found 3                                                                                               |
+      | 1            | SESSION CLEAN QOS 2 MODE NO ACK                                                                                     | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2                                                                         |
+      | 3            | SESSION CLEAN QOS 2 MODE NO ACK                                                                                     | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2                                                                         |
+      | 1            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                                | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2                                                                         |
+      | 3            | SESSION PERSISTENT QOS 0 MODE NO ACK                                                                                | SUSPEND | MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2                                                                         |
+
+  Scenario Outline: MQTT TOPIC ingestors refuse a statement that leaves out its session or quality of service
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
+      """
+    When these Plexus commands fail
+      """
+      CREATE MQTT TOPIC INGESTOR refused
+        FROM mqtt_main TOPIC 'devices/+' <subscription>
+        ON QUIESCE DROP DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    Then the last command error contains
+      """
+      <expected>
+      """
+
+    Examples:
+      | cluster_size | subscription                         | expected                 |
+      | 1            | MODE NO ACK                          | SESSION, found MODE      |
+      | 3            | MODE NO ACK                          | SESSION, found MODE      |
+      | 1            | QOS 0 MODE NO ACK                    | SESSION, found QOS       |
+      | 3            | QOS 0 MODE NO ACK                    | SESSION, found QOS       |
+      | 1            | SESSION CLEAN MODE NO ACK            | expected QOS, found MODE |
+      | 3            | SESSION CLEAN MODE NO ACK            | expected QOS, found MODE |
+      | 1            | QOS 1 SESSION PERSISTENT MODE NO ACK | SESSION, found QOS       |
+      | 3            | QOS 1 SESSION PERSISTENT MODE NO ACK | SESSION, found QOS       |
+
+  Scenario Outline: An MQTT TOPIC ingestor's SET FROM keeps the persistent session at QoS 1 or 2 its acknowledged mode requires
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1' };
+      CREATE MQTT TOPIC INGESTOR acknowledged
+        FROM mqtt_main TOPIC 'devices/+' SESSION PERSISTENT QOS 2
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    When these Plexus commands fail
+      """
+      ALTER MQTT TOPIC INGESTOR acknowledged SET FROM mqtt_main TOPIC 'devices/+'
+        SESSION CLEAN QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s
+        ON QUIESCE DROP;
+      """
+    Then the last command error contains
+      """
+      MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and QOS 1 or 2; the statement writes SESSION CLEAN and QOS 2
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER MQTT TOPIC INGESTOR acknowledged SET FROM mqtt_main TOPIC 'devices/+'
+        SESSION PERSISTENT QOS 2
+        MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s
+        ON QUIESCE SUSPEND;
+      SHOW CREATE INGESTOR acknowledged;
+      """
+    Then the last command output contains
+      """
+      TOPIC 'devices/+' SESSION PERSISTENT QOS 2 MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE SUSPEND
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: MQTT TOPIC ingestors refuse a topic filter the filter rule excludes
     Given a <cluster_size> node nervix cluster is started
@@ -107,7 +193,7 @@ Feature: MQTT TOPIC declarations
     When these Plexus commands fail
       """
       CREATE MQTT TOPIC INGESTOR refused
-        FROM mqtt_main TOPIC '<filter>' MODE NO ACK
+        FROM mqtt_main TOPIC '<filter>' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

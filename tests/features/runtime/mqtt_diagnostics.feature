@@ -6,7 +6,7 @@ Feature: MQTT refusals identify the token and its legal session or QoS
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus statements fail with "MQTT ingestor QOS must be 0 or 1, found <qos>"
+    When these Plexus statements fail with "MQTT ingestor QOS must be 0, 1 or 2, found <qos>"
       """
       CREATE MQTT TOPIC INGESTOR incoming FROM broker TOPIC 'events'
         SESSION PERSISTENT QOS <qos> MODE NO ACK ON QUIESCE DROP
@@ -16,10 +16,10 @@ Feature: MQTT refusals identify the token and its legal session or QoS
 
     Examples:
       | nodes | qos |
-      | 1     | 2   |
-      | 3     | 2   |
       | 1     | 3   |
       | 3     | 3   |
+      | 1     | 10  |
+      | 3     | 10  |
 
   Scenario Outline: MQTT emitter QoS refusals explain the supplied value on <nodes> nodes
     Given a <nodes> node nervix cluster is started
@@ -45,7 +45,7 @@ Feature: MQTT refusals identify the token and its legal session or QoS
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus statements fail with "MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1"
+    When these Plexus statements fail with "MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2"
       """
       CREATE MQTT TOPIC INGESTOR incoming FROM broker TOPIC 'events'
         SESSION <session> QOS <qos> MODE NO ACK ON QUIESCE SUSPEND
@@ -59,5 +59,7 @@ Feature: MQTT refusals identify the token and its legal session or QoS
       | 3     | CLEAN      | 0   |
       | 1     | CLEAN      | 1   |
       | 3     | CLEAN      | 1   |
+      | 1     | CLEAN      | 2   |
+      | 3     | CLEAN      | 2   |
       | 1     | PERSISTENT | 0   |
       | 3     | PERSISTENT | 0   |

@@ -67,6 +67,7 @@ impl CompiledOrderingGroup {
                 output_sensitivity: VmSchemaSensitivity::default(),
             },
             true,
+            None,
             error_sites,
             context,
         )?;

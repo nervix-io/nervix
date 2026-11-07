@@ -256,16 +256,17 @@ fn header_invocations_name_why_a_row_has_no_headers() {
     )];
 
     assert_eq!(
-        emitter_headers_from_invocations(&headers, 0).expect("the first row writes its header"),
-        vec![("tenant".to_string(), "acme".to_string())]
+        emitter_headers_from_invocations(&headers, 0, Some(HeaderValues::Text))
+            .expect("the first row writes its header"),
+        EmitterHeaders::Text(vec![("tenant".to_string(), "acme".to_string())])
     );
     let cases = [
         (
-            emitter_headers_from_invocations(&headers, 1),
+            emitter_headers_from_invocations(&headers, 1, Some(HeaderValues::Text)),
             EmitterHeaderError::NullArgument,
         ),
         (
-            emitter_headers_from_invocations(&headers, 2),
+            emitter_headers_from_invocations(&headers, 2, Some(HeaderValues::Text)),
             EmitterHeaderError::MissingRow { row: 2 },
         ),
         (
@@ -276,6 +277,7 @@ fn header_invocations_name_why_a_row_has_no_headers() {
                     span: VmSpan { start: 0, end: 1 },
                 }],
                 0,
+                Some(HeaderValues::Text),
             ),
             EmitterHeaderError::UnsupportedInvocation {
                 function: FunctionName::Lower,
@@ -289,6 +291,22 @@ fn header_invocations_name_why_a_row_has_no_headers() {
                     span: VmSpan { start: 0, end: 1 },
                 }],
                 0,
+                Some(HeaderValues::Text),
+            ),
+            EmitterHeaderError::ArgumentTypes,
+        ),
+        (
+            emitter_headers_from_invocations(
+                &[nervix_vm::FunctionInvocation {
+                    function: FunctionName::WriteHeader,
+                    arguments: vec![
+                        VmTypedArray::Utf8(StringArray::from(vec!["user"])),
+                        VmTypedArray::Int64(arrow_array::Int64Array::from(vec![7])),
+                    ],
+                    span: VmSpan { start: 0, end: 1 },
+                }],
+                0,
+                Some(HeaderValues::Text),
             ),
             EmitterHeaderError::ArgumentTypes,
         ),
@@ -296,6 +314,145 @@ fn header_invocations_name_why_a_row_has_no_headers() {
     for (outcome, expected) in cases {
         let error = outcome.expect_err("the row has no headers");
         assert_eq!(error.current_context(), &expected);
+    }
+}
+
+/// Typed header values an emitter entity declares: a STRING, an I64 and BYTES.
+const TYPED_HEADER_VALUES: &[nervix_models::HeaderValueType] = &[
+    nervix_models::HeaderValueType {
+        ty: nervix_models::PropertyType::String,
+        carried_as: "String",
+    },
+    nervix_models::HeaderValueType {
+        ty: nervix_models::PropertyType::I64,
+        carried_as: "Number",
+    },
+    nervix_models::HeaderValueType {
+        ty: nervix_models::PropertyType::Bytes,
+        carried_as: "Binary",
+    },
+];
+
+/// A `write_header` invocation writing `name` for every row with the values `values`.
+fn typed_write_header(name: &str, values: VmTypedArray) -> nervix_vm::FunctionInvocation {
+    let names = vec![Some(name); values.len()];
+    nervix_vm::FunctionInvocation {
+        function: FunctionName::WriteHeader,
+        arguments: vec![VmTypedArray::Utf8(StringArray::from(names)), values],
+        span: VmSpan { start: 0, end: 1 },
+    }
+}
+
+#[test]
+fn typed_header_invocations_give_each_row_its_values_in_their_exact_types() {
+    let headers = [
+        typed_write_header(
+            "tenant",
+            VmTypedArray::Utf8(StringArray::from(vec![Some("acme"), Some("beta")])),
+        ),
+        typed_write_header(
+            "user",
+            VmTypedArray::Int64(arrow_array::Int64Array::from(vec![Some(7), None])),
+        ),
+        typed_write_header(
+            "digest",
+            VmTypedArray::Binary(arrow_array::BinaryArray::from(vec![
+                Some(&[0x00, 0xff][..]),
+                Some(&[0x10][..]),
+            ])),
+        ),
+    ];
+    let declared = Some(HeaderValues::Typed(TYPED_HEADER_VALUES));
+
+    assert_eq!(
+        emitter_headers_from_invocations(&headers, 0, declared)
+            .expect("the first row writes every header"),
+        EmitterHeaders::Typed(vec![
+            TypedRecordHeader {
+                name: "tenant".to_string(),
+                value: PropertyValue::String("acme".to_string()),
+            },
+            TypedRecordHeader {
+                name: "user".to_string(),
+                value: PropertyValue::I64(7),
+            },
+            TypedRecordHeader {
+                name: "digest".to_string(),
+                value: PropertyValue::Bytes(vec![0x00, 0xff]),
+            },
+        ])
+    );
+    let null_value = emitter_headers_from_invocations(&headers, 1, declared)
+        .expect_err("the second row's user is NULL");
+    assert_eq!(
+        null_value.current_context(),
+        &EmitterHeaderError::NullArgument
+    );
+    let float = [typed_write_header(
+        "ratio",
+        VmTypedArray::Float64(arrow_array::Float64Array::from(vec![0.5])),
+    )];
+    let undeclared = emitter_headers_from_invocations(&float, 0, declared)
+        .expect_err("no header value is a float");
+    assert_eq!(
+        undeclared.current_context(),
+        &EmitterHeaderError::ArgumentTypes
+    );
+}
+
+#[test]
+fn every_typed_register_becomes_the_property_value_of_its_exact_type() {
+    let cases = [
+        (
+            VmTypedArray::UInt8(arrow_array::UInt8Array::from(vec![8])),
+            PropertyValue::U8(8),
+        ),
+        (
+            VmTypedArray::Int8(arrow_array::Int8Array::from(vec![-8])),
+            PropertyValue::I8(-8),
+        ),
+        (
+            VmTypedArray::UInt16(arrow_array::UInt16Array::from(vec![16])),
+            PropertyValue::U16(16),
+        ),
+        (
+            VmTypedArray::Int16(arrow_array::Int16Array::from(vec![-16])),
+            PropertyValue::I16(-16),
+        ),
+        (
+            VmTypedArray::UInt32(arrow_array::UInt32Array::from(vec![32])),
+            PropertyValue::U32(32),
+        ),
+        (
+            VmTypedArray::Int32(arrow_array::Int32Array::from(vec![-32])),
+            PropertyValue::I32(-32),
+        ),
+        (
+            VmTypedArray::UInt64(arrow_array::UInt64Array::from(vec![u64::MAX])),
+            PropertyValue::U64(u64::MAX),
+        ),
+        (
+            VmTypedArray::Boolean(arrow_array::BooleanArray::from(vec![true])),
+            PropertyValue::Bool(true),
+        ),
+        (
+            VmTypedArray::Datetime(arrow_array::TimestampNanosecondArray::from(vec![42])),
+            PropertyValue::Datetime(Timestamp::from_unix_nanos(42)),
+        ),
+    ];
+    let declared = Some(HeaderValues::Typed(TYPED_HEADER_VALUES));
+
+    for (values, expected) in cases {
+        let headers = [typed_write_header("value", values)];
+        let written = emitter_headers_from_invocations(&headers, 0, declared)
+            .expect("a non-null value of a typed register is a header value");
+        assert_eq!(
+            written,
+            EmitterHeaders::Typed(vec![TypedRecordHeader {
+                name: "value".to_string(),
+                value: expected,
+            }])
+        );
     }
 }
 

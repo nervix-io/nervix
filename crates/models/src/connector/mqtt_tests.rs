@@ -13,13 +13,14 @@
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use rstest::rstest;
+use strum::IntoEnumIterator as _;
 
 use super::*;
 use crate::{
     ClientConfigEntry, ClientConfigFile, ClientConfigOwner, ClientConfigPresence,
     ClientConfigSchema, ClientConfigSchemaError, ClientConfigValue, ClientPooling,
     EmitterEntityKind, EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind,
-    IngestorEntityKind,
+    IngestorEntityKind, IngestorEntityModel as _, WrittenChoice,
 };
 
 #[test]
@@ -28,11 +29,11 @@ fn topic_ingestion_acknowledges_only_through_a_session_the_broker_keeps() {
     let kept_session = [
         ChoiceRequirement {
             option: "SESSION",
-            choice: "PERSISTENT",
+            choices: &["PERSISTENT"],
         },
         ChoiceRequirement {
             option: "QOS",
-            choice: "1",
+            choices: &["1", "2"],
         },
     ];
 
@@ -80,7 +81,7 @@ fn topic_ingestion_acknowledges_only_through_a_session_the_broker_keeps() {
 }
 
 #[test]
-fn topic_ingestion_subscribes_a_filter_with_an_optional_session_and_quality_of_service() {
+fn topic_ingestion_subscribes_a_filter_with_a_required_session_and_quality_of_service() {
     let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
 
     assert_eq!(
@@ -104,12 +105,7 @@ fn topic_ingestion_subscribes_a_filter_with_an_optional_session_and_quality_of_s
     let session = ingest
         .option("SESSION")
         .assured("the topic ingestor declares its session option");
-    assert_eq!(
-        session.presence,
-        OptionPresence::Optional {
-            default: Some("CLEAN"),
-        }
-    );
+    assert_eq!(session.presence, OptionPresence::Required);
     assert_eq!(
         session.examples(),
         vec!["SESSION CLEAN", "SESSION PERSISTENT"]
@@ -118,24 +114,23 @@ fn topic_ingestion_subscribes_a_filter_with_an_optional_session_and_quality_of_s
     let qos = ingest
         .option("QOS")
         .assured("the topic ingestor declares its quality-of-service option");
-    assert_eq!(
-        qos.presence,
-        OptionPresence::Optional { default: Some("0") }
-    );
-    assert_eq!(qos.examples(), vec!["QOS 0", "QOS 1"]);
-    assert_eq!(qos.choice("2"), None);
+    assert_eq!(qos.presence, OptionPresence::Required);
+    assert_eq!(qos.examples(), vec!["QOS 0", "QOS 1", "QOS 2"]);
+    assert_eq!(qos.choice("3"), None);
 }
 
 #[rstest]
-#[case::clean_at_most_once(MqttSession::Clean, MqttQos::AtMostOnce)]
-#[case::clean_at_least_once(MqttSession::Clean, MqttQos::AtLeastOnce)]
-#[case::kept_at_most_once(MqttSession::Persistent, MqttQos::AtMostOnce)]
-#[case::kept_at_least_once(MqttSession::Persistent, MqttQos::AtLeastOnce)]
+#[case::clean_at_most_once(MqttSession::Clean, MqttQos::Qos0)]
+#[case::clean_at_least_once(MqttSession::Clean, MqttQos::Qos1)]
+#[case::clean_exactly_once(MqttSession::Clean, MqttQos::Qos2)]
+#[case::kept_at_most_once(MqttSession::Persistent, MqttQos::Qos0)]
+#[case::kept_at_least_once(MqttSession::Persistent, MqttQos::Qos1)]
+#[case::kept_exactly_once(MqttSession::Persistent, MqttQos::Qos2)]
 fn an_unacknowledged_source_reports_the_session_and_quality_of_service_it_wrote(
     #[case] session: MqttSession,
     #[case] qos: MqttQos,
 ) {
-    let source = topic_source(MqttIngestMode::NoAck { session, qos });
+    let source = topic_source(session, qos, MqttIngestMode::NoAck);
 
     assert_eq!(source.chosen("SESSION"), Some(session.keyword()));
     assert_eq!(source.chosen("QOS"), Some(qos.spelling()));
@@ -146,29 +141,52 @@ fn an_unacknowledged_source_reports_the_session_and_quality_of_service_it_wrote(
     );
     assert!(!source.mode.is_ack());
     assert_eq!(source.mode.acknowledgement_window(), None);
+    assert_eq!(source.unmet_delivery(), None);
 }
 
 #[test]
-fn an_acknowledged_source_subscribes_through_a_persistent_session_at_qos_one() {
+fn the_quality_of_service_levels_spell_what_mqtt_numbers_them() {
+    let mut spelled = Vec::new();
+    for qos in MqttQos::iter() {
+        spelled.push((qos.level(), qos.spelling()));
+    }
+    assert_eq!(spelled, vec![(0, "0"), (1, "1"), (2, "2")]);
+}
+
+fn acknowledged_modes() -> [MqttIngestMode; 2] {
     let retry_policy = RetryPolicy {
         backoff: "1s".to_string(),
         max_backoff: "30s".to_string(),
     };
-    let sequential = topic_source(MqttIngestMode::AckSequential {
-        timeout: "5s".to_string(),
-        retry_policy: retry_policy.clone(),
-    });
-    let parallel = topic_source(MqttIngestMode::AckParallel {
-        max: NonZeroU64::new(8).assured("eight is nonzero"),
-        batch_timeout: "100ms".to_string(),
-        timeout: "5s".to_string(),
-        retry_policy,
-    });
+    [
+        MqttIngestMode::AckSequential {
+            timeout: "5s".to_string(),
+            retry_policy: retry_policy.clone(),
+        },
+        MqttIngestMode::AckParallel {
+            max: NonZeroU64::new(8).assured("eight is nonzero"),
+            batch_timeout: "100ms".to_string(),
+            timeout: "5s".to_string(),
+            retry_policy,
+        },
+    ]
+}
+
+#[rstest]
+#[case::at_least_once(MqttQos::Qos1)]
+#[case::exactly_once(MqttQos::Qos2)]
+fn an_acknowledged_source_subscribes_through_a_persistent_session_at_qos_one_or_two(
+    #[case] qos: MqttQos,
+) {
+    let [sequential, parallel] =
+        acknowledged_modes().map(|mode| topic_source(MqttSession::Persistent, qos, mode));
 
     for source in [&sequential, &parallel] {
         assert_eq!(source.chosen("SESSION"), Some("PERSISTENT"));
-        assert_eq!(source.chosen("QOS"), Some("1"));
+        assert_eq!(source.chosen("QOS"), Some(qos.spelling()));
         assert!(source.mode.is_ack());
+        assert_eq!(source.unmet_delivery(), None);
+        assert!(source.supports_quiesce(&IngestQuiesceMode::Suspend));
     }
     assert_eq!(
         sequential.mode.acknowledgement_window(),
@@ -177,11 +195,96 @@ fn an_acknowledged_source_subscribes_through_a_persistent_session_at_qos_one() {
     assert_eq!(parallel.mode.acknowledgement_window(), NonZeroU64::new(8));
 }
 
-fn topic_source(mode: MqttIngestMode) -> MqttTopicIngestor {
+#[rstest]
+#[case::clean_at_most_once(MqttSession::Clean, MqttQos::Qos0, "CLEAN", "0")]
+#[case::clean_at_least_once(MqttSession::Clean, MqttQos::Qos1, "CLEAN", "1")]
+#[case::clean_exactly_once(MqttSession::Clean, MqttQos::Qos2, "CLEAN", "2")]
+#[case::kept_at_most_once(MqttSession::Persistent, MqttQos::Qos0, "PERSISTENT", "0")]
+fn an_acknowledged_mode_outside_a_kept_session_names_both_written_values(
+    #[case] session: MqttSession,
+    #[case] qos: MqttQos,
+    #[case] session_keyword: &'static str,
+    #[case] qos_spelling: &'static str,
+) {
+    for mode in acknowledged_modes() {
+        let source = topic_source(session, qos, mode);
+        let delivery = source.acknowledgement().kind();
+        let unmet = source
+            .unmet_delivery()
+            .assured("an acknowledged mode needs the persistent session at QoS 1 or 2");
+        assert_eq!(unmet.entity, MqttTopicIngestor::KIND);
+        assert_eq!(unmet.delivery, delivery);
+        assert_eq!(unmet.requires, BROKER_KEPT_SESSION);
+        assert_eq!(
+            unmet.written,
+            vec![
+                WrittenChoice {
+                    option: "SESSION",
+                    choice: Some(session_keyword),
+                },
+                WrittenChoice {
+                    option: "QOS",
+                    choice: Some(qos_spelling),
+                },
+            ]
+        );
+        assert_eq!(
+            unmet.to_string(),
+            format!(
+                "MQTT TOPIC ingestors name MODE {} only with SESSION PERSISTENT and QOS 1 or 2; \
+                 the statement writes SESSION {session_keyword} and QOS {qos_spelling}",
+                delivery.phrase()
+            )
+        );
+        assert!(!source.supports_quiesce(&IngestQuiesceMode::Suspend));
+    }
+}
+
+#[test]
+fn an_acknowledged_mode_beside_options_a_statement_does_not_answer_names_them_unwritten() {
+    let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
+    let unmet = ingest
+        .unmet_delivery(
+            MqttTopicIngestor::KIND,
+            IngestDeliveryKind::AckSequential,
+            &|_| None,
+        )
+        .assured("a statement that answers no option makes none of the choices ACK requires");
+
+    assert_eq!(
+        unmet.written,
+        vec![
+            WrittenChoice {
+                option: "SESSION",
+                choice: None,
+            },
+            WrittenChoice {
+                option: "QOS",
+                choice: None,
+            },
+        ]
+    );
+    assert_eq!(
+        unmet.to_string(),
+        "MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and QOS 1 or \
+         2; the statement writes no SESSION and no QOS"
+    );
+    assert_eq!(
+        ingest.unmet_delivery(MqttTopicIngestor::KIND, IngestDeliveryKind::NoAck, &|_| {
+            None
+        }),
+        None,
+        "NO ACK requires no choice"
+    );
+}
+
+fn topic_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> MqttTopicIngestor {
     MqttTopicIngestor {
         client: ClientName::try_from("mqtt_main").assured("a lowercase identifier is a name"),
         topic: MqttTopicFilter::try_from("devices/+").assured("one wildcard level is a filter"),
         instances: NonZeroU64::MIN,
+        session,
+        qos,
         mode,
         quiesce: IngestQuiesceMode::Drop,
     }

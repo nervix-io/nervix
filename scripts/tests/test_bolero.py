@@ -146,6 +146,7 @@ class InventoryTests(unittest.TestCase):
             "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",
+            "redis-delivered-messages",
             "console-ingestor-source-drafts",
             "materialized-publication-lifetimes",
             "task-status-transitions",
@@ -217,6 +218,7 @@ class InventoryTests(unittest.TestCase):
             "models-connector-declarations",
             "websocket-retained-metadata",
             "ingest-metadata-projection",
+            "endpoint-request-metadata",
             "websocket-client-config",
             "websocket-upgrade-headers",
             "websocket-subprotocol-offers",
@@ -376,6 +378,8 @@ class InventoryTests(unittest.TestCase):
             "console-client-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
+            "kafka-record-create-times",
+            "kafka-record-metadata",
             "ingestor-describe-envelope",
             "dns-operation-budget",
         })
@@ -421,6 +425,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-otel",
             "nervix-connector-sentry",
             "nervix-connector-http",
+            "nervix-connector-redis",
             "nervix-web-console",
             "nervix-dns",
         })

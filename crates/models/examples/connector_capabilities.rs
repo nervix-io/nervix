@@ -48,11 +48,29 @@ fn main() -> std::io::Result<()> {
 
 fn locator(declaration: Option<LocatorDeclaration>) -> Option<String> {
     let declaration = declaration?;
+    Some(locator_with_label(declaration))
+}
+
+/// Every locator a body may write, the declared one first and each alternative after it, or none.
+fn locators(declarations: &[LocatorDeclaration]) -> Option<String> {
+    if declarations.is_empty() {
+        return None;
+    }
+    let described: Vec<String> = declarations
+        .iter()
+        .copied()
+        .map(locator_with_label)
+        .collect();
+    Some(described.join(" | "))
+}
+
+/// The locator written in full, with the label completion offers for its name.
+fn locator_with_label(declaration: LocatorDeclaration) -> String {
     let label = match declaration.name {
         LocatorName::External(name) => name.label,
         LocatorName::Unquoted { label } => label,
     };
-    Some(format!("{} ({label})", declaration.example()))
+    format!("{} ({label})", declaration.example())
 }
 
 fn option_value(value: OptionValue) -> String {
@@ -101,11 +119,10 @@ fn requirements(requirements: &[ChoiceRequirement]) -> String {
     if requirements.is_empty() {
         return String::new();
     }
-    let choices: Vec<_> = requirements
-        .iter()
-        .map(|requirement| format!("{} {}", requirement.option, requirement.choice))
-        .collect();
-    format!(" (requires {})", choices.join(" and "))
+    format!(
+        " (requires {})",
+        ChoiceRequirement::conjunction(requirements)
+    )
 }
 
 fn ingestor(kind: IngestorEntityKind) -> Value {
@@ -165,7 +182,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
     );
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
-        "reference": reference, "locator": locator(declared_locator), "options": options,
+        "reference": reference, "locator": locators(&kind.locators()), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
         "headers": header_model(headers), "every_node": executes_on_every_cluster_node,
         "position": position_class.as_ref(),
@@ -175,14 +192,20 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
 }
 
 /// The header model of one side as the matrix states it, or `null` for a side whose messages carry
-/// no transport headers.
+/// no transport headers. `values` states what carries each typed value, and is `null` for text.
 fn header_model(model: Option<HeaderModel>) -> Value {
-    let Some(HeaderModel { layout, names }) = model else {
+    let Some(HeaderModel {
+        layout,
+        names,
+        values,
+    }) = model
+    else {
         return Value::Null;
     };
     json!({
         "layout": layout.as_ref(), "names": names.as_ref(),
         "layout_meaning": layout.meaning(), "names_meaning": names.meaning(),
+        "values": values.carried(),
     })
 }
 
@@ -422,6 +445,10 @@ fn emitter_template(kind: EmitterEntityKind, body: &str) -> String {
         EmitterBodyForm::Native => String::new(),
     };
     body_clause.push_str(&option_template(&payload_options));
+    // Each envelope clause the entity declares follows the payload, written at most once.
+    for clause in declared.envelope {
+        body_clause.push_str(&format!("\n    [{}]", clause.example()));
+    }
     let batch = match declared.batch {
         EmitterBatchLegality::Required { .. } => "\n  BATCH MAX MESSAGES <count> MAX SIZE <bytes>",
         EmitterBatchLegality::Optional { .. } => {

@@ -83,8 +83,8 @@ boundaries for error-record delivery. `ON GENERAL ERROR` remains node-level beca
 source or transport failures that are not tied to one message or output route.
 
 `MAX BATCH SIZE` counts logical Arrow value, offset, and validity bytes. It excludes unused Arrow
-buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-flight window for
-`ACK PARALLEL`; `MODE NO ACK` never accepts it.
+buffer capacity and object overhead. In delivery modes, `MAX <n>` bounds the in-flight window of
+`ACK PARALLEL` or endpoint `ACK`; `MODE NO ACK` never accepts it.
 
 At runtime, the ingestor:
 
@@ -139,13 +139,21 @@ Every source body declares its delivery mode with `MODE`, polled and listener so
   <duration> MAX <duration>` lets at most `n` payloads await their acknowledgement; `BATCH TIMEOUT`
   is the longest wait for a partial batch. A `CLIENT PRODUCER` ingestor writes `ACK PARALLEL MAX
   <n> ACK TIMEOUT ...` without `BATCH TIMEOUT`.
+- `ACK MAX <n> ACK TIMEOUT <duration>` is the endpoint response mode. It holds at most `n`
+  outstanding payloads per ingestor on each node and requires `ON QUIESCE REJECT RETRY AFTER
+  <duration>`. The sender owns retry.
 
-`ACK TIMEOUT` bounds how long a payload may make no acknowledgement progress, not how long its
-processing takes. Work under way on its records reports them alive on the physical clock: a node
-that received a record from another node does for as long as it holds it, the node delivering a
+For `ACK SEQUENTIAL` and `ACK PARALLEL`, `ACK TIMEOUT` bounds how long a payload may make no
+acknowledgement progress, not how long its processing takes. Work under way on its records reports
+them alive on the physical clock: a node that received a record from another node does for as long
+as it holds it, the node delivering a
 record to another node does until that node has admitted it, and an emitter whose publish waits for
 a retry does for the records it holds. A payload whose records report nothing for its `ACK TIMEOUT`
 is delivered again, and its earlier delivery is not cancelled and may still complete.
+
+Endpoint `ACK TIMEOUT` instead bounds the complete response wait on the physical clock; progress
+does not restart it. Expiry reports `processing_failed` with cause `ack_timeout` without undoing
+admitted effects. See [endpoint ingestion](#http-endpoint-and-websockets-endpoint).
 
 Each entity accepts only the modes it can honor, and completion offers only those:
 
@@ -157,10 +165,11 @@ keeps the ingestor's accepted policy.
 
 | Entity | `MODE` forms |
 | --- | --- |
-| `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
-| `RABBITMQ QUEUE`, `SQS QUEUE` | `ACK SEQUENTIAL ...` |
+| `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `RABBITMQ QUEUE` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
+| `SQS QUEUE` | `ACK SEQUENTIAL ...` |
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
-| `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
+| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `NO ACK`, `ACK MAX <n> ACK TIMEOUT <duration>` |
+| `HTTP REQUEST`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
 In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and error
 delivery the message unfolded into has completed, and it reports that progress only once the
@@ -247,9 +256,10 @@ The shared mode vocabulary is:
   HTTP requests and new WebSocket upgrades receive 503; HTTP includes `Retry-After`, rounded up to
   whole seconds. Established WebSockets close with code 1013 (Try Again Later).
 - Endpoint buffering, for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT`, is `BUFFER MAX SIZE <bytes>`
-  without `ON OVERFLOW`. Requests that fit receive 202 and are held. A full buffer, or a body that
-  cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an acknowledged body is never
-  discarded by buffer policy.
+  without `ON OVERFLOW`, available only with `MODE NO ACK`. HTTP requests that fit receive 202 and
+  are held; WebSocket data frames that fit are held without a per-frame acknowledgement. A full
+  buffer, or a body that cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an accepted
+  body is never discarded by buffer policy. `MODE ACK` requires `REJECT RETRY AFTER <duration>`.
 
 A read already in progress when an ingestor quiesces ends without losing what its source took from
 the transport: under `SUSPEND` those payloads still dispatch before the source suspends, and under
@@ -261,11 +271,11 @@ A source accepts only the modes it can honor, and completion of its body offers 
 | Entity | Allowed `ON QUIESCE` bodies |
 |---|---|
 | `KAFKA TOPIC`, `PULSAR TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | `SUSPEND` |
-| `MQTT TOPIC` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP`; `SUSPEND` requires `SESSION PERSISTENT QOS 1` |
+| `MQTT TOPIC` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP`; `SUSPEND` requires `SESSION PERSISTENT` at `QOS 1` or `QOS 2` |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `WEBSOCKETS CONNECTION` | `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `ZEROMQ PULL`, `SYSLOG LISTENER` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `HTTP REQUEST`, `PROMETHEUS QUERY` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
-| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`, `BUFFER MAX SIZE ...` |
+| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`; `BUFFER MAX SIZE ...` only with `MODE NO ACK` |
 | `CLIENT PRODUCER` | `SUSPEND` |
 
 The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMAIN_PAUSE` batches,
@@ -487,16 +497,20 @@ General notes:
 - public Models store structured expressions; the runtime never reparses Plexus
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
-  `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
-  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`, and
-  `WEBSOCKETS CONNECTION` declares `metadata.frame_type`; every field is optional and none is
-  sensitive
+  `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
+  `metadata.timestamp_type`, and `metadata.tombstone`, `SYSLOG LISTENER` declares
+  `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
+  `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
+  `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
+  `metadata.frame_type`, `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`,
+  `metadata.remote_addr`, and `metadata.path`, and `REDIS PUBSUB` declares `metadata.channel` and
+  `metadata.pattern`; every field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
   entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
 - an ingestor builds a metadata column only for the fields its route expressions or its
-  `TIMESTAMP AT metadata.<field>` read, so an ingestor that reads none spends nothing per message
-  on metadata
+  `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
+  builds no metadata columns
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -534,8 +548,11 @@ Some ingestors receive additional source data alongside the decoded payload body
 
 The `name` argument can be any expression that returns `STRING`. Both functions are available in top-level `FILTER WHERE` and in per-route `SET` / `WHERE` expressions for these sources:
 
-- `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values
-- `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request
+- `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values; an `HTTP ENDPOINT`
+  drops a request header value that is not UTF-8 and counts it in
+  `nervix_ingestor_header_values_dropped_total`
+- `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request, dropping and
+  counting a value that is not UTF-8 the same way
 - `WEBSOCKETS CONNECTION` exposes printable ASCII headers from its opening HTTP upgrade response
 - `KAFKA TOPIC` exposes Kafka record headers
 - `NATS SUBJECT` exposes message headers
@@ -604,7 +621,10 @@ Transport-specific schemes and keys:
 - `KAFKA`: librdkafka properties with the [reserved keys and consumer settings](#kafka) described below. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
-- `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `WEBSOCKETS`: use a `wss://...` endpoint. Nervix trusts `tls_ca_file` beside the bundled WebPKI
+  roots and the platform's native roots, and presents `tls_cert_file` with `tls_key_file` as its
+  client certificate. A plaintext `ws://...` endpoint reads no TLS file, so `CREATE WEBSOCKETS
+  CLIENT` refuses all three with it; see [`WEBSOCKETS CONNECTION`](#websockets-connection).
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
@@ -624,6 +644,9 @@ Redis Pub/Sub also resolves its `addr` hostname through the node resolver for ea
 subscription connection; see [Redis Pub/Sub](#redis-pubsub).
 MQTT resolves the host of its `addr` through the node resolver for every connection and verifies
 an `mqtts` broker certificate against that host; see [MQTT](#mqtt).
+A `WEBSOCKETS CONNECTION` resolves the host of its client's `endpoint` the same way for every
+connection and resume, and verifies a `wss` server certificate against that host; see
+[`WEBSOCKETS CONNECTION`](#websockets-connection).
 
 Example Kafka TLS client:
 
@@ -659,7 +682,9 @@ connection: name resolution, the address attempts, TLS and the protocol's own ha
 from it. Each value is a positive whole number of milliseconds.
 
 `HTTP` and `PROMETHEUS` clients read `timeout_ms`. `RABBITMQ`, `REDIS` and `WEBSOCKETS` clients read
-`connect_timeout_ms`, and allow 30 seconds when it is left out. A `ZEROMQ PULL` ingestor reads
+`connect_timeout_ms`, and allow 30 seconds when it is left out. A `WEBSOCKETS` client also reads
+`idle_timeout_ms`: where it is left out, three `ping_interval_ms` intervals bound the silence, or 30
+seconds without configured pings; see [`WEBSOCKETS CONNECTION`](#websockets-connection). A `ZEROMQ PULL` ingestor reads
 none of these keys, so nothing bounds its connection; see [ZeroMQ](#zeromq). A `RABBITMQ` client's
 deadline covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the
 ingestor's channel, setting its prefetch window and starting its consumer. A request or connection
@@ -1031,11 +1056,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
-| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
+| Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
 | Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
@@ -1050,6 +1075,25 @@ a string literal of 1 to 255 bytes without control characters, passed to Kafka a
 ingestor names `ON QUIESCE SUSPEND`, the only quiesce mode it declares: the topic keeps its records
 after they are read, so a suspended ingestor resumes from its position, within the topic's
 retention. It reads a record's headers through `read_header` and `read_headers`.
+
+The record's metadata also exposes its key as `metadata.key` (`BYTES`), its broker timestamp as
+`metadata.timestamp` (`DATETIME`), its timestamp kind as `metadata.timestamp_type` (`STRING`), and
+whether its value is null as `metadata.tombstone` (`BOOL`). A missing key is null; an empty key is
+an empty byte sequence. `hex_encode(metadata.key)` or `bytes_to_utf8(metadata.key)` explicitly
+converts a key for a string field. Kafka timestamps count Unix milliseconds; Nervix preserves
+that instant exactly. The timestamp kind is `create_time` or `log_append_time`; a record without
+a timestamp has null timestamp and timestamp kind. `TIMESTAMP AT metadata.timestamp` uses that
+instant as the record's event time, while `TIMESTAMP NOW` uses the domain's execution time. An
+unavailable timestamp cannot satisfy `TIMESTAMP AT metadata.timestamp`; it never falls back to
+`NOW`. A present timestamp outside the signed Unix-nanosecond range fails the read with a typed
+conversion error.
+
+A null Kafka value is a tombstone and reaches the codec as an empty payload with
+`metadata.tombstone = true`. An empty non-null value has `metadata.tombstone = false`. The codec
+still determines how many rows the payload produces: an empty JSON payload produces none, while
+an empty TOML document can produce a row through its JAQ transformation. Metadata is available
+to each resulting row's route. Kafka declares only `SUSPEND` on quiesce, so it never copies these
+rows into a host quiesce buffer.
 
 Offset modes:
 
@@ -1183,7 +1227,7 @@ absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
 ```plexus,ignore
 CREATE PULSAR TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
-  (SUBSCRIPTION 'readers' OWNED BY INGESTOR | SUBSCRIPTION 'readers' PROVISIONED)
+  (SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST | SUBSCRIPTION 'readers' PROVISIONED)
   [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -1199,7 +1243,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PULSAR client |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: The current topic declaration exposes properties as headers but no separate typed broker metadata namespace. |
@@ -1218,15 +1262,23 @@ Pulsar ingestors read through a shared, durable subscription. The subscription n
 Pulsar, but the subscription type is not exposed in Plexus. Every statement also declares who owns
 the subscription, because the broker cannot say later who created one:
 
-- `OWNED BY INGESTOR`: the ingestor owns the subscription. Its consumers create it when it is
-  absent, starting at the earliest message the topic retains, and dropping the ingestor or its
-  domain removes it.
+- `OWNED BY INGESTOR START AT EARLIEST` or `OWNED BY INGESTOR START AT LATEST`: the ingestor owns
+  the subscription and declares where a newly created cursor begins. `EARLIEST` reads the topic's
+  retained backlog; `LATEST` starts after the messages present when the subscription is created.
+  Dropping the ingestor or its domain removes its owned subscription.
 - `PROVISIONED`: an operator provisioned the subscription, and Nervix never creates or removes it.
   Before an instance joins it, the instance checks that it exists. A missing subscription is the
   ingestor's transient error, as in `PULSAR subscription 'readers' of topic
   'persistent://public/default/orders' does not exist`, and the instance checks again after its
   retry policy's backoff, or on the host's reconnect cadence in `MODE NO ACK`, until the operator
   provisions it. A missing subscription does not keep the ingestor or its domain from starting.
+
+`START AT` is required for an owned subscription and is unavailable for a provisioned subscription.
+An existing subscription keeps its cursor regardless of the declared start position. `ALTER PULSAR
+TOPIC INGESTOR <name> SET START AT EARLIEST|LATEST` changes the policy for the next creation without
+seeking the existing cursor or discarding its backlog. The alteration is refused for a provisioned
+subscription and leaves its definition unchanged. `SHOW CREATE` and `DESCRIBE INGESTOR` expose the
+declared position; it is a creation policy, not a report of the current broker position.
 
 The check subscribes once with a non-durable cursor of the same name: the broker refuses that while
 the durable subscription exists, and otherwise opens a cursor that the check closes again. The
@@ -1263,7 +1315,7 @@ Different configured host names are distinct addresses even if DNS resolves them
 Declaring the retained subscription `PROVISIONED` hands its ownership to the operator and keeps
 its backlog. Removal on replacement has the same timeout and best-effort reporting as removal
 on drop; a failure does not prevent starting the replacement. `DESCRIBE INGESTOR`
-shows the subscription name, `OWNED BY INGESTOR` or `PROVISIONED`, and `INSTANCES` together
+shows the subscription name, its ownership and declared start position, and `INSTANCES` together
 in the declared `options:` row.
 
 Client config currently supports:
@@ -1299,9 +1351,10 @@ each message without waiting for the broker's answer.
 
 Suspension disconnects the consumer. The durable subscription retains its backlog and redelivers
 unacknowledged in-flight messages. Broker message TTL, backlog quota policy, and inactive-subscription
-expiry remain in force. If an owned subscription expires, resume creates it again at the earliest
-message the topic retains, which can deliver earlier messages again, and what the topic no longer
-retains from the suspension window is lost.
+expiry remain in force. If an owned subscription expires, resume creates it again at its declared
+`START AT` position: `EARLIEST` can deliver retained earlier messages again, while `LATEST` skips
+the backlog present at recreation. What the topic no longer retains from the suspension window
+is lost.
 A provisioned subscription that expires is the ingestor's transient error until the operator
 provisions it again.
 
@@ -1436,27 +1489,53 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | REDIS client |
-| Locator and validation rule | CHANNEL 'orders' (redis_channel) |
+| Locator and validation rule | CHANNEL 'orders' (redis_channel) \| PATTERN 'orders.*' (redis_channel_pattern) |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
+| Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace. |
+| Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |
-| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE or PSUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
 | Driver limits | None declared. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
 <!-- connector-matrix:ingest-redis-pubsub:end -->
 
+An ingestor names what it subscribes to with exactly one of `CHANNEL` and `PATTERN`.
+
 `CHANNEL` takes a nonempty string literal of at most 1,024 UTF-8 bytes. Nervix preserves its case,
 spaces and punctuation in both directions. For example, `CHANNEL 'Orders:EU/*'` subscribes to that
-exact channel: the star is a literal character. Redis Pub/Sub carries no transport headers, so
-`read_header` and `read_headers` are refused when the ingestor is created.
+exact channel: the star is a literal character.
+
+`PATTERN` subscribes to every channel a Redis glob pattern matches, through Redis's `PSUBSCRIBE`.
+It takes a nonempty string literal of at most 1,024 UTF-8 bytes, which Nervix sends exactly as
+written. Redis matches it byte by byte against the channel each message is published to: `*`
+matches any run of bytes, `?` any one byte, `[...]` one byte of a set or range, `[^...]` one byte
+outside it, and `\` makes the next byte literal. Redis accepts any text as a pattern, so a pattern
+without these characters matches only the channel of that exact name. For example,
+`PATTERN 'orders.*'` receives what is published to `orders.eu` and to `orders.us`, but not to
+`returns.eu`. An emitter always publishes to one `CHANNEL`.
+
+Every message exposes two typed metadata fields, both `STRING` and optional:
+
+| Field | Value |
+| --- | --- |
+| `metadata.channel` | The channel the message was published to. For a `CHANNEL` subscription it is the subscribed channel. A pattern can match a channel whose name is not UTF-8 text, published by another client; that message's `metadata.channel` is null. |
+| `metadata.pattern` | The pattern that matched the message. It is null for a `CHANNEL` subscription. |
+
+For example, `SET channel = metadata.channel` records which channel delivered each message of a
+`PATTERN 'orders.*'` subscription, and the same route's `WHERE channel = 'orders.eu'` then keeps
+only that channel's messages. `ALTER REDIS PUBSUB INGESTOR ... SET FROM` replaces the complete
+body, so it moves an ingestor from a channel to a pattern or back; the source then subscribes again
+with the new body.
+
+Redis Pub/Sub carries no transport headers, so `read_header` and `read_headers` are refused when
+the ingestor is created.
 
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both `ON QUIESCE BUFFER`
 and `ON QUIESCE DROP` keep reading and keep the subscriber healthy. `BUFFER` retains payloads up
@@ -1499,8 +1578,8 @@ frame. Configure both bounds for the expected payload sizes.
 CREATE MQTT TOPIC INGESTOR <name>
   FROM <client> TOPIC 'devices/+/orders'
   [INSTANCES 2]
-  [SESSION CLEAN | SESSION PERSISTENT]
-  [QOS 0 | QOS 1]
+  (SESSION CLEAN | SESSION PERSISTENT)
+  (QOS 0 | QOS 1 | QOS 2)
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1514,15 +1593,15 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | MQTT client |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |
-| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1) |
-| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); optional; default CLEAN<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); optional; default 0 |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
 | Headers | Not offered: Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
-| Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
@@ -1552,29 +1631,46 @@ session does not persist that local state.
 
 Delivery constraints:
 
-- `NO ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
+- every statement writes its session, `SESSION CLEAN` or `SESSION PERSISTENT`, and then its quality
+  of service, `QOS 0`, `QOS 1` or `QOS 2`, before `MODE`. Neither has a default, and `MODE` names
+  only the acknowledgement: `NO ACK` or an `ACK` mode
 - `NO ACK` has no in-flight ACK window, so it never accepts `MAX <n>`
-- `ACK` modes require `SESSION PERSISTENT QOS 1`
+- `ACK` modes require `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE and ALTER refuse any other
+  pairing, naming the session and quality of service the statement writes and underlining the
+  mode, such as `MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and
+  QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1`
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
   a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
   rather than after its batch timeout
 - every `CONNECT` in an `ACK` mode advertises the in-flight window and 64 more as its Receive
   Maximum: 65 under `ACK SEQUENTIAL`, and `MAX` plus 64 under `ACK PARALLEL`, at most MQTT's
-  65,535, so the broker sends no further QoS 1 publish while that many wait on their
+  65,535, so the broker sends no further QoS 1 or QoS 2 publish while that many wait on their
   acknowledgements, and a batch above 65,535 gathers at most 65,535 of them before its
   `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
   holds a batch
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages. Every instance subscribes to `$share/<domain>~<ingestor>/<filter>`, so the share group belongs to Nervix and a topic filter cannot begin with a `$share` level of its own
 
-In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for
-is written to the connection, within one keep-alive interval; the broker answers none. Its
-connection keeps writing those acknowledgements and sending its keep-alive while the ingestor
-waits on a batch's acknowledgement trees, however long a downstream emitter holds them, so the
-broker keeps the session connected and delivers nothing again. In an `ACK` mode the read-ahead
+In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for,
+and every `PUBREC` its QoS 2 publishes ask for, is written to the connection, within one keep-alive
+interval. The broker answers a `PUBACK` with nothing, and a `PUBREC` with a `PUBREL` that the
+connection completes with `PUBCOMP` on its own. Nothing is written for a publish the ingestor
+rejects: it delivers that publish again from its own replay, ahead of anything the broker sends
+next, on the mode's `RETRY POLICY`, and writes its one acknowledgement once the publish is
+accepted. Its connection keeps writing those acknowledgements and sending its keep-alive while the
+ingestor waits on a batch's acknowledgement trees, however long a downstream emitter holds them, so
+the broker keeps the session connected and delivers nothing again. In an `ACK` mode the read-ahead
 reserves its full Receive Maximum for QoS 1/2 outcomes and holds up to 64 QoS 0 outcomes alongside
-them. A QoS 0 publisher is not held back by the broker, even through a QoS 1 subscription. Nervix
-drops and counts QoS 0 publishes that do not fit, keeping the connection polling and retaining the
-reserved capacity and acknowledgements of QoS 1 publishes. Admitted outcomes retain packet order.
+them. A QoS 0 publisher is not held back by the broker, even through a QoS 1 or QoS 2 subscription.
+Nervix drops and counts QoS 0 publishes that do not fit, keeping the connection polling and
+retaining the reserved capacity and acknowledgements of QoS 1 and QoS 2 publishes. Admitted
+outcomes retain packet order.
+
+Under `NO ACK` the connection acknowledges each QoS 1 or QoS 2 publish as it receives it, before
+the ingestor reads it. At `QOS 2` the broker sends a publish again only until a connection has
+written its `PUBREC`; after that it releases the publish once with `PUBREL`. Nervix keeps the
+delivery attempts and acknowledgements of a connection in memory only, so a publish whose
+acknowledgement a lost connection never wrote is delivered again once a persistent session
+resumes, at QoS 2 as at QoS 1.
 The per-node Prometheus counter `nervix_ingestor_read_ahead_dropped_payloads_total`, labeled by
 `domain`, `ingestor` and `physical_node_id`, counts each overflow immediately, including during an
 acknowledgement wait. It is separate from the transport-redelivery count in `DESCRIBE INGESTOR`.
@@ -1618,11 +1714,11 @@ whose broker, identity, filter, session mode and QoS still match are retained, i
 an instance-count change. Changing a filter discards the retired filter's broker queue.
 Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessions.
 
-`SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. CREATE refuses any other pairing with
-`MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT QOS 1`, underlining `SUSPEND`.
-An unsupported QoS number is refused with the supplied value and the accepted ingestor levels,
-such as `MQTT ingestor QOS must be 0 or 1, found 2`. Completion offers only the session's valid
-quiesce choices.
+`SUSPEND` is valid only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE refuses any other
+pairing with `MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2`, underlining
+`SUSPEND`. An unsupported QoS number is refused with the supplied value and the accepted ingestor
+levels, such as `MQTT ingestor QOS must be 0, 1 or 2, found 3`. Completion offers only the
+session's valid quiesce choices.
 
 `SUSPEND` disconnects while asking the broker to
 retain the session; broker offline-queue bounds and session expiry limit what can return. If the
@@ -2047,7 +2143,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
-| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
+| Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2082,7 +2178,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
+| Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2106,8 +2202,53 @@ The ACK window is explicit: `MAX` is 1–65,535 outstanding payloads per ingesto
 An acknowledged endpoint requires `ON QUIESCE REJECT RETRY AFTER <duration>`. The sender owns
 retry; there is no endpoint `RETRY POLICY`, `ACK PARALLEL`, or `BATCH` clause. `BUFFER MAX SIZE`
 is available with `MODE NO ACK`. Transport headers are available through `read_header` and
-`read_headers`; these declarations have no typed request metadata namespace. Both ingestors
+`read_headers`, and each entity declares the typed metadata of a request or a frame. Both ingestors
 execute on every cluster node and are excluded from placement members and placement completion.
+
+An `HTTP ENDPOINT` ingestor reads each admitted request's metadata in its route expressions:
+
+| Field | Value |
+| --- | --- |
+| `metadata.method` | The request's method. The endpoint admits only `POST`, so an admitted request always reads `POST`. |
+| `metadata.path` | The path of the request target, exactly as the request wrote it, without its query. Routing matches it exactly, so it is the endpoint's `PATH`. |
+| `metadata.query` | The query of the request target after `?`, exactly as written and not decoded: empty for a target that ends with `?`, and absent for one with no `?`. |
+| `metadata.remote_addr` | The address and port of the peer whose TCP connection carried the request, such as `127.0.0.1:52144` or `[2001:db8::1]:52144`. It is the connection's peer, not a forwarding header such as `X-Forwarded-For`. |
+| `metadata.host` | The host the request was routed by: its `Host` value in ASCII lowercase and without its port, one of the names of the endpoint's `VHOST`. |
+
+A `WEBSOCKETS ENDPOINT` ingestor reads each data frame's metadata:
+
+| Field | Value |
+| --- | --- |
+| `metadata.frame_type` | `text` or `binary`, the kind of the data frame. |
+| `metadata.remote_addr` | The address and port of the peer whose TCP connection opened the WebSocket. |
+| `metadata.path` | The path the connection's upgrade request named, which is the endpoint's `PATH`. |
+
+Every field is `STRING OPTIONAL` and declared non-sensitive. Every frame of a connection reads the
+same `remote_addr` and `path`, including frames its signaling protocol accepts before the handshake
+ends. Each node reads the
+requests and frames it receives, so a field never depends on the node that owns the ingestor's
+output. A body that `BUFFER` retains keeps its metadata, and its replay reads the values it
+arrived with. This route keeps only acme's requests and records the peer that sent each one:
+
+```plexus
+CREATE HTTP ENDPOINT INGESTOR tenant_requests
+  FROM intake MODE NO ACK
+  ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
+  TO acme_events
+    INHERIT ALL
+    SET peer = metadata.remote_addr, query = metadata.query
+    WHERE metadata.query = 'tenant=acme'
+    UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Both endpoints record header names in ASCII lowercase and keep every value of a repeated name in
+that name's original value order. They declare no ordering between different names. WebSocket
+header reads refer to the opening upgrade request, not to later data frames.
+A value that is UTF-8, whether or not it is ASCII, reaches `read_header` and `read_headers` unchanged,
+and a value that is not UTF-8 is
+dropped and counted in `nervix_ingestor_header_values_dropped_total` for every ingestor the request
+or WebSocket upgrade was routed to.
 
 For example, this Plexus declaration holds the HTTP response while its payload's acknowledgement
 root waits for every attached downstream route:
@@ -2121,18 +2262,21 @@ CREATE HTTP ENDPOINT INGESTOR acknowledged
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 ```
 
-| HTTP result in `MODE ACK` | Meaning |
-| --- | --- |
-| 200 | The payload's graph acknowledgement root completed under the declared error policies. |
-| 400 | The codec or local route construction refused the input. |
-| 503 with `Retry-After` | The window or execution capacity is full, intake is quiesced, downstream negatively acknowledged, the ACK timeout expired, or the exact intake ended. |
+| HTTP result in `MODE ACK` | `outcome` | `cause` | Meaning |
+| --- | --- | --- | --- |
+| 200 | `completed` | `none` | The payload's graph acknowledgement root completed under the declared error policies. |
+| 400 | `processing_failed` | `rejected` | The codec or local route construction refused the input. |
+| 503 | `not_admitted` | `busy` | The response window or execution capacity is full. |
+| 503 | `not_admitted` | `suspended` | Intake is quiesced before admission. |
+| 503 | `processing_failed` | `rejected` | Downstream negatively acknowledged admitted work. |
+| 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired. |
+| 503 | `outcome_unknown` | `interrupted` | The exact intake stopped or ended while the response was held. |
 
 Every ACK response has a JSON object containing exactly `outcome` and `cause`, using the existing
 [client submission outcome vocabulary](client-io-architecture.md). For example, a local refusal
 is `{"outcome":"processing_failed","cause":"rejected"}`. Downstream rejection uses that same
-object with status 503. Timeout uses `processing_failed` / `ack_timeout`; a full window uses
-`not_admitted` / `busy`; intake ending uses `outcome_unknown` / `interrupted`. The response contains
-no payload or diagnostic details. Runtime events retain the ingestor's ordinary diagnostics.
+object with status 503. The response contains no payload or diagnostic details. Runtime events
+retain the ingestor's ordinary diagnostics.
 A 503 uses the declared retry delay, rounded up to whole seconds. A retry can duplicate output
 that already completed; timeout or interruption does not roll back admitted work.
 
@@ -2146,8 +2290,10 @@ limit, and WebSocket messages retain the driver's message and frame limits.
 
 In `MODE NO ACK`, admission still answers HTTP 202 without waiting for downstream acknowledgement.
 A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it also answers 202.
-With `BUFFER`, bodies that fit receive 202 and drain after resume. A full buffer rejects new intake
-without discarding bodies already accepted. If extension workers cannot unfold a fresh payload,
+WebSocket data frames receive no per-frame graph-completion reply in this mode; signaling replies
+still follow their protocol. With `BUFFER`, HTTP bodies that fit receive 202 and drain after resume.
+A full buffer rejects new intake without discarding bodies already accepted. If extension workers
+cannot unfold a fresh payload,
 HTTP answers 503 and a WebSocket closes with 1013; buffered payloads instead retain their place
 until workers can take them. See [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
@@ -2164,9 +2310,10 @@ JSON text. A protobuf outbound message must represent both string fields; startu
 fixed outcome before binding intake. The protocol's control frames retain their declared meaning.
 
 A WebSocket retains its selected route and signaling protocol throughout the connection. Stopping
-or replacing its source ends that exact intake, including signaling data intake. Held acknowledged
-responses resolve with 503 (or the equivalent outcome frame) when intake stops or ends; the next
-payload on a retained ended route closes with 1013. Open a new connection for a replacement source.
+or replacing its source ends that exact intake, including signaling data intake. An interrupted
+acknowledgement wait returns HTTP 503 or the equivalent WebSocket outcome frame. A request admitted
+before the ending may still finish. The next payload on a retained ended route closes with 1013.
+Open a new connection for a replacement source.
 Stopping a domain withdraws only its routes and intakes; other domains on the same host and path
 continue receiving requests. A withdrawn route returns HTTP 404.
 
@@ -2235,7 +2382,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Acknowledgement confirmation | none |
 | Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
-| Driver limits | None declared. |
+| Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabilities.md#websockets-connection-ingest).
@@ -2246,7 +2393,8 @@ binary frames. Its optional `HEADERS { 'authorization' = 'Bearer token' }` claus
 <client>` and takes literal string names and values. Names are case-insensitive; repeated names,
 protocol-owned fields (`Host`, hop-by-hop framing fields and every `Sec-WebSocket-*` field except
 `Sec-WebSocket-Protocol`), malformed values, more than 128 fields, or more than 32 KiB of field
-name/value bytes are refused before activation.
+name/value bytes are refused before activation. Each value, a credential included, is visible in
+`DESCRIBE INGESTOR` and `SHOW CREATE INGESTOR`.
 
 `HEADERS { 'sec-websocket-protocol' = 'v2.events, v1.events' }` offers subprotocols in the order
 of preference written. The value lists one or more subprotocol tokens (RFC 6455): elements
@@ -2264,24 +2412,58 @@ never its value. The selected subprotocol is the opening response's
 `sec-websocket-protocol` header, which `read_header('sec-websocket-protocol')` reads.
 
 Each data frame exposes `metadata.frame_type` as `text` or `binary`. `read_header` and
-`read_headers` read the opening response's printable ASCII header values, including repeated values in their
-transport order. These values belong to the frame's exact connection: accepted signaling frames
+`read_headers` read the opening response's header values that hold only printable ASCII and tabs,
+including repeated values in their transport order; a value holding any other byte is left out.
+These values belong to the frame's exact connection: accepted signaling frames
 and quiesce-buffered frames retain that snapshot across suspension, reconnection and replay.
 Headers are not copied into every frame and are not propagated to a relay unless mapped explicitly.
 The connection is ingest-only; it declares no emitter envelope or `BATCH` clause.
+
+This client reaches a TLS endpoint signed by its own certificate authority and pings it every 20
+seconds; the connection offers two subprotocols and records the one its peer selects and each
+frame's kind:
+
+```plexus
+CREATE WEBSOCKETS CLIENT market_feed
+  MOUNT feed_tls VERSION 1
+  CONFIG {
+    'endpoint' = 'wss://stream.example.com/trades',
+    'ping_interval_ms' = 20000,
+    'tls_ca_file' = '{{ feed_tls }}/ca.pem'
+  };
+
+CREATE WEBSOCKETS CONNECTION INGESTOR market_trades
+  FROM market_feed
+  HEADERS { 'sec-websocket-protocol' = 'v2.trades, v1.trades' }
+  MODE NO ACK
+  ON QUIESCE BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST
+  DECODE USING trade_codec
+  TO trades
+    INHERIT ALL
+    SET protocol = read_header('sec-websocket-protocol'),
+        frame_type = metadata.frame_type
+    UNBRANCHED
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+With no `idle_timeout_ms`, a peer that sends nothing for three ping intervals, 60 seconds here, is
+reconnected. A client without `ping_interval_ms` only answers its peer's pings and allows 30 seconds
+of silence.
 
 The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive keys:
 
 | Key | Contract |
 | --- | --- |
-| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. |
+| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. Its path and query are sent in the upgrade request. |
 | `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
 | `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
 | `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
 | `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
 | `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
 | `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
-| `tls_ca_file` | Optional CA file; only with a `wss://` endpoint. |
+| `tls_ca_file` | Optional PEM CA file; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
 | `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together; only with a `wss://` endpoint. |
 
 The client's declared key schema refuses unknown, repeated or mistyped keys and TLS file keys with
@@ -2291,6 +2473,16 @@ intervals beyond the schedulable bound. Durations obey the shared schedulable ph
 bound. Resource mounts and configuration templates keep their shared client contract; rendered
 values are checked before commitment and again when opening the source. A ping write has a
 one-second physical budget and a failure triggers recovery.
+
+No WebSockets key is declared confidential, but `DESCRIBE CLIENT` and `SHOW CREATE CLIENT` show an
+`endpoint` that carries user information or a query as `********`, because either can hold a
+credential. User information in the `endpoint` is not sent with the upgrade; a peer that needs
+credentials receives them as a `HEADERS` field, such as `authorization`, or in the query. `CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template
+is rendered, to name a readable regular file. The source parses the files when it opens: a CA
+certificate it cannot parse, or a client certificate chain and private key it cannot read or pair,
+fails the ingestor's start, which `DESCRIBE INGESTOR` shows as its transient status. A
+`tls_ca_file` that holds no PEM certificate adds no trust root, so the bundled and native roots
+alone verify the server. The server certificate is always verified against the endpoint's host.
 
 After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
@@ -2312,6 +2504,10 @@ For `ws` and `wss`, each initial connection and resume resolves the URL host thr
 asynchronous resolver. It tries the returned addresses in order within the configured
 `connect_timeout_ms` budget for DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
+An address whose connection, TLS handshake or upgrade fails, including an answer other than
+`101 Switching Protocols` and an opening response beyond the transport's limits under Driver
+limits above, gives way to the next address within the same budget; only a refused subprotocol
+offer ends the attempts at once.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
 Resolution, connection and read failures are transient source failures. Nervix answers a peer's
 Close before releasing the connection and reports any supplied code and reason in `DESCRIBE INGESTOR`;

@@ -11,17 +11,18 @@ use nervix_models::{
     ClickHouseTableName, ExternalName, KafkaConsumerGroupName, KafkaTopicName,
     MONGODB_NAMESPACE_MAX_BYTES, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
     MySqlTableName, NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PostgresTableName,
-    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
+    PulsarSubscriptionName, PulsarTopicName, RabbitMqExchangeName, RabbitMqQueueName,
+    RedisChannelName, RedisChannelPattern, SqsQueueName,
 };
 
 use crate::Arbitrary;
 
 /// The longest Kafka topic, in bytes.
 const KAFKA_TOPIC_BYTES: usize = 249;
-/// The longest Kafka consumer group, NATS queue group, Pulsar subscription or RabbitMQ queue, in
-/// bytes.
+/// The longest Kafka consumer group, NATS queue group, Pulsar subscription, RabbitMQ queue or
+/// RabbitMQ exchange, in bytes.
 const SHORT_NAME_BYTES: usize = 255;
-/// The longest Pulsar topic, NATS subject or Redis channel, in bytes.
+/// The longest Pulsar topic, NATS subject, Redis channel or Redis channel pattern, in bytes.
 const LONG_NAME_BYTES: usize = 1024;
 /// The longest SQS queue name, its `.fifo` suffix included.
 const SQS_QUEUE_BYTES: usize = 80;
@@ -50,6 +51,13 @@ const PRINTABLE_PIECES: [&str; 22] = [
 const ANY_PIECES: [&str; 26] = [
     "a", "Z", "0", "9", "-", "_", ".", "/", ":", "*", ">", "+", "#", " ", "'", "\"", "$", "\\",
     "é", "中文", "🎉", "\u{2028}", "\n", "\t", "\0", "\r",
+];
+/// What a Redis channel pattern is spelled from: any text a channel holds, and every character
+/// Redis's glob reads specially, the brackets of a set, its negation and range marks, the
+/// one-byte wildcard and an escaped star included.
+const REDIS_PATTERN_PIECES: [&str; 32] = [
+    "a", "Z", "0", "9", "-", "_", ".", "/", ":", "*", ">", "+", "#", " ", "'", "\"", "$", "\\",
+    "é", "中文", "🎉", "\u{2028}", "\n", "\t", "\0", "\r", "?", "[", "]", "^", "[a-z]", "\\*",
 ];
 /// What a NATS queue group, or a token of a NATS subject apart from its separator and wildcards,
 /// is spelled from: no whitespace and no control character.
@@ -109,6 +117,12 @@ impl Arbitrary<'_> {
         RabbitMqQueueName::parse(&text).assured("a generated queue name is within the bound")
     }
 
+    /// A RabbitMQ exchange, under the same short-string bound as a queue.
+    pub fn rabbitmq_exchange_name(&mut self) -> RabbitMqExchangeName {
+        let text = self.pieces_text(ANY_PIECES, SHORT_NAME_BYTES);
+        RabbitMqExchangeName::parse(&text).assured("a generated exchange name is within the bound")
+    }
+
     /// An SQS queue: letters, digits, `-` and `_`, where a FIFO queue's name ends in `.fifo`, 80
     /// bytes at most with the suffix.
     pub fn sqs_queue_name(&mut self) -> SqsQueueName {
@@ -131,6 +145,12 @@ impl Arbitrary<'_> {
     pub fn redis_channel_name(&mut self) -> RedisChannelName {
         let text = self.pieces_text(ANY_PIECES, LONG_NAME_BYTES);
         RedisChannelName::parse(&text).assured("a generated channel is within the bound")
+    }
+
+    /// A Redis channel pattern: 1 to 1,024 bytes of any text, glob characters included.
+    pub fn redis_channel_pattern(&mut self) -> RedisChannelPattern {
+        let text = self.pieces_text(REDIS_PATTERN_PIECES, LONG_NAME_BYTES);
+        RedisChannelPattern::parse(&text).assured("a generated pattern is within the bound")
     }
 
     /// A NATS subject: one token up to the subject's bound, or several short ones, where a token

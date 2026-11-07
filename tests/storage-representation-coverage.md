@@ -10,10 +10,33 @@ complete field; entity presentation distinguishes omission from an explicitly wr
 The registry's current archive signature and consensus keyspace namespace fence this shape before
 decoding; existing current-header corruption and namespace validation tests qualify those owners.
 
+SQS QUEUE emitter generators draw both `SEND` request shapes beside the `MODE ACK` retry policy and
+the optional FIFO group. The Model/archive, registry, consensus and canonical Plexus properties
+preserve the request shape, and the archive signature and consensus keyspace namespace fence the
+current SQS emitter shape before decoding.
+
+`REDIS PUBSUB` ingestor generators draw both subscriptions, a `CHANNEL` and a `PATTERN`, each from
+any text within its byte bound and the pattern from glob characters too. The Model/archive,
+registry, consensus and canonical Plexus properties preserve which subscription an ingestor holds
+and its exact text, and the archive signature and consensus keyspace namespace fence that shape
+before decoding.
+
 Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>` included, in
 `CREATE` and in `ALTER ... SET TIMESTAMP`. The Model/archive, registry, consensus and canonical
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,
 and the same signature and namespace fence that shape.
+
+Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
+`LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
+`SET START AT` with shared ingestor operations. The Model, registry and consensus properties
+preserve those complete values. The `NERVIX REDIS SUB` registry signature and
+`raft_redis_subscription_` consensus namespace identify this current Model layout before decoding.
+
+MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
+persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
+admits is generated and none it refuses. The Model/archive, registry, consensus and canonical
+Plexus properties preserve the session, quality of service and mode as separate written values,
+and the archive signature and consensus keyspace namespace fence this shape before decoding.
 
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
@@ -136,10 +159,11 @@ delegated configuration values through JSON/archive equality and public inspecti
 
 ## Client Configuration And Inspection
 
-`client-config-schema` includes omitted ClickHouse connection defaults and Redis command-pool
-lifetimes, and explicit typed TCP and pool intervals and lifetimes. JSON and archive equality
-preserve the authored entries; the effective-default projection preserves those entries and is
-idempotent, and public inspection remains idempotent.
+`client-config-schema` includes omitted ClickHouse connection defaults, Redis command-pool
+lifetimes and Postgres pool keys, and explicit typed TCP and pool intervals, lifetimes, checkout
+deadlines and borrow tests. JSON and archive equality preserve the authored entries; the
+effective-default projection preserves those entries and is idempotent, and public inspection
+remains idempotent.
 Scheme-restricted driver addresses include RabbitMQ's `amqps` TLS-file configurations; the
 property retains their complete ordered trust and identity entries through both encodings.
 Driver URLs with Nervix-owned query options include Postgres addresses, which set `sslmode` once
@@ -161,5 +185,5 @@ durations, expressions and properties of any name in written order. `models-arch
 consensus Model targets carry them through their Model storage boundaries with the complete Model.
 `models-emitter-envelopes` compares the envelope alone through JSON and the archive, and
 `plexus-emitter-envelopes` reads its canonical section back through the shared envelope grammar.
-The Plexus domain draws only what an entity declares, so canonical statement round trips carry an
-envelope once a connector entity declares a clause.
+The Plexus domain draws only what an entity declares, so canonical statement round trips carry the
+envelopes connector entities declare: SQS QUEUE's `DELAY` and `DEDUPLICATION ID`.

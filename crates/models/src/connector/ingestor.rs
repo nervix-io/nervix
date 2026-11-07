@@ -448,7 +448,9 @@ pub struct IngestorEntityCapabilities {
     pub delivery: &'static [DeclaredDelivery],
     /// The quiesce modes its transport can honor, each kind at most once.
     pub quiesce: &'static [DeclaredQuiesce],
-    /// The name that locates what it reads, for an entity whose body names one.
+    /// The name that locates what it reads, for an entity whose body names one. A body may write
+    /// one of the entity's [alternative locators](IngestorDeclaration::ALTERNATIVE_LOCATORS)
+    /// instead, and [`IngestorEntityKind::locators`] reads them together.
     pub locator: Option<LocatorDeclaration>,
     /// The options its body writes after the locator, in the order a statement writes them.
     pub options: &'static [OptionDeclaration],
@@ -519,7 +521,93 @@ impl IngestorEntityCapabilities {
         let Some(declared) = self.declared_quiesce(quiesce.kind()) else {
             return false;
         };
-        ChoiceRequirement::all_met_by(declared.requires, body)
+        ChoiceRequirement::all_met(declared.requires, &|option| body.chosen(option))
+    }
+
+    /// The requirement of the delivery mode `delivery` that a statement of the pair `entity`
+    /// leaves unmet: the option choices the entity declares the mode needs written beside it,
+    /// where the statement does not make every one. `chosen` names the choice the statement makes
+    /// for an option, by the option's keywords. A mode the entity does not declare is the
+    /// grammar's to refuse, so it has no requirement here.
+    pub fn unmet_delivery(
+        &self,
+        entity: IngestorEntityKind,
+        delivery: IngestDeliveryKind,
+        chosen: &dyn Fn(&str) -> Option<&'static str>,
+    ) -> Option<UnmetDeliveryRequirement> {
+        let declared = self.declared_delivery(delivery)?;
+        if ChoiceRequirement::all_met(declared.requires, chosen) {
+            return None;
+        }
+        let mut written = Vec::with_capacity(declared.requires.len());
+        for requirement in declared.requires {
+            written.push(WrittenChoice {
+                option: requirement.option,
+                choice: chosen(requirement.option),
+            });
+        }
+        Some(UnmetDeliveryRequirement {
+            entity,
+            delivery,
+            requires: declared.requires,
+            written,
+        })
+    }
+}
+
+/// A delivery mode a statement names without the option choices its entity declares the mode
+/// needs written beside it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "checking a delivery mode against its entity's declaration is a pure refusal"
+    )
+)]
+#[error(
+    "{entity} ingestors name MODE {delivery} only with {required}; the statement writes {written}",
+    delivery = .delivery.phrase(),
+    required = ChoiceRequirement::conjunction(.requires),
+    written = WrittenChoice::conjunction(.written)
+)]
+pub struct UnmetDeliveryRequirement {
+    /// The pair the statement reads.
+    pub entity: IngestorEntityKind,
+    /// The delivery mode the statement names.
+    pub delivery: IngestDeliveryKind,
+    /// Every choice requirement the entity declares for the mode, all of which a statement meets.
+    pub requires: &'static [ChoiceRequirement],
+    /// The choice the statement makes for each option a requirement names, in the order the
+    /// requirements name them.
+    pub written: Vec<WrittenChoice>,
+}
+
+/// The choice a statement makes for one declared option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrittenChoice {
+    /// The keywords of the option.
+    pub option: &'static str,
+    /// The name of the choice the statement makes, where its body answers for the option.
+    pub choice: Option<&'static str>,
+}
+
+impl WrittenChoice {
+    /// Every choice of `written`, as a statement writes them together, such as
+    /// `SESSION CLEAN and QOS 0`.
+    fn conjunction(written: &[Self]) -> String {
+        let phrases: Vec<String> = written.iter().map(ToString::to_string).collect();
+        phrases.join(" and ")
+    }
+}
+
+/// A choice is written as its option's keywords, then the choice's own name.
+impl Display for WrittenChoice {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.choice {
+            Some(choice) => write!(f, "{} {choice}", self.option),
+            None => write!(f, "no {}", self.option),
+        }
     }
 }
 
@@ -527,12 +615,28 @@ impl IngestorEntityCapabilities {
 pub trait IngestorDeclaration {
     const CAPABILITIES: IngestorEntityCapabilities;
 
+    /// The other names a body may locate what it reads by instead of the capabilities' locator,
+    /// each opened by its own keywords, such as a Redis Pub/Sub ingestor's `PATTERN` beside its
+    /// `CHANNEL`. A body writes exactly one locator. Empty for an entity whose body locates what
+    /// it reads one way, or by none.
+    const ALTERNATIVE_LOCATORS: &'static [LocatorDeclaration] = &[];
+
     /// Whether this source can honor `quiesce`, as its entity declares.
     fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool
     where
         Self: IngestorEntityBody + Sized,
     {
         Self::CAPABILITIES.honors_quiesce(quiesce, self)
+    }
+
+    /// The requirement of this source's delivery mode its statement leaves unmet, as its entity
+    /// declares the mode.
+    fn unmet_delivery(&self) -> Option<UnmetDeliveryRequirement>
+    where
+        Self: IngestorEntityBody + IngestorEntityModel + Sized,
+    {
+        let delivery = self.acknowledgement().kind();
+        Self::CAPABILITIES.unmet_delivery(Self::KIND, delivery, &|option| self.chosen(option))
     }
 }
 
@@ -567,20 +671,6 @@ pub trait IngestorEntityBody {
     }
 }
 
-impl ChoiceRequirement {
-    /// Whether `body` makes the choice this requirement needs.
-    fn met_by(&self, body: &dyn IngestorEntityBody) -> bool {
-        body.chosen(self.option) == Some(self.choice)
-    }
-
-    /// Whether `body` makes every choice `requirements` need.
-    pub(crate) fn all_met_by(requirements: &[Self], body: &dyn IngestorEntityBody) -> bool {
-        requirements
-            .iter()
-            .all(|requirement| requirement.met_by(body))
-    }
-}
-
 /// The pair one entity Model is a source of, which the head of its ingestor's statements names.
 pub trait IngestorEntityModel {
     const KIND: IngestorEntityKind;
@@ -599,6 +689,17 @@ pub(crate) trait AlteredIngestorEntity: IngestorEntityModel + Clone {
     ) -> error_stack::Result<(), AlterIngestorError>;
 }
 
+/// One typed operation of a transport ingestor, shared or owned by its entity.
+/// The enclosing alteration checks the entity pair before applying any operation to its copy.
+pub(crate) trait TransportIngestorOperation {
+    fn apply_to(
+        &self,
+        ingestor: &mut crate::CreateIngestor,
+    ) -> error_stack::Result<(), AlterIngestorError>;
+
+    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError>;
+}
+
 /// What the kind of one connector's source entities answers for each of them.
 pub trait IngestorEntityMetadata {
     fn connector(&self) -> ConnectorKind;
@@ -613,6 +714,10 @@ pub trait IngestorEntityMetadata {
     fn form_label(&self) -> &'static str;
 
     fn capabilities(&self) -> IngestorEntityCapabilities;
+
+    /// The names a body may locate what it reads by instead of the declared locator, none for an
+    /// entity that declares no alternative.
+    fn alternative_locators(&self) -> &'static [LocatorDeclaration];
 }
 
 entity_union! {
@@ -691,6 +796,18 @@ impl IngestorEntityKind {
         self.entity().capabilities()
     }
 
+    /// Every name a body of this pair may locate what it reads by: the declared locator, then its
+    /// alternatives. A body writes exactly one of them, and a pair whose body names none has none.
+    pub fn locators(self) -> Vec<LocatorDeclaration> {
+        let entity = self.entity();
+        let mut locators = Vec::new();
+        if let Some(locator) = entity.capabilities().locator {
+            locators.push(locator);
+        }
+        locators.extend_from_slice(entity.alternative_locators());
+        locators
+    }
+
     /// The key a form identifies this pair by: its phrase in lower case, joined by a hyphen.
     pub fn form_key(self) -> String {
         self.phrase().to_ascii_lowercase().replace(' ', "-")
@@ -767,6 +884,16 @@ impl IngestorEntity {
         self.kind()
             .capabilities()
             .honors_quiesce(quiesce, self.body())
+    }
+
+    /// The requirement of this source's delivery mode its statement leaves unmet: its entity
+    /// declares option choices the mode needs written beside it, and the statement does not make
+    /// every one.
+    pub fn unmet_delivery(&self) -> Option<UnmetDeliveryRequirement> {
+        let kind = self.kind();
+        let delivery = self.acknowledgement().kind();
+        kind.capabilities()
+            .unmet_delivery(kind, delivery, &|option| self.chosen(option))
     }
 
     /// The choice this source's statement makes, or holds by default, for the declared option

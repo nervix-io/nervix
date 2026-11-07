@@ -121,6 +121,18 @@ and requires only new records after `RESUME`. Both topologies use the production
 for recovery from persisted state. Their diagnostic inventory includes active/order execution and
 the corresponding lifecycle or restore stress selection. No phase or suite budget changes.
 
+The Kafka record-metadata fixture sends explicit binary keys, millisecond-aligned timestamps and
+null or non-null payloads, with one delivery pending at a time. Its isolated topics explicitly use
+`CreateTime` and disable time and size retention: the historical record timestamps must not make
+their segments eligible for the broker's periodic cleanup before Nervix reads them. It uses the
+existing Kafka fixture's five-second delivery, request and queue limits, observed through a
+six-second whole-send bound;
+timeout and driver causes remain typed. It adds no transport retry. The one- and three-node
+outlines check all three ACK modes, null versus empty values, and historical event-time windows in
+two branches. Their sixty-second output assertions observe the graph's result. The metadata
+mapping and native driver waits are untracked by Deloxide; the diagnostic selections reach the
+host's tracked ingestion and lifecycle locks.
+
 The Kafka consumer-retirement scenario holds the same broker's replies before it drops an ingestor
 whose eight instances joined their group, so destroying each consumer waits for its LeaveGroup
 answer. It waits for a running connector-storage job before sending a record through an HTTP
@@ -220,7 +232,7 @@ resubmitting an outcome that might already have produced output.
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | HTTP proxies | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP proxy fixture, `tests/common/http_proxy.rs` |
 | Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
-| Backup cut holds | No harness task: the fault injector's lease, drain or capture gate holds each backup cut that reaches it on that cut's own task in the node, and its pause-application gate holds each node's wait for the cluster to ready a revision that pauses the domain on the task applying that revision, until the scenario releases the gate or for the duration the scenario timed from each arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
+| Backup cut holds | No harness task: the fault injector's lease, committed-pause, drain or capture gate holds each backup cut that reaches it on that cut's own task in the node, and its pause-application gate holds each node's wait for the cluster to ready a revision that pauses the domain on the task applying that revision, until the scenario releases the gate or for the duration the scenario timed from each arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact payload multiplicities, generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs` and `subscription_payloads.rs`, used by the payload, generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
@@ -585,14 +597,12 @@ scenario waits for is the one thread that polls all of their steps, described un
 that thread ran on a CPU for 86 percent of the run, every scenario took about 1.45 times its
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
-limit on those runs' runner, which used at most 28 GiB of its 62. The archive build and its
-unit-test and scenario readers run on `blacksmith-16vcpu-ubuntu-2404`, keeping the compiled
-checkout path identical across archive publication and restoration. Each scenario shard retains
-16 CPUs, 48 slots and every product and harness deadline. A Boat shard in Check run 41176344914
-recorded 15.2% mean CPU steal and 46.7% peak steal alongside deadline failures, while the
-contemporaneous Blacksmith sanitizer runner recorded near-zero steal. The runner records retain
-the measurements and failed attempts; changing the environment does not explain every individual
-retry observation.
+limit on those runs' runner, which used at most 28 GiB of its 62. The archive build runs on
+`blacksmith-16vcpu-ubuntu-2404`, and its unit-test and scenario readers on `boat-xlarge`, whose
+32 GB and 4 GB of swap stay above that peak with less to spare. Each scenario shard keeps 16 CPUs,
+48 slots and every product and harness deadline. A Boat runner can lose a fifth of its CPU to its host: in Check 41157008321 two of three
+shards averaged 18% and 20% CPU steal with 54 and 64 retries, and the third averaged 0.9% with one.
+The runner load record shows how close a run comes on memory and how much CPU it lost.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. The `@slots_N` tag declares
@@ -620,10 +630,17 @@ retries: smaller attempts behind it cannot consume those slots one at a time and
 Declare weights from measured load per attempt, including CPU work or memory demand rather than
 elapsed time alone. Compare complete sharded runs on the same product source for run-slot
 utilization, runner stalls, retries and suite length against the suite watchdog's budget. Keep the
-measurements and the declaration decision on the owning ClickUp task. A weight accounts for load;
-timing assumptions still have to hold beside the rest of the suite, including on the first
-attempt. Passing only after a weight or retry share quiets the machine identifies a scenario defect
-to repair.
+measurements and the declaration decision on the owning ClickUp task. A weight accounts for load.
+
+Scenarios are timing sensitive, and under heavy contention on a host a scenario may not fit its
+bounds even when nothing is wrong with it. Weights and retries exist to absorb that. They do not
+explain a failure, and one they clear may be a masked bug, so the scenario's owner reasons out which
+it is and records why on the owning ClickUp task. Contention shows as a failure that follows the
+host's load, such as CPU steal, stalls and retries across unrelated scenarios, and does not repeat
+on a quiet host. Delay alone can make a wait late. It cannot lose an effect, duplicate one or
+produce a wrong value, so such a failure stays a defect however often a retry passes. A masked bug
+is repaired in its owner, and a timing assumption the scenario does not need is removed rather than
+weighed away.
 
 The active-scenario diagnostic names the feature limit or run slot a waiting scenario needs. Each
 `scenario started` line names the run slots the attempt holds. The suite summary counts scenario
@@ -982,6 +999,12 @@ first one ended. A stalled runner delays when the step learns of a release, neve
 itself. When the command is expected to outlast every hold, the step still watches it and reports a
 command that ends early with its own outcome.
 
+The committed-pause gate holds the cut coordinator after its replicated pause completes and
+before it tries to install the paused revision. It leaves reconciliation free to apply that
+revision. The elapsed-pause outline holds there beyond the cut's budget and requires the
+installation refusal, no archive and a resumed domain on one and three nodes. Its 25-second hold
+is measured on the cut's own task against the existing 20-second cut budget.
+
 A gate holds every cut that reaches it, not only the first. When the leader cannot record a
 backup's outcome, because leadership moved or because it could not confirm that it still leads,
 the backup runs again under its execution reference, and the outcome and the archive the client
@@ -1000,7 +1023,18 @@ only after its lease, its pause and its drain, which a loaded runner delays, and
 again reaches a later gate only after the earlier gates have held its cuts too. A 30-second bound
 failed on loaded runners, both before a backup's first cut arrived and before the second cut of a
 backup that had started again arrived. The wait ends as soon as a cut arrives, and the bound
-neither measures nor shortens any hold or cut budget.
+neither measures nor shortens any hold or cut budget. A failed backup attempt logs its execution
+reference and complete cause before the command finalization barrier can hold its result. A backup
+that ended before reaching the next domain's cut can therefore be distinguished from a capture
+observation that missed an arrival, even while the scenario is deliberately holding finalization.
+
+The first-domain lease-release recovery outline arms one refusal of the execution's mutation
+lease release at the consensus proposal boundary, as a leader whose lease lapsed while it keeps
+its term would refuse it. The public native client retries the same admitted reference, and the
+downloaded archive must contain both domains' quiesced cuts. It runs on one and three nodes; the
+ordinary, order and stressed-restore diagnostic selections retain the client, storage and cluster
+lifetimes around that recovery. Their tracked locks do not observe the asynchronous refusal or
+retry waits.
 
 A step waits up to 120 seconds, too, for a commit to reach the transaction commit pause a scenario
 armed on a node after its admission or after a statement. A commit reaches such a pause only after
@@ -2977,8 +3011,9 @@ for one build at a time, so the recipe builds each helper beside the suite in a 
 below `target/llvm-cov-tools`, and then installs it into the target directory of `cargo llvm-cov`. `scripts/scenario_shards.py`
 names what the archive holds: every executable `cargo llvm-cov report` reads as an object, the
 Playwright driver whose path the scenario executable holds, the ONNX fixtures and runtime, and the
-WASM guests. Each `scenarios (I of N)` job checks out the same revision at the same path, which the
-executables' absolute paths require, and restores the archive with
+WASM guests. Each `scenarios (I of N)` job checks out the same revision and bind-mounts it at the
+path the build publishes, which the executables' absolute paths require, because the build and the
+shards run on different providers. It then restores the archive from there with
 `just test-scenarios-coverage-unpack`. The restore refuses an archive of another revision or
 checkout path, a file restored at another size, and an executable whose shared libraries the runner
 lacks, before any scenario starts. Before it, the shard remounts the ext4 volumes holding `/tmp`,
@@ -3823,25 +3858,8 @@ address for the ZeroMQ address, and a UDP socket on every address for the syslog
 and three-node clusters. Each asserts that the ingestor becomes ready within 30 seconds and that a
 message sent to the address the scenario names reaches its relay.
 
-The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as
-`cec5f764`, at the CI concurrency factor of two scenarios per CPU with Cucumber's two retries unless
-a run says otherwise. The local runs used a 24-CPU workstation shared with other builds, whose load
-average stayed between 7 and 40, so 48 scenarios ran at once; CI used its 16-CPU runner, so 32 did.
-
-| Run | Result |
-| --- | --- |
-| `just test-harness-liveness`, 20 repetitions | Every repetition passed, 48 regressions in 4.0 seconds each |
-| `WASM processor restores guest state after cluster restart`, all three example rows, three runs with `--retry 0` | Every run passed. Every node became ready on its first attempt within 2.1 seconds, and the slowest cleanup took 8.7 of its 60 seconds, so none reached its budget |
-| `tests/features/cluster/*.feature` | 206 scenarios passed in 500 seconds with 16 retries. 553 node startups: median 2.04, 99th percentile 22.0, and slowest 41.3 seconds; two became ready on their second attempt, after a 36-second readiness deadline whose last probe was a typed `Unauthenticated` reply. 200 cleanups, the slowest 45.1 seconds, so none reached its budget |
-| `tests/features/runtime/wasm_*.feature` | 95 scenarios passed in 583 seconds with 18 retries. 288 startups, the slowest 17.4 seconds. Two cleanups reached the 60-second budget with a node still running, each recorded with that node and the scenarios live beside it, and both scenarios passed when retried |
-| The whole suite with `--suite-budget 4m` | Exit `124` after 313 seconds: the 240-second budget, the 60-second cleanup window, and 13 seconds of dependency and runtime teardown. The diagnostic named all 49 registered scenarios with their attempt, phase, phase age, and nodes, and the cleanup named the one node still running at the end of its window |
-| The whole suite with a deliberately failing scenario added | Exit `101` reporting `3 step(s) failed` after 1,676 seconds. The failing scenario failed all three attempts while the rest of the suite ran beside it, and each attempt reached `finished` within 0.32 seconds of its body ending. 3,926 startups, 99th percentile 4.14 and slowest 21.4 seconds; eight transient bind failures were relaunched on fresh ports and became ready. Six cleanups reached their budget with a node still running and were recorded |
-| The whole suite | Exit `101` after 1,490 seconds, with 1,749 of 1,752 scenarios passing. The three that did not are throughput and deadline assertions that failed only under the shared machine's load and pass in isolation and in CI. 3,937 startups, the slowest 20.7 seconds; four cleanups reached their budget with a node still running and were recorded |
-| CI `tests` job with `NERVIX_TEST_SUITE_BUDGET=4m` | The job ended itself in 16m30s. The suite started 11m54s into the job, and its budget expired with 32 scenarios active, 29 in their body and 3 stopping, each named. All 53 live nodes stopped within 9.96 seconds of the cleanup window, the process exited `124`, and the `test-logs` artifact was uploaded 2 seconds later |
-| CI `tests` job of the merged revision | Passed in 34m15s. The suite started 12m01s into the job and ran 1,754 scenarios and 19,384 steps in 19m26s with 2 retries. 3,832 node startups, all on their first attempt: median 1.77, 99th percentile 4.91, and slowest 6.37 seconds. No cleanup reached its budget |
-
-After every run, no `nervix-server` process, scenario binary, or dependency container remained. The
-[harness liveness qualification
-ledger](https://github.com/nervix-io/nervix/blob/main/tests/harness-liveness-qualification-ledger.md)
-records each run in full, with its artifacts, the executable evidence for every item of the
-qualification matrix, and the comparison with the run the job limit cancelled.
+The [harness liveness qualification map](https://github.com/nervix-io/nervix/blob/main/tests/harness-liveness-qualification-ledger.md)
+maps lifecycle and failure-handling contracts to their executable checks.
+[Test Liveness 06](https://app.clickup.com/t/86bc2wugx) retains the historical high-parallelism run
+results, comparison with the interrupted run, startup and cleanup distributions, and CI artifacts.
+Those results qualify their recorded revision and workload.

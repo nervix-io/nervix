@@ -424,7 +424,9 @@ typed fields: the field, input relay, route target, or materialized dependency, 
 requested names when an alteration targets another Model. An ingestor alteration whose head names
 another connector and entity than the stored ingestor reads is refused with both typed kinds, which
 its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
-KAFKA TOPIC INGESTOR cannot alter it`. An input, route, or dependency operation
+KAFKA TOPIC INGESTOR cannot alter it`. A Pulsar `SET START AT` on a provisioned subscription is a
+typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged.
+An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
 processor's own error where it is detected, so the report begins at the failure rather than at a
 conversion. Canonical Plexus rendering refuses only a value the language has no spelling for: a NaN or
@@ -442,9 +444,11 @@ answers a Model canonical Plexus cannot spell with a fixed diagnostic.
 ### Plexus Language And Formatter
 
 MQTT QoS refusals identify the supplied number, its source span, and the levels that the ingestor
-or emitter accepts. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
-`SESSION PERSISTENT QOS 1` pairing. Completion offers the quiesce modes the written session can
-use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+or emitter accepts. An MQTT ingestor `ACK` mode outside a persistent session at QoS 1 or 2 is
+refused with the mode underlined and the session and QoS the statement writes named beside the
+required pairing. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
+`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the quiesce modes the
+written session can use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
@@ -797,6 +801,25 @@ body size and the limit as typed fields and becomes a record rejection of that m
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
 
+A message the broker returns unrouted under `MANDATORY`, with its publisher confirm under `ACK` or
+before the round trip that ends a `NO ACK` write, is a record rejection with code `external` and
+operation `publish` whose message names the broker's reply code and text, such as `rabbitmq
+returned the message unrouted with reply code 312: NO_ROUTE`. A routing key longer than an AMQP
+short string carries is a `RabbitMqRecordError` keeping the driver's `ShortStringError` as its
+source and the key's length as a typed field, and becomes the same kind of rejection before the
+message is written. A return the emitter cannot attribute to a message of its write fails the
+attempt instead, because no record can be named as unrouted. An exchange emitter whose passive check
+finds no exchange fails to open with `EmitterOpenError::MissingExternalEntity`, naming the exchange
+and keeping the broker's `NOT_FOUND` answer, a `lapin::Error`, as its typed cause; `DESCRIBE EMITTER`
+shows it as `RabbitMQ exchange '<name>' does not exist`. Any other failure of that check is an
+initialization failure. Both are retried on the emitter's backoff.
+
+The registry refuses a `ROUTING KEY` that does not compute an exact, non-null, non-sensitive
+`STRING` as `ConnectorDeclarationIssue::EnvelopeValue`, the issue envelope values share, with the
+site written as the statement writes it: `ROUTING KEY requires an exact, non-null, non-sensitive
+STRING value`. The host reports a routing key that fails or produces no value for a record as an
+`evaluation` error of the `publish` operation whose message begins `ROUTING KEY`.
+
 Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
 their existing infrastructure contexts: `EmitterOpenError::Initialize` while a Syslog sender opens
 and `IngestorError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
@@ -831,6 +854,16 @@ them from the client's effective entries and checks them again: an invalid value
 pool with `RedisClientError::InvalidPoolLifetime`, naming the key above the schema's
 `ClientConfigSchemaError::InvalidValue`, which the node reports as
 `OpenClientError::InvalidPoolLifetime`. It is a configuration failure, not a record rejection.
+
+A Postgres client's pool keys are refused at `CREATE CLIENT` unless `pool_acquire_timeout_ms`,
+`pool_idle_timeout_ms` and `pool_max_lifetime_ms` are positive, schedulable whole milliseconds and
+`pool_test_before_acquire` is a boolean. The pool reads them from the client's effective entries and
+checks them again: an invalid value fails opening the pool with
+`EmitterOpenError::InvalidConfiguration` above the `ClientConfigError` that names the key, and it is a
+configuration failure, not a record rejection. A checkout that runs out of
+`pool_acquire_timeout_ms` keeps the shared `DeadlineElapsed` with the key and its bound, beneath
+`EmitterOpenError::Initialize` while the pool opens and beneath `EmitterWriteError::NotInitialized`
+on a write, which the host retries on its policy.
 
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
@@ -940,7 +973,10 @@ drops without a delivery report keeps the report channel's cancellation the same
 the connector's description of the failure for the emitter's transient error, and a missed `ACK
 TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
 record itself, an invalid or oversized message, timestamp or record, rejects that record through
-`ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
+`ON MESSAGE ERROR` instead. A record whose `TIMESTAMP` falls before the Unix epoch's first
+millisecond, which a Kafka record cannot carry, is a record rejection in either mode before the
+producer takes it, rendered from `KafkaCreateTimeError::BeforeFirstMillisecond` with the timestamp.
+A producer that librdkafka cannot create keeps its `KafkaError` beneath
 `EmitterOpenError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `delivery.timeout.ms` can
 hold is `KafkaMessageTimeoutError::TooLong` beneath `EmitterOpenError::InvalidConfiguration`. A
 finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
@@ -963,6 +999,13 @@ client accepts under one name, such as `metadata.broker.list` for `bootstrap.ser
 `ClientConfigSchemaError::DriverAlias`, naming the key and the accepted name. A key written under
 librdkafka's `topic.` prefix is `ClientConfigSchemaError::DriverPrefix`, naming the key and the
 prefix. Both refusals sit beneath the same client context and carry no configured value.
+
+A Kafka record timestamp outside the signed Unix-nanosecond range retains
+`TimestampError::ArithmeticOverflow` beneath `KafkaTopicIngestorError::RecordTimestamp`, naming
+the topic, partition and offset, beneath `IngestorError::Read`. It is a source read failure, not
+a codec rejection, and never becomes a wrapped or absent metadata instant. When a later record
+in a collected read fails that conversion, the source returns the valid gathered prefix first and
+keeps exactly one report for its next admitted read. A cancelled read leaves that report pending.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
@@ -1206,9 +1249,17 @@ An envelope clause or `PROPERTIES` key the entity does not declare is
 `EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
 reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
 not an exact, non-null, non-sensitive value of its type is `EnvelopeValue`, naming the clause or
-key and the expected type with the VM's compile failure beneath it. These are command refusals
-before publication, including during `ALTER`, rather than retried source or sink initialization
-failures. They never include a record's values.
+key and the expected type with the VM's compile failure beneath it. An `SQS QUEUE` emitter that
+writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, or a
+`DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
+`SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command
+refusals before publication, including during `ALTER`, rather than retried source or sink
+initialization failures. They never include a record's values. An ingestor whose delivery mode lacks
+the option choices its entity declares for it, such as an MQTT `ACK` mode outside a persistent
+session at QoS 1 or 2, is `ConnectorDeclarationIssue::Delivery`, carrying the vocabulary's typed
+`UnmetDeliveryRequirement` that names the entity, the mode, every required choice and the choice the
+statement writes for each option. The grammar refuses the same statement with the same text,
+underlining the mode.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed
 `ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through
@@ -1385,7 +1436,10 @@ the wait: an installation slot, or every live node preparing or readying a revis
 reports it beneath `DomainAlterError::BackupPauseTimeout`, and the cut attributes that to its drain
 phase as its timeout, such as `timed out waiting to capture domain 'edge': phase=drain, ...: timed
 out applying the backup pause of domain 'edge': the caller's deadline ended the runtime application
-while it waited for every live node to ready runtime revision 9`.
+while it waited for every live node to ready runtime revision 9`. An already elapsed deadline
+refuses the first installation wait immediately, even when its slot is available; attribution
+does not depend on whether the timer driver has processed that deadline yet. A pause committed
+after its cut's deadline therefore retains the installation refusal beneath the pause timeout.
 
 ### Ingestors, Emitters And Generators
 
@@ -2398,7 +2452,24 @@ completed `drain` duration. These are measurements of the same cut budget, never
 An owner request remains a terminal operation: a coordinator waiting for owners names that phase,
 and owner-local administrative logs distinguish revision catch-up, cluster-state application,
 lifecycle checkpoints, storage capture and staging. No remote progress is inferred from elapsed
-time. A cut that cannot reach a node it needs is refused as
+time. The command boundary reads a preserved `ConsensusError::LeadershipLost` beneath a capture or
+lifecycle context, or the cut's explicit `CoordinatorChanged`, as
+`OutcomeUnknown(LeadershipLost)`. The execution stays applying under its original reference,
+including when the same leader could not confirm its lease during pause, resume or mutation lease
+release. A `CaptureTimeout` remains a definitive refusal even when its last lease-admission cause
+was leadership loss; storage failures likewise retain their definitive failure and full chain.
+The cut's result is joined with its resume and mutation-lease-release results at their production
+boundaries. When both operations fail, a definitive cut failure wins; an uncertain cut yields to
+the cleanup failure, including a definitive storage failure. Both reports retain their typed
+causes until they are logged together with the execution reference. A later authority-loss report
+therefore cannot replace an expired cut's refusal with an unknown outcome.
+`DomainAlterError::ResumeAfterAbandonedAlter` keeps the application or drain failure of an already
+confirmed pause alongside its failed resume. The phase projection inspects the typed lifecycle
+contexts beneath that compound report, so a pause-application or drain expiry keeps its
+`CaptureTimeout` measurements. An abandoned cut remains definitive even when the resume's cause
+is `ConsensusError::LeadershipLost`; both causes remain in the report.
+Every failed attempt logs its execution reference and report before command finalization can hold
+its result. A cut that cannot reach a node it needs is refused as
 `StateOwnerUnreachable` when the cluster does not report a placement's scheduled primary live, and
 as `ExecutorUnreachable` when, before a quiesced cut pauses, it does not report a node that runs the
 domain's work live. Each carries the domain, the entity's kind and name and the node as typed

@@ -40,14 +40,14 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'http_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP ENDPOINT ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'http_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but HTTP ENDPOINT ingestors declare only metadata.method, metadata.path, metadata.query, metadata.remote_addr and metadata.host"
       """
       CREATE HTTP ENDPOINT INGESTOR http_endpoint_source
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'ws_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS ENDPOINT ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'ws_endpoint_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but WEBSOCKETS ENDPOINT ingestors declare only metadata.frame_type, metadata.remote_addr and metadata.path"
       """
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_source
         FROM ws_ingress MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s DECODE USING event_codec
@@ -61,7 +61,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'kafka_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition and metadata.offset"
+    When these Plexus statements fail with "ingestor 'kafka_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition, metadata.offset, metadata.key, metadata.timestamp, metadata.timestamp_type and metadata.tombstone"
       """
       CREATE KAFKA TOPIC INGESTOR kafka_source
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
@@ -72,7 +72,7 @@ Feature: Typed ingestor metadata
     When these Plexus statements fail with "ingestor 'pulsar_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PULSAR TOPIC ingestors declare no metadata field"
       """
       CREATE PULSAR TOPIC INGESTOR pulsar_source
-        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR
+        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
@@ -87,7 +87,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'redis_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but REDIS PUBSUB ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'redis_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but REDIS PUBSUB ingestors declare only metadata.channel and metadata.pattern"
       """
       CREATE REDIS PUBSUB INGESTOR redis_source
         FROM redis_main CHANNEL 'Orders' MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
@@ -192,7 +192,7 @@ Feature: Typed ingestor metadata
         TIMESTAMP AT metadata.offset
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'kafka_missing_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.missing, but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition and metadata.offset"
+    When these Plexus statements fail with "ingestor 'kafka_missing_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.missing, but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition, metadata.offset, metadata.key, metadata.timestamp, metadata.timestamp_type and metadata.tombstone"
       """
       CREATE KAFKA TOPIC INGESTOR kafka_missing_time
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'

@@ -24,16 +24,16 @@ use crate::{
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
-    AlterSchemaOperation, AlterTransportIngestorOperation, AlterWireSchema,
-    AlterWireSchemaOperation, AssignmentTarget, AssignmentTargetScope, AvroType, Backup,
-    BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction, BranchSelection,
-    ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode, ClientResourceMount,
-    CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName, CodecWireFormat,
-    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTarget,
+    AssignmentTargetScope, AvroType, Backup, BackupCapture, BackupResources, BackupScope,
+    BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping, ClientConfigEntry,
+    ClientIngestMode, ClientResourceMount, CodecEncoding, CodecEncodingRule,
+    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
@@ -2733,25 +2733,19 @@ pub(crate) fn alter_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
 }
 
 /// The canonical Plexus of every operation of an alteration of a transport's ingestor, in order.
-pub(crate) fn alter_transport_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
-    operations: &[AlterTransportIngestorOperation<Source>],
+pub(crate) fn alter_transport_ingestor_operations_to_plexus<
+    Operation: crate::connector::TransportIngestorOperation,
+>(
+    operations: &[Operation],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     let mut rendered = Vec::with_capacity(operations.len());
     for operation in operations {
-        let operation = match operation {
-            AlterTransportIngestorOperation::Ingestor(operation) => {
-                alter_ingestor_operation_to_plexus(operation)?
-            }
-            AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
-                format!("SET DECODE USING {}", codec.as_str())
-            }
-        };
-        rendered.push(operation);
+        rendered.push(operation.to_plexus()?);
     }
     Ok(rendered)
 }
 
-fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
+pub(crate) fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
     operation: &AlterIngestorOperation<Source>,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
@@ -3028,12 +3022,6 @@ impl EmitterPublishing<'_> {
                 ack_timeout,
                 retry_policy,
             } => confirmed("JETSTREAM ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::SqsSingle { retry_policy } => {
-                format!("SINGLE {}", retry(retry_policy))
-            }
-            EmitterPublishing::SqsBatch { retry_policy } => {
-                format!("BATCH {}", retry(retry_policy))
-            }
             EmitterPublishing::RequestAck { retry_policy } => {
                 format!("ACK {}", retry(retry_policy))
             }
@@ -3149,38 +3137,50 @@ impl EmitterEnvelope {
     }
 }
 
-fn postgres_conflict_action_to_plexus(action: &PostgresConflictAction) -> String {
-    match action {
-        PostgresConflictAction::None => String::new(),
-        PostgresConflictAction::DoNothing { target } => {
-            let target = conflict_target_to_plexus(target);
-            format!(" ON CONFLICT{target} DO NOTHING")
-        }
-        PostgresConflictAction::DoUpdate { target } => {
-            let target = conflict_target_to_plexus(target);
-            format!(" ON CONFLICT{target} DO UPDATE")
+impl PostgresConflictAction {
+    /// The `ON CONFLICT` clause the action writes after the emitter's `VALUES`, absent for an
+    /// emitter that writes none.
+    fn conflict_clause(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::DoNothing { target } => {
+                let target = conflict_target_to_plexus(target);
+                Some(format!("ON CONFLICT{target} DO NOTHING"))
+            }
+            Self::DoUpdate { target } => {
+                let target = conflict_target_to_plexus(target);
+                Some(format!("ON CONFLICT{target} DO UPDATE"))
+            }
         }
     }
 }
 
-fn mysql_conflict_action_to_plexus(action: &MySqlConflictAction) -> String {
-    match action {
-        MySqlConflictAction::None => String::new(),
-        MySqlConflictAction::DoNothing => " ON CONFLICT DO NOTHING".to_string(),
-        MySqlConflictAction::DoUpdate => " ON CONFLICT DO UPDATE".to_string(),
+impl MySqlConflictAction {
+    /// The `ON CONFLICT` clause the action writes after the emitter's `VALUES`, absent for an
+    /// emitter that writes none.
+    fn conflict_clause(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::DoNothing => Some("ON CONFLICT DO NOTHING".to_string()),
+            Self::DoUpdate => Some("ON CONFLICT DO UPDATE".to_string()),
+        }
     }
 }
 
-fn mongodb_conflict_action_to_plexus(action: &MongoDbConflictAction) -> String {
-    match action {
-        MongoDbConflictAction::None => String::new(),
-        MongoDbConflictAction::DoNothing { target } => {
-            let target = conflict_target_to_plexus(target);
-            format!(" ON CONFLICT{target} DO NOTHING")
-        }
-        MongoDbConflictAction::DoUpdate { target } => {
-            let target = conflict_target_to_plexus(target);
-            format!(" ON CONFLICT{target} DO UPDATE")
+impl MongoDbConflictAction {
+    /// The `ON CONFLICT` clause the action writes after the emitter's `VALUES`, absent for an
+    /// emitter that writes none.
+    fn conflict_clause(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::DoNothing { target } => {
+                let target = conflict_target_to_plexus(target);
+                Some(format!("ON CONFLICT{target} DO NOTHING"))
+            }
+            Self::DoUpdate { target } => {
+                let target = conflict_target_to_plexus(target);
+                Some(format!("ON CONFLICT{target} DO UPDATE"))
+            }
         }
     }
 }
@@ -3390,10 +3390,10 @@ mod tests {
         PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         PrometheusConfigEntry, PrometheusIngestMode, PrometheusQueryIngestor, PulsarEmitter,
         PulsarIngestMode, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicEmitter,
-        PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestMode, RabbitMqQueueEmitter,
-        RabbitMqQueueIngestor, RedisEmitter, RedisPubSubEmitter, RedisPubSubIngestMode,
-        RedisPubSubIngestor, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
-        SentryConfigEntry, SentryEmitter, SentryEventEmitter, SignalingProtobufConfig,
+        PulsarTopicIngestor, RabbitMqEmitter, RabbitMqExchangeEmitter, RabbitMqIngestMode,
+        RabbitMqQueueEmitter, RabbitMqQueueIngestor, RedisEmitter, RedisPubSubEmitter,
+        RedisPubSubIngestMode, RedisPubSubIngestor, RelayBranching, RetryPolicy, RouteConstruction,
+        SchemaField, SentryConfigEntry, SentryEmitter, SentryEventEmitter, SignalingProtobufConfig,
         SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsEmitter, SqsIngestMode,
         SqsQueueEmitter, SqsQueueIngestor, SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode,
         SyslogListenerIngestor, UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
@@ -4382,6 +4382,20 @@ mod tests {
                 "rmq_main QUEUE 'orders_q'",
             ),
             (
+                EmitterEntity::RabbitMq(RabbitMqEmitter::Exchange(RabbitMqExchangeEmitter {
+                    mode: crate::RabbitMqExchangePublishingMode::NoAck {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("rmq_main"),
+                    exchange: named("orders_x"),
+                    routing_key: scoped_field(FieldScope::Input, "category"),
+                })),
+                "rmq_main EXCHANGE 'orders_x' ROUTING KEY input.category",
+            ),
+            (
                 EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
                     mode: crate::RedisPubSubPublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
@@ -4434,7 +4448,7 @@ mod tests {
             ),
             (
                 EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-                    mode: crate::SqsQueuePublishingMode::Single {
+                    mode: crate::SqsQueuePublishingMode::Ack {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
                             max_backoff: "30s".to_string(),
@@ -4443,8 +4457,9 @@ mod tests {
                     client: named("sqs_main"),
                     queue: crate::SqsQueueName::parse("orders_queue").expect("valid queue"),
                     fifo_group: None,
+                    send: crate::SqsSend::Single,
                 })),
-                "sqs_main QUEUE 'orders_queue'",
+                "sqs_main QUEUE 'orders_queue' SEND SINGLE",
             ),
             (
                 EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
@@ -4543,7 +4558,7 @@ mod tests {
 
         let sqs = |fifo_group| {
             EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-                mode: crate::SqsQueuePublishingMode::Single {
+                mode: crate::SqsQueuePublishingMode::Ack {
                     retry_policy: crate::RetryPolicy {
                         backoff: "250ms".to_string(),
                         max_backoff: "30s".to_string(),
@@ -4552,6 +4567,7 @@ mod tests {
                 client: named("sqs_main"),
                 queue: crate::SqsQueueName::parse("orders_queue").expect("valid queue"),
                 fifo_group,
+                send: crate::SqsSend::Batch,
             }))
         };
         assert_eq!(
@@ -4559,7 +4575,7 @@ mod tests {
                 .entity_presentation()
                 .assured("the branch group has no fallible expression")
                 .reference_to_plexus(),
-            "sqs_main QUEUE 'orders_queue' FIFO GROUP FROM BRANCH"
+            "sqs_main QUEUE 'orders_queue' FIFO GROUP FROM BRANCH SEND BATCH"
         );
         assert_eq!(
             sqs(Some(crate::SqsFifoGroup::Expression(scoped_field(
@@ -4569,7 +4585,7 @@ mod tests {
             .entity_presentation()
             .assured("the scoped field has a canonical representation")
             .reference_to_plexus(),
-            "sqs_main QUEUE 'orders_queue' FIFO GROUP input.tenant"
+            "sqs_main QUEUE 'orders_queue' FIFO GROUP input.tenant SEND BATCH"
         );
 
         let otel = EmitterEntity::from(crate::OtelMetricsEmitter {
@@ -4910,15 +4926,14 @@ mod tests {
                         client: named("mqtt_main"),
                         topic: named("devices/+/Orders"),
                         instances: nonzero!(2u64),
-                        mode: MqttIngestMode::NoAck {
-                            session: MqttSession::Clean,
-                            qos: MqttQos::AtMostOnce,
-                        },
+                        session: MqttSession::Clean,
+                        qos: MqttQos::Qos0,
+                        mode: MqttIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
                 ),
                 "CREATE MQTT TOPIC INGESTOR mqtt_ingestor\n  FROM mqtt_main TOPIC \
-                 'devices/+/Orders' INSTANCES 2 MODE NO ACK ON QUIESCE DROP",
+                 'devices/+/Orders' INSTANCES 2 SESSION CLEAN QOS 0 MODE NO ACK ON QUIESCE DROP",
             ),
             (
                 orders_ingestor(
@@ -4927,15 +4942,14 @@ mod tests {
                         client: named("mqtt_main"),
                         topic: named("devices/#"),
                         instances: nonzero!(1u64),
-                        mode: MqttIngestMode::NoAck {
-                            session: MqttSession::Persistent,
-                            qos: MqttQos::AtLeastOnce,
-                        },
+                        session: MqttSession::Persistent,
+                        qos: MqttQos::Qos2,
+                        mode: MqttIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
                 "CREATE MQTT TOPIC INGESTOR mqtt_session_ingestor\n  FROM mqtt_main TOPIC \
-                 'devices/#' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND",
+                 'devices/#' SESSION PERSISTENT QOS 2 MODE NO ACK ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(
@@ -4976,7 +4990,7 @@ mod tests {
                     "redis_ingestor",
                     decoded(RedisPubSubIngestor {
                         client: named("redis_main"),
-                        channel: named("orders:*"),
+                        subscription: crate::RedisSubscriptionTarget::Channel(named("orders:*")),
                         mode: RedisPubSubIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),

@@ -116,7 +116,7 @@ A statement is rejected, naming the emitter and the offending value, when:
   message histograms track, so a batch at the limit is still observable as one batch.
 - `MAX SIZE` is zero.
 - `MAX SIZE` exceeds a maximum the destination protocol itself fixes. The one such maximum today is
-  the SQS message limit Nervix enforces, 256 KiB.
+  the SQS message limit Nervix enforces, 1 MiB.
 - The clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter.
 - The clause is present on a Sentry emitter whose codec declares no `ON EMITTING BATCH`
   transformation. The Sentry envelope protocol admits at most one `event` item per envelope, so
@@ -428,7 +428,7 @@ record rather than assumed.
 | MQTT | `QOS 0`, `QOS 1`, `QOS 2` | One PUBLISH packet whose payload is the batch payload | One message on the topic carrying the members |
 | NATS | `NO ACK` (core), `JETSTREAM ACK SEQUENTIAL`, `JETSTREAM ACK PARALLEL` | One message on the subject whose payload is the batch payload | One core message or one stream message carrying the members |
 | ZeroMQ | `NO ACK` | One single-frame PUSH message whose frame is the batch payload | One message; the puller reads the first frame and decodes the members |
-| SQS | `SINGLE`, `BATCH`; standard and FIFO queues | One SQS message whose body is the batch payload, with the members' common attributes and FIFO group | One queue message carrying the members; `MODE BATCH` still packs up to ten such messages per request, and each stays an independent message |
+| SQS | `SEND SINGLE`, `SEND BATCH`; standard and FIFO queues | One SQS message whose body is the batch payload, with the members' common attributes and FIFO group | One queue message carrying the members; `SEND BATCH` still packs up to ten such messages per request, and each stays an independent message |
 | Sentry | `ACK` | One envelope with one `event` item, whose event is the single value the codec's batch transformation produced | One Sentry event carrying the members in the field the transformation placed them in, typically `extra` |
 | Syslog | `udp`, `tcp` octet-counting, `tcp` non-transparent, `tls` | One transport frame whose content is the batch payload | One syslog message; with a `SYSLOG` codec its `MSG` is the array of the members' own RFC 5424 messages |
 | OTEL | `LOGS`, `TRACES`, `METRIC`; `grpc` and `http/protobuf` | One OTLP export request with one resource, one scope and the members as log records, spans or data points | One export of the members |
@@ -436,7 +436,7 @@ record rather than assumed.
 | Postgres | `ACK`; `DO UPDATE`, `DO NOTHING`, no conflict policy | One `INSERT ... SELECT ... FROM unnest(...)` statement with one array element per member per mapped column | One insert of the members as rows |
 | MySQL | `ACK`; `DO UPDATE`, `DO NOTHING`, no conflict policy | One multi-row `INSERT ... VALUES (...), (...)` statement | One insert of the members as rows |
 | MongoDB | `ACK`; insert, `DO UPDATE`, `DO NOTHING` | One insert or bulk write carrying one document per member | One write of the members as documents |
-| Iceberg | `ACK`; `ON S3`, `ON GCS`, `ON AZURE_BLOB` | One appended Parquet data file whose rows are the members | One data file in the table's next snapshot; the commit appends every data file it wrote |
+| Iceberg | `ACK`; an `S3`, `GCS` or `AZURE_BLOB` storage client | One appended Parquet data file whose rows are the members | One data file in the table's next snapshot; the commit appends every data file it wrote |
 
 For every row emitter the relationship to the array is exact: the native repeated-record container
 carries the same members, in the same order, counted the same way, confirmed by one response. The
@@ -454,7 +454,7 @@ not an array — and Nervix never changes a destination schema to make an array 
 | MQTT | The encoded batch payload written as the PUBLISH payload | The fixed and variable headers, including the topic | The broker's `Maximum Packet Size`; the protocol maximum is 268,435,455 bytes |
 | NATS | The encoded batch payload written as the message payload | The subject and protocol headers | `max_payload`, 1 MiB by default |
 | ZeroMQ | The encoded batch payload written as the frame | The ZMTP frame header | None in the protocol; the receiving socket's `ZMQ_MAXMSGSIZE` |
-| SQS | The encoded batch payload written as the message body | Message attributes and the FIFO group, which the service counts against the same limit | 256 KiB per message and per `SendMessageBatch` request, as Nervix enforces them; ten entries per request |
+| SQS | The encoded batch payload written as the message body | Message attributes and the FIFO group, which the service counts against the same limit | 1 MiB per message and per `SendMessageBatch` request, as Nervix enforces them; ten entries per request |
 | Sentry | The event JSON the batch transformation produced | The envelope header, the item header and the newline framing Nervix adds | Sentry rejects events above 200 KB compressed or 1 MB decompressed; a Relay deployment may lower it |
 | Syslog | The encoded batch payload written as the frame content | The octet-count prefix or the trailing LF | 65,507 bytes per UDP datagram; an octet count of at most ten digits; non-transparent TCP framing rejects a payload containing LF |
 | OTEL | The encoded protobuf export request, before optional gzip | The gRPC or HTTP request framing and headers | The receiver's request-size limit; the OpenTelemetry Collector's gRPC default is 4 MiB |
@@ -471,7 +471,7 @@ MQTT broker declared in its latest `CONNACK`, and the largest packet MQTT can ex
 fixed header, topic, packet identifier and property length; the `max_payload` the NATS server
 announced, with the message headers; the `maxMessageSize` the Pulsar broker announced when the
 producer's connection opened, with the message metadata and properties, as the Java client counts
-them; and the 256 KiB SQS message with its attributes and FIFO group. A Pulsar topic's own
+them; and the 1 MiB SQS message with its attributes and FIFO group. A Pulsar topic's own
 `maxMessageSize` policy is applied only by the broker, which answers a larger message with
 `NotAllowedError`; a confirming `MODE ACK` rejects the batch with that answer, while `NO ACK` has
 already completed at producer acceptance. RabbitMQ's `max_message_size` is a broker setting a client
@@ -504,8 +504,10 @@ it; a `MAX SIZE` equal to the packet limit does not guarantee that every insert 
 
 Iceberg is the one emitter with two byte bounds, and they measure different things on purpose:
 `BATCH ... MAX SIZE` bounds one written data file, while `COMMIT EACH ... MAX SIZE` bounds the
-Arrow payload bytes staged before a commit becomes due. A declaration that sets the first above the
-second is valid and simply means every commit publishes one data file.
+Arrow payload bytes staged before a commit becomes due. Neither bound limits the other, so a
+declaration that sets the first above the second is valid. A commit appends one data file for each
+staged segment it covers, and a segment never spans two released Arrow carriers, so a commit that
+covers several carriers appends several data files whichever bound is larger.
 For a declared `BATCH`, Iceberg measures the full Parquet file, including its footer, before
 staging each accepted segment. It writes one file per segment and checks the file's physical bytes
 and row count before appending its manifest entry. A single row that cannot fit is a per-row
@@ -548,7 +550,7 @@ runs after the batch failed, not a second way to publish.
 | `FLUSH IMMEDIATE` | Unchanged, including the 100 µs minimum batching window. Batching does not extend it. |
 | `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` | Unchanged. It changes the size of incoming Arrow carriers; compatible rows from successive carriers may share a payload within one emitter flush. Collection stays independent per source relay and concrete branch. |
 | `MODE` | Unchanged in form. A confirmation window counts publishes: without batching a publish is one record, with batching it is one batch. `ACK PARALLEL MAX 100` with `MAX MESSAGES 500` therefore exposes up to 50,000 records to one ambiguity window, which is the declaration's meaning, not a hidden multiplier. |
-| SQS `MODE BATCH` | Unchanged and orthogonal. `MODE` groups independent SQS messages into one service request; batching decides how many source records one SQS message carries. A request still holds at most ten messages and at most the service's request limit. |
+| SQS `SEND BATCH` | Unchanged and orthogonal. `SEND BATCH` groups independent SQS messages into one service request; batching decides how many source records one SQS message carries. A request still holds at most ten messages and at most the service's request limit. |
 | Database `WITH MAX BATCH <n>` | Deleted. The batching clause declares the same bound for the four database emitters and adds the encoded-size bound. |
 | Iceberg `COMMIT EACH <duration> MAX SIZE <bytes>` | Unchanged. It decides when staged rows are published; batching decides how the published rows are divided into data files. One commit may append several data files. |
 | `ATTACHED` / `DETACHED` | Unchanged. A detached emitter still acknowledges upstream at relay fan-out and still performs its declared confirmations and retries. |
@@ -642,7 +644,7 @@ or `trace` detail and carry no payload values.
 | Limit | Value |
 | --- | --- |
 | `MAX MESSAGES` | 1 to 65,536 |
-| `MAX SIZE` | At least 1 byte; at most 256 KiB for SQS |
+| `MAX SIZE` | At least 1 byte; at most 1 MiB for SQS |
 | Encodings per candidate | At most `⌈log2(n)⌉ + 1` for `n` members, each bounded by `MAX SIZE` |
 | Members per batch | At most `MAX MESSAGES`, selected from compatible carriers released by one emitter flush |
 | Batch cadence | None: batching owns no timer, and `FLUSH` alone decides when output leaves |
@@ -827,7 +829,7 @@ existing emission scenarios already provision.
 | Batch-aware jaq and format-native containers | Every container in the [container table](#containers-by-format), the protobuf batch message with and without a transformation, and the zero-output, multiple-output, evaluation-failure and unwritable-value failures | Kafka, and a protobuf consumer for the batch message |
 | Bounded payload assembly | Packing order across Arrow carriers, compatibility on source relay, exact branch, key, headers and ordering group, singleton shape, nothing for an empty carrier, partial batches, and no batch cadence of its own | Kafka and SQS, with interleaved records from at least two branches and source relays |
 | Membership through acknowledgements and retries | One confirmation acknowledging every member, a retained prepared payload across an ambiguous retry, a smaller retry where the contract names members, and upstream leases kept alive | Kafka with a stalled broker, and MongoDB with a poison document |
-| Broker and message emitters | One batch per message on Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ and SQS, in every publishing mode, including SQS `MODE BATCH` with FIFO groups | Kafka, Pulsar, RabbitMQ, Redis, EMQX, NATS, a Nervix ZeroMQ ingestor, ElasticMQ |
+| Broker and message emitters | One batch per message on Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ and SQS, in every publishing mode, including SQS `SEND BATCH` with FIFO groups | Kafka, Pulsar, RabbitMQ, Redis, EMQX, NATS, a Nervix ZeroMQ ingestor, ElasticMQ |
 | Syslog, Sentry and OTEL | The syslog frame and its compatibility rule over UDP, TCP and TLS; a Sentry envelope accepted with the batch event; bounded OTLP export requests for logs, traces and metrics over both transports | A Nervix syslog ingestor, Bugsink, Quickwit and Jaeger |
 | SQL and MongoDB | Bounded inserts and bulk writes, the encoded-size bound, existing conflict policies, and record-specific isolation after a failed batch | ClickHouse, Postgres, MySQL, MongoDB |
 | Iceberg staging and commit | Data files bounded by rows and written bytes, several files in one commit, and the commit cadence unchanged | An Iceberg REST catalog over object storage |

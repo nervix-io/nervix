@@ -43,7 +43,6 @@ use nervix_connector_otel::{
     OtelScope,
 };
 use nervix_connector_postgres::PostgresConflictAction;
-use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
     AckWindow, Assignment, AssignmentTarget, CLIENT_CONSUMER_SESSION_BYTES, ClickHouseEmitter,
     ClickHouseTableEmitter, ClickHouseValueMapping, ClientConfigEntry, ClientConsumerEmitter,
@@ -53,10 +52,10 @@ use nervix_models::{
     KafkaEmitter, KafkaTopicEmitter, Literal, Model, MongoDbCollectionEmitter, MongoDbEmitter,
     MqttEmitter, MqttTopicEmitter, MySqlEmitter, MySqlTableEmitter, NatsEmitter,
     NatsSubjectEmitter, OtelEmitter, OtelMappings, OtelMetricsEmitter, PostgresEmitter,
-    PostgresTableEmitter, PulsarEmitter, PulsarTopicEmitter, RabbitMqEmitter, RabbitMqQueueEmitter,
-    RedisEmitter, RedisPubSubEmitter, RetryPolicy, RouteConstruction, SchemaName, SentryEmitter,
-    SqsEmitter, SqsQueueEmitter, SyslogCollectorEmitter, SyslogEmitter, ZeroMqEmitter,
-    ZeroMqPushEmitter, parse_duration_text,
+    PostgresTableEmitter, PulsarEmitter, PulsarTopicEmitter, RabbitMqEmitter,
+    RabbitMqExchangeEmitter, RabbitMqQueueEmitter, RedisEmitter, RedisPubSubEmitter, RetryPolicy,
+    RouteConstruction, SchemaName, SentryEmitter, SqsEmitter, SqsQueueEmitter,
+    SyslogCollectorEmitter, SyslogEmitter, ZeroMqEmitter, ZeroMqPushEmitter, parse_duration_text,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -547,10 +546,11 @@ pub(super) enum PulsarEmitterPlan<Config = ResolvedClientConfig> {
     Topic(PulsarTopicEmitterPlan<Config>),
 }
 
-/// The queue entity planned for RabbitMq execution.
+/// The queue and exchange entities planned for RabbitMq execution.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum RabbitMqEmitterPlan<Config = ResolvedClientConfig> {
     Queue(RabbitMqQueueEmitterPlan<Config>),
+    Exchange(RabbitMqExchangeEmitterPlan<Config>),
 }
 
 /// The pubsub entity planned for Redis execution.
@@ -660,6 +660,7 @@ impl<Config> EmitterConnectorPlan<Config> {
             Self::Kafka(KafkaEmitterPlan::Topic(plan)) => plan.batch,
             Self::Pulsar(PulsarEmitterPlan::Topic(plan)) => plan.batch,
             Self::RabbitMq(RabbitMqEmitterPlan::Queue(plan)) => plan.batch,
+            Self::RabbitMq(RabbitMqEmitterPlan::Exchange(plan)) => plan.batch,
             Self::Redis(RedisEmitterPlan::PubSub(plan)) => plan.batch,
             Self::Mqtt(MqttEmitterPlan::Topic(plan)) => plan.batch,
             Self::Nats(NatsEmitterPlan::Subject(plan)) => plan.batch,
@@ -694,6 +695,9 @@ impl<Config> EmitterConnectorPlan<Config> {
             }
             Self::RabbitMq(RabbitMqEmitterPlan::Queue(_)) => {
                 <nervix_models::RabbitMqQueueEmitter as EmitterEntityModel>::KIND
+            }
+            Self::RabbitMq(RabbitMqEmitterPlan::Exchange(_)) => {
+                <nervix_models::RabbitMqExchangeEmitter as EmitterEntityModel>::KIND
             }
             Self::Redis(RedisEmitterPlan::PubSub(_)) => {
                 <nervix_models::RedisPubSubEmitter as EmitterEntityModel>::KIND
@@ -766,6 +770,9 @@ impl EmitterConnectorPlan<DeclaredClientConfig> {
             ),
             Self::RabbitMq(RabbitMqEmitterPlan::Queue(plan)) => EmitterConnectorPlan::RabbitMq(
                 RabbitMqEmitterPlan::Queue(plan.resolve_clients(resolve)?),
+            ),
+            Self::RabbitMq(RabbitMqEmitterPlan::Exchange(plan)) => EmitterConnectorPlan::RabbitMq(
+                RabbitMqEmitterPlan::Exchange(plan.resolve_clients(resolve)?),
             ),
             Self::Redis(RedisEmitterPlan::PubSub(plan)) => EmitterConnectorPlan::Redis(
                 RedisEmitterPlan::PubSub(plan.resolve_clients(resolve)?),
@@ -971,6 +978,27 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 },
             )),
             (
+                EmitterEntity::RabbitMq(RabbitMqEmitter::Exchange(RabbitMqExchangeEmitter {
+                    client: expected,
+                    exchange,
+                    mode,
+                    ..
+                })),
+                Model::ClientRabbitMq(client),
+            ) => EmitterConnectorPlan::RabbitMq(RabbitMqEmitterPlan::Exchange(
+                RabbitMqExchangeEmitterPlan {
+                    batch: emitter.batch,
+                    client: EmitterClientSpec::declared(
+                        expected,
+                        &client.name,
+                        client.mount.as_ref(),
+                        &client.config,
+                    )?,
+                    exchange: exchange.clone(),
+                    mode: decide_rabbitmq_exchange_publication(mode)?,
+                },
+            )),
+            (
                 EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
                     client: expected,
                     channel,
@@ -1062,7 +1090,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                     client: expected,
                     queue,
-                    mode,
+                    send,
                     ..
                 })),
                 Model::ClientSqs(client),
@@ -1075,7 +1103,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 queue: queue.clone(),
-                mode: decide_sqs_publishing_mode(mode),
+                send: *send,
             })),
             (EmitterEntity::Sentry(SentryEmitter::Event(event)), Model::ClientSentry(client)) => {
                 EmitterConnectorPlan::Sentry(SentryEmitterPlan::Event(SentryEventEmitterPlan {
@@ -1482,6 +1510,10 @@ macro_rules! broker_publication {
 broker_publication!(decide_kafka_publication, KafkaTopicPublishingMode);
 broker_publication!(decide_pulsar_publication, PulsarTopicPublishingMode);
 broker_publication!(decide_rabbitmq_publication, RabbitMqQueuePublishingMode);
+broker_publication!(
+    decide_rabbitmq_exchange_publication,
+    RabbitMqExchangePublishingMode
+);
 
 /// The quality of service `mode` declares for an MQTT `emitter`.
 fn decide_mqtt_publishing_mode(
@@ -1522,14 +1554,6 @@ fn decide_nats_publishing_mode(
             let confirmation = decide_ack_confirmation(window, ack_timeout)?;
             Ok(NatsPublishingMode::JetStream(confirmation))
         }
-    }
-}
-
-/// The request shape `mode` declares for an SQS `emitter`.
-fn decide_sqs_publishing_mode(mode: &nervix_models::SqsQueuePublishingMode) -> SqsPublishingMode {
-    match mode {
-        nervix_models::SqsQueuePublishingMode::Single { .. } => SqsPublishingMode::Single,
-        nervix_models::SqsQueuePublishingMode::Batch { .. } => SqsPublishingMode::Batch,
     }
 }
 
@@ -1922,7 +1946,7 @@ mod tests {
                 },
                 Self::Sqs => EmitterCase {
                     connector: EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
-                        mode: nervix_models::SqsQueuePublishingMode::Batch {
+                        mode: nervix_models::SqsQueuePublishingMode::Ack {
                             retry_policy: nervix_models::RetryPolicy {
                                 backoff: "100ms".to_string(),
                                 max_backoff: "1s".to_string(),
@@ -1931,6 +1955,7 @@ mod tests {
                         client: client(),
                         queue: nervix_models::SqsQueueName::parse("orders").expect("valid queue"),
                         fifo_group: None,
+                        send: nervix_models::SqsSend::Batch,
                     })),
                     client: Model::ClientSqs(CreateClientSqs {
                         name: client(),
@@ -2574,12 +2599,12 @@ mod tests {
         let EmitterConnectorPlan::Sqs(SqsEmitterPlan::Queue(sqs)) = EmitterKind::Sqs
             .case()
             .decide()
-            .expect("an SQS emitter accepts BATCH")
+            .expect("an SQS emitter accepts SEND BATCH")
             .connector
         else {
             panic!("an SQS emitter must be planned as SQS");
         };
-        assert_eq!(sqs.mode, SqsPublishingMode::Batch);
+        assert_eq!(sqs.send, nervix_models::SqsSend::Batch);
     }
 
     #[rstest]

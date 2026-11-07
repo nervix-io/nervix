@@ -539,7 +539,7 @@ mod tests {
             (
                 IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                     client: client_name.clone(),
-                    channel: named("events"),
+                    subscription: nervix_models::RedisSubscriptionTarget::Channel(named("events")),
                     mode: RedisPubSubIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 })),
@@ -557,10 +557,9 @@ mod tests {
                     topic: nervix_models::MqttTopicFilter::parse("events")
                         .expect("valid topic filter"),
                     instances: NonZeroU64::MIN,
-                    mode: MqttIngestMode::NoAck {
-                        session: MqttSession::Clean,
-                        qos: MqttQos::AtMostOnce,
-                    },
+                    session: MqttSession::Clean,
+                    qos: MqttQos::Qos0,
+                    mode: MqttIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 })),
                 Model::ClientMqtt(CreateClientMqtt {

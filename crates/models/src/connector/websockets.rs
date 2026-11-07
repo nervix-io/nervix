@@ -157,7 +157,14 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Fixed(WEBSOCKETS_CONTROL_FRAME_BUDGET),
         },
     ],
-    driver_limits: &[],
+    // The transport's handshake parser fixes these bounds of the opening response; no client key
+    // reaches them.
+    driver_limits: &[
+        "The opening upgrade response carries at most 124 header fields, and at most 64 KiB \
+         arrives before its head ends; a larger response fails that connection attempt.",
+        "The response head arrives within 512 reads that, after the 64th, average at least 128 \
+         bytes; a peer that trickles it fails that connection attempt.",
+    ],
 };
 
 /// What the connector of a WEBSOCKETS ENDPOINT holds and how long it waits.
@@ -261,12 +268,21 @@ pub struct WebsocketsEndpointIngestor {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// The text or binary kind of one data frame, the address of the peer that opened its connection and
+/// the path the connection's upgrade request named.
+const WEBSOCKETS_ENDPOINT_METADATA: IngestorMetadataDeclaration =
+    IngestorMetadataDeclaration::new(&[
+        IngestorMetadataField::new("frame_type", IngestorMetadataType::String),
+        IngestorMetadataField::new("remote_addr", IngestorMetadataType::String),
+        IngestorMetadataField::new("path", IngestorMetadataType::String),
+    ]);
+
 impl IngestorDeclaration for WebsocketsEndpointIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // The opening HTTP upgrade request's fields, as the server's header map keeps them: names in
         // lowercase, every value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: WEBSOCKETS_ENDPOINT_METADATA,
         executes_on_every_cluster_node: true,
         reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         position_class: PositionClass::None,
