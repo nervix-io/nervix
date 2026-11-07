@@ -319,10 +319,10 @@ During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain avail
 Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
 for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
 selected domain. Read `Domains And Time` → `Duration Literals` for duration spelling, and
-`Node Settings` for the complete parameter set, positive duration bounds,
-existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
-belong only to the first bootstrap, including when their value equals the default. Later starts,
-including the returning bootstrap node, omit them.
+`Node Settings` for the complete parameter set, one assignment per parameter, positive duration
+bounds, existing-model cap refusals, live installation and committed-versus-running inspection.
+Seed flags belong only to the first bootstrap, including when their value equals the default.
+Later starts, including the returning bootstrap node, omit them.
 `HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect
 literal HTTP polling headers, at model creation and when a later cap is lowered.
 
