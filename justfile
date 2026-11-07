@@ -399,6 +399,15 @@ test-domain-clock-delivery *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/domain_clock_delivery_attachment.feature {{ quote(args) }}
 
+# Qualify request-based command progress and clock attachment with in-process node prerequisites.
+test-progress-qualification *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input 'tests/features/{cluster/application_progress,cluster/interconnect_health,runtime/domain_clock_delivery_attachment}.feature' \
+        {{ quote(args) }}
+
 # Run the native-client and CLI foreign-reference witnesses with only the tools they start.
 test-client-foreign-execution: (test-client-recovery-witnesses "client-foreign-execution" "(A native command|The CLI) recovers its own execution after a foreign command reply")
 
