@@ -1936,6 +1936,38 @@ mod tests {
                 .assured("a persisted window needs nothing more")
                 .is_none()
         );
+
+        let storage_directory = tempfile::tempdir().assured("the state directory opens");
+        let database = fjall::Database::builder(storage_directory.path())
+            .open()
+            .assured("the state database opens");
+        let store = RuntimeStateStore::from_database(
+            database,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .assured("the state store opens");
+        assert_eq!(
+            state
+                .persist_published(&store, &executor, &staging)
+                .await
+                .assured("the branch owner persists the segmented window"),
+            Some(large_revision)
+        );
+        let stored = store
+            .latest_snapshot(&state.placement)
+            .assured("the stored window reads")
+            .verified("the branch owner published the window");
+        assert_eq!(stored.lsm, large_revision);
+        assert_eq!(stored.payload, payload);
+        assert_eq!(state.generations.last_persisted_lsm(), large_revision);
+        assert!(
+            state
+                .persist_published(&store, &executor, &staging)
+                .await
+                .assured("the branch owner already persisted this generation")
+                .is_none()
+        );
     }
 
     /// Delayed removals that need several typed sections are sealed one section at a time into
