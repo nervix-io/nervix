@@ -499,6 +499,12 @@ impl<'a> SyslogMessage<'a> {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external writer interface encodes one validated syslog message"
+        )
+    )]
     fn write(
         &self,
         row: &ArrowCodecRow<'_>,
