@@ -30,6 +30,12 @@ use super::{
 mod channels;
 use channels::{RelayBranchChannels, RelayChannels};
 
+#[path = "relay_boundary_routed.rs"]
+mod routed;
+pub(super) use routed::{
+    RemoteRuntimeConsumer, RoutedDelivery, RuntimeConsumerDispatch, routed_payload,
+};
+
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "relay_boundary_shuttle_tests.rs"]
 mod shuttle_tests;
@@ -543,91 +549,6 @@ pub(super) struct BranchCollapseNode {
 pub(super) enum RelayBoundaryFanout {
     Direct(Arc<RelayConsumerFanout>),
     BranchCollapse(Arc<BranchCollapseNode>),
-}
-
-/// One destination's share of a relay fanout.
-///
-/// The body is a parameter rather than something this builds, because the fanout encodes it once
-/// and every destination carries a handle to that one allocation. Only the target relay and the
-/// acknowledgement obligations differ between destinations.
-pub(super) struct RoutedDelivery<'a> {
-    pub(super) delivery: RelayDelivery,
-    pub(super) domain: &'a DomainName,
-    /// The unit of the relay whose owner routes the batch.
-    pub(super) unit: Unit,
-    pub(super) consumer: &'a RemoteRuntimeConsumer,
-    pub(super) batch: &'a RelayRecordBatch,
-    pub(super) batch_ipc: ChargedBytes,
-    pub(super) acks: Vec<Option<RemoteAckRegistration>>,
-}
-
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "retained relay handles route each admitted record and keep channel ordering and \
-                  fences"
-    )
-)]
-pub(super) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
-    RelayPayload {
-        delivery: delivery.delivery,
-        kind: RelayPayloadKind::Routed,
-        domain: delivery.domain.clone(),
-        relay: delivery.consumer.relay.clone(),
-        unit: delivery.unit,
-        key: BranchKey::to_remote_key(&delivery.batch.key),
-        batch_ipc: delivery.batch_ipc,
-        metadata: delivery.batch.metadata.to_remote(),
-        acks: delivery.acks,
-        admission: None,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RemoteRuntimeConsumer {
-    pub(super) node_id: ClusterNodeName,
-    pub(super) relay: RelayName,
-    pub(super) mode: Option<AckMode>,
-    pub(super) unit_modes: BTreeMap<Unit, AckMode>,
-}
-
-impl RemoteRuntimeConsumer {
-    pub(super) fn mode_for(&self, unit: Unit) -> Option<AckMode> {
-        match (self.mode, self.unit_modes.get(&unit).copied()) {
-            (Some(AckMode::Attached), _) | (_, Some(AckMode::Attached)) => Some(AckMode::Attached),
-            (Some(AckMode::Detached), _) | (_, Some(AckMode::Detached)) => Some(AckMode::Detached),
-            (None, None) => None,
-        }
-    }
-}
-
-/// How a batch reaches this node's runtime consumers of a relay, which decides what reaching no
-/// attached consumer here means.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum RuntimeConsumerDispatch {
-    /// The relay owner fans out a batch of its own relay. Its remote consumers can take what no
-    /// local consumer does, and a relay that no attached consumer reads leaves nothing to wait for.
-    Owner,
-    /// The owner of the relay on another node routed the batch here, because its schedule places an
-    /// attached consumer of the relay on this node.
-    Routed,
-}
-
-impl RuntimeConsumerDispatch {
-    /// Whether a batch that carries record acknowledgements must reach an attached consumer on this
-    /// node.
-    ///
-    /// A routed batch that finds none was routed for a consumer that has since left the node, as
-    /// when a forced recovery moves it off a node the scheduler judged unavailable while the batch
-    /// was in flight. Nothing here can complete the work its acknowledgements stand for, so
-    /// completing them would report records no consumer processed.
-    fn requires_local_attached_consumer(self) -> bool {
-        match self {
-            Self::Owner => false,
-            Self::Routed => true,
-        }
-    }
 }
 
 pub(super) struct RelayOwnerTask {
