@@ -36,6 +36,16 @@ node's files, observes the initially loaded leaf on a fresh connection before re
 replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
 name, and the console recorder checks an opened WSS connection to the advertised leader.
 
+## Focused Application Progress Qualification
+
+`just test-progress-qualification --concurrency 2 --retry 0` runs the application-progress,
+interconnect-health and domain-clock-attachment features through the ordinary in-process harness.
+It prepares the console assets, WASM guests and ONNX runtime those nodes load, while retaining
+the scenarios' public commands, fault controls, startup budgets, deadlines and parallel execution.
+This focused check covers incarnation-bound progress, completion through a push or query and
+clock delivery after attachment changes; the complete ordinary and mode suites remain separate
+qualification evidence.
+
 ## Focused Native Command Recovery
 
 `just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
