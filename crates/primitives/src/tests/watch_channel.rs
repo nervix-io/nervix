@@ -39,6 +39,34 @@ pub(super) fn borrowing_and_updating_marks_the_value_as_seen() {
     assert!(!sender.borrow().has_changed());
 }
 
+/// Marking a value as seen changes only this receiver, without borrowing or publishing a value.
+pub(super) fn marking_a_value_as_seen_does_not_borrow_or_publish_it() {
+    let (sender, mut receiver) = watch::channel(0_u8);
+    let other = receiver.clone();
+    sender.send_replace(1);
+    assert!(receiver.has_changed().assured("the sender is alive"));
+    assert!(!sender.send_if_modified(|value| {
+        assert_eq!(*value, 1);
+        receiver.mark_unchanged();
+        assert!(!receiver.has_changed().assured("the sender is alive"));
+        false
+    }));
+    assert!(other.has_changed().assured("the sender is alive"));
+    assert_eq!(*sender.borrow(), 1);
+    {
+        let mut waiting = pin!(receiver.changed());
+        assert!(poll_once(waiting.as_mut()).is_pending());
+        sender.send_replace(2);
+        assert!(poll_once(waiting.as_mut()).is_ready());
+    }
+    sender.send_replace(3);
+    drop(sender);
+    receiver.mark_unchanged();
+    let mut closed = pin!(receiver.changed());
+    let ended = ready(poll_once(closed.as_mut()), "the sender was dropped");
+    assert!(ended.is_err());
+}
+
 /// A wait completes at once for an unseen value, and otherwise waits for the next send.
 pub(super) fn a_wait_completes_for_an_unseen_or_a_later_value() {
     let (sender, mut receiver) = watch::channel(0_u8);
@@ -207,6 +235,7 @@ pub(super) fn closing_completes_when_every_receiver_is_dropped() {
 pub(super) fn keeps_the_channel_contract() {
     subscribing_marks_the_current_value_as_seen();
     borrowing_and_updating_marks_the_value_as_seen();
+    marking_a_value_as_seen_does_not_borrow_or_publish_it();
     a_wait_completes_for_an_unseen_or_a_later_value();
     a_wait_fails_once_the_senders_are_dropped_and_nothing_is_unseen();
     dropping_the_last_sender_ends_a_pending_wait();

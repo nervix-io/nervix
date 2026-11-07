@@ -58,6 +58,8 @@ mod relay;
 mod materialized;
 #[path = "parameters.rs"]
 mod parameters;
+#[path = "process_target.rs"]
+mod process_target;
 #[path = "progress.rs"]
 mod progress;
 
