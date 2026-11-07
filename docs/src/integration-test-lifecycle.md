@@ -18,6 +18,16 @@ client's ordinary retry deadline, then verifies that the same process resumes it
 termination cases check process exit after a subscription ends and after Ctrl-C during an outage.
 The ordinary scenario runner, deadlines and parallel execution remain in force.
 
+`just test-cli-repl` selects the interactive output, reconnect, membership, cancellation and upload
+examples tagged `@cli_repl_output` in `cli_session.feature`. Its optional first argument replaces
+that tag expression. It prepares the console assets, ONNX runtime and CLI, without unrelated
+guest or client-probe builds. The pseudo-terminal waits for output without sending Enter: rows,
+notices and new clock generations must appear while input remains unfinished, including during
+completion selection and history search. A held statement
+keeps the event consumer away from the prompt during a burst; its completion is followed by the
+bounded queue's omission notice and a fresh row. The same terminal fixture preserves its bounded
+transcript, closes with its process and leaves all scenario deadlines and parallel execution intact.
+
 `just test-domain-clock-delivery` runs the one- and three-node receiver attachment scenarios:
 clock installation while gossip exchanges are blocked, session tick delivery and receiver restart.
 It prepares the console assets, WASM guests and ONNX runtime required by the in-process nodes;

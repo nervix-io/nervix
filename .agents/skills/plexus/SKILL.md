@@ -77,6 +77,9 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 completion status messages. For connector expression completion, including filters, HTTP request
 expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
 the CLI's Completion section.
+For live subscription, clock and notice output while editing, and terminal omission notices,
+follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)
+section.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
 Listener certificates are node provisioning, configured outside Plexus statements.

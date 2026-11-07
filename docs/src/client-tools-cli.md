@@ -258,15 +258,18 @@ The level is `INFO`, `WARN` or `ERROR`.
 
 A domain clock line follows each newer state or accepted tick after the attach reply. A state or
 tick that changes again before it is delivered or read is replaced by the newest one, so a slow
-client can skip states and tick ids. Between prompts the REPL holds at most 128 event lines, each
+client can skip states and tick ids. The REPL queues at most 128 event lines, each
 cut at 8 KiB with `… [line truncated]`; lines that arrive while it is full are dropped, and
 `[events] notice: <n> event lines were omitted because terminal output could not keep up` reports
 how many. When the server ends an attachment, or the session holding it is interrupted and the clock
 is attached again on the next session, the line reads `[events] domain clock [<domain>] notice: ...`
 with the reason.
 
-The REPL prints these lines when it draws its next prompt: after the statement that is running
-finishes, or when you press Enter on an empty line.
+While the prompt waits for input, events appear above it without a keypress. The text being
+edited, the continuation of a multiline statement, completion and history search remain available.
+While a statement runs, events stay in the bounded queue and print when the prompt resumes;
+event readers never wait for the terminal. An overflow is reported when output next drains,
+including when no later event arrives.
 
 Output keeps printing across reconnects. When the session is lost, the next statement you run opens
 a new one; the client also opens one at once while a subscription or a followed clock waits to be

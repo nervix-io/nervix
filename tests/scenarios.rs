@@ -210,6 +210,7 @@ use crate::common::{
 
 mod backup;
 mod cli_outcomes;
+mod cli_repl;
 mod clickhouse_connections;
 mod client_consumers;
 mod client_foreign_execution;
